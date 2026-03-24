@@ -12,6 +12,7 @@ RUN uv pip install --system --no-cache .
 # Copy source
 COPY app/ app/
 COPY migrations/ migrations/
+COPY alembic.ini .
 
 EXPOSE 8000
 

@@ -25,6 +25,9 @@ docker/data/
 *.swp
 *.swo
 
+# Local reference docs
+COMMANDS.md
+
 # OS
 .DS_Store
 Thumbs.db
