@@ -25,6 +25,9 @@ app = FastAPI(
     redoc_url="/redoc" if settings.debug else None,
 )
 
+# TODO(k8s): replace allow_origins=["*"] with origins loaded from ALLOWED_ORIGINS env var
+# (e.g. ALLOWED_ORIGINS="https://scrapeflow.govindappa.com") and remove wildcard methods/headers.
+# allow_credentials=True + wildcard origin is invalid in browsers — must be explicit origins.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
