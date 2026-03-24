@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core import minio, nats
+from app.core.redis import create_pool, close_pool
 from app.settings import settings
 from app.routers import health
 
@@ -12,8 +14,32 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting ScrapeFlow API", env=settings.app_env)
+
+    # Redis
+    create_pool()
+    logger.info("Redis pool created")
+
+    # MinIO
+    await minio.create_client()
+    logger.info("MinIO client ready", bucket=settings.minio_bucket)
+
+    # NATS
+    await nats.connect()
+    logger.info("NATS connected", url=settings.nats_url)
+
     yield
-    logger.info("Shutting down ScrapeFlow API")
+
+    # Shutdown in reverse order
+    await nats.disconnect()
+    logger.info("NATS disconnected")
+
+    await minio.close_client()
+    logger.info("MinIO client closed")
+
+    await close_pool()
+    logger.info("Redis pool closed")
+
+    logger.info("ScrapeFlow API shutdown complete")
 
 
 app = FastAPI(
