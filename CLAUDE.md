@@ -1,0 +1,74 @@
+# ScrapeFlow - Apify Clone
+
+> **Status: MVP / Phase 1 — being built iteratively. Sections marked [LATER] are planned but not yet implemented.**
+
+## Goal
+
+A self-hosted, multi-tenant web scraping platform. Primary use case: structured data extraction and change detection to feed ML/data pipelines. Built as a production-grade portfolio project.
+
+---
+
+## Architecture
+
+### Core stack
+- **API**: FastAPI (Python)
+- **Workers**: Go (background scrape workers)
+- **Queue**: NATS JetStream
+- **DB**: PostgreSQL (metadata), MinIO (object storage / raw output)
+- **Cache / rate limiting**: Redis
+- **Gateway**: Traefik
+- **Auth**: Clerk (OAuth — Google, GitHub; JWT issued by Clerk, verified by API)
+- **[LATER] MCP server**: LLM-callable interface (scrape_url, get_result, list_jobs)
+
+### Deployment
+- **Local dev**: Docker Compose (Postgres, Redis, NATS, MinIO)
+- **Production**: k3s homelab — namespace `scrapeflow`, domain `scrapeflow.govindappa.com`
+  - Traefik ingress, ExternalDNS (Cloudflare), cert-manager (letsencrypt-prod)
+  - GitOps via FluxCD — infra repo at `/home/karthik/Documents/govindappa/govindappa-k8s-config`
+
+---
+
+## Components
+
+### Phase 1 — MVP (building now)
+- **Auth**: Clerk OAuth login/signup, JWT verification middleware, user sync to local DB, API key management
+- **Job CRUD**: create scrape job (URL + options), get status, list jobs, cancel job
+- **HTTP scraper worker**: plain HTTP requests, returns raw HTML / cleaned Markdown / JSON
+- **Output storage**: raw results stored in MinIO, metadata in Postgres
+- **Rate limiting**: Redis-backed per-user quotas
+- **Docker Compose**: full local dev stack
+
+### Phase 2 — Core features [LATER]
+- **Playwright worker**: opt-in JS rendering for dynamic/SPA sites, configurable per job
+- **LLM processing**: user provides their own Anthropic/OpenAI API key + output schema; worker extracts structured data
+- **Change detection**: recurring/scheduled jobs, diff detection, notify on change
+- **Webhook delivery**: configurable webhooks with exponential backoff retry
+- **Admin panel API**: manage users, view all jobs, usage stats
+
+### Phase 3 — Production hardening [LATER]
+- **Proxy rotation**: pluggable proxy provider config (Bright Data, Oxylabs, etc.)
+- **robots.txt compliance**: respect/ignore toggle per job
+- **Billing/quotas**: per-user job limits, usage tracking
+- **Admin SPA**: React dashboard for user and job management
+- **MCP server**: expose scrape_url, get_result, list_jobs as LLM-callable tools
+- **K8s manifests**: production deployment manifests for k3s, added to infra repo
+
+---
+
+## Key decisions
+
+| Concern | Decision | Rationale |
+|---|---|---|
+| Auth provider | Clerk | Handles OAuth, JWT, user mgmt out of the box |
+| Tenancy | Multi-tenant | Each user has isolated jobs/data |
+| Scraping engine | HTTP first, Playwright opt-in later | Most structured data sites are server-rendered |
+| LLM output | User provides own API key + schema | Avoids shared LLM cost; users control their models |
+| Proxy rotation | Skip for MVP | Low volume personal use; add as pluggable provider later |
+| Change detection | Yes, Phase 2 | Key feature for ML data pipeline use cases |
+| Output formats | Raw HTML, cleaned Markdown, JSON | Feed directly into ML pipelines |
+
+---
+
+## MVP definition
+
+> "Submit a URL via API → get back raw or cleaned data (HTML/Markdown/JSON) → check job status → usable in an ML pipeline"
