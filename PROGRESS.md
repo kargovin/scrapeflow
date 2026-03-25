@@ -14,8 +14,12 @@
 |   | 3e. NATS + JetStream connection on startup, graceful shutdown | ✅ Done |
 |   | 3f. Wire all clients into `lifespan` in `main.py` | ✅ Done |
 |   | 3g. Test setup (`conftest.py`) + tests for health, DB, Redis, MinIO, NATS | ✅ Done |
-| 4 | Database schema + migrations — `users`, `api_keys`, `jobs` tables | 🔜 Next |
-| 5 | Clerk auth middleware — JWT verification, user sync to local DB, API key auth | ⏳ Pending |
+| 4 | Database schema + migrations — `users`, `api_keys`, `jobs` tables | ✅ Done |
+|   | 4a. `User` model — id, clerk_id, email, created_at | ✅ Done |
+|   | 4b. `ApiKey` model — id, user_id (FK), key_hash, name, created_at, last_used_at, revoked | ✅ Done |
+|   | 4c. `Job` model — id, user_id (FK), url, status, output_format, result_path, created_at, updated_at | ✅ Done |
+|   | 4d. Generate + apply Alembic migration | ✅ Done |
+| 5 | Clerk auth middleware — JWT verification, user sync to local DB, API key auth | 🔜 Next |
 | 6 | Job CRUD API — `POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, `DELETE /jobs/{id}` | ⏳ Pending |
 | 7 | Rate limiting — Redis-backed per-user quotas | ⏳ Pending |
 | 8 | Go HTTP scraper worker — reads from NATS, fetches URL, stores result in MinIO, updates job status | ⏳ Pending |
