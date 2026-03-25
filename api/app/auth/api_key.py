@@ -3,6 +3,7 @@ import secrets
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.api_key import ApiKey
 from app.models.user import User
@@ -32,7 +33,7 @@ async def verify_api_key(db: AsyncSession, raw_key: str) -> User | None:
         select(ApiKey)
         .where(ApiKey.key_hash == key_hash)
         .where(ApiKey.revoked == False)  # noqa: E712
-        .join(ApiKey.user)
+        .options(selectinload(ApiKey.user))
     )
     api_key = result.scalar_one_or_none()
 
