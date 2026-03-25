@@ -30,9 +30,7 @@ class Settings(BaseSettings):
     minio_secure: bool = False
 
     # Clerk
-    clerk_publishable_key: str = ""
-    clerk_secret_key: str = ""
-    clerk_jwt_public_key: str = ""  # PEM public key for JWT verification
+    clerk_secret_key: str = ""  # used by backend SDK for JWT verification + API calls
 
     # Rate limiting (requests per minute per user)
     rate_limit_rpm: int = 60

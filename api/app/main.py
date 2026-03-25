@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core import minio, nats
 from app.core.redis import create_pool, close_pool
 from app.settings import settings
-from app.routers import health
+from app.routers import health, users
 
 logger = structlog.get_logger()
 
@@ -63,3 +63,4 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(users.router)

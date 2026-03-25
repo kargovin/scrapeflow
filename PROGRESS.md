@@ -19,7 +19,12 @@
 |   | 4b. `ApiKey` model — id, user_id (FK), key_hash, name, created_at, last_used_at, revoked | ✅ Done |
 |   | 4c. `Job` model — id, user_id (FK), url, status, output_format, result_path, created_at, updated_at | ✅ Done |
 |   | 4d. Generate + apply Alembic migration | ✅ Done |
-| 5 | Clerk auth middleware — JWT verification, user sync to local DB, API key auth | 🔜 Next |
+| 5 | Clerk auth middleware — JWT verification, user sync to local DB, API key auth | ✅ Done |
+|   | 5a. Clerk JWT verification middleware | ✅ Done |
+|   | 5b. User sync — upsert Clerk user into local `users` table on first login | ✅ Done |
+|   | 5c. `get_current_user` dependency — extracts verified user for route handlers | ✅ Done |
+|   | 5d. API key auth — generate/hash keys, verify as alternative to JWT | ✅ Done |
+|   | 5e. `/me` endpoint + end-to-end auth tests (unauthenticated 401, authenticated 200, user created in DB) | ✅ Done |
 | 6 | Job CRUD API — `POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, `DELETE /jobs/{id}` | ⏳ Pending |
 | 7 | Rate limiting — Redis-backed per-user quotas | ⏳ Pending |
 | 8 | Go HTTP scraper worker — reads from NATS, fetches URL, stores result in MinIO, updates job status | ⏳ Pending |
