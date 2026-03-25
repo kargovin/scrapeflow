@@ -25,7 +25,7 @@
 |   | 5c. `get_current_user` dependency — extracts verified user for route handlers | ✅ Done |
 |   | 5d. API key auth — generate/hash keys, verify as alternative to JWT | ✅ Done |
 |   | 5e. `/me` endpoint + end-to-end auth tests (unauthenticated 401, authenticated 200, user created in DB) | ✅ Done |
-| 6 | Job CRUD API — `POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, `DELETE /jobs/{id}` | ⏳ Pending |
+| 6 | Job CRUD API — `POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, `DELETE /jobs/{id}` | 🔜 Next |
 | 7 | Rate limiting — Redis-backed per-user quotas | ⏳ Pending |
 | 8 | Go HTTP scraper worker — reads from NATS, fetches URL, stores result in MinIO, updates job status | ⏳ Pending |
 
@@ -43,6 +43,9 @@
 - Admin SPA (React)
 - MCP server (scrape_url, get_result, list_jobs)
 - K8s manifests for k3s (namespace: scrapeflow, scrapeflow.govindappa.com)
+
+## Gotchas
+- SQLAlchemy async does **not** support lazy loading. Always use `selectinload()` or `joinedload()` when a query needs to traverse a relationship.
 
 ## Notes
 - Auth: Clerk (OAuth + JWT)
