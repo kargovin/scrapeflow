@@ -25,9 +25,18 @@
 |   | 5c. `get_current_user` dependency — extracts verified user for route handlers | ✅ Done |
 |   | 5d. API key auth — generate/hash keys, verify as alternative to JWT | ✅ Done |
 |   | 5e. `/me` endpoint + end-to-end auth tests (unauthenticated 401, authenticated 200, user created in DB) | ✅ Done |
-| 6 | Job CRUD API — `POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, `DELETE /jobs/{id}` | 🔜 Next |
-| 7 | Rate limiting — Redis-backed per-user quotas | ⏳ Pending |
-| 8 | Go HTTP scraper worker — reads from NATS, fetches URL, stores result in MinIO, updates job status | ⏳ Pending |
+| 6 | Job CRUD API — `POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, `DELETE /jobs/{id}` | ✅ Done |
+|   | 6a. Pydantic schemas — `JobCreate` (request), `JobResponse` (response) | ✅ Done |
+|   | 6b. `POST /jobs` — insert row with `status=pending`, publish fat message `{job_id, url, output_format}` to `scrapeflow.jobs.run` | ✅ Done |
+|   | 6c. `GET /jobs/{id}` — fetch single job with ownership check (404 if not found or wrong user) | ✅ Done |
+|   | 6d. `GET /jobs` — list jobs for current user with `limit`/`offset` pagination (default limit=50, max=200) | ✅ Done |
+|   | 6e. `DELETE /jobs/{id}` — set `status=cancelled` (ownership check; no-op if already terminal state) | ✅ Done |
+|   | 6f. Wire `jobs` router into `main.py` | ✅ Done |
+|   | 6g. NATS result consumer — background task in `lifespan`; subscribes to `scrapeflow.jobs.result`, updates job `status`/`result_path`/`error` in DB; discards results for `status=cancelled` jobs | ✅ Done |
+|   | 6h. Tests — create job, get job (own/other user returns 404), list jobs (pagination), cancel job, unauthenticated 401, result consumer updates DB correctly | ✅ Done |
+| 7 | Rate limiting — Redis-backed per-user quotas | 🔜 Next |
+| 8 | Go HTTP scraper worker — consumes `scrapeflow.jobs.run`, fetches URL, writes result to MinIO, publishes `{job_id, minio_path, status, error?}` to `scrapeflow.jobs.result`, acks after MinIO write | ⏳ Pending |
+|   | 8a. NATS stream init — Docker Compose init container (`natsio/nats-box`) creates `SCRAPEFLOW` stream before API starts | ✅ Done |
 
 ## Phase 2 — Core features [LATER]
 - Playwright worker (opt-in JS rendering per job)
@@ -46,6 +55,11 @@
 
 ## Gotchas
 - SQLAlchemy async does **not** support lazy loading. Always use `selectinload()` or `joinedload()` when a query needs to traverse a relationship.
+- NATS result consumer (`app/core/result_consumer.py`) creates its own DB sessions via `AsyncSessionLocal` directly — it cannot use the `get_db()` FastAPI dependency since it runs outside the request/response cycle.
+- NATS subject names and stream name live in `app/constants.py`, **not** `settings.py` — they are part of the worker contract (ADR-001) and must not vary between environments.
+- Static routes must be registered **before** parameterized routes in the same router (e.g. `GET /jobs` before `GET /jobs/{job_id}`) or the parameterized route will swallow requests meant for the static one.
+- The `nats:2.10-alpine` image contains only `nats-server` — it does not include the `nats` CLI. Use `natsio/nats-box` for the init container.
+- Shared pytest fixtures (e.g. `mock_clerk_auth`, `db_user`) must live in `conftest.py` to be visible across test files. Fixtures defined in a regular test file are only available within that file.
 
 ## Notes
 - Auth: Clerk (OAuth + JWT)

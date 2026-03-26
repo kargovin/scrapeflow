@@ -62,6 +62,24 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── NATS stream init (creates SCRAPEFLOW stream before API starts) ──────────
+
+  nats-init:
+    image: natsio/nats-box:latest
+    restart: "no"
+    depends_on:
+      nats:
+        condition: service_healthy
+    command: >
+      sh -c "nats stream add SCRAPEFLOW
+      --subjects 'scrapeflow.jobs.*'
+      --storage file
+      --retention limits
+      --replicas 1
+      --defaults
+      --server nats://nats:4222 2>/dev/null ||
+      nats stream info SCRAPEFLOW --server nats://nats:4222"
+
   # ── API ─────────────────────────────────────────────────────────────────────
 
   api:
@@ -89,6 +107,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
     develop:
       watch:
         - action: sync

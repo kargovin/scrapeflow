@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     # NATS
     nats_url: str = "nats://localhost:4222"
+    nats_max_deliver: int = 3  # max delivery attempts before NATS stops redelivering (ADR-001)
 
     # MinIO
     minio_endpoint: str = "localhost:9000"

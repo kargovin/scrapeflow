@@ -10,29 +10,6 @@ from app.models.api_key import ApiKey
 from app.models.user import User
 
 
-@pytest.fixture
-def mock_clerk_auth(client):
-    """Patch Clerk's authenticate_request to return a fake valid payload."""
-    mock_state = MagicMock()
-    mock_state.is_signed_in = True
-    mock_state.payload = {
-        "sub": "user_test_123",
-        "email": "test@example.com",
-    }
-
-    # Also mock clerk.users.get so user_sync doesn't call the real Clerk API
-    mock_clerk_user = MagicMock()
-    mock_clerk_user.email_addresses = [MagicMock(email_address="test@example.com")]
-
-    mock_clerk_instance = MagicMock()
-    mock_clerk_instance.authenticate_request.return_value = mock_state
-    mock_clerk_instance.users.get.return_value = mock_clerk_user
-
-    # Patch _clerk directly so both jwt.py and user_sync.py get the mock instance
-    with patch("app.auth.jwt._clerk", mock_clerk_instance):
-        yield
-
-
 async def test_me_unauthenticated(client):
     """GET /users/me without a token returns 401."""
     response = await client.get("/users/me")
@@ -91,21 +68,6 @@ def test_hash_api_key_unique():
 
 
 # --- API key auth integration tests ---
-
-@pytest_asyncio.fixture
-async def db_user():
-    """Create a real user in the DB for API key tests, clean up after."""
-    from sqlalchemy import delete
-
-    user = User(clerk_id=f"user_apikey_{uuid.uuid4().hex}", email=f"apikey_{uuid.uuid4().hex}@example.com")
-    async with AsyncSessionLocal() as db:
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-    yield user
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(User).where(User.id == user.id))
-        await db.commit()
 
 
 async def test_api_key_auth_valid(client, db_user):

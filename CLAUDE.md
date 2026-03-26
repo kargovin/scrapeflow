@@ -20,6 +20,9 @@ A self-hosted, multi-tenant web scraping platform. Primary use case: structured 
 - **Auth**: Clerk (OAuth — Google, GitHub; JWT issued by Clerk, verified by API)
 - **[LATER] MCP server**: LLM-callable interface (scrape_url, get_result, list_jobs)
 
+### Worker contract
+See `ADR-001-worker-job-contract.md` for the full API↔worker interface: NATS subjects, message schemas, ack timing, retry policy, and cancellation protocol.
+
 ### Deployment
 - **Local dev**: Docker Compose (Postgres, Redis, NATS, MinIO)
 - **Production**: k3s homelab — namespace `scrapeflow`, domain `scrapeflow.govindappa.com`
@@ -66,6 +69,13 @@ A self-hosted, multi-tenant web scraping platform. Primary use case: structured 
 | Proxy rotation | Skip for MVP | Low volume personal use; add as pluggable provider later |
 | Change detection | Yes, Phase 2 | Key feature for ML data pipeline use cases |
 | Output formats | Raw HTML, cleaned Markdown, JSON | Feed directly into ML pipelines |
+| Worker design | Light worker — NATS + MinIO only, no DB access | Keeps worker DB-ignorant; all business logic in API |
+| Job dispatch message | Fat message `{job_id, url, output_format}` | Worker needs no DB lookup to execute the scrape |
+| Worker→API result | Worker publishes to `scrapeflow.jobs.result`; API background consumer updates DB | Decoupled; worker never touches Postgres |
+| Cancellation | API sets `status=cancelled`; result consumer discards worker results for cancelled jobs | Worker is unaware of cancellations; API enforces correctness |
+| NATS stream creation | Outside API/worker (init container / infra); API asserts stream exists at startup | API has no infra concerns |
+| Cross-tenant access | 404 (not 403) for jobs belonging to other users | 403 leaks resource existence; 404 is safer for multi-tenant |
+| NATS subject constants | `app/constants.py` (not `settings.py`) | Subject names are part of the worker contract, not env-configurable |
 
 ---
 

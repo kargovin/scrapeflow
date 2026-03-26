@@ -1,3 +1,4 @@
+import asyncio
 import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -5,8 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import minio, nats
 from app.core.redis import create_pool, close_pool
+from app.core.result_consumer import start_result_consumer
 from app.settings import settings
-from app.routers import health, users
+from app.routers import health, jobs, users
 
 logger = structlog.get_logger()
 
@@ -27,9 +29,17 @@ async def lifespan(app: FastAPI):
     await nats.connect()
     logger.info("NATS connected", url=settings.nats_url)
 
+    # Result consumer — background task that processes worker results from NATS (ADR-001)
+    result_consumer_task = await start_result_consumer()
+    logger.info("NATS result consumer started")
+
     yield
 
     # Shutdown in reverse order
+    result_consumer_task.cancel()
+    await asyncio.gather(result_consumer_task, return_exceptions=True)
+    logger.info("NATS result consumer stopped")
+
     await nats.disconnect()
     logger.info("NATS disconnected")
 
@@ -64,3 +74,4 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(users.router)
+app.include_router(jobs.router)
