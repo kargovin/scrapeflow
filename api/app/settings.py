@@ -33,8 +33,9 @@ class Settings(BaseSettings):
     # Clerk
     clerk_secret_key: str = ""  # used by backend SDK for JWT verification + API calls
 
-    # Rate limiting (requests per minute per user)
-    rate_limit_rpm: int = 60
+    # Rate limiting — per-user fixed window counter
+    rate_limit_requests: int = 60   # max requests allowed per window
+    rate_limit_window_seconds: int = 60  # window size in seconds
 
 
 settings = Settings()

@@ -34,8 +34,12 @@
 |   | 6f. Wire `jobs` router into `main.py` | ✅ Done |
 |   | 6g. NATS result consumer — background task in `lifespan`; subscribes to `scrapeflow.jobs.result`, updates job `status`/`result_path`/`error` in DB; discards results for `status=cancelled` jobs | ✅ Done |
 |   | 6h. Tests — create job, get job (own/other user returns 404), list jobs (pagination), cancel job, unauthenticated 401, result consumer updates DB correctly | ✅ Done |
-| 7 | Rate limiting — Redis-backed per-user quotas | 🔜 Next |
-| 8 | Go HTTP scraper worker — consumes `scrapeflow.jobs.run`, fetches URL, writes result to MinIO, publishes `{job_id, minio_path, status, error?}` to `scrapeflow.jobs.result`, acks after MinIO write | ⏳ Pending |
+| 7 | Rate limiting — Redis-backed per-user quotas | ✅ Done |
+|   | 7a. Rate limit config in `settings.py` — requests per window, window seconds | ✅ Done |
+|   | 7b. Redis-backed rate limiter utility — fixed window counter (`INCR` + `EXPIRE`) per user | ✅ Done |
+|   | 7c. Wire as FastAPI dependency on `POST /jobs` — returns `429 Too Many Requests` when exceeded | ✅ Done |
+|   | 7d. Tests — under limit passes, at limit passes, over limit returns 429, independent counters per user | ✅ Done |
+| 8 | Go HTTP scraper worker — consumes `scrapeflow.jobs.run`, fetches URL, writes result to MinIO, publishes `{job_id, minio_path, status, error?}` to `scrapeflow.jobs.result`, acks after MinIO write | 🔜 Next |
 |   | 8a. NATS stream init — Docker Compose init container (`natsio/nats-box`) creates `SCRAPEFLOW` stream before API starts | ✅ Done |
 
 ## Phase 2 — Core features [LATER]

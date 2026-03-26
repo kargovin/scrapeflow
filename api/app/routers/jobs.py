@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_current_user
 from app.core.db import get_db
 from app.core.nats import get_jetstream
+from app.core.rate_limit import check_rate_limit
 from app.constants import NATS_JOBS_RUN_SUBJECT
 from app.models.job import Job, JobStatus, OutputFormat
 from app.models.user import User
@@ -46,6 +47,7 @@ async def create_job(
     body: JobCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(check_rate_limit),
 ) -> Job:
     job = Job(
         user_id=user.id,
