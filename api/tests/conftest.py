@@ -11,6 +11,8 @@ from app.core import minio, nats
 from app.core.db import AsyncSessionLocal
 from app.core.redis import create_pool, close_pool
 from app.models.user import User
+from app.models.api_key import ApiKey
+from app.auth.api_key import generate_api_key, hash_api_key
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session", scope="session")
@@ -62,3 +64,31 @@ async def db_user():
     async with AsyncSessionLocal() as db:
         await db.execute(delete(User).where(User.id == user.id))
         await db.commit()
+
+
+@pytest_asyncio.fixture
+async def other_user():
+    """A second independent DB user for cross-tenant tests."""
+    user = User(clerk_id=f"user_{uuid.uuid4().hex}", email=f"{uuid.uuid4().hex}@example.com")
+    async with AsyncSessionLocal() as db:
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    yield user
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(User).where(User.id == user.id))
+        await db.commit()
+
+
+@pytest_asyncio.fixture
+async def db_api_key(db_user):
+    """Create a real ApiKey in DB for db_user. Returns (raw_key, api_key).
+    Cleanup is handled by db_user's cascade delete.
+    """
+    raw_key = generate_api_key()
+    api_key = ApiKey(user_id=db_user.id, key_hash=hash_api_key(raw_key), name="fixture key")
+    async with AsyncSessionLocal() as db:
+        db.add(api_key)
+        await db.commit()
+        await db.refresh(api_key)
+    return raw_key, api_key

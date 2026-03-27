@@ -117,6 +117,30 @@ services:
         - action: rebuild
           path: ../api/pyproject.toml
 
+  # ── Go scraper worker ────────────────────────────────────────────────────────
+
+  worker:
+    build:
+      context: ../worker
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: scrapeflow
+      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_BUCKET: scrapeflow-results
+      MINIO_SECURE: "false"
+      FETCH_TIMEOUT_SECS: "30"
+      NATS_MAX_DELIVER: "3"
+    depends_on:
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:

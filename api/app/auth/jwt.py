@@ -37,7 +37,7 @@ async def verify_request(request: Request) -> dict:
     # and load from CLERK_AUTHORIZED_PARTIES env var
     request_state = clerk.authenticate_request(
         httpx_request,
-        AuthenticateRequestOptions(authorized_parties=[]),
+        AuthenticateRequestOptions(authorized_parties=None),
     )
 
     if not request_state.is_signed_in:

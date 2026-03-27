@@ -76,6 +76,7 @@ See `ADR-001-worker-job-contract.md` for the full API↔worker interface: NATS s
 | NATS stream creation | Outside API/worker (init container / infra); API asserts stream exists at startup | API has no infra concerns |
 | Cross-tenant access | 404 (not 403) for jobs belonging to other users | 403 leaks resource existence; 404 is safer for multi-tenant |
 | NATS subject constants | `app/constants.py` (not `settings.py`) | Subject names are part of the worker contract, not env-configurable |
+| Rate limiting | Fixed window counter (Redis `INCR` + `EXPIRE`) per user; sliding window planned for Phase 2 | Simple, 2–3 Redis ops; adequate for MVP quotas |
 
 ---
 
