@@ -20,10 +20,9 @@ import (
 // NATS subject and stream constants — must match ADR-001 and the Python constants.py.
 // These are not configurable: they are part of the worker contract.
 const (
-	streamName      = "SCRAPEFLOW"
-	jobsRunSubject  = "scrapeflow.jobs.run"
+	jobsRunSubject    = "scrapeflow.jobs.run"
 	jobsResultSubject = "scrapeflow.jobs.result"
-	durableName     = "go-worker"
+	durableName       = "go-worker"
 )
 
 // jobMessage is the incoming message shape published by the API (ADR-001 §3).
@@ -60,7 +59,7 @@ func New(js nats.JetStreamContext, f *fetcher.Fetcher, s *storage.Client) *Worke
 
 // Run subscribes to the jobs.run subject and processes messages in a loop.
 // It blocks until ctx is cancelled (i.e. the process is shutting down).
-func (w *Worker) Run(ctx context.Context) error {
+func (w *Worker) Run(ctx context.Context, maxDeliver int) error {
 	// Create a push-based subscription with a durable consumer.
 	// A durable consumer (named "go-worker") persists in NATS so that if the
 	// worker restarts, it picks up unacknowledged messages from where it left off.
@@ -69,9 +68,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		jobsRunSubject,
 		w.handleMessage,
 		nats.Durable(durableName),
-		nats.AckExplicit(),        // We ack manually — never auto-ack
-		nats.DeliverAll(),         // Start from the beginning if no prior state
-		nats.MaxDeliver(3),        // NATS retries up to 3 times before giving up
+		nats.AckExplicit(),          // We ack manually — never auto-ack
+		nats.DeliverAll(),           // Start from the beginning if no prior state
+		nats.MaxDeliver(maxDeliver), // NATS retries up to defined times before giving up
 		nats.AckWait(5*time.Minute), // Allow up to 5 min per job before redelivery
 	)
 	if err != nil {
@@ -91,13 +90,13 @@ func (w *Worker) Run(ctx context.Context) error {
 
 // handleMessage is the callback invoked by the NATS library for each message.
 // It implements the full ADR-001 job lifecycle:
-//   1. Parse message
-//   2. Publish "running" progress event
-//   3. Fetch URL
-//   4. Format output
-//   5. Upload to MinIO
-//   6. Publish "completed" or "failed" result event
-//   7. Ack the NATS message (only after MinIO write succeeds)
+//  1. Parse message
+//  2. Publish "running" progress event
+//  3. Fetch URL
+//  4. Format output
+//  5. Upload to MinIO
+//  6. Publish "completed" or "failed" result event
+//  7. Ack the NATS message (only after MinIO write succeeds)
 func (w *Worker) handleMessage(msg *nats.Msg) {
 	// --- Step 1: Parse the incoming job message ---
 	var job jobMessage

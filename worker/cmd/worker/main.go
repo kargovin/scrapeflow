@@ -31,7 +31,7 @@ func main() {
 	// nats.Connect returns a *nats.Conn (the raw TCP connection to NATS).
 	nc, err := nats.Connect(cfg.NATSUrl,
 		// Reconnect automatically if the NATS server restarts.
-		nats.MaxReconnects(-1), // -1 means retry forever
+		nats.MaxReconnects(-1),    // -1 means retry forever
 		nats.ReconnectWait(2*1e9), // wait 2 seconds between attempts (in nanoseconds)
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			log.Printf("NATS disconnected: %v", err)
@@ -100,7 +100,7 @@ func main() {
 	}()
 
 	// --- Start the worker loop (blocks until ctx is cancelled) ---
-	if err := w.Run(ctx); err != nil {
+	if err := w.Run(ctx, cfg.NATSMaxDeliver); err != nil {
 		log.Fatalf("Worker error: %v", err)
 	}
 }
