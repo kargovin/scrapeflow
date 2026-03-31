@@ -279,3 +279,16 @@ async def test_revoke_already_revoked_key(client, db_user):
     # db.get returns the row regardless of revoked status, so the handler sets revoked=True again.
     assert response.status_code == 200
     assert response.json()["revoked"] is True
+
+# test if last_updated_at is updated on verify_api_key
+async def test_verify_api_key_updates_last_used_at(db_api_key):
+    """Calling verify_api_key should update the last_used_at timestamp in the database."""
+    raw_key, api_key = db_api_key
+    assert api_key.last_used_at is None  # should start as None
+
+    from app.auth.api_key import verify_api_key
+    async with AsyncSessionLocal() as db:
+        await verify_api_key(db, raw_key)
+    async with AsyncSessionLocal() as db:
+        updated_api_key = await db.get(ApiKey, api_key.id)
+        assert updated_api_key.last_used_at is not None  # should be updated

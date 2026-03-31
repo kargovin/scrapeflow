@@ -7,6 +7,7 @@ from app.auth.dependencies import get_current_user
 from app.core.redis import get_redis
 from app.models.user import User
 from app.settings import settings
+import time
 
 
 async def check_rate_limit(
@@ -29,20 +30,26 @@ async def _increment_and_check(user_id: uuid.UUID, redis: aioredis.Redis) -> Non
     window = _current_window()
     key = f"scrapeflow:rl:{user_id}:{window}"
 
-    count = await redis.incr(key)
-    if count == 1:
-        # First request in this window — set expiry so the key cleans itself up
-        await redis.expire(key, settings.rate_limit_window_seconds)
+
+    _RATE_LIMIT_SCRIPT = """
+    local count = redis.call('INCR', KEYS[1])
+    if count == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+    end
+    return count
+    """
+    count = await redis.eval(_RATE_LIMIT_SCRIPT, 1, key, settings.rate_limit_window_seconds)
 
     if count > settings.rate_limit_requests:
+        remaining = settings.rate_limit_window_seconds - (int(time.time()) % settings.rate_limit_window_seconds)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded: {settings.rate_limit_requests} requests "
                    f"per {settings.rate_limit_window_seconds}s",
+            headers={"Retry-After": str(remaining)},
         )
 
 
 def _current_window() -> int:
     """Return the current fixed-window bucket (Unix epoch // window_seconds)."""
-    import time
     return int(time.time()) // settings.rate_limit_window_seconds

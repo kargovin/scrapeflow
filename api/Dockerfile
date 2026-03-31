@@ -1,20 +1,20 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 WORKDIR /app
 
-# Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install dependencies
-COPY pyproject.toml .
-RUN uv pip install --system --no-cache .[dev]
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-# Copy source
 COPY app/ app/
 COPY migrations/ migrations/
-COPY tests/ tests/
 COPY alembic.ini .
 
-EXPOSE 8000
+FROM base AS test
+RUN uv sync --frozen --no-install-project --extra dev
+COPY tests/ tests/
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+FROM base AS production
+EXPOSE 8000
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

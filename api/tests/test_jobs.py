@@ -37,16 +37,14 @@ async def test_jobs_unauthenticated(client):
 # 6h-2: POST /jobs creates a job and publishes to NATS
 # ---------------------------------------------------------------------------
 
-async def test_create_job(client, auth_headers):
+async def test_create_job(client, auth_headers, mock_jetstream):
     """POST /jobs returns 201, correct fields, and publishes a fat NATS message."""
-    mock_js = AsyncMock()
-
-    with patch("app.routers.jobs.get_jetstream", return_value=mock_js):
-        response = await client.post(
+    
+    response = await client.post(
             "/jobs",
             json={"url": "https://example.com", "output_format": "markdown"},
             headers=auth_headers,
-        )
+    )
 
     assert response.status_code == 201
     data = response.json()
@@ -56,8 +54,8 @@ async def test_create_job(client, auth_headers):
     assert "id" in data
 
     # Assert the NATS publish was called once with the correct subject and fat message
-    mock_js.publish.assert_called_once()
-    call_subject, call_payload = mock_js.publish.call_args.args
+    mock_jetstream.publish.assert_called_once()
+    call_subject, call_payload = mock_jetstream.publish.call_args.args
     assert call_subject == NATS_JOBS_RUN_SUBJECT
     published = json.loads(call_payload.decode())
     assert published["job_id"] == data["id"]
@@ -69,14 +67,13 @@ async def test_create_job(client, auth_headers):
 # 6h-3: GET /jobs/{job_id} — own job returns 200
 # ---------------------------------------------------------------------------
 
-async def test_get_job_own(client, auth_headers):
+async def test_get_job_own(client, auth_headers, mock_jetstream):
     """GET /jobs/{job_id} returns 200 and the correct job for the owning user."""
-    with patch("app.routers.jobs.get_jetstream", return_value=AsyncMock()):
-        create_resp = await client.post(
-            "/jobs",
-            json={"url": "https://example.com"},
-            headers=auth_headers,
-        )
+    create_resp = await client.post(
+        "/jobs",
+        json={"url": "https://example.com"},
+        headers=auth_headers,
+    )
     assert create_resp.status_code == 201
     job_id = create_resp.json()["id"]
 
@@ -105,12 +102,11 @@ async def test_get_job_other_user(client, auth_headers, db_user):
 # 6h-5: GET /jobs — returns only current user's jobs, respects limit/offset
 # ---------------------------------------------------------------------------
 
-async def test_list_jobs_pagination(client, auth_headers):
+async def test_list_jobs_pagination(client, auth_headers, mock_jetstream):
     """GET /jobs returns only the authenticated user's jobs and respects limit/offset."""
     # Create 3 jobs as the mock user
     for _ in range(3):
-        with patch("app.routers.jobs.get_jetstream", return_value=AsyncMock()):
-            resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
+        resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
         assert resp.status_code == 201
 
     # limit=2 must return exactly 2 items
@@ -128,10 +124,9 @@ async def test_list_jobs_pagination(client, auth_headers):
 # 6h-6: DELETE /jobs/{job_id} — pending job transitions to cancelled
 # ---------------------------------------------------------------------------
 
-async def test_cancel_job(client, auth_headers):
+async def test_cancel_job(client, auth_headers, mock_jetstream):
     """DELETE /jobs/{job_id} sets a pending job to cancelled and returns it."""
-    with patch("app.routers.jobs.get_jetstream", return_value=AsyncMock()):
-        create_resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
+    create_resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
     assert create_resp.status_code == 201
     job_id = create_resp.json()["id"]
 
@@ -144,10 +139,9 @@ async def test_cancel_job(client, auth_headers):
 # 6h-7: DELETE /jobs/{job_id} — already-cancelled is a no-op
 # ---------------------------------------------------------------------------
 
-async def test_cancel_job_noop(client, auth_headers):
+async def test_cancel_job_noop(client, auth_headers, mock_jetstream):
     """DELETE /jobs/{job_id} on an already-cancelled job returns it unchanged."""
-    with patch("app.routers.jobs.get_jetstream", return_value=AsyncMock()):
-        create_resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
+    create_resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
     job_id = create_resp.json()["id"]
 
     # First cancel
@@ -265,3 +259,38 @@ async def test_result_consumer_failed(db_user):
         assert updated.error == "connection timeout"
 
     msg.ack.assert_called_once()
+
+# ---------------------------------------------------------------------------
+# SSRF protection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url,resolved_ip", [
+    ("http://localhost/secret", "127.0.0.1"),
+    ("http://169.254.169.254/latest/meta-data/", "169.254.169.254"),
+    ("http://redis/data", "10.0.0.1"),
+    ("http://192.168.1.1/admin", "192.168.1.1"),
+])
+async def test_create_job_ssrf_blocked(client, auth_headers, url, resolved_ip):
+    """URLs resolving to private/loopback/link-local addresses are rejected with 400."""
+    with patch("app.routers.jobs.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [(None, None, None, None, (resolved_ip, 0))]
+        response = await client.post("/jobs", json={"url": url}, headers=auth_headers)
+    assert response.status_code == 400
+    assert "private" in response.json()["detail"]
+
+
+async def test_create_job_ssrf_unresolvable(client, auth_headers):
+    """Hostnames that fail DNS resolution are rejected with 422."""
+    import socket as _socket
+    with patch("app.routers.jobs.socket.getaddrinfo", side_effect=_socket.gaierror("name not found")):
+        response = await client.post("/jobs", json={"url": "http://nosuchodomain.invalid/"}, headers=auth_headers)
+    assert response.status_code == 422
+    assert "resolved" in response.json()["detail"]
+
+
+async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_jetstream):
+    """Public IPs pass SSRF check and proceed to job creation."""
+    with patch("app.routers.jobs.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [(None, None, None, None, ("93.184.216.34", 0))]  # example.com
+        response = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
+    assert response.status_code == 201

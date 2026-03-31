@@ -9,9 +9,11 @@ import (
 	"time"
 )
 
+const maxBodySize = 10 * 1024 * 1024 // 10 MB
+
 // Result holds the raw HTML bytes and the final URL after any redirects.
 type Result struct {
-	Body    []byte // raw HTML response body
+	Body     []byte // raw HTML response body
 	FinalURL string // URL after following redirects (may differ from the requested URL)
 }
 
@@ -55,9 +57,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 		return nil, fmt.Errorf("non-2xx response from %s: %d", rawURL, resp.StatusCode)
 	}
 
-	// io.ReadAll reads the entire response body into memory.
-	// For MVP this is fine — Phase 2 (streaming to MinIO) would use io.Copy instead.
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("reading body: %w", err)
 	}

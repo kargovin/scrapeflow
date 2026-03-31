@@ -43,9 +43,16 @@ type resultMessage struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// jetStreamClient is the subset of nats.JetStreamContext used by Worker.
+// Using a narrow interface keeps Worker testable without a real NATS server.
+type jetStreamClient interface {
+	Subscribe(subj string, cb nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error)
+	Publish(subj string, data []byte, opts ...nats.PubOpt) (*nats.PubAck, error)
+}
+
 // Worker holds the dependencies needed to process scrape jobs.
 type Worker struct {
-	js      nats.JetStreamContext
+	js      jetStreamClient
 	fetcher *fetcher.Fetcher
 	storage *storage.Client
 }
@@ -113,21 +120,30 @@ func (w *Worker) handleMessage(msg *nats.Msg) {
 
 	// --- Step 2: Publish "running" progress event (ADR-001 §3) ---
 	// This tells the API result consumer to set job.status = "running" in Postgres.
-	w.publishResult(resultMessage{
+	err := w.publishResult(resultMessage{
 		JobID:  job.JobID,
 		Status: "running",
 	})
+	if err != nil {
+		log.Printf("Failed to publish 'running' result for job %s: %v", job.JobID, err)
+	}
 
 	// --- Steps 3–6: Fetch, format, upload, publish outcome ---
 	// processJob does the real work. On failure it returns an error string.
 	minioPath, err := w.processJob(context.Background(), &job)
 	if err != nil {
 		log.Printf("Job %s failed: %v", job.JobID, err)
-		w.publishResult(resultMessage{
+		err := w.publishResult(resultMessage{
 			JobID:  job.JobID,
 			Status: "failed",
 			Error:  err.Error(),
 		})
+		if err != nil {
+			log.Printf("Failed to publish 'failed' result for job %s: %v", job.JobID, err)
+			// We'll send a NAK here to trigger redelivery, hoping the next attempt succeeds in publishing the failure result.
+			msg.NakWithDelay(30 * time.Second)
+			return
+		}
 		// Ack even on failure — the result event already told the API it failed.
 		// Not acking would cause NATS to redeliver, but the scrape already failed
 		// (e.g. site is down), so redelivery would likely fail again.
@@ -136,11 +152,16 @@ func (w *Worker) handleMessage(msg *nats.Msg) {
 	}
 
 	// --- Step 6 (success): Publish "completed" result event ---
-	w.publishResult(resultMessage{
+	err = w.publishResult(resultMessage{
 		JobID:     job.JobID,
 		Status:    "completed",
 		MinIOPath: minioPath,
 	})
+	if err != nil {
+		log.Printf("Failed to publish 'completed' result for job %s: %v", job.JobID, err)
+		msg.NakWithDelay(30 * time.Second)
+		return
+	}
 
 	// --- Step 7: Ack the NATS message AFTER MinIO write succeeds (ADR-001 §5) ---
 	// If the worker crashed before this line, NATS would redeliver the message.
@@ -174,13 +195,15 @@ func (w *Worker) processJob(ctx context.Context, job *jobMessage) (string, error
 
 // publishResult serializes and publishes a result message to scrapeflow.jobs.result.
 // Failures here are logged but do not abort the job — the NATS message will still be acked.
-func (w *Worker) publishResult(result resultMessage) {
+func (w *Worker) publishResult(result resultMessage) error {
 	data, err := json.Marshal(result)
 	if err != nil {
 		log.Printf("Failed to marshal result for job %s: %v", result.JobID, err)
-		return
+		return err
 	}
 	if _, err := w.js.Publish(jobsResultSubject, data); err != nil {
 		log.Printf("Failed to publish result for job %s: %v", result.JobID, err)
+		return err
 	}
+	return nil
 }

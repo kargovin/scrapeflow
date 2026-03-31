@@ -4,6 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from alembic import command
+from alembic.config import Config
+
 from app.core import minio, nats
 from app.core.redis import create_pool, close_pool
 from app.core.result_consumer import start_result_consumer
@@ -12,25 +15,38 @@ from app.routers import health, jobs, users
 
 logger = structlog.get_logger()
 
+def _run_migrations_online():
+    """Run migrations with a live async DB connection."""
+    alembic_cfg = Config("alembic.ini")
+    command.upgrade(alembic_cfg, "head")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting ScrapeFlow API", env=settings.app_env)
 
+    # Alembic migrations — run in separate thread to avoid blocking the event loop, since Alembic doesn't support async DB connections.
+    try:
+        await asyncio.get_event_loop().run_in_executor(None, _run_migrations_online)
+        logger.info("Database migrations complete")
+    except Exception as e:
+        logger.exception("Database migration failed")
+        raise
+
     # Redis
-    create_pool()
+    app.state.redis_pool = create_pool()
     logger.info("Redis pool created")
 
     # MinIO
-    await minio.create_client()
+    app.state.minio = await minio.create_client()
     logger.info("MinIO client ready", bucket=settings.minio_bucket)
 
     # NATS
-    await nats.connect()
+    app.state.nats_client, app.state.nats_js = await nats.connect()
     logger.info("NATS connected", url=settings.nats_url)
 
     # Result consumer — background task that processes worker results from NATS (ADR-001)
-    result_consumer_task = await start_result_consumer()
+    result_consumer_task = await start_result_consumer(app.state.nats_js)
     logger.info("NATS result consumer started")
 
     yield
@@ -40,13 +56,13 @@ async def lifespan(app: FastAPI):
     await asyncio.gather(result_consumer_task, return_exceptions=True)
     logger.info("NATS result consumer stopped")
 
-    await nats.disconnect()
+    await nats.disconnect(app.state.nats_client)
     logger.info("NATS disconnected")
 
-    await minio.close_client()
+    await minio.close_client(app.state.minio)
     logger.info("MinIO client closed")
 
-    await close_pool()
+    await close_pool(app.state.redis_pool)
     logger.info("Redis pool closed")
 
     logger.info("ScrapeFlow API shutdown complete")
@@ -61,13 +77,10 @@ app = FastAPI(
     redoc_url="/redoc" if settings.debug else None,
 )
 
-# TODO(k8s): replace allow_origins=["*"] with origins loaded from ALLOWED_ORIGINS env var
-# (e.g. ALLOWED_ORIGINS="https://scrapeflow.govindappa.com") and remove wildcard methods/headers.
-# allow_credentials=True + wildcard origin is invalid in browsers — must be explicit origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=settings.allowed_origins != ["*"],  # only allow credentials if specific origins are set
     allow_methods=["*"],
     allow_headers=["*"],
 )

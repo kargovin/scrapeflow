@@ -1,34 +1,25 @@
 import nats
 from nats.aio.client import Client
 from nats.js import JetStreamContext
-
+from fastapi import Request
 from app.settings import settings
-
-# Module-level connections — created once at startup, shared across all requests
-_nc: Client | None = None
-_js: JetStreamContext | None = None
 
 
 async def connect() -> tuple[Client, JetStreamContext]:
-    global _nc, _js
-    _nc = await nats.connect(settings.nats_url)
-    _js = _nc.jetstream()
-    return _nc, _js
+    nc = await nats.connect(settings.nats_url)
+    js = nc.jetstream()
+    return nc, js
 
 
-async def disconnect() -> None:
-    global _nc, _js
-    if _nc and not _nc.is_closed:
-        await _nc.drain()
-        _nc = None
-        _js = None
+async def disconnect(nc: Client) -> None:
+    if nc and not nc.is_closed:
+        await nc.drain()
 
 
-def get_nats() -> Client:
-    assert _nc is not None, "NATS client not initialized — call connect() at startup"
-    return _nc
+def get_nats(request: Request) -> Client:
+    return request.app.state.nats_client
+    
 
 
-def get_jetstream() -> JetStreamContext:
-    assert _js is not None, "JetStream not initialized — call connect() at startup"
-    return _js
+def get_jetstream(request: Request) -> JetStreamContext:
+    return request.app.state.nats_js

@@ -1,33 +1,25 @@
 from miniopy_async import Minio
 
 from app.settings import settings
-
-# Module-level client — created once at startup, shared across all requests
-_client: Minio | None = None
-
+from fastapi import Request
 
 async def create_client() -> Minio:
-    global _client
-    _client = Minio(
+    
+    client = Minio(
         settings.minio_endpoint,
         access_key=settings.minio_access_key,
         secret_key=settings.minio_secret_key,
         secure=settings.minio_secure,
     )
     # Auto-create the bucket if it doesn't exist
-    if not await _client.bucket_exists(settings.minio_bucket):
-        await _client.make_bucket(settings.minio_bucket)
-    return _client
+    if not await client.bucket_exists(settings.minio_bucket):
+        await client.make_bucket(settings.minio_bucket)
+    return client
 
 
-async def close_client() -> None:
-    global _client
-    # miniopy-async uses aiohttp sessions internally — close to release connections
-    if _client:
-        await _client.close_session()
-        _client = None
+async def close_client(client: Minio) -> None:
+    await client.close_session()
 
 
-def get_minio() -> Minio:
-    assert _client is not None, "MinIO client not initialized — call create_client() at startup"
-    return _client
+def get_minio(request: Request) -> Minio:
+    return request.app.state.minio

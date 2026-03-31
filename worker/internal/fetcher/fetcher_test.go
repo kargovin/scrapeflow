@@ -106,4 +106,22 @@ func TestFetch(t *testing.T) {
 			t.Fatal("expected error from cancelled context, got nil")
 		}
 	})
+
+	t.Run("response body is capped at maxBodyBytes", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// Write more than the limit
+			w.Write(make([]byte, maxBodySize+1024))
+		}))
+		defer srv.Close()
+
+		f := New(5)
+		result, err := f.Fetch(context.Background(), srv.URL)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if int64(len(result.Body)) > maxBodySize {
+			t.Errorf("body not capped: got %d bytes, want <= %d", len(result.Body), maxBodySize)
+		}
+	})
 }

@@ -1,12 +1,10 @@
 import uuid
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-import redis.asyncio as aioredis
 
+from app.main import app
 from app.core.rate_limit import _increment_and_check
-from app.core.redis import get_redis
 from app.settings import settings
 
 
@@ -16,8 +14,11 @@ from app.settings import settings
 
 @pytest_asyncio.fixture
 async def redis_client(init_clients):
-    """Yield a real Redis client using the session-scoped pool."""
-    async for r in get_redis():
+    # """Yield a real Redis client using the session-scoped pool."""
+    # async for r in get_redis():
+    #     yield r
+    import redis.asyncio as aioredis
+    async with aioredis.Redis(connection_pool=app.state.redis_pool) as r:
         yield r
 
 
@@ -106,7 +107,7 @@ async def test_rate_limit_per_user_isolation(redis_client):
 # 7d-5: HTTP integration — POST /jobs returns 429 when limit exceeded
 # ---------------------------------------------------------------------------
 
-async def test_create_job_rate_limited(client, mock_clerk_auth, redis_client):
+async def test_create_job_rate_limited(client, mock_clerk_auth, redis_client, mock_jetstream):
     """POST /jobs returns 429 once the rate limit is exhausted."""
     headers = {"Authorization": "Bearer fake.jwt.token"}
 
@@ -124,12 +125,10 @@ async def test_create_job_rate_limited(client, mock_clerk_auth, redis_client):
     settings.rate_limit_requests = 2
     try:
         for _ in range(2):
-            with patch("app.routers.jobs.get_jetstream", return_value=AsyncMock()):
-                resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=headers)
+            resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=headers)
             assert resp.status_code == 201
 
-        with patch("app.routers.jobs.get_jetstream", return_value=AsyncMock()):
-            resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=headers)
+        resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=headers)
         assert resp.status_code == 429
     finally:
         settings.rate_limit_requests = original

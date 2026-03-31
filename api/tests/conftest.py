@@ -1,5 +1,5 @@
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -13,18 +13,19 @@ from app.core.redis import create_pool, close_pool
 from app.models.user import User
 from app.models.api_key import ApiKey
 from app.auth.api_key import generate_api_key, hash_api_key
+from app.core.nats import get_jetstream
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session", scope="session")
 async def init_clients():
     """Initialize all clients once for the entire test session."""
-    create_pool()
-    await minio.create_client()
-    await nats.connect()
+    app.state.redis_pool = create_pool()
+    app.state.minio = await minio.create_client()
+    app.state.nats_client, app.state.nats_js = await nats.connect()
     yield
-    await nats.disconnect()
-    await minio.close_client()
-    await close_pool()
+    await nats.disconnect(app.state.nats_client)
+    await minio.close_client(app.state.minio)
+    await close_pool(app.state.redis_pool)
 
 
 @pytest_asyncio.fixture
@@ -92,3 +93,11 @@ async def db_api_key(db_user):
         await db.commit()
         await db.refresh(api_key)
     return raw_key, api_key
+
+
+@pytest.fixture
+def mock_jetstream():
+    mock_js = AsyncMock()
+    app.dependency_overrides[get_jetstream] = lambda: mock_js
+    yield mock_js
+    app.dependency_overrides.pop(get_jetstream, None)

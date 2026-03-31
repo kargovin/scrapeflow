@@ -1,8 +1,8 @@
 # ScrapeFlow — Architect's Review
 
 > Reviewed by: architect analysis pass
-> Codebase state: Phase 1 MVP in progress (steps 1–5 complete)
-> Date: 2026-03-25
+> Codebase state: ~~Phase 1 MVP in progress (steps 1–5 complete)~~ Phase 1 MVP complete (all 9 steps done)
+> Date: 2026-03-25 (updated 2026-03-27)
 
 ---
 
@@ -28,6 +28,14 @@ Files that define the project state:
 The foundation is solid. The technology choices are appropriate for the problem, the code is clean and readable, and the separation of concerns is sensible for a project at this stage. The patterns established early (async SQLAlchemy, structlog, dependency injection, Clerk for auth) are production-grade choices that will scale without requiring re-architecture.
 
 The main gaps are not quality issues — they are the expected incompleteness of an MVP in flight. The notes below are ranked by impact and flag the things that will bite hardest if not addressed before the project grows.
+
+---
+
+## Phase 1 Complete — Overall Assessment Update
+
+Phase 1 is well-executed. Both the Python API and Go worker are clean, the ADR is faithfully implemented, and test coverage is solid across unit and integration tests. The worker internals (fetcher, formatter, storage) are correctly separated into packages with their own tests. The NATS subject constants are correctly placed in `constants.py` — not `settings.py` — respecting the contract boundary.
+
+New findings below are from a full read of the completed codebase. Several are security-relevant and should be addressed before Phase 2 begins.
 
 ---
 
@@ -75,6 +83,93 @@ FROM base AS production
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
+
+---
+
+### 16. SSRF vulnerability — no private IP blocklist on job URLs
+
+The API accepts any `AnyHttpUrl` and dispatches it to the worker, which makes a real HTTP GET. There is no validation blocking private/internal addresses. In a multi-tenant deployment this means any authenticated user can submit:
+
+- `http://169.254.169.254/latest/meta-data/` — AWS/GCP/Azure instance metadata service
+- `http://redis:6379/` — internal Redis instance
+- `http://minio:9000/` — internal MinIO API
+- `http://postgres:5432/` — causes a TCP connect, leaks port state
+- `http://192.168.0.1/` — router admin panel
+
+The worker fetches the URL and writes the response to MinIO, where the owner can retrieve it. This is a textbook SSRF attack that could leak cloud credentials or internal service data.
+
+**Recommendation:** Add URL validation in `POST /jobs` before dispatching. Block requests to:
+- Loopback addresses (`127.0.0.0/8`, `::1`)
+- Private RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+- Link-local (`169.254.0.0/16` — cloud metadata services)
+- The hostname must resolve to a public IP before dispatch
+
+This is especially critical once moving to k3s homelab — every internal service will be reachable by hostname from the worker container.
+
+---
+
+### 17. Rate limiter INCR/EXPIRE is not atomic — key can live forever
+
+In `rate_limit.py`, the fixed-window counter uses two separate Redis commands:
+
+```python
+count = await redis.incr(key)      # operation 1
+if count == 1:
+    await redis.expire(key, ...)   # operation 2
+```
+
+If the process crashes, restarts, or loses the Redis connection between these two operations, the key is created with no TTL and never expires. That user is permanently rate-limited for that window bucket — their counter is stuck at 1 forever, which means they'll never hit the limit again either. Actually worse: if the key persists with count=1 and no TTL, the window never resets — the user appears to always be under the limit, but the window never closes.
+
+**Recommendation:** Use a Redis pipeline or a Lua script to make INCR + EXPIRE atomic:
+
+```python
+pipe = redis.pipeline()
+pipe.incr(key)
+pipe.expire(key, settings.rate_limit_window_seconds)
+count, _ = await pipe.execute()
+```
+
+A pipeline sends both commands in one round-trip and executes them sequentially without interruption.
+
+---
+
+### 18. Worker `NATS_MAX_DELIVER` config is loaded but silently ignored
+
+`config.go` reads `NATS_MAX_DELIVER` from the environment into `cfg.NATSMaxDeliver`. But `worker.go` hardcodes `nats.MaxDeliver(3)` in the subscription options — `cfg.NATSMaxDeliver` is never passed through:
+
+```go
+// worker.go — cfg is never referenced here
+sub, err := w.js.Subscribe(
+    jobsRunSubject,
+    w.handleMessage,
+    nats.MaxDeliver(3),   // hardcoded — cfg.NATSMaxDeliver is unused
+    ...
+)
+```
+
+Setting `NATS_MAX_DELIVER=5` in Docker Compose has zero effect. The config field is dead code.
+
+**Recommendation:** Pass `cfg.NATSMaxDeliver` into `worker.New()` and use it in the subscription. This also requires threading `cfg` through to where the subscription is created, which means the `Worker` struct needs a `maxDeliver` field.
+
+---
+
+### 19. Worker `publishResult` failure leaves jobs permanently stuck
+
+In `worker.go`, `publishResult` logs and returns silently on NATS publish failure:
+
+```go
+func (w *Worker) publishResult(result resultMessage) {
+    ...
+    if _, err := w.js.Publish(jobsResultSubject, data); err != nil {
+        log.Printf("Failed to publish result for job %s: %v", result.JobID, err)
+        // returns — no error propagated
+    }
+}
+```
+
+If the result publish fails (NATS partition, server restart), `handleMessage` continues and calls `msg.Ack()`. The NATS job dispatch message is acknowledged — NATS will never redeliver it. But the API result consumer never received the result event, so the job stays in `running` (or `pending`) state forever with no way to recover it except a manual DB update.
+
+**Recommendation:** `publishResult` should return an error. If the result publish fails, do **not** ack the NATS message — let NATS redeliver the job. Yes, this means the URL gets scraped again (idempotent per ADR-001), but correctness is preserved. A stuck-forever job in `running` state is worse than a duplicate scrape.
 
 ---
 
@@ -139,6 +234,81 @@ Adding `--reload` completes the loop: file saved → synced into container → u
 
 ---
 
+### 20. `result_consumer.py` uses `logging` instead of `structlog`
+
+Every other Python module in the project uses `structlog`. The result consumer uses the standard `logging` module:
+
+```python
+# result_consumer.py
+import logging
+logger = logging.getLogger(__name__)
+logger.error("Malformed result message, discarding", error=str(e), data=msg.data)
+```
+
+Python's standard `logging` silently ignores unknown keyword arguments — `error=` and `data=` are dropped entirely. The structured context is lost. This means malformed message errors appear in logs with no details about what the message actually contained.
+
+**Recommendation:** Replace `import logging` with `import structlog` and `logger = structlog.get_logger()`. The call sites are already in structlog style — only the import needs changing.
+
+---
+
+### 21. No response body size limit in the Go fetcher
+
+`fetcher.go` uses `io.ReadAll` with no size constraint:
+
+```go
+body, err := io.ReadAll(resp.Body)
+```
+
+A malicious user can submit a URL pointing to a multi-gigabyte file. The worker will read the entire response into memory before uploading to MinIO. With multiple concurrent jobs (NATS push subscription dispatches each message to a goroutine), several large fetches could simultaneously exhaust the worker container's memory.
+
+**Recommendation:** Wrap the response body with `io.LimitReader` before reading:
+
+```go
+const maxBodyBytes = 10 * 1024 * 1024 // 10 MB
+body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+```
+
+Choose a sensible limit (10–50 MB for HTML/text). Binary responses (PDFs, images, ZIPs) should also be handled — the formatter would produce garbage from binary input, so validating `Content-Type` before reading is worth considering too.
+
+---
+
+### 22. NATS push subscription creates unbounded concurrency in the worker
+
+NATS push subscriptions in Go dispatch each incoming message to the callback via a separate goroutine. If 50 jobs are queued, `handleMessage` is called 50 times concurrently — 50 simultaneous HTTP fetches and MinIO uploads. There is no concurrency limit.
+
+This is invisible during development with low job volume but becomes a resource exhaustion issue under load: file descriptor limits, network saturation, and OOM from concurrent large responses.
+
+**Recommendation:** For Phase 1 this is acceptable. Document it in PROGRESS.md gotchas. For Phase 2, consider switching to a pull consumer with a fixed worker pool:
+
+```go
+// Pull-based with controlled concurrency
+for i := 0; i < maxConcurrent; i++ {
+    go func() {
+        for {
+            msgs, _ := sub.Fetch(1)
+            handleMessage(msgs[0])
+        }
+    }()
+}
+```
+
+---
+
+### 23. Worker graceful shutdown does not cancel in-flight HTTP fetches
+
+In `worker.go`, `processJob` uses `context.Background()` instead of the shutdown context:
+
+```go
+// handleMessage — called when SIGTERM received
+minioPath, err := w.processJob(context.Background(), &job)  // not cancellable
+```
+
+When Docker sends SIGTERM, `main.go` cancels the context and calls `nc.Drain()`. But in-flight jobs continue running because they hold a `context.Background()`. If a job is fetching a slow URL (up to `FETCH_TIMEOUT_SECS=30`), the worker won't actually exit for up to 30 seconds after the signal — potentially beyond Docker's shutdown grace period.
+
+**Recommendation:** Pass a shutdown context into `handleMessage` and thread it through to `processJob`. This requires either passing the context through the NATS callback (requires a closure) or using a package-level context that is cancelled on shutdown.
+
+---
+
 ## Design Observations — Worth Discussing
 
 ### 10. ~~Worker contract undocumented~~ — ✅ Resolved by ADR-001
@@ -193,11 +363,38 @@ The API won't start until `nats-init` exits with code 0 — guaranteeing the str
 
 ---
 
-### 10c. MaxDeliver advisory detection is non-trivial
+### 10c. ~~MaxDeliver advisory detection is non-trivial~~  — partially superseded
 
-ADR-001 §6 says "The API result consumer is responsible for detecting [MaxDeliver exhaustion] via the `MaxDeliver` advisory." This is correct but easy to underestimate. NATS publishes exhaustion advisories to `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.SCRAPEFLOW.*` — the API needs a separate subscription to this subject, parse the advisory payload, extract the `job_id` from the original message metadata, and mark the job as `failed`.
+~~ADR-001 §6 says "The API result consumer is responsible for detecting [MaxDeliver exhaustion] via the `MaxDeliver` advisory." This is correct but easy to underestimate. NATS publishes exhaustion advisories to `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.SCRAPEFLOW.*` — the API needs a separate subscription to this subject, parse the advisory payload, extract the `job_id` from the original message metadata, and mark the job as `failed`.~~
 
-**Recommendation:** Add this as an explicit implementation note in PROGRESS.md step 8 so it doesn't get missed. The alternative (simpler) approach: set a NATS `MaxDeliver` and also set `AckWait` with a `NoAck` policy to a dead-letter subject, then subscribe to the dead-letter subject instead of the advisory.
+~~**Recommendation:** Add this as an explicit implementation note in PROGRESS.md step 8 so it doesn't get missed. The alternative (simpler) approach: set a NATS `MaxDeliver` and also set `AckWait` with a `NoAck` policy to a dead-letter subject, then subscribe to the dead-letter subject instead of the advisory.~~
+
+The current implementation (item 19 above) means `publishResult` failures already prevent the API from ever receiving a result event. The MaxDeliver advisory path is a separate concern and remains valid — but item 19 should be fixed first since it's a more common failure mode.
+
+---
+
+### 10d. NATS stream retention diverges from ADR-001
+
+ADR-001 §1 specifies `WorkQueuePolicy` retention (`--retention work`). The actual `nats-init` command in `docker-compose.yml` creates the stream with `--retention limits`:
+
+```yaml
+command: >
+  sh -c "nats stream add SCRAPEFLOW
+  --retention limits    ← actual
+  ...
+```
+
+WorkQueue retention automatically deletes messages after they are acknowledged — semantically correct for a job dispatch queue. Limits retention keeps messages until they age out or hit configured size/count limits. With `limits` retention, every dispatched job and every result event accumulates in NATS storage indefinitely. Under sustained load this will fill the NATS volume.
+
+**Recommendation:** Either update `nats-init` to use `--retention work` per the ADR, or update ADR-001 to document and justify the `limits` choice. The divergence between the spec and the implementation should not be silent.
+
+---
+
+### 10e. MaxDeliver exhaustion leaves jobs silently stuck
+
+ADR-001 §6 says "The API result consumer is responsible for detecting [MaxDeliver exhaustion] via the `MaxDeliver` advisory." NATS publishes exhaustion advisories to `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.SCRAPEFLOW.*`. The current result consumer has no subscription to this subject. A job that exceeds `MaxDeliver` retries will simply stop being delivered with no signal to the API — the job stays in `pending` state forever.
+
+**Recommendation:** Subscribe to the MaxDeliver advisory subject in the result consumer and mark the job as `failed` when it fires. The simpler alternative: configure a NATS dead-letter (nack with no requeue) subject and subscribe to that instead of parsing advisory metadata.
 
 ---
 
@@ -253,6 +450,14 @@ The Dockerfile uses `uv pip install` with version ranges from `pyproject.toml` (
 
 - **No `__all__` exports in `app/models/__init__.py`** — the `import app.models` in `migrations/env.py` relies on `__init__.py` importing the submodules. If someone adds a new model file and forgets to add it to `__init__.py`, Alembic won't detect it. Add a comment warning about this.
 
+- **`import time` inside `_current_window()` in `rate_limit.py`** — module-level imports belong at the top of the file, not inside function bodies. No functional impact, just a style inconsistency.
+
+- **No `Retry-After` header on 429 responses** — When `check_rate_limit` raises 429, clients have no way to know when the window resets. The standard is to include `Retry-After: <seconds>`. The window end time is calculable from `_current_window()`.
+
+- **Go worker uses standard `log` package** — No structured logging, no job_id correlation across log lines. In production, filtering worker logs by job_id requires `grep`. `log/slog` (Go 1.21 stdlib) or `zerolog` would give structured output with no new dependencies for the former.
+
+- **Rate limit tests mutate global `settings` object** — `settings.rate_limit_requests = 5` directly mutates the shared singleton. This works because tests run sequentially today, but would cause race conditions with `-parallel` or if the test runner ever runs test files concurrently. Pass the limit as a parameter to `_increment_and_check` instead.
+
 ---
 
 ## Summary Table
@@ -270,9 +475,19 @@ The Dockerfile uses `uv pip install` with version ranges from `pyproject.toml` (
 | 10 | Worker contract undocumented | Design | Low | ✅ Resolved — ADR-001 |
 | 10a | NATS stream never created in Docker Compose | Critical | Low | ✅ Resolved — PROGRESS.md 8a |
 | 10b | API result consumer not yet tracked/planned | Critical | Medium | ✅ Resolved — PROGRESS.md 6g |
-| 10c | MaxDeliver advisory detection is non-trivial | Design | Medium | Open |
+| 10c | MaxDeliver advisory — superseded by #19 | Design | Medium | Superseded |
+| 10d | NATS stream retention diverges from ADR | Design | Low | Open |
+| 10e | MaxDeliver exhaustion leaves jobs stuck | Design | Medium | Open |
 | 11 | Postgres ENUM migration pain | Design | Low | Open |
 | 12 | Health endpoint is shallow | Design | Low | Open |
 | 13 | structlog barely used | Design | Low | Open |
 | 14 | No request correlation ID | Design | Medium | Open |
 | 15 | Non-reproducible Docker builds | Minor | Low | Open |
+| 16 | SSRF — no private IP blocklist on job URLs | **Critical** | Medium | Open |
+| 17 | Rate limiter INCR/EXPIRE race condition | **Critical** | Low | Open |
+| 18 | Worker `NATS_MAX_DELIVER` config unused | Important | Low | Open |
+| 19 | `publishResult` failure silently loses jobs | **Critical** | Low | Open |
+| 20 | `result_consumer.py` uses `logging` not `structlog` | Important | Low | Open |
+| 21 | No response size limit in Go fetcher | Important | Low | Open |
+| 22 | Worker push subscription has unbounded concurrency | Design | Medium | Open |
+| 23 | Worker graceful shutdown ignores in-flight fetches | Design | Low | Open |

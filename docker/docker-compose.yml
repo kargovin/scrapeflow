@@ -1,5 +1,4 @@
 services:
-
   # ── Infrastructure ──────────────────────────────────────────────────────────
 
   postgres:
@@ -11,9 +10,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - '5432:5432'
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U scrapeflow"]
+      test: ['CMD-SHELL', 'pg_isready -U scrapeflow']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -24,23 +23,23 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - '6379:6379'
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 5s
       retries: 5
 
   nats:
     image: nats:2.10-alpine
-    command: ["-js", "-sd", "/data"]
+    command: ['-js', '-sd', '/data']
     volumes:
       - nats_data:/data
     ports:
-      - "4222:4222"   # client
-      - "8222:8222"   # monitoring
+      - '4222:4222' # client
+      - '8222:8222' # monitoring
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 4222 || exit 1"]
+      test: ['CMD-SHELL', 'nc -z localhost 4222 || exit 1']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -54,10 +53,14 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"   # API
-      - "9001:9001"   # Console UI
+      - '9000:9000' # API
+      - '9001:9001' # Console UI
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      test:
+        [
+          'CMD-SHELL',
+          'curl -f http://localhost:9000/minio/health/live || exit 1',
+        ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -66,7 +69,7 @@ services:
 
   nats-init:
     image: natsio/nats-box:latest
-    restart: "no"
+    restart: 'no'
     depends_on:
       nats:
         condition: service_healthy
@@ -86,6 +89,8 @@ services:
     build:
       context: ../api
       dockerfile: Dockerfile
+      target: test
+    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - ../.env
     environment:
@@ -95,9 +100,9 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: scrapeflow
       MINIO_SECRET_KEY: scrapeflow_secret
-      MINIO_SECURE: "false"
+      MINIO_SECURE: 'false'
     ports:
-      - "8000:8000"
+      - '8000:8000'
     depends_on:
       postgres:
         condition: service_healthy
@@ -129,9 +134,9 @@ services:
       MINIO_ACCESS_KEY: scrapeflow
       MINIO_SECRET_KEY: scrapeflow_secret
       MINIO_BUCKET: scrapeflow-results
-      MINIO_SECURE: "false"
-      FETCH_TIMEOUT_SECS: "30"
-      NATS_MAX_DELIVER: "3"
+      MINIO_SECURE: 'false'
+      FETCH_TIMEOUT_SECS: '30'
+      NATS_MAX_DELIVER: '3'
     depends_on:
       nats:
         condition: service_healthy

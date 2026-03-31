@@ -4,6 +4,8 @@ import secrets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from datetime import datetime, timezone                                                            
+from sqlalchemy import update
 
 from app.models.api_key import ApiKey
 from app.models.user import User
@@ -39,5 +41,12 @@ async def verify_api_key(db: AsyncSession, raw_key: str) -> User | None:
 
     if api_key is None:
         return None
+    
+    await db.execute(                                                                                  
+        update(ApiKey)                                                                                 
+        .where(ApiKey.id == api_key.id)                                                                
+        .values(last_used_at=datetime.now(timezone.utc))                                               
+    )                                                                                                  
+    await db.commit()
 
     return api_key.user

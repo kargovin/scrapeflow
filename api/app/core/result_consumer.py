@@ -1,15 +1,15 @@
 import asyncio
 import json
-import logging
+import structlog
 
 from nats.aio.msg import Msg
+from nats.js import JetStreamContext
 
 from app.constants import NATS_JOBS_RESULT_SUBJECT
 from app.core.db import AsyncSessionLocal
-from app.core.nats import get_jetstream
 from app.models.job import Job, JobStatus
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 _DURABLE_NAME = "api-result-consumer"
 
@@ -56,9 +56,8 @@ async def _handle_result(msg: Msg) -> None:
     logger.info("Job result processed", job_id=job_id, status=worker_status)
 
 
-async def start_result_consumer() -> asyncio.Task:
+async def start_result_consumer(js: JetStreamContext) -> asyncio.Task:
     """Subscribe to the result subject and return the background task."""
-    js = get_jetstream()
     sub = await js.subscribe(
         NATS_JOBS_RESULT_SUBJECT,
         durable=_DURABLE_NAME,
