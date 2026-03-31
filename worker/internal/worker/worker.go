@@ -71,9 +71,12 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int) error {
 	// A durable consumer (named "go-worker") persists in NATS so that if the
 	// worker restarts, it picks up unacknowledged messages from where it left off.
 	// This is the Go equivalent of the Python result consumer's durable subscription.
+	handler := func(msg *nats.Msg) {
+		w.handleMessage(ctx, msg)
+	}
 	sub, err := w.js.Subscribe(
 		jobsRunSubject,
-		w.handleMessage,
+		handler,
 		nats.Durable(durableName),
 		nats.AckExplicit(),          // We ack manually — never auto-ack
 		nats.DeliverAll(),           // Start from the beginning if no prior state
@@ -104,7 +107,7 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int) error {
 //  5. Upload to MinIO
 //  6. Publish "completed" or "failed" result event
 //  7. Ack the NATS message (only after MinIO write succeeds)
-func (w *Worker) handleMessage(msg *nats.Msg) {
+func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 	// --- Step 1: Parse the incoming job message ---
 	var job jobMessage
 	// json.Unmarshal is Go's equivalent of json.loads() + Pydantic validation.
@@ -130,7 +133,7 @@ func (w *Worker) handleMessage(msg *nats.Msg) {
 
 	// --- Steps 3–6: Fetch, format, upload, publish outcome ---
 	// processJob does the real work. On failure it returns an error string.
-	minioPath, err := w.processJob(context.Background(), &job)
+	minioPath, err := w.processJob(ctx, &job)
 	if err != nil {
 		log.Printf("Job %s failed: %v", job.JobID, err)
 		err := w.publishResult(resultMessage{

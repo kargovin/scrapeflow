@@ -77,7 +77,7 @@ services:
       sh -c "nats stream add SCRAPEFLOW
       --subjects 'scrapeflow.jobs.*'
       --storage file
-      --retention limits
+      --retention work
       --replicas 1
       --defaults
       --server nats://nats:4222 2>/dev/null ||
@@ -90,7 +90,7 @@ services:
       context: ../api
       dockerfile: Dockerfile
       target: test
-    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - ../.env
     environment:

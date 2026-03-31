@@ -1,3 +1,4 @@
+import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,7 @@ from app.models.user import User
 
 # Extracts the X-API-Key header value (optional — returns None if missing)
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+logger = structlog.get_logger()
 
 
 async def get_current_user(
@@ -32,6 +34,7 @@ async def get_current_user(
         user = await verify_api_key(db, api_key)
         if user:
             return user
+        logger.warning("auth_failed", reason="invalid_api_key")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or revoked API key",

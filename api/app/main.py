@@ -12,6 +12,7 @@ from app.core.redis import create_pool, close_pool
 from app.core.result_consumer import start_result_consumer
 from app.settings import settings
 from app.routers import health, jobs, users
+from app.middleware.correlation import CorrelationIdMiddleware
 
 logger = structlog.get_logger()
 
@@ -76,7 +77,7 @@ app = FastAPI(
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
 )
-
+app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,

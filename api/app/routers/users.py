@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from app.models.api_key import ApiKey
 from app.models.user import User
 
 router = APIRouter(prefix="/users", tags=["users"])
+logger = structlog.get_logger()
 
 
 class UserResponse(BaseModel):
@@ -64,6 +66,7 @@ async def create_api_key(
     # Attach the raw key to the ORM object so the response model can read it.
     # It is NOT persisted — only the hash is in the DB.
     api_key.key = raw_key
+    logger.info("api_key_created", key_id=str(api_key.id), user_id=str(user.id))
     return api_key
 
 
@@ -95,4 +98,5 @@ async def revoke_api_key(
 
     api_key.revoked = True
     await db.commit()
+    logger.info("api_key_revoked", key_id=str(key_id))
     return api_key

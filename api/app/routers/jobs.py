@@ -6,6 +6,7 @@ from asyncio import get_event_loop
 from datetime import datetime
 from urllib.parse import urlparse
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import AnyHttpUrl, BaseModel, field_validator
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from app.models.job import Job, JobStatus, OutputFormat
 from app.models.user import User
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+logger = structlog.get_logger()
 
 
 def _validate_no_ssrf(url: str) -> None:
@@ -95,6 +97,7 @@ async def create_job(
         "output_format": job.output_format.value,
     }).encode()
     await js.publish(NATS_JOBS_RUN_SUBJECT, payload)
+    logger.info("job_created", job_id=str(job.id), user_id=str(user.id), url=job.url)
 
     return job
 
@@ -145,5 +148,6 @@ async def cancel_job(
         job.status = JobStatus.cancelled
         await db.commit()
         await db.refresh(job)
+        logger.info("job_cancelled", job_id=str(job_id))
 
     return job
