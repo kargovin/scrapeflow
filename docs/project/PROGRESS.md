@@ -57,12 +57,39 @@
 |   | 9d. `scripts/dev_token.sh` — `--api-key sf_...` or `--clerk sk_test_...` modes for local API testing | ✅ Done |
 |   | 9e. Fix Clerk JWT `authorized_parties=None` — was `[]` which blocked all non-browser JWTs | ✅ Done |
 
-## Phase 2 — Core features [LATER]
-- Playwright worker (opt-in JS rendering per job)
-- LLM processing (user provides own API key + output schema)
-- Change detection (recurring jobs, diff on result)
-- Webhook delivery (exponential backoff retry)
-- Admin panel API
+## Phase 2 — Core features
+
+> Full task breakdown: `docs/project/PHASE2_BACKLOG.md` (26 steps)
+> Engineering spec: `docs/phase2/phase2-engineering-spec-v3.md`
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Refactor `_validate_no_ssrf()` to `core/security.py` | ⬜ Todo |
+| 2 | Add `get_current_admin_user` dependency | ⬜ Todo |
+| 3 | Fernet encryption setup in settings + dependencies | ⬜ Todo |
+| 4 | Migration 2.1: Add `is_admin` to `users` | ⬜ Todo |
+| 5 | Migration 2.2: Add Phase 2 fields to `jobs` | ⬜ Todo |
+| 6 | Migration 2.3: Create `job_runs` table + data migration | ⬜ Todo |
+| 7 | Migration 2.5: Create `user_llm_keys` table | ⬜ Todo |
+| 8 | Migration 2.6: Add `processing` status to `JobStatus` enum | ⬜ Todo |
+| 9 | Migrations 2.7 + 2.8: `webhook_deliveries` + `nats_stream_seq` | ⬜ Todo |
+| 10 | Update `POST /jobs` for Phase 2 | ⬜ Todo |
+| 11 | Update `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` for Phase 2 | ⬜ Todo |
+| 12 | Migration 2.4: Drop run-state columns from `jobs` ⚠ requires ADR-003 | ⬜ Todo |
+| 13 | Update NATS constants + docker-compose nats-init | ⬜ Todo |
+| 14 | Update Go HTTP worker for Phase 2 | ⬜ Todo |
+| 15 | Update result consumer for Phase 2 | ⬜ Todo |
+| 16 | New job routes: PATCH, GET runs, webhook-secret rotate | ⬜ Todo |
+| 17 | LLM key management routes | ⬜ Todo |
+| 18 | Python Playwright worker (new service) | ⬜ Todo |
+| 19 | Python LLM worker (new service) | ⬜ Todo |
+| 20 | Scheduler loop background task | ⬜ Todo |
+| 21 | Webhook delivery loop background task | ⬜ Todo |
+| 22 | MaxDeliver advisory subscriber | ⬜ Todo |
+| 23 | Admin panel API routes | ⬜ Todo |
+| 24 | Admin stats endpoint | ⬜ Todo |
+| 25 | `scripts/cleanup_old_runs.py` | ⬜ Todo |
+| 26 | Docker Compose: add Playwright + LLM worker services | ⬜ Todo |
 
 ## Phase 3 — Production hardening [LATER]
 - Proxy rotation (pluggable provider config)

@@ -1,8 +1,10 @@
 # ADR-001: Worker Job Contract
 
-**Status:** Accepted
+**Status:** Partially Superseded — see ADR-002
 **Date:** 2026-03-25
 **Deciders:** @karthik
+
+> **Supersession notice (2026-04-02):** ADR-002 supersedes §2 (Subjects), §3 (Message Schemas), and §8 (MinIO Path Convention) of this document. Sections §4 (Worker Responsibilities), §5 (Acknowledgment Timing), §6 (Retry Policy), and §7 (Cancellation) remain authoritative. Where this document and ADR-002 conflict, ADR-002 takes precedence.
 
 ---
 
@@ -33,6 +35,8 @@ Max deliver:    Configurable via NATS_MAX_DELIVER (default: 3)
 
 ### 2. Subjects
 
+> ⚠ **Superseded by ADR-002 §2.** Phase 2 introduces per-engine subjects (`scrapeflow.jobs.run.http`, `scrapeflow.jobs.run.playwright`, `scrapeflow.jobs.llm`) and changes the stream to a `scrapeflow.jobs.>` wildcard. Do not implement against the subject table below for Phase 2 work.
+
 | Subject | Publisher | Consumer | Purpose |
 |---|---|---|---|
 | `scrapeflow.jobs.run` | API | Worker | Dispatch a new scrape job |
@@ -41,6 +45,8 @@ Max deliver:    Configurable via NATS_MAX_DELIVER (default: 3)
 ---
 
 ### 3. Message Schemas
+
+> ⚠ **Superseded by ADR-002 §3.** Phase 2 adds `run_id` to all messages, adds `nats_stream_seq` to running-status result messages, and changes the `minio_path` convention to `history/` paths. Do not implement against the schemas below for Phase 2 work.
 
 #### `scrapeflow.jobs.run` — Job dispatch (API → Worker)
 
@@ -154,6 +160,8 @@ The worker wastes one scrape. Correctness is preserved — the job remains `canc
 ---
 
 ### 8. MinIO Path Convention
+
+> ⚠ **Superseded by ADR-002 §4.** Phase 2 workers write to two paths per run: `latest/{job_id}.{ext}` (overwritten each run) and `history/{job_id}/{unix_timestamp}.{ext}` (append-only, one per run). The result message carries the `history/` path. The single-path convention below applies to Phase 1 data only.
 
 ```
 {bucket}/{job_id}.{extension}

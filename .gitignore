@@ -25,8 +25,7 @@ docker/data/
 *.swp
 *.swo
 
-# Local reference docs
-COMMANDS.md
+
 
 # OS
 .DS_Store
@@ -34,8 +33,4 @@ Thumbs.db
 
 
 # only for my understanding, not to be committed
-suggesions.md
-ARCHITECTURE_DECISIONS.md
-hello.txt
-plans/
-TODO.md
+secret.txt

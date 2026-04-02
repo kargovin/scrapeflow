@@ -21,7 +21,11 @@ A self-hosted, multi-tenant web scraping platform. Primary use case: structured 
 - **[LATER] MCP server**: LLM-callable interface (scrape_url, get_result, list_jobs)
 
 ### Worker contract
-See `ADR-001-worker-job-contract.md` for the full API↔worker interface: NATS subjects, message schemas, ack timing, retry policy, and cancellation protocol.
+See `docs/adr/README.md` for the full ADR index and current status of each decision record.
+- **ADR-001** — Phase 1 worker contract (partially superseded)
+- **ADR-002** — Phase 2 worker contract (current authoritative reference for NATS subjects, message schemas, MinIO path convention)
+
+When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 
 ### Deployment
 - **Local dev**: Docker Compose (Postgres, Redis, NATS, MinIO)
@@ -55,6 +59,18 @@ See `ADR-001-worker-job-contract.md` for the full API↔worker interface: NATS s
 - **Admin SPA**: React dashboard for user and job management
 - **MCP server**: expose scrape_url, get_result, list_jobs as LLM-callable tools
 - **K8s manifests**: production deployment manifests for k3s, added to infra repo
+
+### Phase 3 — Build Process
+Phase 3 simulates how a larger engineering organization works by dividing the build process across distinct Claude personas. Each persona owns a specific part of the process and produces defined outputs before handing off to the next.
+
+| Persona | Responsibilities | Outputs |
+|---------|-----------------|---------|
+| **Program Manager** | Defines scope, priorities, success criteria, and stakeholder requirements for each feature | PRD per feature, prioritized backlog |
+| **Software Architect** | Translates PRDs into technical design decisions, system contracts, and ADRs | Design docs, ADRs, updated engineering spec |
+| **Tech Lead** | Breaks the engineering spec into an ordered implementation backlog with dependencies and sequencing | Task breakdown, sprint plan, dependency graph |
+| **Engineer(s)** | Implements tasks from the backlog, writes tests, raises blockers to Tech Lead | Code, tests, implementation notes |
+
+Each persona operates with only the outputs from the persona before them — the Engineer does not read the PRD; the Architect does not second-guess the PM's priorities. This mirrors how information flows in real organizations and surfaces the communication gaps between roles.
 
 ---
 
