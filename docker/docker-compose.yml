@@ -101,6 +101,9 @@ services:
       MINIO_ACCESS_KEY: scrapeflow
       MINIO_SECRET_KEY: scrapeflow_secret
       MINIO_SECURE: 'false'
+    volumes:
+      - ../api/app:/app/app
+      - ../api/tests:/app/tests
     ports:
       - '8000:8000'
     depends_on:

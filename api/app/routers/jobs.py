@@ -4,7 +4,6 @@ from asyncio import get_event_loop
 from datetime import datetime
 
 import structlog
-from api.app.core.security import _validate_no_ssrf
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from nats.js import JetStreamContext
 from pydantic import AnyHttpUrl, BaseModel, field_validator
@@ -16,6 +15,7 @@ from app.constants import NATS_JOBS_RUN_SUBJECT
 from app.core.db import get_db
 from app.core.nats import get_jetstream
 from app.core.rate_limit import check_rate_limit
+from app.core.security import _validate_no_ssrf
 from app.models.job import Job, JobStatus, OutputFormat
 from app.models.user import User
 
