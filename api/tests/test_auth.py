@@ -1,4 +1,8 @@
+import pytest
+from fastapi import HTTPException
+
 from app.auth.api_key import API_KEY_PREFIX, generate_api_key, hash_api_key
+from app.auth.dependencies import get_current_admin_user
 from app.core.db import AsyncSessionLocal
 from app.models.api_key import ApiKey
 from app.models.user import User
@@ -96,3 +100,19 @@ async def test_api_key_auth_revoked(client, db_user):
 
     response = await client.get("/users/me", headers={"X-API-Key": raw_key})
     assert response.status_code == 401
+
+
+# Admin access tests
+
+
+def test_admin_access_denied_for_non_admin():
+    user = User(clerk_id="test", email="test@example.com", is_admin=False)
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_admin_user(user)
+    assert exc_info.value.status_code == 403
+
+
+def test_admin_access_granted_for_admin():
+    user = User(clerk_id="admin_test", email="test@domain.com", is_admin=True)
+    result = get_current_admin_user(user)
+    assert result is user

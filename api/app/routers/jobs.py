@@ -1,49 +1,26 @@
-import ipaddress
 import json
-import socket
 import uuid
 from asyncio import get_event_loop
 from datetime import datetime
-from urllib.parse import urlparse
 
 import structlog
+from api.app.core.security import _validate_no_ssrf
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from nats.js import JetStreamContext
 from pydantic import AnyHttpUrl, BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from nats.js import JetStreamContext
 
 from app.auth.dependencies import get_current_user
+from app.constants import NATS_JOBS_RUN_SUBJECT
 from app.core.db import get_db
 from app.core.nats import get_jetstream
 from app.core.rate_limit import check_rate_limit
-from app.constants import NATS_JOBS_RUN_SUBJECT
 from app.models.job import Job, JobStatus, OutputFormat
 from app.models.user import User
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = structlog.get_logger()
-
-
-def _validate_no_ssrf(url: str) -> None:
-    """Reject URLs that resolve to private/loopback/link-local addresses.
-
-    Resolves the hostname via DNS so that Docker service names (redis, postgres)
-    and DNS-rebinding attacks are also blocked, not just literal IP strings.
-    """
-    hostname = urlparse(url).hostname
-    if not hostname:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="URL has no hostname")
-
-    try:
-        results = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="URL hostname could not be resolved")
-
-    for _family, _type, _proto, _canonname, sockaddr in results:
-        ip = ipaddress.ip_address(sockaddr[0])
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="URL resolves to a private address")
 
 
 class JobCreate(BaseModel):
@@ -91,11 +68,13 @@ async def create_job(
 
     # Publish to NATS after successful DB insert (ADR-001)
     # If NATS is unavailable, job stays as `pending` and can be retried later
-    payload = json.dumps({
-        "job_id": str(job.id),
-        "url": job.url,
-        "output_format": job.output_format.value,
-    }).encode()
+    payload = json.dumps(
+        {
+            "job_id": str(job.id),
+            "url": job.url,
+            "output_format": job.output_format.value,
+        }
+    ).encode()
     await js.publish(NATS_JOBS_RUN_SUBJECT, payload)
     logger.info("job_created", job_id=str(job.id), user_id=str(user.id), url=job.url)
 

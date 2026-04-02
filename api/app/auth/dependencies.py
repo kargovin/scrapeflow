@@ -43,3 +43,12 @@ async def get_current_user(
     # JWT auth
     payload = await verify_request(request)
     return await get_or_create_user(db, payload)
+
+
+def get_current_admin_user(user: User = Depends(get_current_user)):
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. Admin privileges required.",
+        )
+    return user
