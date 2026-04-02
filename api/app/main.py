@@ -1,20 +1,21 @@
 import asyncio
-import structlog
 from contextlib import asynccontextmanager
+
+import structlog
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from alembic import command
-from alembic.config import Config
-
 from app.core import minio, nats
-from app.core.redis import create_pool, close_pool
+from app.core.redis import close_pool, create_pool
 from app.core.result_consumer import start_result_consumer
-from app.settings import settings
-from app.routers import health, jobs, users
 from app.middleware.correlation import CorrelationIdMiddleware
+from app.routers import health, jobs, users
+from app.settings import settings
 
 logger = structlog.get_logger()
+
 
 def _run_migrations_online():
     """Run migrations with a live async DB connection."""
@@ -30,7 +31,7 @@ async def lifespan(app: FastAPI):
     try:
         await asyncio.get_event_loop().run_in_executor(None, _run_migrations_online)
         logger.info("Database migrations complete")
-    except Exception as e:
+    except Exception:
         logger.exception("Database migration failed")
         raise
 
@@ -81,7 +82,8 @@ app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_credentials=settings.allowed_origins != ["*"],  # only allow credentials if specific origins are set
+    allow_credentials=settings.allowed_origins
+    != ["*"],  # only allow credentials if specific origins are set
     allow_methods=["*"],
     allow_headers=["*"],
 )

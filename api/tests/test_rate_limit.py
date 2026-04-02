@@ -3,14 +3,14 @@ import uuid
 import pytest
 import pytest_asyncio
 
-from app.main import app
 from app.core.rate_limit import _increment_and_check
+from app.main import app
 from app.settings import settings
-
 
 # ---------------------------------------------------------------------------
 # Helper fixture — real Redis client via the shared pool
 # ---------------------------------------------------------------------------
+
 
 @pytest_asyncio.fixture
 async def redis_client(init_clients):
@@ -18,6 +18,7 @@ async def redis_client(init_clients):
     # async for r in get_redis():
     #     yield r
     import redis.asyncio as aioredis
+
     async with aioredis.Redis(connection_pool=app.state.redis_pool) as r:
         yield r
 
@@ -25,6 +26,7 @@ async def redis_client(init_clients):
 # ---------------------------------------------------------------------------
 # 7d-1: requests under the limit all pass
 # ---------------------------------------------------------------------------
+
 
 async def test_rate_limit_under_limit(redis_client):
     """All requests below the limit succeed without raising."""
@@ -43,6 +45,7 @@ async def test_rate_limit_under_limit(redis_client):
 # 7d-2: request exactly at the limit still passes
 # ---------------------------------------------------------------------------
 
+
 async def test_rate_limit_at_limit(redis_client):
     """The Nth request (exactly at the limit) still succeeds."""
     user_id = uuid.uuid4()
@@ -60,9 +63,11 @@ async def test_rate_limit_at_limit(redis_client):
 # 7d-3: request over the limit raises 429
 # ---------------------------------------------------------------------------
 
+
 async def test_rate_limit_exceeded(redis_client):
     """The (N+1)th request raises HTTP 429."""
     from fastapi import HTTPException
+
     user_id = uuid.uuid4()
     original = settings.rate_limit_requests
     settings.rate_limit_requests = 3
@@ -81,9 +86,11 @@ async def test_rate_limit_exceeded(redis_client):
 # 7d-4: different users have independent counters
 # ---------------------------------------------------------------------------
 
+
 async def test_rate_limit_per_user_isolation(redis_client):
     """Hitting the limit for user A does not affect user B."""
     from fastapi import HTTPException
+
     user_a = uuid.uuid4()
     user_b = uuid.uuid4()
     original = settings.rate_limit_requests
@@ -107,14 +114,17 @@ async def test_rate_limit_per_user_isolation(redis_client):
 # 7d-5: HTTP integration — POST /jobs returns 429 when limit exceeded
 # ---------------------------------------------------------------------------
 
+
 async def test_create_job_rate_limited(client, mock_clerk_auth, redis_client, mock_jetstream):
     """POST /jobs returns 429 once the rate limit is exhausted."""
     headers = {"Authorization": "Bearer fake.jwt.token"}
 
     # Clear any existing rate limit counter for the mock user from prior tests
+    from sqlalchemy import select
+
     from app.core.db import AsyncSessionLocal
     from app.models.user import User
-    from sqlalchemy import select
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.clerk_id == "user_test_123"))
         user = result.scalar_one_or_none()
@@ -138,6 +148,8 @@ async def test_create_job_rate_limited(client, mock_clerk_auth, redis_client, mo
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _window() -> int:
     import time
+
     return int(time.time()) // settings.rate_limit_window_seconds

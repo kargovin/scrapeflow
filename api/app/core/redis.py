@@ -2,6 +2,7 @@ from collections.abc import AsyncGenerator
 
 import redis.asyncio as redis
 from fastapi import Request
+
 from app.settings import settings
 
 
@@ -13,7 +14,7 @@ def create_pool() -> redis.ConnectionPool:
     )
 
 
-async def close_pool(pool: redis.ConnectionPool) -> None: 
+async def close_pool(pool: redis.ConnectionPool) -> None:
     await pool.aclose()
 
 

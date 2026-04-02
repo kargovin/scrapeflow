@@ -1,6 +1,8 @@
 import uuid
-from structlog.contextvars import bind_contextvars, clear_contextvars
+
 from starlette.middleware.base import BaseHTTPMiddleware
+from structlog.contextvars import bind_contextvars, clear_contextvars
+
 
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):

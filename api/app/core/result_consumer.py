@@ -1,7 +1,7 @@
 import asyncio
 import json
-import structlog
 
+import structlog
 from nats.aio.msg import Msg
 from nats.js import JetStreamContext
 

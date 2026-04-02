@@ -1,10 +1,10 @@
+from fastapi import Request
 from miniopy_async import Minio
 
 from app.settings import settings
-from fastapi import Request
+
 
 async def create_client() -> Minio:
-    
     client = Minio(
         settings.minio_endpoint,
         access_key=settings.minio_access_key,

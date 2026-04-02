@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -35,15 +36,19 @@ class Settings(BaseSettings):
     clerk_secret_key: str = ""  # used by backend SDK for JWT verification + API calls
 
     # Rate limiting — per-user fixed window counter
-    rate_limit_requests: int = 60   # max requests allowed per window
+    rate_limit_requests: int = 60  # max requests allowed per window
     rate_limit_window_seconds: int = 60  # window size in seconds
 
     # Allowed origins - CORS
-    allowed_origins_raw: str = Field(default="*", alias="ALLOWED_ORIGINS")   # env: ALLOWED_ORIGINS (comma-separated for production)
+    allowed_origins_raw: str = Field(
+        default="*", alias="ALLOWED_ORIGINS"
+    )  # env: ALLOWED_ORIGINS (comma-separated for production)
+
     @property
     def allowed_origins(self) -> list[str]:
         if self.allowed_origins_raw == "*":
             return ["*"]
         return [o.strip() for o in self.allowed_origins_raw.split(",")]
-    
+
+
 settings = Settings()

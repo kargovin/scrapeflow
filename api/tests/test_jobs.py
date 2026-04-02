@@ -9,10 +9,10 @@ from app.core.db import AsyncSessionLocal
 from app.core.result_consumer import _handle_result
 from app.models.job import Job, JobStatus
 
-
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def auth_headers(mock_clerk_auth):
@@ -23,6 +23,7 @@ def auth_headers(mock_clerk_auth):
 # ---------------------------------------------------------------------------
 # 6h-1: unauthenticated requests return 401 on all job endpoints
 # ---------------------------------------------------------------------------
+
 
 async def test_jobs_unauthenticated(client):
     """All job endpoints return 401 when no auth header is provided."""
@@ -37,18 +38,19 @@ async def test_jobs_unauthenticated(client):
 # 6h-2: POST /jobs creates a job and publishes to NATS
 # ---------------------------------------------------------------------------
 
+
 async def test_create_job(client, auth_headers, mock_jetstream):
     """POST /jobs returns 201, correct fields, and publishes a fat NATS message."""
-    
+
     response = await client.post(
-            "/jobs",
-            json={"url": "https://example.com", "output_format": "markdown"},
-            headers=auth_headers,
+        "/jobs",
+        json={"url": "https://example.com", "output_format": "markdown"},
+        headers=auth_headers,
     )
 
     assert response.status_code == 201
     data = response.json()
-    assert data["url"] == "https://example.com/"   # AnyHttpUrl normalises trailing slash
+    assert data["url"] == "https://example.com/"  # AnyHttpUrl normalises trailing slash
     assert data["output_format"] == "markdown"
     assert data["status"] == "pending"
     assert "id" in data
@@ -66,6 +68,7 @@ async def test_create_job(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 # 6h-3: GET /jobs/{job_id} — own job returns 200
 # ---------------------------------------------------------------------------
+
 
 async def test_get_job_own(client, auth_headers, mock_jetstream):
     """GET /jobs/{job_id} returns 200 and the correct job for the owning user."""
@@ -86,6 +89,7 @@ async def test_get_job_own(client, auth_headers, mock_jetstream):
 # 6h-4: GET /jobs/{job_id} — another user's job returns 404
 # ---------------------------------------------------------------------------
 
+
 async def test_get_job_other_user(client, auth_headers, db_user):
     """GET /jobs/{job_id} returns 404 when the job belongs to a different user."""
     job = Job(user_id=db_user.id, url="https://other.com")
@@ -101,6 +105,7 @@ async def test_get_job_other_user(client, auth_headers, db_user):
 # ---------------------------------------------------------------------------
 # 6h-5: GET /jobs — returns only current user's jobs, respects limit/offset
 # ---------------------------------------------------------------------------
+
 
 async def test_list_jobs_pagination(client, auth_headers, mock_jetstream):
     """GET /jobs returns only the authenticated user's jobs and respects limit/offset."""
@@ -124,9 +129,12 @@ async def test_list_jobs_pagination(client, auth_headers, mock_jetstream):
 # 6h-6: DELETE /jobs/{job_id} — pending job transitions to cancelled
 # ---------------------------------------------------------------------------
 
+
 async def test_cancel_job(client, auth_headers, mock_jetstream):
     """DELETE /jobs/{job_id} sets a pending job to cancelled and returns it."""
-    create_resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
     assert create_resp.status_code == 201
     job_id = create_resp.json()["id"]
 
@@ -139,9 +147,12 @@ async def test_cancel_job(client, auth_headers, mock_jetstream):
 # 6h-7: DELETE /jobs/{job_id} — already-cancelled is a no-op
 # ---------------------------------------------------------------------------
 
+
 async def test_cancel_job_noop(client, auth_headers, mock_jetstream):
     """DELETE /jobs/{job_id} on an already-cancelled job returns it unchanged."""
-    create_resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
     job_id = create_resp.json()["id"]
 
     # First cancel
@@ -157,6 +168,7 @@ async def test_cancel_job_noop(client, auth_headers, mock_jetstream):
 # Result consumer tests (6h-8 to 6h-11)
 # NOTE: mock_clerk_auth and db_user fixtures to be moved to conftest.py later
 # ---------------------------------------------------------------------------
+
 
 async def test_result_consumer_running(db_user):
     """Result consumer sets job status to running when worker publishes status=running."""
@@ -186,14 +198,20 @@ async def test_result_consumer_running(db_user):
 async def test_result_consumer_completed(db_user):
     """Result consumer sets job status to completed and saves result_path when worker publishes status=completed."""
     async with AsyncSessionLocal() as db:
-        job = Job(user_id = db_user.id , url = 'https://other.com')
+        job = Job(user_id=db_user.id, url="https://other.com")
         db.add(job)
         await db.commit()
         await db.refresh(job)
         job_id = job.id
-    
+
     msg = MagicMock()
-    msg.data = json.dumps({'job_id': str(job_id), 'status': 'completed', 'minio_path': f'scrapeflow-results/{str(job_id)}.html'}).encode()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "status": "completed",
+            "minio_path": f"scrapeflow-results/{job_id!s}.html",
+        }
+    ).encode()
     msg.ack = AsyncMock()
 
     await _handle_result(msg)
@@ -201,7 +219,7 @@ async def test_result_consumer_completed(db_user):
     async with AsyncSessionLocal() as db:
         updated = await db.get(Job, job_id)
         assert updated.status == JobStatus.completed
-        assert updated.result_path == f'scrapeflow-results/{str(job_id)}.html'
+        assert updated.result_path == f"scrapeflow-results/{job_id!s}.html"
 
     msg.ack.assert_called_once()
 
@@ -209,6 +227,7 @@ async def test_result_consumer_completed(db_user):
 # ---------------------------------------------------------------------------
 # 6h-11: Result consumer — cancelled job result is discarded
 # ---------------------------------------------------------------------------
+
 
 async def test_result_consumer_cancelled_job_discarded(db_user):
     """Result consumer discards worker results for cancelled jobs (status stays cancelled)."""
@@ -221,15 +240,17 @@ async def test_result_consumer_cancelled_job_discarded(db_user):
 
     # Worker sends a completed event — should be discarded
     msg = MagicMock()
-    msg.data = json.dumps({"job_id": str(job_id), "status": "completed", "minio_path": "some/path"}).encode()
+    msg.data = json.dumps(
+        {"job_id": str(job_id), "status": "completed", "minio_path": "some/path"}
+    ).encode()
     msg.ack = AsyncMock()
 
     await _handle_result(msg)
 
     async with AsyncSessionLocal() as db:
         updated = await db.get(Job, job_id)
-        assert updated.status == JobStatus.cancelled   # unchanged
-        assert updated.result_path is None             # not written
+        assert updated.status == JobStatus.cancelled  # unchanged
+        assert updated.result_path is None  # not written
 
     msg.ack.assert_called_once()
 
@@ -237,6 +258,7 @@ async def test_result_consumer_cancelled_job_discarded(db_user):
 # ---------------------------------------------------------------------------
 # 6h-10: Result consumer failed event → DB status + error updated
 # ---------------------------------------------------------------------------
+
 
 async def test_result_consumer_failed(db_user):
     """Result consumer sets job status to failed and saves error when worker publishes status=failed."""
@@ -248,7 +270,9 @@ async def test_result_consumer_failed(db_user):
         job_id = job.id
 
     msg = MagicMock()
-    msg.data = json.dumps({"job_id": str(job_id), "status": "failed", "error": "connection timeout"}).encode()
+    msg.data = json.dumps(
+        {"job_id": str(job_id), "status": "failed", "error": "connection timeout"}
+    ).encode()
     msg.ack = AsyncMock()
 
     await _handle_result(msg)
@@ -260,16 +284,21 @@ async def test_result_consumer_failed(db_user):
 
     msg.ack.assert_called_once()
 
+
 # ---------------------------------------------------------------------------
 # SSRF protection
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("url,resolved_ip", [
-    ("http://localhost/secret", "127.0.0.1"),
-    ("http://169.254.169.254/latest/meta-data/", "169.254.169.254"),
-    ("http://redis/data", "10.0.0.1"),
-    ("http://192.168.1.1/admin", "192.168.1.1"),
-])
+
+@pytest.mark.parametrize(
+    "url,resolved_ip",
+    [
+        ("http://localhost/secret", "127.0.0.1"),
+        ("http://169.254.169.254/latest/meta-data/", "169.254.169.254"),
+        ("http://redis/data", "10.0.0.1"),
+        ("http://192.168.1.1/admin", "192.168.1.1"),
+    ],
+)
 async def test_create_job_ssrf_blocked(client, auth_headers, url, resolved_ip):
     """URLs resolving to private/loopback/link-local addresses are rejected with 400."""
     with patch("app.routers.jobs.socket.getaddrinfo") as mock_gai:
@@ -282,8 +311,13 @@ async def test_create_job_ssrf_blocked(client, auth_headers, url, resolved_ip):
 async def test_create_job_ssrf_unresolvable(client, auth_headers):
     """Hostnames that fail DNS resolution are rejected with 422."""
     import socket as _socket
-    with patch("app.routers.jobs.socket.getaddrinfo", side_effect=_socket.gaierror("name not found")):
-        response = await client.post("/jobs", json={"url": "http://nosuchodomain.invalid/"}, headers=auth_headers)
+
+    with patch(
+        "app.routers.jobs.socket.getaddrinfo", side_effect=_socket.gaierror("name not found")
+    ):
+        response = await client.post(
+            "/jobs", json={"url": "http://nosuchodomain.invalid/"}, headers=auth_headers
+        )
     assert response.status_code == 422
     assert "resolved" in response.json()["detail"]
 
@@ -292,5 +326,7 @@ async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_jet
     """Public IPs pass SSRF check and proceed to job creation."""
     with patch("app.routers.jobs.socket.getaddrinfo") as mock_gai:
         mock_gai.return_value = [(None, None, None, None, ("93.184.216.34", 0))]  # example.com
-        response = await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
+        response = await client.post(
+            "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+        )
     assert response.status_code == 201
