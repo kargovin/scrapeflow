@@ -1,11 +1,15 @@
 import enum
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class JobStatus(str, enum.Enum):
@@ -52,7 +56,7 @@ class Job(Base):
         nullable=False,
     )
 
-    user: Mapped["User"] = relationship("User", back_populates="jobs")  # noqa: F821
+    user: Mapped["User"] = relationship("User", back_populates="jobs")
 
     def __repr__(self) -> str:
         return f"<Job id={self.id} status={self.status} url={self.url}>"

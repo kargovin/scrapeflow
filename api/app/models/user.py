@@ -25,7 +25,7 @@ class User(Base):
         default=lambda: datetime.now(UTC),
         nullable=False,
     )
-    is_admin: Mapped[bool] = mapped_column(default=False, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(nullable=False, server_default="false")
 
     api_keys: Mapped[list[ApiKey]] = relationship(
         "ApiKey", back_populates="user", cascade="all, delete-orphan"
