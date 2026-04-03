@@ -3,7 +3,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text
+from sqlalchemy import VARCHAR, CheckConstraint, DateTime, Enum, ForeignKey, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -55,6 +56,27 @@ class Job(Base):
         onupdate=lambda: datetime.now(UTC),
         nullable=False,
     )
+
+    engine: Mapped[str] = mapped_column(
+        VARCHAR(20), CheckConstraint("engine IN ('http', 'playwright')"), server_default="http"
+    )
+    schedule_cron: Mapped[str | None] = mapped_column(nullable=True)
+
+    schedule_status: Mapped[str | None] = mapped_column(
+        CheckConstraint("schedule_status IN ('active', 'paused')")
+    )
+
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    webhook_url: Mapped[str | None] = mapped_column(nullable=True)
+
+    webhook_secret: Mapped[str | None] = mapped_column(nullable=True)  # Fernet-encrypted at rest
+
+    llm_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # JSONB
+
+    playwright_options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # JSONB
 
     user: Mapped["User"] = relationship("User", back_populates="jobs")
 
