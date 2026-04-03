@@ -38,3 +38,26 @@ If there is a use case for reusing names after revocation, revisit with Option C
 - Test: duplicate name returns 409, different name succeeds
 
 ---
+
+## Q2 — `jobs.updated_at` exists but is never updated
+
+**Raised during:** Phase 2 Step 5 — reviewing `job.py` model additions
+**File:** `api/app/models/job.py`
+
+### Context
+
+`updated_at` was added to the `jobs` model in Phase 1 with `onupdate=lambda: datetime.now(UTC)`. SQLAlchemy's `onupdate` fires when a column value is changed via the ORM. `result_consumer.py` does mutate job fields (`job.status`, `job.result_path`, `job.error`) so `onupdate` fires there. The open question is whether all other mutation paths (cancel route, Phase 2 status transitions) also touch a field, or if some updates bypass ORM assignment and go through `db.execute(update(...))` — in which case `onupdate` would silently not fire.
+
+### Options
+
+| Option | Behaviour |
+|--------|-----------|
+| **A — remove it** | Drop the column; no misleading stale data |
+| **B — keep, wire it up** | Ensure every route that mutates a job (cancel, result consumer updates) sets at least one field so `onupdate` fires, or explicitly assign `job.updated_at` |
+| **C — DB trigger** | Let Postgres maintain it — more reliable than ORM-level `onupdate` |
+
+### Recommendation
+
+**Option B** if the column is useful for the admin panel or change detection. **Option A** if it's never queried — dead columns are a maintenance burden. Decide before Step 12 (the irreversible migration) so it can be cleaned up in the same window if needed.
+
+---
