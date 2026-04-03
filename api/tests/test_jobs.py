@@ -305,7 +305,7 @@ async def test_result_consumer_failed(db_user):
 )
 async def test_create_job_ssrf_blocked(client, auth_headers, url, resolved_ip):
     """URLs resolving to private/loopback/link-local addresses are rejected with 400."""
-    with patch("app.routers.jobs.socket.getaddrinfo") as mock_gai:
+    with patch("app.core.security.socket.getaddrinfo") as mock_gai:
         mock_gai.return_value = [(None, None, None, None, (resolved_ip, 0))]
         response = await client.post("/jobs", json={"url": url}, headers=auth_headers)
     assert response.status_code == 400
@@ -317,7 +317,7 @@ async def test_create_job_ssrf_unresolvable(client, auth_headers):
     import socket as _socket
 
     with patch(
-        "app.routers.jobs.socket.getaddrinfo", side_effect=_socket.gaierror("name not found")
+        "app.core.security.socket.getaddrinfo", side_effect=_socket.gaierror("name not found")
     ):
         response = await client.post(
             "/jobs", json={"url": "http://nosuchodomain.invalid/"}, headers=auth_headers
@@ -328,7 +328,7 @@ async def test_create_job_ssrf_unresolvable(client, auth_headers):
 
 async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_jetstream):
     """Public IPs pass SSRF check and proceed to job creation."""
-    with patch("app.routers.jobs.socket.getaddrinfo") as mock_gai:
+    with patch("app.core.security.socket.getaddrinfo") as mock_gai:
         mock_gai.return_value = [(None, None, None, None, ("93.184.216.34", 0))]  # example.com
         response = await client.post(
             "/jobs", json={"url": "https://example.com"}, headers=auth_headers
