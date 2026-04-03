@@ -70,13 +70,13 @@
 | ---- | --------------------------------------------------------------------- | ------- |
 | 1    | Refactor `_validate_no_ssrf()` to `core/security.py`                  | ✅ Done |
 | 2    | Add `get_current_admin_user` dependency                               | ✅ Done |
-| 3    | Fernet encryption setup in settings + dependencies                    | ⬜ Todo |
-| 4    | Migration 2.1: Add `is_admin` to `users`                              | ⬜ Todo |
-| 5    | Migration 2.2: Add Phase 2 fields to `jobs`                           | ⬜ Todo |
-| 6    | Migration 2.3: Create `job_runs` table + data migration               | ⬜ Todo |
-| 7    | Migration 2.5: Create `user_llm_keys` table                           | ⬜ Todo |
-| 8    | Migration 2.6: Add `processing` status to `JobStatus` enum            | ⬜ Todo |
-| 9    | Migrations 2.7 + 2.8: `webhook_deliveries` + `nats_stream_seq`        | ⬜ Todo |
+| 3    | Fernet encryption setup in settings + dependencies                    | ✅ Done |
+| 4    | Migration 2.1: Add `is_admin` to `users`                              | ✅ Done |
+| 5    | Migration 2.2: Add Phase 2 fields to `jobs`                           | ✅ Done |
+| 6    | Migration 2.3: Create `job_runs` table + data migration               | ✅ Done |
+| 7    | Migration 2.5: Create `user_llm_keys` table                           | ✅ Done |
+| 8    | Migration 2.6: Add `processing` status to `JobStatus` enum            | ✅ Done |
+| 9    | Migrations 2.7 + 2.8: `webhook_deliveries` + `nats_stream_seq`        | ✅ Done |
 | 10   | Update `POST /jobs` for Phase 2                                       | ⬜ Todo |
 | 11   | Update `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` for Phase 2 | ⬜ Todo |
 | 12   | Migration 2.4: Drop run-state columns from `jobs` ⚠ requires ADR-003  | ⬜ Todo |
