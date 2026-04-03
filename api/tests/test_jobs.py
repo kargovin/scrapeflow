@@ -190,6 +190,7 @@ async def test_result_consumer_running(db_user):
     # Assert DB was updated
     async with AsyncSessionLocal() as db:
         updated = await db.get(Job, job_id)
+        assert updated is not None
         assert updated.status == JobStatus.running
 
     msg.ack.assert_called_once()
@@ -218,6 +219,7 @@ async def test_result_consumer_completed(db_user):
 
     async with AsyncSessionLocal() as db:
         updated = await db.get(Job, job_id)
+        assert updated is not None
         assert updated.status == JobStatus.completed
         assert updated.result_path == f"scrapeflow-results/{job_id!s}.html"
 
@@ -248,7 +250,8 @@ async def test_result_consumer_cancelled_job_discarded(db_user):
     await _handle_result(msg)
 
     async with AsyncSessionLocal() as db:
-        updated = await db.get(Job, job_id)
+        updated: Job | None = await db.get(Job, job_id)
+        assert updated is not None
         assert updated.status == JobStatus.cancelled  # unchanged
         assert updated.result_path is None  # not written
 
@@ -279,6 +282,7 @@ async def test_result_consumer_failed(db_user):
 
     async with AsyncSessionLocal() as db:
         updated = await db.get(Job, job_id)
+        assert updated is not None
         assert updated.status == JobStatus.failed
         assert updated.error == "connection timeout"
 

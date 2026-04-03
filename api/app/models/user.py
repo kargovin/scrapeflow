@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
-from app.models.api_key import ApiKey
-from app.models.job import Job
+
+if TYPE_CHECKING:
+    from app.models.api_key import ApiKey
+    from app.models.job import Job
 
 
 class User(Base):
@@ -22,10 +27,10 @@ class User(Base):
     )
     is_admin: Mapped[bool] = mapped_column(default=False, nullable=False)
 
-    api_keys: Mapped[list["ApiKey"]] = relationship(
+    api_keys: Mapped[list[ApiKey]] = relationship(
         "ApiKey", back_populates="user", cascade="all, delete-orphan"
     )
-    jobs: Mapped[list["Job"]] = relationship(
+    jobs: Mapped[list[Job]] = relationship(
         "Job", back_populates="user", cascade="all, delete-orphan"
     )
 

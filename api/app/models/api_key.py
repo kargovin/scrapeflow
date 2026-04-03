@@ -5,6 +5,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+from app.models.user import User
 
 
 class ApiKey(Base):
@@ -24,7 +25,7 @@ class ApiKey(Base):
     )
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    user: Mapped["User"] = relationship("User", back_populates="api_keys")  # noqa: F821
+    user: Mapped["User"] = relationship("User", back_populates="api_keys")
 
     def __repr__(self) -> str:
         return f"<ApiKey id={self.id} name={self.name} revoked={self.revoked}>"

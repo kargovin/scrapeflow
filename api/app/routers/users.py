@@ -63,11 +63,14 @@ async def create_api_key(
     db.add(api_key)
     await db.commit()
 
-    # Attach the raw key to the ORM object so the response model can read it.
-    # It is NOT persisted — only the hash is in the DB.
-    api_key.key = raw_key
     logger.info("api_key_created", key_id=str(api_key.id), user_id=str(user.id))
-    return api_key
+    return ApiKeyCreatedResponse(
+        id=api_key.id,
+        name=api_key.name,
+        created_at=api_key.created_at,
+        revoked=api_key.revoked,
+        key=raw_key,
+    )
 
 
 @router.get("/api-keys", response_model=list[ApiKeyResponse])
