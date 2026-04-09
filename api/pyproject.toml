@@ -18,6 +18,8 @@ dependencies = [
     "clerk-backend-api>=5.0.0",
     "python-multipart>=0.0.9",
     "structlog>=24.0.0",
+    "croniter>=3.0.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]

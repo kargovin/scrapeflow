@@ -3,11 +3,15 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
-from app.constants import NATS_JOBS_RUN_SUBJECT
+from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.result_consumer import _handle_result
 from app.models.job import Job, JobStatus
+from app.models.job_runs import JobRun
+from app.models.llm_keys import UserLLMKey
+from app.models.user import User
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -54,15 +58,17 @@ async def test_create_job(client, auth_headers, mock_jetstream):
     assert data["output_format"] == "markdown"
     assert data["status"] == "pending"
     assert "id" in data
+    assert "run_id" in data
 
     # Assert the NATS publish was called once with the correct subject and fat message
     mock_jetstream.publish.assert_called_once()
     call_subject, call_payload = mock_jetstream.publish.call_args.args
-    assert call_subject == NATS_JOBS_RUN_SUBJECT
+    assert call_subject == NATS_JOBS_RUN_HTTP_SUBJECT
     published = json.loads(call_payload.decode())
     assert published["job_id"] == data["id"]
     assert published["url"] == "https://example.com/"
     assert published["output_format"] == "markdown"
+    assert published["run_id"] == data["run_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +172,6 @@ async def test_cancel_job_noop(client, auth_headers, mock_jetstream):
 
 # ---------------------------------------------------------------------------
 # Result consumer tests (6h-8 to 6h-11)
-# NOTE: mock_clerk_auth and db_user fixtures to be moved to conftest.py later
 # ---------------------------------------------------------------------------
 
 
@@ -334,3 +339,87 @@ async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_jet
             "/jobs", json={"url": "https://example.com"}, headers=auth_headers
         )
     assert response.status_code == 201
+
+
+# Cron validation unit test
+async def test_create_job_valid_cron_job(client, auth_headers, mock_jetstream):
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://domain.com", "schedule_cron": "0 * * * *"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+
+
+async def test_create_job_invalid_cron_job(client, auth_headers, mock_jetstream):
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://domain.com", "schedule_cron": "65 * * * *"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+# LLM key unit tests
+async def test_create_job_valid_llm_key(client, auth_headers, mock_jetstream):
+    # Create and add a key to llm table
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(User).where(User.clerk_id == "user_test_123"))
+        auth_user = res.scalar_one()
+
+        key = UserLLMKey(
+            user_id=auth_user.id, name="test", provider="anthropic", encrypted_api_key="testnow"
+        )
+        db.add(key)
+        await db.commit()
+        await db.refresh(key)
+
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://domain.com",
+            "llm_config": {"llm_key_id": str(key.id), "model": "abc", "output_schema": {}},
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+
+
+async def test_create_job_invalid_llmkey(client, auth_headers, mock_jetstream):
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://domain.com",
+            "llm_config": {
+                "llm_key_id": "00000000-0000-0000-0000-000000000000",
+                "model": "abc",
+                "output_schema": {},
+            },
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 404
+
+
+# webhook url validation
+async def test_create_job_valid_webhook_returns_secret(client, auth_headers, mock_jetstream):
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://domain.com", "webhook_url": "https://anotherdomain.com"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    assert response.json()["webhook_secret"] is not None
+
+
+# Job run creation
+async def test_create_job_job_runs_entry_exists(client, auth_headers, mock_jetstream):
+    response = await client.post("/jobs", json={"url": "https://domain.com"}, headers=auth_headers)
+
+    assert response.status_code == 201
+    run_id = uuid.UUID(response.json()["run_id"])
+
+    async with AsyncSessionLocal() as db:
+        res: JobRun | None = await db.get(JobRun, run_id)
+        assert res is not None
+        assert res.status == "pending"

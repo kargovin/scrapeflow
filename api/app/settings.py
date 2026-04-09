@@ -45,6 +45,9 @@ class Settings(BaseSettings):
         default="", alias="LLM_KEY_ENCRYPTION_KEY"
     )  # symmetric key for encrypting LLM API keys in DB
 
+    # Cron Sheduler
+    schedule_min_interval_minutes: int = 5
+
     @field_validator("llm_key_encryption_key")
     def validate_fernet_key(cls, v):
         if not v:
