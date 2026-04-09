@@ -78,3 +78,27 @@ If there is a use case for reusing names after revocation, revisit with Option C
 - Low risk — `VARCHAR` and `TEXT` are functionally equivalent in Postgres; this is a type annotation cleanup
 
 ---
+
+## Q4 — `DELETE /jobs/{id}` does not disable scheduled jobs
+
+**Raised during:** Phase 2 Step 11 — implementing Phase 2 cancellation
+
+**File:** `api/app/routers/jobs.py`
+
+### Context
+
+`DELETE /jobs/{id}` now cancels active `job_runs` rows (status = pending/running/processing). This stops the current scrape, but it does not prevent the scheduler (Step 20) from firing a new `job_run` at the next cron tick for a scheduled job. After Step 12 drops `jobs.status`, there is no job-level flag to mark a scheduled job as disabled.
+
+### Options
+
+| Option | Behaviour |
+|--------|-----------|
+| **A — `is_active` flag on `jobs`** | `DELETE /jobs/{id}` sets `is_active = False`; scheduler skips jobs where `is_active = False` |
+| **B — Separate disable endpoint** | `DELETE` only cancels the active run; a new `PATCH /jobs/{id}` with `{"is_active": false}` disables future scheduling |
+| **C — DELETE means hard delete** | `DELETE /jobs/{id}` removes the job row (CASCADE deletes runs); no disable concept needed |
+
+### Recommendation
+
+Decide before Step 20 (scheduler loop). **Option A** is simplest — a boolean flag is enough for the MVP. **Option B** is more RESTful but adds a route. **Option C** is clean but loses history.
+
+---

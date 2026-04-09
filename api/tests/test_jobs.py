@@ -77,18 +77,44 @@ async def test_create_job(client, auth_headers, mock_jetstream):
 
 
 async def test_get_job_own(client, auth_headers, mock_jetstream):
-    """GET /jobs/{job_id} returns 200 and the correct job for the owning user."""
+    """GET /jobs/{job_id} returns 200 with run_id and status sourced from job_runs."""
     create_resp = await client.post(
         "/jobs",
         json={"url": "https://example.com"},
         headers=auth_headers,
     )
     assert create_resp.status_code == 201
-    job_id = create_resp.json()["id"]
+    data = create_resp.json()
+    job_id = data["id"]
 
     response = await client.get(f"/jobs/{job_id}", headers=auth_headers)
     assert response.status_code == 200
-    assert response.json()["id"] == job_id
+    body = response.json()
+    assert body["id"] == job_id
+    assert body["run_id"] == data["run_id"]
+    assert body["status"] == "pending"
+
+
+async def test_get_job_status_from_run(client, auth_headers, mock_jetstream):
+    """GET /jobs/{job_id} reflects status from job_runs, not jobs."""
+    create_resp = await client.post(
+        "/jobs",
+        json={"url": "https://example.com"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201
+    run_id = uuid.UUID(create_resp.json()["run_id"])
+    job_id = create_resp.json()["id"]
+
+    # Simulate worker updating the run to running
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        run.status = "running"
+        await db.commit()
+
+    response = await client.get(f"/jobs/{job_id}", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +156,10 @@ async def test_list_jobs_pagination(client, auth_headers, mock_jetstream):
     assert resp.status_code == 200
     assert resp.json() == []
 
+    # each item must include run_id
+    resp = await client.get("/jobs", headers=auth_headers)
+    assert all("run_id" in job for job in resp.json())
+
 
 # ---------------------------------------------------------------------------
 # 6h-6: DELETE /jobs/{job_id} — pending job transitions to cancelled
@@ -137,7 +167,7 @@ async def test_list_jobs_pagination(client, auth_headers, mock_jetstream):
 
 
 async def test_cancel_job(client, auth_headers, mock_jetstream):
-    """DELETE /jobs/{job_id} sets a pending job to cancelled and returns it."""
+    """DELETE /jobs/{job_id} cancels the active job_run and returns a message."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
     )
@@ -146,28 +176,47 @@ async def test_cancel_job(client, auth_headers, mock_jetstream):
 
     response = await client.delete(f"/jobs/{job_id}", headers=auth_headers)
     assert response.status_code == 200
-    assert response.json()["status"] == "cancelled"
+    assert response.json()["message"] == "Job run cancelled"
 
 
 # ---------------------------------------------------------------------------
-# 6h-7: DELETE /jobs/{job_id} — already-cancelled is a no-op
+# 6h-7: DELETE /jobs/{job_id} — no active run returns appropriate message
 # ---------------------------------------------------------------------------
 
 
 async def test_cancel_job_noop(client, auth_headers, mock_jetstream):
-    """DELETE /jobs/{job_id} on an already-cancelled job returns it unchanged."""
+    """DELETE /jobs/{job_id} with no active run returns 'no active run' message."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
     )
     job_id = create_resp.json()["id"]
 
-    # First cancel
+    # First cancel — cancels the active run
     await client.delete(f"/jobs/{job_id}", headers=auth_headers)
 
-    # Second cancel — should still return cancelled, not error
+    # Second cancel — no active run remains
     response = await client.delete(f"/jobs/{job_id}", headers=auth_headers)
     assert response.status_code == 200
-    assert response.json()["status"] == "cancelled"
+    assert response.json()["message"] == "Job has no active run to cancel"
+
+
+async def test_cancel_job_terminal_run(client, auth_headers, mock_jetstream):
+    """DELETE /jobs/{job_id} returns 'no active run' when the run is already completed."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    run_id = uuid.UUID(create_resp.json()["run_id"])
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        run.status = "completed"
+        await db.commit()
+
+    response = await client.delete(f"/jobs/{job_id}", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json()["message"] == "Job has no active run to cancel"
 
 
 # ---------------------------------------------------------------------------

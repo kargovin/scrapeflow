@@ -10,9 +10,9 @@ from croniter import croniter
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from nats.js import JetStreamContext
-from pydantic import AnyHttpUrl, BaseModel, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
@@ -20,11 +20,11 @@ from app.core.db import get_db
 from app.core.nats import get_jetstream
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
-from app.models.job import Job, JobStatus, OutputFormat
+from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
 from app.models.user import User
-from app.schemas.jobs import Engine, LLMJobConfig, PlaywrightOptions
+from app.schemas.jobs import CancelJobResponse, Engine, JobCreate, JobCreateResponse, JobResponse
 from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -46,38 +46,34 @@ def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
         prev = curr
 
 
-class JobCreate(BaseModel):
-    url: AnyHttpUrl
-    output_format: OutputFormat = OutputFormat.html
-    engine: Engine = Engine.http
-    playwight_options: PlaywrightOptions | None = None
-    llm_config: LLMJobConfig | None = None
-    schedule_cron: str | None = None
-    webhook_url: AnyHttpUrl | None = None
-
-    @field_validator("url", "webhook_url", mode="after")
-    @classmethod
-    def uri_to_str(cls, v: AnyHttpUrl) -> str:
-        return str(v)
-
-
-class JobResponse(BaseModel):
-    id: uuid.UUID
-    user_id: uuid.UUID
-    url: str
-    status: JobStatus
-    output_format: OutputFormat
-    result_path: str | None
-    error: str | None
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class JobCreateResponse(JobResponse):
-    run_id: uuid.UUID
-    webhook_secret: str | None = None
+def _jobs_with_latest_run_stmt(
+    user_id: uuid.UUID,
+    job_id: uuid.UUID | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+):
+    latest_run_sq = (
+        select(JobRun)
+        .where(JobRun.job_id == Job.id)
+        .order_by(JobRun.created_at.desc())
+        .limit(1)
+        .correlate(Job)
+        .lateral()
+    )
+    latest_run = aliased(JobRun, latest_run_sq)
+    stmt = (
+        select(Job, latest_run)
+        .join(latest_run, true())
+        .where(Job.user_id == user_id)
+        .order_by(Job.created_at.desc())
+    )
+    if job_id is not None:
+        stmt = stmt.where(Job.id == job_id)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    if offset is not None:
+        stmt = stmt.offset(offset)
+    return stmt
 
 
 @router.post("", response_model=JobCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -186,16 +182,27 @@ async def list_jobs(
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-) -> list[Job]:
-    stmt = (
-        select(Job)
-        .where(Job.user_id == user.id)
-        .order_by(Job.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+) -> list[JobResponse]:
+    stmt = _jobs_with_latest_run_stmt(user.id, limit=limit, offset=offset)
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    rows = result.all()
+    return [
+        JobResponse(
+            id=job.id,
+            user_id=job.user_id,
+            url=job.url,
+            output_format=job.output_format,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            run_id=run.id,
+            status=run.status,
+            result_path=run.result_path,
+            diff_detected=run.diff_detected,
+            error=run.error,
+            completed_at=run.completed_at,
+        )
+        for job, run in rows
+    ]
 
 
 @router.get("/{job_id}", response_model=JobResponse)
@@ -203,29 +210,50 @@ async def get_job(
     job_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> Job:
-    job = await db.get(Job, job_id)
-    if job is None or job.user_id != user.id:
+) -> JobResponse:
+    stmt = _jobs_with_latest_run_stmt(user.id, job_id=job_id)
+    result = await db.execute(stmt)
+    row = result.one_or_none()
+    if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    return job
+    job, run = row
+    return JobResponse(
+        id=job.id,
+        user_id=job.user_id,
+        url=job.url,
+        output_format=job.output_format,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        run_id=run.id,
+        status=run.status,
+        result_path=run.result_path,
+        diff_detected=run.diff_detected,
+        error=run.error,
+        completed_at=run.completed_at,
+    )
 
 
-@router.delete("/{job_id}", response_model=JobResponse)
+@router.delete("/{job_id}", response_model=CancelJobResponse)
 async def cancel_job(
     job_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> Job:
+) -> CancelJobResponse:
     job = await db.get(Job, job_id)
     if job is None or job.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    # No-op if already in a terminal state — cancelling a completed/failed/cancelled job is harmless
-    terminal_states = {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}
-    if job.status not in terminal_states:
-        job.status = JobStatus.cancelled
-        await db.commit()
-        await db.refresh(job)
-        logger.info("job_cancelled", job_id=str(job_id))
+    active_statuses = ("pending", "running", "processing")
+    result = await db.execute(
+        select(JobRun).where(JobRun.job_id == job_id).where(JobRun.status.in_(active_statuses))
+    )
+    active_runs = result.scalars().all()
 
-    return job
+    if not active_runs:
+        return CancelJobResponse(message="Job has no active run to cancel")
+
+    for run in active_runs:
+        run.status = "cancelled"
+    await db.commit()
+    logger.info("job_cancelled", job_id=str(job_id))
+    return CancelJobResponse(message="Job run cancelled")
