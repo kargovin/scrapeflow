@@ -39,7 +39,7 @@ async def verify_request(request: Request) -> dict:
         AuthenticateRequestOptions(authorized_parties=None),
     )
 
-    if not request_state.is_signed_in:
+    if not request_state.is_signed_in or not request_state.payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Unauthorized: {request_state.reason}",

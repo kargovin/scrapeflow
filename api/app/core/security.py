@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, status
 
 
-def _validate_no_ssrf(url: str) -> None:
+def validate_no_ssrf(url: str) -> None:
     """Reject URLs that resolve to private/loopback/link-local addresses.
 
     Resolves the hostname via DNS so that Docker service names (redis, postgres)
