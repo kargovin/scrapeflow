@@ -61,3 +61,20 @@ If there is a use case for reusing names after revocation, revisit with Option C
 **Option B** if the column is useful for the admin panel or change detection. **Option A** if it's never queried — dead columns are a maintenance burden. Decide before Step 12 (the irreversible migration) so it can be cleaned up in the same window if needed.
 
 ---
+
+## Q3 — `jobs.webhook_url` column type should be `Text`
+
+**Raised during:** Phase 2 Step 10 — testing webhook URL creation
+**File:** `api/app/models/job.py`
+
+### Context
+
+`jobs.webhook_url` is declared as `Mapped[str | None] = mapped_column(nullable=True)` with no explicit SA column type. SQLAlchemy infers `String` (unbounded `VARCHAR`) from the Python type annotation. The `url` column on the same model uses `Text` explicitly. URLs can be arbitrarily long and `Text` is the correct Postgres type for unbounded string storage — consistent with `url`, `webhook_url`, `error`, and `result_path` on the same table.
+
+### What needs to happen
+
+- Change `jobs.webhook_url` column type to `Text` in `api/app/models/job.py`
+- New Alembic migration: `ALTER TABLE jobs ALTER COLUMN webhook_url TYPE TEXT`
+- Low risk — `VARCHAR` and `TEXT` are functionally equivalent in Postgres; this is a type annotation cleanup
+
+---
