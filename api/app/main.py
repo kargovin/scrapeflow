@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     logger.info("NATS connected", url=settings.nats_url)
 
     # Result consumer — background task that processes worker results from NATS (ADR-001)
-    result_consumer_task = await start_result_consumer(app.state.nats_js)
+    result_consumer_task = await start_result_consumer(app.state.nats_js, app.state.minio)
     logger.info("NATS result consumer started")
 
     yield

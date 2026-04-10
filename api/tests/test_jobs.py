@@ -1,17 +1,19 @@
 import json
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
 
-from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT
+from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RUN_HTTP_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.result_consumer import _handle_result
-from app.models.job import Job, JobStatus
+from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
 from app.models.user import User
+from app.models.webhook_delivery import WebhookDelivery
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -220,136 +222,250 @@ async def test_cancel_job_terminal_run(client, auth_headers, mock_jetstream):
 
 
 # ---------------------------------------------------------------------------
-# Result consumer tests (6h-8 to 6h-11)
-# xfail: result_consumer.py is Phase 1 code — still reads/writes job.status,
-# job.result_path, job.error which were dropped in migration 2.4 (Step 12).
-# These tests will be fixed in Step 15 when the consumer is rewritten for Phase 2.
-_xfail_step15 = pytest.mark.xfail(
-    reason="result_consumer uses Phase 1 job.status — rewritten in Step 15",
-    strict=True,
-)
+# Result consumer tests (Phase 2 — Steps 6h-8 to 6h-11)
 # ---------------------------------------------------------------------------
 
 
-@_xfail_step15
 async def test_result_consumer_running(db_user):
-    """Result consumer sets job status to running when worker publishes status=running."""
-    # Insert a pending job directly in DB
+    """Result consumer sets run.status=running, started_at from NATS timestamp, and nats_stream_seq."""
     async with AsyncSessionLocal() as db:
         job = Job(user_id=db_user.id, url="https://example.com")
         db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="pending")
+        db.add(run)
         await db.commit()
         await db.refresh(job)
+        await db.refresh(run)
         job_id = job.id
+        run_id = run.id
 
-    # Build a fake NATS Msg with status=running
+    mock_ts = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
     msg = MagicMock()
-    msg.data = json.dumps({"job_id": str(job_id), "status": "running"}).encode()
+    msg.data = json.dumps(
+        {"job_id": str(job_id), "run_id": str(run_id), "status": "running", "nats_stream_seq": 42}
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.metadata.timestamp = mock_ts
     msg.ack = AsyncMock()
 
-    await _handle_result(msg)
+    await _handle_result(msg, AsyncMock(), MagicMock())
 
-    # Assert DB was updated
     async with AsyncSessionLocal() as db:
-        updated = await db.get(Job, job_id)
-        assert updated is not None
-        assert updated.status == JobStatus.running
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "running"
+        assert updated_run.started_at == mock_ts
+        assert updated_run.nats_stream_seq == 42
 
     msg.ack.assert_called_once()
 
 
-@_xfail_step15
 async def test_result_consumer_completed(db_user):
-    """Result consumer sets job status to completed and saves result_path when worker publishes status=completed."""
+    """Result consumer marks run completed, sets result_path/completed_at, creates webhook delivery (no LLM, no prior run)."""
     async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://other.com")
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            webhook_url="https://hook.example.com",
+        )
         db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running")
+        db.add(run)
         await db.commit()
         await db.refresh(job)
+        await db.refresh(run)
         job_id = job.id
+        run_id = run.id
+
+    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "completed",
+            "minio_path": minio_path,
+        }
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    await _handle_result(msg, AsyncMock(), MagicMock())
+
+    async with AsyncSessionLocal() as db:
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "completed"
+        assert updated_run.result_path == minio_path
+        assert updated_run.completed_at is not None
+        assert updated_run.diff_detected is None  # no previous run to diff against
+
+        delivery_result = await db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
+        )
+        delivery = delivery_result.scalar_one_or_none()
+        assert delivery is not None
+        assert delivery.payload["event"] == "job.completed"
+        assert delivery.status == "pending"
+
+    msg.ack.assert_called_once()
+
+
+async def test_result_consumer_completed_with_llm(db_user):
+    """Result consumer routes to LLM worker when job.llm_config is set (run transitions to processing)."""
+    async with AsyncSessionLocal() as db:
+        key = UserLLMKey(
+            user_id=db_user.id,
+            name="test-key",
+            provider="anthropic",
+            encrypted_api_key="enc_key",
+        )
+        db.add(key)
+        await db.flush()
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            llm_config={"llm_key_id": str(key.id), "model": "claude-3", "output_schema": {}},
+        )
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running")
+        db.add(run)
+        await db.commit()
+        await db.refresh(key)
+        await db.refresh(job)
+        await db.refresh(run)
+        job_id = job.id
+        run_id = run.id
+
+    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "completed",
+            "minio_path": minio_path,
+        }
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    mock_js = AsyncMock()
+    await _handle_result(msg, mock_js, MagicMock())
+
+    async with AsyncSessionLocal() as db:
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "processing"
+
+    mock_js.publish.assert_called_once()
+    subject, payload_bytes = mock_js.publish.call_args.args
+    assert subject == NATS_JOBS_LLM_SUBJECT
+    published = json.loads(payload_bytes.decode())
+    assert published["job_id"] == str(job_id)
+    assert published["run_id"] == str(run_id)
+    assert published["raw_minio_path"] == minio_path
+
+    msg.ack.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 6h-11: Result consumer — cancelled run result is discarded
+# ---------------------------------------------------------------------------
+
+
+async def test_result_consumer_cancelled_job_discarded(db_user):
+    """Result consumer discards worker results for cancelled runs (run status stays cancelled)."""
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="cancelled")
+        db.add(run)
+        await db.commit()
+        await db.refresh(job)
+        await db.refresh(run)
+        job_id = job.id
+        run_id = run.id
 
     msg = MagicMock()
     msg.data = json.dumps(
         {
             "job_id": str(job_id),
+            "run_id": str(run_id),
             "status": "completed",
-            "minio_path": f"scrapeflow-results/{job_id!s}.html",
+            "minio_path": "some/path",
         }
     ).encode()
+    msg.metadata = MagicMock()
     msg.ack = AsyncMock()
 
-    await _handle_result(msg)
+    await _handle_result(msg, AsyncMock(), MagicMock())
 
     async with AsyncSessionLocal() as db:
-        updated = await db.get(Job, job_id)
-        assert updated is not None
-        assert updated.status == JobStatus.completed
-        assert updated.result_path == f"scrapeflow-results/{job_id!s}.html"
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "cancelled"  # unchanged
+        assert updated_run.result_path is None  # not written
 
     msg.ack.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# 6h-11: Result consumer — cancelled job result is discarded
+# 6h-10: Result consumer failed event → run status + error + webhook delivery
 # ---------------------------------------------------------------------------
 
 
-@_xfail_step15
-async def test_result_consumer_cancelled_job_discarded(db_user):
-    """Result consumer discards worker results for cancelled jobs (status stays cancelled)."""
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com", status=JobStatus.cancelled)
-        db.add(job)
-        await db.commit()
-        await db.refresh(job)
-        job_id = job.id
-
-    # Worker sends a completed event — should be discarded
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {"job_id": str(job_id), "status": "completed", "minio_path": "some/path"}
-    ).encode()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg)
-
-    async with AsyncSessionLocal() as db:
-        updated: Job | None = await db.get(Job, job_id)
-        assert updated is not None
-        assert updated.status == JobStatus.cancelled  # unchanged
-        assert updated.result_path is None  # not written
-
-    msg.ack.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# 6h-10: Result consumer failed event → DB status + error updated
-# ---------------------------------------------------------------------------
-
-
-@_xfail_step15
 async def test_result_consumer_failed(db_user):
-    """Result consumer sets job status to failed and saves error when worker publishes status=failed."""
+    """Result consumer sets run.status=failed, error, completed_at, and creates webhook delivery."""
     async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            webhook_url="https://hook.example.com",
+        )
         db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running")
+        db.add(run)
         await db.commit()
         await db.refresh(job)
+        await db.refresh(run)
         job_id = job.id
+        run_id = run.id
 
     msg = MagicMock()
     msg.data = json.dumps(
-        {"job_id": str(job_id), "status": "failed", "error": "connection timeout"}
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "failed",
+            "error": "connection timeout",
+        }
     ).encode()
+    msg.metadata = MagicMock()
     msg.ack = AsyncMock()
 
-    await _handle_result(msg)
+    await _handle_result(msg, AsyncMock(), MagicMock())
 
     async with AsyncSessionLocal() as db:
-        updated = await db.get(Job, job_id)
-        assert updated is not None
-        assert updated.status == JobStatus.failed
-        assert updated.error == "connection timeout"
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "failed"
+        assert updated_run.error == "connection timeout"
+        assert updated_run.completed_at is not None
+
+        delivery_result = await db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
+        )
+        delivery = delivery_result.scalar_one_or_none()
+        assert delivery is not None
+        assert delivery.payload["event"] == "job.failed"
+        assert delivery.payload["error"] == "connection timeout"
+        assert delivery.status == "pending"
 
     msg.ack.assert_called_once()
 
