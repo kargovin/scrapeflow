@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
 
-from app.models.job import JobStatus, OutputFormat
+from app.models.job import OutputFormat
 
 
 class Engine(str, enum.Enum):
@@ -49,7 +49,7 @@ class JobResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     url: str
-    status: JobStatus
+    status: str
     output_format: OutputFormat
     result_path: str | None
     error: str | None

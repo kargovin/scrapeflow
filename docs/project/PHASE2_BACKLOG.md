@@ -306,15 +306,13 @@ docker compose exec db psql -U scrapeflow -c "SELECT COUNT(*) FROM job_runs;"
   ```
 - Edit: `docker/docker-compose.yml` — update `nats-init` command to idempotent create-or-edit with `scrapeflow.jobs.>` wildcard subject:
   ```yaml
-  command: >-
+  command: >
     sh -c "
-      nats stream info SCRAPEFLOW --server nats:4222 > /dev/null 2>&1
-      && nats stream edit SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --server nats:4222
-      || nats stream add SCRAPEFLOW
-           --subjects 'scrapeflow.jobs.>'
-           --retention work --max-deliver 3
-           --storage file --replicas 1
-           --server nats:4222
+      if nats stream info SCRAPEFLOW --server nats://nats:4222 >/dev/null 2>&1; then
+        nats stream edit SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --server nats://nats:4222 --force;
+      else
+        nats stream add SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --retention work --storage file --replicas 1 --server nats://nats:4222 --defaults;
+      fi
     "
   ```
 - Edit: `docker/docker-compose.yml` `worker` service env — rename `NATS_JOBS_RUN_SUBJECT` → `NATS_JOBS_RUN_HTTP_SUBJECT: "scrapeflow.jobs.run.http"`

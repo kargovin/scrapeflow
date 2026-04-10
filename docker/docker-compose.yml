@@ -74,14 +74,13 @@ services:
       nats:
         condition: service_healthy
     command: >
-      sh -c "nats stream add SCRAPEFLOW
-      --subjects 'scrapeflow.jobs.*'
-      --storage file
-      --retention work
-      --replicas 1
-      --defaults
-      --server nats://nats:4222 2>/dev/null ||
-      nats stream info SCRAPEFLOW --server nats://nats:4222"
+      sh -c "
+        if nats stream info SCRAPEFLOW --server nats://nats:4222 >/dev/null 2>&1; then
+          nats stream edit SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --server nats://nats:4222 --force;
+        else
+          nats stream add SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --retention work --storage file --replicas 1 --server nats://nats:4222 --defaults;
+        fi
+      "
 
   # ── API ─────────────────────────────────────────────────────────────────────
 
