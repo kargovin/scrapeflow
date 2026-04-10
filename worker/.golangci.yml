@@ -1,14 +1,18 @@
+version: "2"
+
 linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+
+formatters:
   enable:
     - gofmt
     - goimports
-    - govet
-    - staticcheck
-    - errcheck # flags ignored errors (very common Go bug source)
-    - gosimple
-    - ineffassign # assigned but never used
-    - unused
-
-linters-settings:
-  goimports:
-    local-prefixes: github.com/kargovin/scrapeflow
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/kargovin/scrapeflow

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -47,26 +48,39 @@ func New(endpoint, accessKey, secretKey, bucket string, secure bool) (*Client, e
 // and returns the full object path (e.g. "scrapeflow-results/abc123.html").
 // This path is included in the result event so the API can store it in jobs.result_path.
 func (c *Client) Upload(ctx context.Context, jobID, ext string, data []byte) (string, error) {
-	// Construct the object name per ADR-001's MinIO path convention:
-	// {bucket}/{job_id}.{extension}
-	objectName := fmt.Sprintf("%s.%s", jobID, ext)
+
+	// {bucket}/latest/{job_id}.{extension}
+	objectNameLatest := fmt.Sprintf("latest/%s.%s", jobID, ext)
 
 	// bytes.NewReader wraps a byte slice to implement io.Reader,
 	// which is what MinIO's PutObject expects. Think of it as io.BytesIO() in Python.
 	reader := bytes.NewReader(data)
 
-	_, err := c.mc.PutObject(ctx, c.bucket, objectName, reader, int64(len(data)),
+	_, err := c.mc.PutObject(ctx, c.bucket, objectNameLatest, reader, int64(len(data)),
 		minio.PutObjectOptions{
 			ContentType: contentType(ext),
 		},
 	)
 	if err != nil {
-		return "", fmt.Errorf("uploading %s to MinIO: %w", objectName, err)
+		return "", fmt.Errorf("uploading %s to MinIO: %w", objectNameLatest, err)
+	}
+
+	// Creating a history path with timestamp allows us to keep old results without overwriting.
+	objectNameHistory := fmt.Sprintf("history/%s/%d.%s", jobID, time.Now().Unix(), ext)
+	_, err = c.mc.CopyObject(ctx, minio.CopyDestOptions{
+		Bucket: c.bucket,
+		Object: objectNameHistory,
+	}, minio.CopySrcOptions{
+		Bucket: c.bucket,
+		Object: objectNameLatest,
+	})
+	if err != nil {
+		return "", fmt.Errorf("copying %s to history path in MinIO: %w", objectNameLatest, err)
 	}
 
 	// Return the full path including bucket name — matches what the Python
 	// result consumer stores in jobs.result_path.
-	return fmt.Sprintf("%s/%s", c.bucket, objectName), nil
+	return fmt.Sprintf("%s/%s", c.bucket, objectNameHistory), nil
 }
 
 // contentType maps file extensions to MIME types for MinIO metadata.

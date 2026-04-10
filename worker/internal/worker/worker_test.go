@@ -171,7 +171,7 @@ func TestProcessJob(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			expectedPrefix := fmt.Sprintf("%s/%s.", bucket, jobID)
+			expectedPrefix := fmt.Sprintf("%s/history/%s/", bucket, jobID)
 			if !strings.HasPrefix(minioPath, expectedPrefix) {
 				t.Errorf("minioPath: got %q, want prefix %q", minioPath, expectedPrefix)
 			}

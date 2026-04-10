@@ -51,7 +51,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetching %s: %w", rawURL, err)
 	}
-	defer resp.Body.Close() // always close the body to free the connection
+	defer resp.Body.Close() //nolint:errcheck // best-effort cleanup
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("non-2xx response from %s: %d", rawURL, resp.StatusCode)

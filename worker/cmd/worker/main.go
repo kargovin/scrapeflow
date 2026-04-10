@@ -43,7 +43,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("NATS connect error: %v", err)
 	}
-	defer nc.Drain() // Drain flushes pending messages before closing — cleaner than Close()
+	defer nc.Drain() //nolint:errcheck // best-effort flush before exit
 
 	// JetStream() returns the JetStream context from the base NATS connection.
 	// JetStream is the persistent messaging layer on top of plain NATS pub/sub.
@@ -100,7 +100,7 @@ func main() {
 	}()
 
 	// --- Start the worker loop (blocks until ctx is cancelled) ---
-	if err := w.Run(ctx, cfg.NATSMaxDeliver); err != nil {
+	if err := w.Run(ctx, cfg.NATSMaxDeliver, cfg.WorkerPoolSize); err != nil {
 		log.Fatalf("Worker error: %v", err)
 	}
 }

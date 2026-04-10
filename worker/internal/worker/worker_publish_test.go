@@ -16,7 +16,7 @@ type mockJS struct {
 	publishCalls int
 }
 
-func (m *mockJS) Subscribe(_ string, _ nats.MsgHandler, _ ...nats.SubOpt) (*nats.Subscription, error) {
+func (m *mockJS) PullSubscribe(_ string, _ string, _ ...nats.SubOpt) (*nats.Subscription, error) {
 	return nil, nil
 }
 

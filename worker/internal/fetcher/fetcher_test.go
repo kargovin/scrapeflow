@@ -12,7 +12,7 @@ func TestFetch(t *testing.T) {
 	t.Run("successful 200 returns body and final URL", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("<html><body>hello</body></html>"))
+			_, _ = w.Write([]byte("<html><body>hello</body></html>"))
 		}))
 		defer srv.Close()
 
@@ -66,7 +66,7 @@ func TestFetch(t *testing.T) {
 		// srv2 is the redirect target.
 		srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("redirected content"))
+			_, _ = w.Write([]byte("redirected content"))
 		}))
 		defer srv2.Close()
 
@@ -111,7 +111,7 @@ func TestFetch(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			// Write more than the limit
-			w.Write(make([]byte, maxBodySize+1024))
+			_, _ = w.Write(make([]byte, maxBodySize+1024))
 		}))
 		defer srv.Close()
 
