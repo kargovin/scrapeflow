@@ -3,7 +3,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import VARCHAR, CheckConstraint, DateTime, Enum, ForeignKey, Text
+from sqlalchemy import VARCHAR, CheckConstraint, DateTime, Enum, ForeignKey, Index, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,16 +36,9 @@ class Job(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     url: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[JobStatus] = mapped_column(
-        Enum(JobStatus), nullable=False, default=JobStatus.pending
-    )
     output_format: Mapped[OutputFormat] = mapped_column(
         Enum(OutputFormat), nullable=False, default=OutputFormat.html
     )
-    result_path: Mapped[str | None] = mapped_column(
-        nullable=True
-    )  # MinIO object path, set when job completes
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)  # error message if status=failed
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -79,7 +72,15 @@ class Job(Base):
 
     playwright_options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # JSONB
 
+    __table_args__ = (
+        Index(
+            "idx_jobs_next_run_at",
+            "next_run_at",
+            postgresql_where=text("schedule_cron IS NOT NULL AND schedule_status = 'active'"),
+        ),
+    )
+
     user: Mapped["User"] = relationship("User", back_populates="jobs")
 
     def __repr__(self) -> str:
-        return f"<Job id={self.id} status={self.status} url={self.url}>"
+        return f"<Job id={self.id} url={self.url}>"

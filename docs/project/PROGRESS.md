@@ -79,7 +79,7 @@
 | 9    | Migrations 2.7 + 2.8: `webhook_deliveries` + `nats_stream_seq`        | ✅ Done |
 | 10   | Update `POST /jobs` for Phase 2                                       | ✅ Done |
 | 11   | Update `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` for Phase 2 | ✅ Done |
-| 12   | Migration 2.4: Drop run-state columns from `jobs` ⚠ requires ADR-003  | ⬜ Todo |
+| 12   | Migration 2.4: Drop run-state columns from `jobs` ⚠ requires ADR-003  | ✅ Done |
 | 13   | Update NATS constants + docker-compose nats-init                      | ⬜ Todo |
 | 14   | Update Go HTTP worker for Phase 2                                     | ⬜ Todo |
 | 15   | Update result consumer for Phase 2                                    | ⬜ Todo |

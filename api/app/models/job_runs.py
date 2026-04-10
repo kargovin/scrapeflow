@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import VARCHAR, BigInteger, CheckConstraint, DateTime, ForeignKey, Text
+from sqlalchemy import VARCHAR, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,14 @@ class JobRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_job_runs_nats_stream_seq",
+            "nats_stream_seq",
+            postgresql_where=text("nats_stream_seq IS NOT NULL"),
+        ),
     )
 
     def __repr__(self) -> str:

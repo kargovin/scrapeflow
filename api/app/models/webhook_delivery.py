@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import VARCHAR, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import VARCHAR, DateTime, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,14 @@ class WebhookDelivery(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_webhook_deliveries_status_next",
+            "next_attempt_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
     )
 
     def __repr__(self) -> str:
