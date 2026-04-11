@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RUN_HTTP_SUBJECT
 from app.core.db import AsyncSessionLocal
@@ -599,3 +599,274 @@ async def test_create_job_job_runs_entry_exists(client, auth_headers, mock_jetst
         res: JobRun | None = await db.get(JobRun, run_id)
         assert res is not None
         assert res.status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# GET /jobs/{id}/runs — paginated run history
+# ---------------------------------------------------------------------------
+
+
+async def test_list_job_runs(client, auth_headers, mock_jetstream):
+    """GET /jobs/{id}/runs returns all runs for a job the user owns."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    run_id = create_resp.json()["run_id"]
+
+    # Add a second run directly in DB
+    async with AsyncSessionLocal() as db:
+        db.add(JobRun(job_id=uuid.UUID(job_id), status="completed"))
+        await db.commit()
+
+    resp = await client.get(f"/jobs/{job_id}/runs", headers=auth_headers)
+    assert resp.status_code == 200
+    runs = resp.json()
+    assert len(runs) == 2
+    assert any(r["run_id"] == run_id for r in runs)
+
+
+async def test_list_job_runs_other_user(client, auth_headers, db_user):
+    """GET /jobs/{id}/runs returns 404 for a job belonging to another user."""
+    job = Job(user_id=db_user.id, url="https://other.com")
+    async with AsyncSessionLocal() as db:
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+
+    resp = await client.get(f"/jobs/{job.id}/runs", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+async def test_list_job_runs_empty(client, auth_headers, mock_jetstream):
+    """GET /jobs/{id}/runs returns [] for a job with no runs."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    run_id = uuid.UUID(create_resp.json()["run_id"])
+
+    # Delete the auto-created run to simulate a job with no run history
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(JobRun).where(JobRun.id == run_id))
+        await db.commit()
+
+    resp = await client.get(f"/jobs/{job_id}/runs", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_list_job_runs_pagination(client, auth_headers, mock_jetstream):
+    """GET /jobs/{id}/runs respects limit and offset."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    # Add 2 more runs — 3 total
+    async with AsyncSessionLocal() as db:
+        for _ in range(2):
+            db.add(JobRun(job_id=uuid.UUID(job_id), status="completed"))
+        await db.commit()
+
+    resp = await client.get(f"/jobs/{job_id}/runs?limit=2", headers=auth_headers)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+    resp = await client.get(f"/jobs/{job_id}/runs?limit=10&offset=2", headers=auth_headers)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+# ---------------------------------------------------------------------------
+# PATCH /jobs/{id} — partial update
+# ---------------------------------------------------------------------------
+
+
+async def test_patch_job_schedule_cron(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with schedule_cron updates cron and recalculates next_run_at."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/jobs/{job_id}", json={"schedule_cron": "0 * * * *"}, headers=auth_headers
+    )
+    assert resp.status_code == 200
+
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, uuid.UUID(job_id))
+        assert job.schedule_cron == "0 * * * *"
+        assert job.next_run_at is not None
+
+
+async def test_patch_job_invalid_cron(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with an invalid cron expression returns 422."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/jobs/{job_id}", json={"schedule_cron": "65 * * * *"}, headers=auth_headers
+    )
+    assert resp.status_code == 422
+
+
+async def test_patch_job_immutable_fields(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} rejects immutable fields (url, engine, output_format) with 422."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    for immutable_payload in [
+        {"url": "https://changed.com"},
+        {"engine": "playwright"},
+        {"output_format": "json"},
+    ]:
+        resp = await client.patch(f"/jobs/{job_id}", json=immutable_payload, headers=auth_headers)
+        assert resp.status_code == 422, f"Expected 422 for payload {immutable_payload}"
+
+
+async def test_patch_job_webhook_url_set(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} setting webhook_url generates and returns the new secret."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={"webhook_url": "https://anotherdomain.com"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["webhook_secret"] is not None
+
+
+async def test_patch_job_webhook_url_removed(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with webhook_url=null clears the webhook URL and secret."""
+    create_resp = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "webhook_url": "https://anotherdomain.com"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    resp = await client.patch(f"/jobs/{job_id}", json={"webhook_url": None}, headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["webhook_secret"] is None
+
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, uuid.UUID(job_id))
+        assert job.webhook_url is None
+        assert job.webhook_secret is None
+
+
+async def test_patch_job_llm_config_409(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with llm_config returns 409 if the latest run is processing."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    run_id = uuid.UUID(create_resp.json()["run_id"])
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        run.status = "processing"
+        await db.commit()
+
+        res = await db.execute(select(User).where(User.clerk_id == "user_test_123"))
+        auth_user = res.scalar_one()
+        key = UserLLMKey(
+            user_id=auth_user.id, name="test", provider="anthropic", encrypted_api_key="testkey"
+        )
+        db.add(key)
+        await db.commit()
+        await db.refresh(key)
+
+    resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={"llm_config": {"llm_key_id": str(key.id), "model": "claude-3", "output_schema": {}}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409
+
+
+async def test_patch_job_other_user(client, auth_headers, db_user):
+    """PATCH /jobs/{id} returns 404 for a job belonging to another user."""
+    job = Job(user_id=db_user.id, url="https://other.com")
+    async with AsyncSessionLocal() as db:
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+
+    resp = await client.patch(
+        f"/jobs/{job.id}", json={"schedule_cron": "0 * * * *"}, headers=auth_headers
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /jobs/{id}/webhook-secret/rotate
+# ---------------------------------------------------------------------------
+
+
+async def test_rotate_webhook_secret(client, auth_headers, mock_jetstream):
+    """POST .../rotate returns new plaintext secret and updates the encrypted secret in DB."""
+    create_resp = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "webhook_url": "https://anotherdomain.com"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, uuid.UUID(job_id))
+        original_encrypted = job.webhook_secret
+
+    resp = await client.post(f"/jobs/{job_id}/webhook-secret/rotate", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "webhook_secret" in data
+    assert data["webhook_secret"] is not None
+
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, uuid.UUID(job_id))
+        assert job.webhook_secret != original_encrypted
+
+
+async def test_rotate_webhook_secret_no_webhook(client, auth_headers, mock_jetstream):
+    """POST .../rotate returns 422 for a job that has no webhook URL."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    resp = await client.post(f"/jobs/{job_id}/webhook-secret/rotate", headers=auth_headers)
+    assert resp.status_code == 422
+
+
+async def test_rotate_webhook_secret_other_user(client, auth_headers, db_user):
+    """POST .../rotate returns 404 for a job belonging to another user."""
+    job = Job(user_id=db_user.id, url="https://other.com", webhook_url="https://hook.example.com")
+    async with AsyncSessionLocal() as db:
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+
+    resp = await client.post(f"/jobs/{job.id}/webhook-secret/rotate", headers=auth_headers)
+    assert resp.status_code == 404

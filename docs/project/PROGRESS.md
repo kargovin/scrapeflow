@@ -81,9 +81,9 @@
 | 11   | Update `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` for Phase 2 | ✅ Done |
 | 12   | Migration 2.4: Drop run-state columns from `jobs` ⚠ requires ADR-003  | ✅ Done |
 | 13   | Update NATS constants + docker-compose nats-init                      | ✅ Done |
-| 14   | Update Go HTTP worker for Phase 2                                     | ⬜ Todo |
-| 15   | Update result consumer for Phase 2                                    | ⬜ Todo |
-| 16   | New job routes: PATCH, GET runs, webhook-secret rotate                | ⬜ Todo |
+| 14   | Update Go HTTP worker for Phase 2                                     | ✅ Done |
+| 15   | Update result consumer for Phase 2                                    | ✅ Done |
+| 16   | New job routes: PATCH, GET runs, webhook-secret rotate                | ✅ Done |
 | 17   | LLM key management routes                                             | ⬜ Todo |
 | 18   | Python Playwright worker (new service)                                | ⬜ Todo |
 | 19   | Python LLM worker (new service)                                       | ⬜ Todo |

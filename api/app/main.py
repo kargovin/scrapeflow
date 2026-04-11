@@ -27,13 +27,14 @@ def _run_migrations_online():
 async def lifespan(app: FastAPI):
     logger.info("Starting ScrapeFlow API", env=settings.app_env)
 
-    # Alembic migrations — run in separate thread to avoid blocking the event loop, since Alembic doesn't support async DB connections.
-    try:
-        await asyncio.get_event_loop().run_in_executor(None, _run_migrations_online)
-        logger.info("Database migrations complete")
-    except Exception:
-        logger.exception("Database migration failed")
-        raise
+    # TODO: uncomment when pusing
+    # # Alembic migrations — run in separate thread to avoid blocking the event loop, since Alembic doesn't support async DB connections.
+    # try:
+    #     await asyncio.get_event_loop().run_in_executor(None, _run_migrations_online)
+    #     logger.info("Database migrations complete")
+    # except Exception:
+    #     logger.exception("Database migration failed")
+    #     raise
 
     # Redis
     app.state.redis_pool = create_pool()
