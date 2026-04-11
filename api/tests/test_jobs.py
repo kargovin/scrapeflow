@@ -111,6 +111,7 @@ async def test_get_job_status_from_run(client, auth_headers, mock_jetstream):
     # Simulate worker updating the run to running
     async with AsyncSessionLocal() as db:
         run = await db.get(JobRun, run_id)
+        assert run is not None
         run.status = "running"
         await db.commit()
 
@@ -213,6 +214,7 @@ async def test_cancel_job_terminal_run(client, auth_headers, mock_jetstream):
 
     async with AsyncSessionLocal() as db:
         run = await db.get(JobRun, run_id)
+        assert run is not None
         run.status = "completed"
         await db.commit()
 
@@ -701,6 +703,7 @@ async def test_patch_job_schedule_cron(client, auth_headers, mock_jetstream):
 
     async with AsyncSessionLocal() as db:
         job = await db.get(Job, uuid.UUID(job_id))
+        assert job is not None
         assert job.schedule_cron == "0 * * * *"
         assert job.next_run_at is not None
 
@@ -769,6 +772,7 @@ async def test_patch_job_webhook_url_removed(client, auth_headers, mock_jetstrea
 
     async with AsyncSessionLocal() as db:
         job = await db.get(Job, uuid.UUID(job_id))
+        assert job is not None
         assert job.webhook_url is None
         assert job.webhook_secret is None
 
@@ -784,6 +788,7 @@ async def test_patch_job_llm_config_409(client, auth_headers, mock_jetstream):
 
     async with AsyncSessionLocal() as db:
         run = await db.get(JobRun, run_id)
+        assert run is not None
         run.status = "processing"
         await db.commit()
 
@@ -835,6 +840,7 @@ async def test_rotate_webhook_secret(client, auth_headers, mock_jetstream):
 
     async with AsyncSessionLocal() as db:
         job = await db.get(Job, uuid.UUID(job_id))
+        assert job is not None
         original_encrypted = job.webhook_secret
 
     resp = await client.post(f"/jobs/{job_id}/webhook-secret/rotate", headers=auth_headers)
@@ -845,6 +851,7 @@ async def test_rotate_webhook_secret(client, auth_headers, mock_jetstream):
 
     async with AsyncSessionLocal() as db:
         job = await db.get(Job, uuid.UUID(job_id))
+        assert job is not None
         assert job.webhook_secret != original_encrypted
 
 
