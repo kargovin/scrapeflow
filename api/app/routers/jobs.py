@@ -103,7 +103,7 @@ async def create_job(
     if body.llm_config:
         key_id = body.llm_config.llm_key_id
         user_llm_key = await db.get(UserLLMKey, key_id)
-        if user_llm_key is None:
+        if user_llm_key is None or user_llm_key.user_id != user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LLM Key not found")
         if user_llm_key.base_url:
             await get_running_loop().run_in_executor(

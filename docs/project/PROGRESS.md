@@ -84,7 +84,7 @@
 | 14   | Update Go HTTP worker for Phase 2                                     | ✅ Done |
 | 15   | Update result consumer for Phase 2                                    | ✅ Done |
 | 16   | New job routes: PATCH, GET runs, webhook-secret rotate                | ✅ Done |
-| 17   | LLM key management routes                                             | ⬜ Todo |
+| 17   | LLM key management routes                                             | ✅ Done |
 | 18   | Python Playwright worker (new service)                                | ⬜ Todo |
 | 19   | Python LLM worker (new service)                                       | ⬜ Todo |
 | 20   | Scheduler loop background task                                        | ⬜ Todo |

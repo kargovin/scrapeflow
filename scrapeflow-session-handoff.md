@@ -4,36 +4,48 @@ We are building Phase 2 iteratively. Read @docs/phase2/phase2-engineering-spec-v
 
 ## Completed this session
 
-**Step 16** (commit TBD): New job routes
+**Step 17** (commit TBD): LLM key management routes
 
 ### What was built
 
-**`GET /jobs/{id}/runs`** (`api/app/routers/jobs.py`)
-- Ownership check → 404 for cross-tenant
-- `select(JobRun)` with `.limit()/.offset()` — returns `list[JobResponse]`
-- Returns `[]` for jobs with no runs
+**Schema refactor** (`api/app/schemas/`)
+- Created `api/app/schemas/users.py` — extracted `UserResponse`, `ApiKeyCreate`, `ApiKeyResponse`, `ApiKeyCreatedResponse` from the router into their own schema file (matching the pattern already used by `schemas/jobs.py`)
+- Added `api/app/schemas/__init__.py` for consistency with other packages
+- Added to `schemas/users.py`: `Providers` enum, `LLMKeyCreate`, `LLMKeyResponse`, `LLMKeyCreatedResponse`
 
-**`PATCH /jobs/{id}`** (`api/app/routers/jobs.py`)
-- `model_dump(exclude_unset=True)` loop with `setattr` for simple fields
-- Special cases: `schedule_cron` → validate + recalculate `next_run_at`; `webhook_url=None` → clear `webhook_secret`; `webhook_url` set → SSRF-validate + generate new Fernet secret; `llm_config` → 409 if active run is `processing`
-- Returns `JobResponse` (includes `webhook_secret` when a new one is generated)
+**`POST /users/llm-keys`** (`api/app/routers/users.py`)
+- SSRF-validate `base_url` if provided
+- Fernet-encrypt `api_key` → stored as `encrypted_api_key` in `user_llm_keys`
+- Returns masked key: `api_key[:4] + "*****"` (e.g. `sk-a*****`)
+- 201 response
 
-**`POST /jobs/{id}/webhook-secret/rotate`** (`api/app/routers/jobs.py`)
-- Ownership check + webhook_url guard (422 if job has no webhook)
-- Generates new Fernet secret, updates DB, returns `RotateWebhookSecretResponse`
+**`GET /users/llm-keys`** (`api/app/routers/users.py`)
+- List all keys for current user, ordered newest first
+- Response: `list[LLMKeyResponse]` — no `api_key` field at all
 
-### Schema changes (`api/app/schemas/jobs.py`)
-- Added `_MutableJobFields` base class (shared mutable fields between `JobCreate` and `JobPatch`)
-- `JobCreate` now inherits from `_MutableJobFields`
-- `JobPatch` inherits from `_MutableJobFields`, adds `schedule_status` + `ConfigDict(extra="forbid")` (immutable fields rejected with 422)
-- `webhook_secret: str | None = None` moved up to `JobResponse` (was only on `JobCreateResponse`)
-- `JobCreateResponse` removed (now just `JobResponse`)
-- Added `RotateWebhookSecretResponse(webhook_secret: str)`
-- Fixed `uri_to_str` validator to handle `None`: `return str(v) if v is not None else None`
-- Renamed `playwight_options` typo → `playwright_options` throughout
+**`DELETE /users/llm-keys/{id}`** (`api/app/routers/users.py`)
+- Ownership check → 404 for cross-tenant or missing
+- Hard delete via `db.execute(delete(...))` + `db.commit()`
+- Returns `LLMKeyResponse` (the deleted object)
 
-### Tests added
-14 new tests covering all three endpoints (40 total, all passing).
+**Bug fix in `POST /jobs`** (`api/app/routers/jobs.py:106`)
+- Added ownership check for `llm_key_id`: `user_llm_key.user_id != user.id` → 404
+- Previously only checked `is None`
+
+### Tests added (`api/tests/test_llm_keys.py`)
+12 new tests (100 total, all passing):
+- `test_create_llm_key` — 201, masked api_key
+- `test_create_llm_key_with_base_url` — base_url stored and returned
+- `test_create_llm_key_short_api_key` — < 8 chars → 422
+- `test_create_llm_key_ssrf_base_url` — private address → 400
+- `test_create_llm_key_unauthenticated` — 401
+- `test_list_llm_keys` — list with no api_key field
+- `test_list_llm_keys_empty` — []
+- `test_list_llm_keys_isolation` — cross-tenant isolation
+- `test_delete_llm_key` — 200, gone from DB
+- `test_delete_llm_key_other_user` — 404
+- `test_delete_llm_key_not_found` — 404
+- `test_create_job_llm_key_other_user` — POST /jobs with another user's llm_key_id → 404
 
 ### Key facts
 
@@ -51,27 +63,30 @@ docker compose exec api uv run alembic upgrade head
 
 ## Current state
 
-- All 40 tests passing
+- All 100 tests passing
 - On branch `develop`
-- Steps 1–16 complete
+- Steps 1–17 complete
 
 ## Next step
 
-**Step 17**: LLM key management routes
+**Step 18**: Python Playwright worker (new service)
 
-From `docs/project/PHASE2_BACKLOG.md` Step 17:
+From `docs/project/PHASE2_BACKLOG.md` Step 18:
 
 **Files:**
-- Edit: `api/app/routers/users.py` — add three new handlers:
-  - `POST /users/llm-keys` — Fernet-encrypt `api_key`, store, return masked key (`sk-***`)
-  - `GET /users/llm-keys` — list keys for current user (no key in response)
-  - `DELETE /users/llm-keys/{id}` — hard delete (ownership check)
+- New: `playwright-worker/` directory — Python service
+  - Subscribes to `scrapeflow.jobs.run.playwright`
+  - Uses Playwright (async) to render JS-heavy pages
+  - Writes result to MinIO (same dual-write convention: `latest/` + `history/`)
+  - Publishes result to `scrapeflow.jobs.result` (same schema as Go worker)
+  - Config from env vars (NATS URL, MinIO endpoint/credentials)
 
 **Key rules:**
-- SSRF-validate `base_url` if provided (same pattern as webhook_url in jobs)
-- Mask returned key: show only first 4 chars + `***` (e.g. `sk-t***`)
-- Hard delete — referencing jobs will fail at dispatch with "LLM key not found"
+- Same NATS message schema as Go worker (`job_id`, `run_id`, `url`, `output_format`, `playwright_options`)
+- `playwright_options`: `wait_strategy` (load/domcontentloaded/networkidle), `timeout_seconds`, `block_images`
+- Must ack NATS only after successful MinIO write (same durability guarantee as Go worker)
+- Dockerfile: Python base image with Playwright + browser install
 
-**Spec ref:** §5.7
+**Spec ref:** §4.2
 
-**Verify:** `pytest tests/ -v`
+**Verify:** Docker Compose build + smoke test via `POST /jobs` with `"engine": "playwright"`
