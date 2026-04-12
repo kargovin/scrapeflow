@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Cron Sheduler
     schedule_min_interval_minutes: int = 5
 
+    # Webhook delivery
+    webhook_max_attempts: int = 5
+
     @field_validator("llm_key_encryption_key")
     def validate_fernet_key(cls, v):
         if not v:

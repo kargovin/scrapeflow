@@ -1,15 +1,20 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+import httpx
 import structlog
 from alembic import command
 from alembic.config import Config
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import minio, nats
+from app.core.db import AsyncSessionLocal
 from app.core.redis import close_pool, create_pool
 from app.core.result_consumer import start_result_consumer
+from app.core.scheduler import scheduler_loop
+from app.core.webhook_loop import webhook_delivery_loop
 from app.middleware.correlation import CorrelationIdMiddleware
 from app.routers import health, jobs, users
 from app.settings import settings
@@ -52,12 +57,33 @@ async def lifespan(app: FastAPI):
     result_consumer_task = await start_result_consumer(app.state.nats_js, app.state.minio)
     logger.info("NATS result consumer started")
 
+    # Shared HTTP client for webhook delivery (reused across all deliveries)
+    http_client = httpx.AsyncClient()
+
+    # Fernet instance — same key used for LLM key encryption (validated at settings load)
+    fernet = Fernet(settings.llm_key_encryption_key.encode())
+
+    # Scheduler — dispatches due cron jobs every 60s
+    scheduler_task = asyncio.create_task(scheduler_loop(AsyncSessionLocal, app.state.nats_js))
+    logger.info("Scheduler loop started")
+
+    # Webhook delivery loop — retries pending deliveries every 15s
+    webhook_task = asyncio.create_task(
+        webhook_delivery_loop(AsyncSessionLocal, http_client, fernet)
+    )
+    logger.info("Webhook delivery loop started")
+
     yield
 
-    # Shutdown in reverse order
+    # Shutdown — cancel all background tasks together
     result_consumer_task.cancel()
-    await asyncio.gather(result_consumer_task, return_exceptions=True)
-    logger.info("NATS result consumer stopped")
+    scheduler_task.cancel()
+    webhook_task.cancel()
+    await asyncio.gather(result_consumer_task, scheduler_task, webhook_task, return_exceptions=True)
+    logger.info("Background tasks stopped")
+
+    await http_client.aclose()
+    logger.info("HTTP client closed")
 
     await nats.disconnect(app.state.nats_client)
     logger.info("NATS disconnected")
