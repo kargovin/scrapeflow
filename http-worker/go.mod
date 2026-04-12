@@ -1,4 +1,4 @@
-module github.com/kargovin/scrapeflow/worker
+module github.com/kargovin/scrapeflow/http-worker
 
 go 1.22
 

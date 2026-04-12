@@ -11,10 +11,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/kargovin/scrapeflow/worker/internal/config"
-	"github.com/kargovin/scrapeflow/worker/internal/fetcher"
-	"github.com/kargovin/scrapeflow/worker/internal/storage"
-	"github.com/kargovin/scrapeflow/worker/internal/worker"
+	"github.com/kargovin/scrapeflow/http-worker/internal/config"
+	"github.com/kargovin/scrapeflow/http-worker/internal/fetcher"
+	"github.com/kargovin/scrapeflow/http-worker/internal/storage"
+	"github.com/kargovin/scrapeflow/http-worker/internal/worker"
 )
 
 func main() {

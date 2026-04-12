@@ -4,7 +4,7 @@
 > **Status:** Ready for implementation
 > **Spec source:** `docs/phase2/phase2-engineering-spec-v3.md` (approved, v3 — all architect review issues resolved)
 > **Test command (Python):** `docker compose exec api python -m pytest`
-> **Test command (Go):** `docker compose exec worker go test ./...`
+> **Test command (Go):** `docker compose exec http-worker go test ./...`
 
 ---
 
@@ -349,7 +349,7 @@ docker compose down -v && docker compose up -d nats nats-init
 
 **Verify:**
 ```bash
-docker compose exec worker go test ./... -v
+docker compose exec http-worker go test ./... -v
 ```
 
 **Spec ref:** §4.1

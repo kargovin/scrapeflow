@@ -125,11 +125,11 @@ services:
         - action: rebuild
           path: ../api/pyproject.toml
 
-  # ── Go scraper worker ────────────────────────────────────────────────────────
+  # ── Go HTTP scraper worker ───────────────────────────────────────────────────
 
-  worker:
+  http-worker:
     build:
-      context: ../worker
+      context: ../http-worker
       dockerfile: Dockerfile
     environment:
       NATS_URL: nats://nats:4222

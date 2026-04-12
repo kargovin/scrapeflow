@@ -12,9 +12,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/kargovin/scrapeflow/worker/internal/fetcher"
-	"github.com/kargovin/scrapeflow/worker/internal/formatter"
-	"github.com/kargovin/scrapeflow/worker/internal/storage"
+	"github.com/kargovin/scrapeflow/http-worker/internal/fetcher"
+	"github.com/kargovin/scrapeflow/http-worker/internal/formatter"
+	"github.com/kargovin/scrapeflow/http-worker/internal/storage"
 )
 
 // NATS subject and stream constants — must match ADR-002 and the Python constants.py.

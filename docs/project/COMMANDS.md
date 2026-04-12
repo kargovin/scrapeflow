@@ -218,9 +218,9 @@ curl -X DELETE http://localhost:8000/jobs/<job_id> \
 
 ---
 
-## Go Worker
+## Go HTTP Worker
 
-> Run all commands from the `worker/` directory.
+> Run all commands from the `http-worker/` directory.
 
 ```bash
 # Build the worker binary
