@@ -127,6 +127,27 @@ services:
 
   # ── Go HTTP scraper worker ───────────────────────────────────────────────────
 
+  playwright-worker:
+    build:
+      context: ../playwright-worker
+    environment:
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: scrapeflow
+      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_BUCKET: scrapeflow-results
+      MINIO_SECURE: 'false'
+      PLAYWRIGHT_MAX_WORKERS: '3'
+      PLAYWRIGHT_DEFAULT_TIMEOUT_SECONDS: '60'
+    depends_on:
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   http-worker:
     build:
       context: ../http-worker
