@@ -4,9 +4,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: scrapeflow
-      POSTGRES_PASSWORD: scrapeflow
-      POSTGRES_DB: scrapeflow
+      POSTGRES_USER: ${POSTGRES_USER:-scrapeflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scrapeflow}
+      POSTGRES_DB: ${POSTGRES_DB:-scrapeflow}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -48,8 +48,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: scrapeflow
-      MINIO_ROOT_PASSWORD: scrapeflow_secret
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
     volumes:
       - minio_data:/data
     ports:
@@ -74,14 +74,13 @@ services:
       nats:
         condition: service_healthy
     command: >
-      sh -c "nats stream add SCRAPEFLOW
-      --subjects 'scrapeflow.jobs.*'
-      --storage file
-      --retention work
-      --replicas 1
-      --defaults
-      --server nats://nats:4222 2>/dev/null ||
-      nats stream info SCRAPEFLOW --server nats://nats:4222"
+      sh -c "
+        if nats stream info SCRAPEFLOW --server nats://nats:4222 >/dev/null 2>&1; then
+          nats stream edit SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --server nats://nats:4222 --force;
+        else
+          nats stream add SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --retention work --storage file --replicas 1 --server nats://nats:4222 --defaults;
+        fi
+      "
 
   # ── API ─────────────────────────────────────────────────────────────────────
 
@@ -94,13 +93,17 @@ services:
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://scrapeflow:scrapeflow@postgres:5432/scrapeflow
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scrapeflow}:${POSTGRES_PASSWORD:-scrapeflow}@postgres:5432/${POSTGRES_DB:-scrapeflow}
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: scrapeflow
-      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
       MINIO_SECURE: 'false'
+    volumes:
+      - ../api/app:/app/app
+      - ../api/tests:/app/tests
+      - ../api/migrations:/app/migrations
     ports:
       - '8000:8000'
     depends_on:
@@ -122,17 +125,62 @@ services:
         - action: rebuild
           path: ../api/pyproject.toml
 
-  # ── Go scraper worker ────────────────────────────────────────────────────────
+  # ── Python Playwright worker ─────────────────────────────────────────────────
 
-  worker:
+  playwright-worker:
     build:
-      context: ../worker
+      context: ../playwright-worker
+    environment:
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
+      MINIO_BUCKET: scrapeflow-results
+      MINIO_SECURE: 'false'
+      PLAYWRIGHT_MAX_WORKERS: '3'
+      PLAYWRIGHT_DEFAULT_TIMEOUT_SECONDS: '60'
+    depends_on:
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  llm-worker:
+    build:
+      context: ../llm-worker
+    env_file:
+      - ../.env
+    environment:
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
+      MINIO_BUCKET: scrapeflow-results
+      MINIO_SECURE: 'false'
+      LLM_MAX_WORKERS: '3'
+    depends_on:
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── Go HTTP scraper worker ───────────────────────────────────────────────────
+
+  http-worker:
+    build:
+      context: ../http-worker
       dockerfile: Dockerfile
     environment:
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: scrapeflow
-      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
       MINIO_BUCKET: scrapeflow-results
       MINIO_SECURE: 'false'
       FETCH_TIMEOUT_SECS: '30'

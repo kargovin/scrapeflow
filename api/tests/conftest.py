@@ -3,17 +3,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
-from app.main import app
+from app.auth.api_key import generate_api_key, hash_api_key
 from app.core import minio, nats
 from app.core.db import AsyncSessionLocal
-from app.core.redis import create_pool, close_pool
-from app.models.user import User
-from app.models.api_key import ApiKey
-from app.auth.api_key import generate_api_key, hash_api_key
 from app.core.nats import get_jetstream
+from app.core.redis import close_pool, create_pool
+from app.main import app
+from app.models.api_key import ApiKey
+from app.models.user import User
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session", scope="session")

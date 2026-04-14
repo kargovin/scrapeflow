@@ -1,10 +1,8 @@
-import uuid
-from unittest.mock import MagicMock, patch
-
 import pytest
-import pytest_asyncio
+from fastapi import HTTPException
 
-from app.auth.api_key import generate_api_key, hash_api_key, API_KEY_PREFIX
+from app.auth.api_key import API_KEY_PREFIX, generate_api_key, hash_api_key
+from app.auth.dependencies import get_current_admin_user
 from app.core.db import AsyncSessionLocal
 from app.models.api_key import ApiKey
 from app.models.user import User
@@ -49,6 +47,7 @@ async def test_me_creates_user_on_first_login(client, mock_clerk_auth):
 
 # --- API key unit tests ---
 
+
 def test_generate_api_key_format():
     """Generated key has the sf_ prefix."""
     key = generate_api_key()
@@ -92,10 +91,28 @@ async def test_api_key_auth_invalid(client):
 async def test_api_key_auth_revoked(client, db_user):
     """Revoked API key returns 401."""
     raw_key = generate_api_key()
-    api_key = ApiKey(user_id=db_user.id, key_hash=hash_api_key(raw_key), name="revoked key", revoked=True)
+    api_key = ApiKey(
+        user_id=db_user.id, key_hash=hash_api_key(raw_key), name="revoked key", revoked=True
+    )
     async with AsyncSessionLocal() as db:
         db.add(api_key)
         await db.commit()
 
     response = await client.get("/users/me", headers={"X-API-Key": raw_key})
     assert response.status_code == 401
+
+
+# Admin access tests
+
+
+def test_admin_access_denied_for_non_admin():
+    user = User(clerk_id="test", email="test@example.com", is_admin=False)
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_admin_user(user)
+    assert exc_info.value.status_code == 403
+
+
+def test_admin_access_granted_for_admin():
+    user = User(clerk_id="admin_test", email="test@domain.com", is_admin=True)
+    result = get_current_admin_user(user)
+    assert result is user

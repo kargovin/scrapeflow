@@ -1,5 +1,7 @@
 from pathlib import Path
-from pydantic import Field
+
+from cryptography.fernet import Fernet, InvalidToken
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env relative to this file: api/app/settings.py -> ../../.env (repo root)
@@ -35,15 +37,40 @@ class Settings(BaseSettings):
     clerk_secret_key: str = ""  # used by backend SDK for JWT verification + API calls
 
     # Rate limiting — per-user fixed window counter
-    rate_limit_requests: int = 60   # max requests allowed per window
+    rate_limit_requests: int = 60  # max requests allowed per window
     rate_limit_window_seconds: int = 60  # window size in seconds
 
+    # LLM
+    llm_key_encryption_key: str = Field(
+        default="", alias="LLM_KEY_ENCRYPTION_KEY"
+    )  # symmetric key for encrypting LLM API keys in DB
+
+    # Cron Sheduler
+    schedule_min_interval_minutes: int = 5
+
+    # Webhook delivery
+    webhook_max_attempts: int = 5
+
+    @field_validator("llm_key_encryption_key")
+    def validate_fernet_key(cls, v):
+        if not v:
+            raise ValueError("LLM_KEY_ENCRYPTION_KEY must be set to a valid Fernet key")
+        try:
+            Fernet(v)
+        except (ValueError, InvalidToken):
+            raise ValueError("LLM_KEY_ENCRYPTION_KEY is not a valid Fernet key") from None
+        return v
+
     # Allowed origins - CORS
-    allowed_origins_raw: str = Field(default="*", alias="ALLOWED_ORIGINS")   # env: ALLOWED_ORIGINS (comma-separated for production)
+    allowed_origins_raw: str = Field(
+        default="*", alias="ALLOWED_ORIGINS"
+    )  # env: ALLOWED_ORIGINS (comma-separated for production)
+
     @property
     def allowed_origins(self) -> list[str]:
         if self.allowed_origins_raw == "*":
             return ["*"]
         return [o.strip() for o in self.allowed_origins_raw.split(",")]
-    
+
+
 settings = Settings()

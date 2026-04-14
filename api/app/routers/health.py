@@ -1,7 +1,8 @@
+import importlib.metadata
+
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
-import redis.asyncio as aioredis
-import importlib.metadata
 from sqlalchemy import text
 
 from app.core.db import AsyncSessionLocal
@@ -13,9 +14,11 @@ try:
 except importlib.metadata.PackageNotFoundError:
     _VERSION = "dev"
 
+
 class HealthResponse(BaseModel):
     status: str
     version: str
+
 
 class ReadinessResponse(BaseModel):
     status: str
@@ -23,9 +26,11 @@ class ReadinessResponse(BaseModel):
     redis: str
     nats: str
 
+
 @router.get("", response_model=HealthResponse)
 async def health():
     return HealthResponse(status="ok", version=_VERSION)
+
 
 @router.get("/ready", response_model=ReadinessResponse)
 async def readiness(request: Request, response: Response):
@@ -36,7 +41,7 @@ async def readiness(request: Request, response: Response):
             await db.execute(text("SELECT 1"))
         output.db = "ok"
     except Exception as e:
-        output.db = f"error: {str(e)}"
+        output.db = f"error: {e!s}"
 
     try:
         # Check Redis connectivity
@@ -44,7 +49,7 @@ async def readiness(request: Request, response: Response):
             await client.ping()
         output.redis = "ok"
     except Exception as e:
-        output.redis = f"error: {str(e)}"
+        output.redis = f"error: {e!s}"
 
     try:
         # Check Nats connectivity
@@ -53,9 +58,9 @@ async def readiness(request: Request, response: Response):
         else:
             output.nats = "error: not connected"
     except Exception as e:
-        output.nats = f"error: {str(e)}"
+        output.nats = f"error: {e!s}"
 
-    if any(v != 'ok' for v in [output.db, output.redis, output.nats]):
+    if any(v != "ok" for v in [output.db, output.redis, output.nats]):
         output.status = "degraded"
         response.status_code = 503
 

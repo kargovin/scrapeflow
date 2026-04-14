@@ -3,6 +3,7 @@ async def test_health(client):
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "version": "0.1.0"}
 
+
 async def test_readiness(client):
     response = await client.get("/health/ready")
     assert response.status_code == 200

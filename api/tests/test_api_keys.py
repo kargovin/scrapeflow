@@ -1,15 +1,13 @@
 import uuid
 
-import pytest_asyncio
-
 from app.auth.api_key import generate_api_key, hash_api_key
 from app.core.db import AsyncSessionLocal
 from app.models.api_key import ApiKey
 
-
 # ---------------------------------------------------------------------------
 # POST /users/api-keys
 # ---------------------------------------------------------------------------
+
 
 async def test_create_api_key_unauthenticated(client):
     """No auth header returns 401."""
@@ -92,6 +90,7 @@ async def test_create_multiple_keys_same_user(client, db_api_key):
 # GET /users/api-keys
 # ---------------------------------------------------------------------------
 
+
 async def test_list_api_keys_unauthenticated(client):
     """No auth header returns 401."""
     response = await client.get("/users/api-keys")
@@ -136,7 +135,11 @@ async def test_list_api_keys_excludes_revoked(client, db_user):
     revoked_raw = generate_api_key()
     async with AsyncSessionLocal() as db:
         db.add(ApiKey(user_id=db_user.id, key_hash=hash_api_key(active_raw), name="active"))
-        db.add(ApiKey(user_id=db_user.id, key_hash=hash_api_key(revoked_raw), name="revoked", revoked=True))
+        db.add(
+            ApiKey(
+                user_id=db_user.id, key_hash=hash_api_key(revoked_raw), name="revoked", revoked=True
+            )
+        )
         await db.commit()
 
     response = await client.get("/users/api-keys", headers={"X-API-Key": active_raw})
@@ -191,6 +194,7 @@ async def test_list_api_keys_ordered_newest_first(client, db_user):
 # ---------------------------------------------------------------------------
 # DELETE /users/api-keys/{key_id}
 # ---------------------------------------------------------------------------
+
 
 async def test_revoke_api_key_unauthenticated(client, db_api_key):
     """No auth header returns 401."""
@@ -280,6 +284,7 @@ async def test_revoke_already_revoked_key(client, db_user):
     assert response.status_code == 200
     assert response.json()["revoked"] is True
 
+
 # test if last_updated_at is updated on verify_api_key
 async def test_verify_api_key_updates_last_used_at(db_api_key):
     """Calling verify_api_key should update the last_used_at timestamp in the database."""
@@ -287,6 +292,7 @@ async def test_verify_api_key_updates_last_used_at(db_api_key):
     assert api_key.last_used_at is None  # should start as None
 
     from app.auth.api_key import verify_api_key
+
     async with AsyncSessionLocal() as db:
         await verify_api_key(db, raw_key)
     async with AsyncSessionLocal() as db:

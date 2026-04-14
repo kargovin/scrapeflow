@@ -1,10 +1,23 @@
 # ScrapeFlow Phase 2 — Implementation Backlog
 
 > **Owner:** Tech Lead
-> **Status:** Ready for implementation
+> **Status:** ✅ Complete — all 26 steps implemented and committed (2026-04-14)
 > **Spec source:** `docs/phase2/phase2-engineering-spec-v3.md` (approved, v3 — all architect review issues resolved)
 > **Test command (Python):** `docker compose exec api python -m pytest`
-> **Test command (Go):** `docker compose exec worker go test ./...`
+> **Test command (Go):** `docker compose exec http-worker go test ./...`
+
+## Implementation Deviations from Spec
+
+These are naming and structural choices made during implementation that differ from the spec's conventions. All are functionally correct.
+
+| Spec said | Implemented as | Notes |
+|-----------|---------------|-------|
+| `playwright-worker/app/` package | `playwright-worker/worker/` | Clearer package name for a worker process |
+| `llm-worker/app/` package | `llm-worker/worker/` | Consistent with playwright-worker naming |
+| `api/app/models/llm_key.py` | `api/app/models/llm_keys.py` | Plural naming consistent with other model files |
+| `api/app/models/job_run.py` | `api/app/models/job_runs.py` | Plural naming consistent with other model files |
+| `playwright-worker/app/worker.py` | Logic inlined into `worker/main.py` | Single-file worker loop; separate file added no value |
+| Result consumer: pull consumer (implied) | Push subscriber via `js.subscribe()` | Push is correct for event-driven consumer; pull consumer mandate only applies to scrape workers (§4.1–4.3) |
 
 ---
 
@@ -306,15 +319,13 @@ docker compose exec db psql -U scrapeflow -c "SELECT COUNT(*) FROM job_runs;"
   ```
 - Edit: `docker/docker-compose.yml` — update `nats-init` command to idempotent create-or-edit with `scrapeflow.jobs.>` wildcard subject:
   ```yaml
-  command: >-
+  command: >
     sh -c "
-      nats stream info SCRAPEFLOW --server nats:4222 > /dev/null 2>&1
-      && nats stream edit SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --server nats:4222
-      || nats stream add SCRAPEFLOW
-           --subjects 'scrapeflow.jobs.>'
-           --retention work --max-deliver 3
-           --storage file --replicas 1
-           --server nats:4222
+      if nats stream info SCRAPEFLOW --server nats://nats:4222 >/dev/null 2>&1; then
+        nats stream edit SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --server nats://nats:4222 --force;
+      else
+        nats stream add SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --retention work --storage file --replicas 1 --server nats://nats:4222 --defaults;
+      fi
     "
   ```
 - Edit: `docker/docker-compose.yml` `worker` service env — rename `NATS_JOBS_RUN_SUBJECT` → `NATS_JOBS_RUN_HTTP_SUBJECT: "scrapeflow.jobs.run.http"`
@@ -351,7 +362,7 @@ docker compose down -v && docker compose up -d nats nats-init
 
 **Verify:**
 ```bash
-docker compose exec worker go test ./... -v
+docker compose exec http-worker go test ./... -v
 ```
 
 **Spec ref:** §4.1

@@ -1,5 +1,6 @@
 from app.main import app
 
+
 async def test_nats_connected():
     assert app.state.nats_client.is_connected
 

@@ -24,7 +24,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 |-----|-------|--------|------|------------|---------------|
 | [ADR-001](ADR-001-worker-job-contract.md) | Worker Job Contract | **Partially Superseded** | 2026-03-25 | — | ADR-002 (§2 Subjects, §3 Schemas, §8 MinIO paths) |
 | [ADR-002](ADR-002-phase2-worker-contract.md) | Phase 2 Worker Contract | **Accepted** | 2026-04-02 | ADR-001 (§2, §3, §8) | — |
-| ADR-003 | Job/Run Data Model Split | **Pending** — required before Phase 2 Step 12 | — | — | — |
+| [ADR-003](ADR-003-job-run-split.md) | Job/Run Data Model Split | **Accepted** | 2026-04-09 | — | — |
 
 ---
 

@@ -1,7 +1,8 @@
 import nats
+from fastapi import Request
 from nats.aio.client import Client
 from nats.js import JetStreamContext
-from fastapi import Request
+
 from app.settings import settings
 
 
@@ -18,7 +19,6 @@ async def disconnect(nc: Client) -> None:
 
 def get_nats(request: Request) -> Client:
     return request.app.state.nats_client
-    
 
 
 def get_jetstream(request: Request) -> JetStreamContext:

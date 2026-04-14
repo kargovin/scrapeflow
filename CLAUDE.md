@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: MVP / Phase 1 — being built iteratively. Sections marked [LATER] are planned but not yet implemented.**
+> **Status: Phase 2 complete. Phase 1 MVP and all 26 Phase 2 steps are done. Phase 3 (production hardening) is next.**
 
 ## Goal
 
@@ -45,7 +45,7 @@ When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 - **Rate limiting**: Redis-backed per-user quotas
 - **Docker Compose**: full local dev stack
 
-### Phase 2 — Core features [LATER]
+### Phase 2 — Core features [IN PROGRESS]
 - **Playwright worker**: opt-in JS rendering for dynamic/SPA sites, configurable per job
 - **LLM processing**: user provides their own Anthropic/OpenAI API key + output schema; worker extracts structured data
 - **Change detection**: recurring/scheduled jobs, diff detection, notify on change
@@ -93,6 +93,10 @@ Each persona operates with only the outputs from the persona before them — the
 | Cross-tenant access | 404 (not 403) for jobs belonging to other users | 403 leaks resource existence; 404 is safer for multi-tenant |
 | NATS subject constants | `app/constants.py` (not `settings.py`) | Subject names are part of the worker contract, not env-configurable |
 | Rate limiting | Fixed window counter (Redis `INCR` + `EXPIRE`) per user; sliding window planned for Phase 2 | Simple, 2–3 Redis ops; adequate for MVP quotas |
+| Cancellation (Phase 2) | Cancel active `job_runs` rows (not `jobs.status`); result consumer discards by checking `run.status == "cancelled"` | `jobs` no longer has a `status` column after migration 2.4 |
+| MinIO path convention | Dual write: `latest/{job_id}.{ext}` (overwritten) + `history/{job_id}/{unix_ts}.{ext}` (immutable); `job_runs.result_path` always stores the `history/` path | history path enables per-run diff; latest path for convenience access |
+| Worker routing (Phase 2) | Subject-based: `scrapeflow.jobs.run.http` for Go worker, `scrapeflow.jobs.run.playwright` for Playwright worker | Workers subscribe to their own subject; wrong engine never receives the message |
+| `nats_stream_seq` | Stored on `job_runs` from the worker's "running" result message | MaxDeliver advisory carries only stream seq — used to identify stalled runs (Step 22) |
 
 ---
 

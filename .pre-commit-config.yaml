@@ -1,0 +1,29 @@
+repos:
+  # General hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+
+  # Python — Ruff lint + format (replaces flake8, isort, black)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^(api|playwright-worker|llm-worker)/
+      - id: ruff-format
+        files: ^(api|playwright-worker|llm-worker)/
+
+  # Go — golangci-lint (local hook: module is in worker/, not repo root)
+  - repo: local
+    hooks:
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c 'cd worker && ~/go/bin/golangci-lint run ./...'
+        language: system
+        files: ^worker/
+        pass_filenames: false

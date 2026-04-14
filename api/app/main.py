@@ -1,20 +1,27 @@
 import asyncio
-import structlog
 from contextlib import asynccontextmanager
+
+import httpx
+import structlog
+from alembic import command
+from alembic.config import Config
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from alembic import command
-from alembic.config import Config
-
 from app.core import minio, nats
-from app.core.redis import create_pool, close_pool
+from app.core.advisory import maxdeliver_advisory_subscriber
+from app.core.db import AsyncSessionLocal
+from app.core.redis import close_pool, create_pool
 from app.core.result_consumer import start_result_consumer
-from app.settings import settings
-from app.routers import health, jobs, users
+from app.core.scheduler import scheduler_loop
+from app.core.webhook_loop import webhook_delivery_loop
 from app.middleware.correlation import CorrelationIdMiddleware
+from app.routers import admin, health, jobs, users
+from app.settings import settings
 
 logger = structlog.get_logger()
+
 
 def _run_migrations_online():
     """Run migrations with a live async DB connection."""
@@ -26,13 +33,14 @@ def _run_migrations_online():
 async def lifespan(app: FastAPI):
     logger.info("Starting ScrapeFlow API", env=settings.app_env)
 
-    # Alembic migrations — run in separate thread to avoid blocking the event loop, since Alembic doesn't support async DB connections.
-    try:
-        await asyncio.get_event_loop().run_in_executor(None, _run_migrations_online)
-        logger.info("Database migrations complete")
-    except Exception as e:
-        logger.exception("Database migration failed")
-        raise
+    # TODO: uncomment when pusing
+    # # Alembic migrations — run in separate thread to avoid blocking the event loop, since Alembic doesn't support async DB connections.
+    # try:
+    #     await asyncio.get_event_loop().run_in_executor(None, _run_migrations_online)
+    #     logger.info("Database migrations complete")
+    # except Exception:
+    #     logger.exception("Database migration failed")
+    #     raise
 
     # Redis
     app.state.redis_pool = create_pool()
@@ -47,15 +55,49 @@ async def lifespan(app: FastAPI):
     logger.info("NATS connected", url=settings.nats_url)
 
     # Result consumer — background task that processes worker results from NATS (ADR-001)
-    result_consumer_task = await start_result_consumer(app.state.nats_js)
+    result_consumer_task = await start_result_consumer(app.state.nats_js, app.state.minio)
     logger.info("NATS result consumer started")
+
+    # Shared HTTP client for webhook delivery (reused across all deliveries)
+    http_client = httpx.AsyncClient()
+
+    # Fernet instance — same key used for LLM key encryption (validated at settings load)
+    fernet = Fernet(settings.llm_key_encryption_key)
+
+    # Scheduler — dispatches due cron jobs every 60s
+    scheduler_task = asyncio.create_task(scheduler_loop(AsyncSessionLocal, app.state.nats_js))
+    logger.info("Scheduler loop started")
+
+    # Webhook delivery loop — retries pending deliveries every 15s
+    webhook_task = asyncio.create_task(
+        webhook_delivery_loop(AsyncSessionLocal, http_client, fernet)
+    )
+    logger.info("Webhook delivery loop started")
+
+    # MaxDeliver advisory subscriber — marks stalled runs as failed when NATS exhausts retries
+    advisory_task = asyncio.create_task(
+        maxdeliver_advisory_subscriber(app.state.nats_client, AsyncSessionLocal)
+    )
+    logger.info("MaxDeliver advisory subscriber started")
 
     yield
 
-    # Shutdown in reverse order
+    # Shutdown — cancel all background tasks together
     result_consumer_task.cancel()
-    await asyncio.gather(result_consumer_task, return_exceptions=True)
-    logger.info("NATS result consumer stopped")
+    scheduler_task.cancel()
+    webhook_task.cancel()
+    advisory_task.cancel()
+    await asyncio.gather(
+        result_consumer_task,
+        scheduler_task,
+        webhook_task,
+        advisory_task,
+        return_exceptions=True,
+    )
+    logger.info("Background tasks stopped")
+
+    await http_client.aclose()
+    logger.info("HTTP client closed")
 
     await nats.disconnect(app.state.nats_client)
     logger.info("NATS disconnected")
@@ -81,7 +123,8 @@ app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_credentials=settings.allowed_origins != ["*"],  # only allow credentials if specific origins are set
+    allow_credentials=settings.allowed_origins
+    != ["*"],  # only allow credentials if specific origins are set
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -89,3 +132,4 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(users.router)
 app.include_router(jobs.router)
+app.include_router(admin.router)

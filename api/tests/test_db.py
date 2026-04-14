@@ -1,4 +1,5 @@
 from sqlalchemy import text
+
 from app.core.db import AsyncSessionLocal
 
 
