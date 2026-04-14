@@ -1,4 +1,4 @@
-// cmd/worker/main.go — ScrapeFlow Go scraper worker entry point.
+// cmd/worker/main.go — ScrapeFlow Go HTTP scraper worker entry point.
 // This wires together config → NATS → MinIO → fetcher → worker loop.
 package main
 

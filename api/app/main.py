@@ -20,7 +20,7 @@ from app.middleware.correlation import CorrelationIdMiddleware
 from app.routers import admin, health, jobs, users
 from app.settings import settings
 
-logger = structlog.get_logger()
+logger = structlog.get_logger()  # structured JSON logger — see settings.py for log level config
 
 
 def _run_migrations_online():
