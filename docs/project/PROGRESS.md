@@ -91,7 +91,7 @@
 | 21   | Webhook delivery loop background task                                 | ✅ Done |
 | 22   | MaxDeliver advisory subscriber                                        | ✅ Done |
 | 23   | Admin panel API routes                                                | ✅ Done |
-| 24   | Admin stats endpoint                                                  | ⬜ Todo |
+| 24   | Admin stats endpoint                                                  | ✅ Done |
 | 25   | `scripts/cleanup_old_runs.py`                                         | ⬜ Todo |
 | 26   | Docker Compose: add Playwright + LLM worker services                  | ⬜ Todo |
 

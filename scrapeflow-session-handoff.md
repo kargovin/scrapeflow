@@ -39,8 +39,8 @@ docker compose exec api uv run alembic upgrade head
 ## Current state
 
 - Branch: `develop`
-- Steps 1–23 complete
-- **130 API tests passing** (`docker compose exec api uv run pytest tests/ -v`)
+- Steps 1–24 complete
+- **138 API tests passing** (`docker compose exec api uv run pytest tests/ -v`)
 - **28 playwright-worker tests passing** (`docker compose exec playwright-worker python -m pytest tests/ -v`)
 - **27 llm-worker tests passing** (`docker compose exec llm-worker python -m pytest tests/ -v`)
 
@@ -250,16 +250,16 @@ When NATS exhausts `MaxDeliver` retries for a message, it publishes an advisory 
 
 ---
 
-## Next step
+## What was built in Step 24
 
-**Step 24**: Admin stats endpoint
+**Step 24** — Admin stats endpoint (`api/app/routers/admin.py`, `api/app/schemas/admin.py`):
 
-From `docs/project/PHASE2_BACKLOG.md` Step 24:
+Two new routes completing the admin panel API:
+- `GET /admin/stats` — platform-wide operational + historical stats
+- `GET /admin/stats/users/{user_id}` — per-user breakdown of the same shape; 404 on unknown user
 
-**Files to implement:**
-- EDIT `api/app/routers/admin.py` — add `GET /admin/stats` and `GET /admin/stats/users/{id}`
+### Response shape
 
-**`GET /admin/stats` response shape (§5.9):**
 ```json
 {
   "operational": {
@@ -286,9 +286,46 @@ From `docs/project/PHASE2_BACKLOG.md` Step 24:
 }
 ```
 
-**Key rules:**
-- `minio_storage_bytes`: MinIO `bucket_size` API call, cached in Redis with 5-minute TTL (`scrapeflow:cache:minio_storage`)
-- All historical stats query `job_runs.created_at`, not `jobs.created_at`
-- `GET /admin/stats/users/{id}` — per-user breakdown of the same shape
+### Files created/modified
 
-**Spec ref:** §5.9
+| File | Change |
+|------|--------|
+| `api/app/schemas/admin.py` | Added `TopUserByJobs`, `OperationalStats`, `HistoricalStats`, `AdminStatsResponse` |
+| `api/app/routers/admin.py` | Added `_build_operational_stats`, `_build_historical_stats` helpers + 2 routes |
+| `api/tests/test_admin.py` | 8 new tests (26 total); 403 batch updated to include new routes |
+
+### Key implementation facts
+
+- **Time windows**: computed in Python (`datetime.now(UTC) - timedelta(days=N)`) — avoids SQL dialect-specific `INTERVAL` syntax
+- **`minio_storage_bytes`**: `async for obj in minio_client.list_objects(bucket, recursive=True)` — miniopy-async exposes this as an async generator; cached in Redis at `scrapeflow:cache:minio_storage` with 300s TTL
+- **Per-user `minio_storage_bytes = 0`**: accurate per-user enumeration would require one `list_objects` call per job (expensive). Both endpoints share the same schema; field is 0 when scoped.
+- **`top_users_by_jobs` skipped for per-user**: returns `[]` — a leaderboard scoped to one user is meaningless
+- **Webhook success rate**: `SUM(CASE WHEN status='delivered' THEN 1 ELSE 0 END) / COUNT(*)` in one query; Python-side division avoids SQL NULL handling
+- **`dict[str, int]` comprehensions**: SQLAlchemy 2.0 row results use explicit `{str(r[0]): int(r[1]) for r in ...}` comprehensions — avoids Pylance type inference issues from `dict(result.all())`
+- **`get_minio` already existed** in `api/app/core/minio.py` — no new dependency needed
+- **Tests use `app.dependency_overrides`** (not `patch`) — the correct seam for FastAPI dependency injection; follows the `mock_jetstream` pattern in conftest.py
+
+---
+
+## Next step
+
+**Step 25**: `scripts/cleanup_old_runs.py`
+
+From `docs/project/PHASE2_BACKLOG.md` Step 25:
+
+**Files to implement:**
+- NEW `api/scripts/cleanup_old_runs.py` — standalone async script (spec §8.3)
+
+**Key rules:**
+- Batches of 500 rows
+- MinIO delete BEFORE DB delete (MinIO failure leaves DB row for retry; inverse is unrecoverable)
+- `successful_ids` built inside loop — only append on successful MinIO delete
+- Deletes: `job_runs`, their `webhook_deliveries`, their `history/` MinIO objects
+- Never deletes: `latest/` MinIO objects, `jobs` rows
+
+**Verify:**
+```bash
+docker compose exec api python scripts/cleanup_old_runs.py
+```
+
+**Spec ref:** §8.3
