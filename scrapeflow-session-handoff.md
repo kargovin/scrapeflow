@@ -39,8 +39,8 @@ docker compose exec api uv run alembic upgrade head
 ## Current state
 
 - Branch: `develop`
-- Steps 1–21 complete
-- **109 API tests passing** (`docker compose exec api uv run pytest tests/ -v`)
+- Steps 1–23 complete
+- **130 API tests passing** (`docker compose exec api uv run pytest tests/ -v`)
 - **28 playwright-worker tests passing** (`docker compose exec playwright-worker python -m pytest tests/ -v`)
 - **27 llm-worker tests passing** (`docker compose exec llm-worker python -m pytest tests/ -v`)
 
@@ -187,23 +187,108 @@ A new Docker service that subscribes to `scrapeflow.jobs.llm`, fetches raw scrap
 
 ---
 
+## What was built in Step 22
+
+**Step 22** — MaxDeliver advisory subscriber (`api/app/core/advisory.py`):
+
+When NATS exhausts `MaxDeliver` retries for a message, it publishes an advisory containing only the `stream_seq` of the exhausted message. This subscriber bridges NATS's world back to the DB: it maps `stream_seq → job_run` (via `job_runs.nats_stream_seq`) and marks the run `failed`.
+
+### Files created/modified
+
+| File | Change |
+|------|--------|
+| `api/app/core/advisory.py` | NEW — `_handle_advisory` (testable inner fn) + `maxdeliver_advisory_subscriber` (subscriber loop) |
+| `api/app/constants.py` | Added `NATS_ADVISORY_MAX_DELIVER_SUBJECT = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.SCRAPEFLOW.*"` |
+| `api/app/main.py` | Wired `advisory_task` into lifespan startup and shutdown gather |
+| `api/tests/test_advisory.py` | 3 tests: happy path, no matching run, malformed JSON |
+
+### Key implementation facts
+
+- **Core NATS, not JetStream**: advisories live on the NATS broker's internal system — `nats_client.subscribe()` is used, not `js.subscribe()`. `app.state.nats_client` is the correct handle.
+- **`_handle_advisory` is top-level**: extracted as a named function (not a closure) so tests can call it directly without setting up the subscriber — mirrors `_handle_result` in `result_consumer.py`.
+- **Status filter includes `processing`**: LLM jobs can exhaust retries on `scrapeflow.jobs.llm` while still in `processing` state — must be included alongside `pending` and `running`.
+- **`await asyncio.Future()` hold-open pattern**: same as `result_consumer.py` — the subscriber is push-based (callback fires on message arrival), so the task just needs to stay alive without burning CPU. `CancelledError` breaks the future → `sub.unsubscribe()` → re-raise.
+
+---
+
+## What was built in Step 23
+
+**Step 23** — Admin panel API routes (`api/app/routers/admin.py`):
+
+8 routes under `/admin/*`, all gated on `Depends(get_current_admin_user)` (403 for non-admins).
+
+### Files created/modified
+
+| File | Change |
+|------|--------|
+| `api/app/schemas/admin.py` | NEW — `AdminUserResponse`, `AdminUserDetailResponse`, `AdminWebhookDeliveryResponse` |
+| `api/app/routers/admin.py` | NEW — 8 routes + `_admin_jobs_with_latest_run_stmt` helper |
+| `api/app/main.py` | Added `admin` import + `include_router(admin.router)` |
+| `api/tests/test_admin.py` | NEW — 18 tests, 3 local fixtures |
+
+### Routes implemented
+
+| Method | Path | Behaviour |
+|--------|------|-----------|
+| `GET` | `/admin/users` | Paginated list; optional `email` partial filter (ilike) |
+| `GET` | `/admin/users/{id}` | User detail + `job_counts: dict[str, int]` (sparse GROUP BY) |
+| `DELETE` | `/admin/users/{id}` | Hard delete, 204; self-delete guard (400) |
+| `GET` | `/admin/jobs` | All jobs across all users; optional `user_id`/`status`/`engine` filters |
+| `GET` | `/admin/jobs/{id}` | Any job regardless of ownership |
+| `DELETE` | `/admin/jobs/{id}` | Cancel active runs (default) or `?hard_delete=true` |
+| `GET` | `/admin/webhooks/deliveries` | Paginated; optional `status` exact filter |
+| `POST` | `/admin/webhooks/deliveries/{id}/retry` | Reset `attempts=0`, `status='pending'`, `next_attempt_at=now()` |
+
+### Key implementation facts
+
+- **`_admin_jobs_with_latest_run_stmt`**: adapts `_jobs_with_latest_run_stmt` from `jobs.py` — same LATERAL join, but `user_id` is optional and adds `status`/`engine` filters. Lives in `admin.py` (not refactored into shared util) to avoid risking the existing 112 tests.
+- **LATERAL join is INNER**: jobs with zero runs are excluded — consistent with user-facing `GET /jobs`.
+- **`job_counts` is a sparse dict**: only statuses with ≥1 run appear. Callers should use `.get("pending", 0)`.
+- **Self-delete guard**: `DELETE /admin/users/{id}` returns 400 if `user_id == admin.id` (lockout prevention).
+- **`model_validate` on list returns**: `admin_list_users` and `admin_list_webhook_deliveries` use explicit `model_validate` in list comprehensions (not raw `.all()`) to satisfy Pylance's list invariance check.
+- **18 tests**: 403 batch (all 8 routes in one test), happy path per route including cross-tenant assertions and DB verification after mutations.
+
+---
+
 ## Next step
 
-**Step 22**: MaxDeliver advisory subscriber
+**Step 24**: Admin stats endpoint
 
-From `docs/project/PHASE2_BACKLOG.md` Step 22:
+From `docs/project/PHASE2_BACKLOG.md` Step 24:
 
 **Files to implement:**
-- NEW `api/app/core/advisory.py` — `maxdeliver_advisory_subscriber(nats_client, db_factory)` async function
-- EDIT `api/app/main.py` lifespan — launch as `asyncio.create_task()` on startup, cancel on shutdown
+- EDIT `api/app/routers/admin.py` — add `GET /admin/stats` and `GET /admin/stats/users/{id}`
+
+**`GET /admin/stats` response shape (§5.9):**
+```json
+{
+  "operational": {
+    "jobs_running": 12,
+    "jobs_pending": 3,
+    "jobs_by_engine": { "http": 9, "playwright": 3 },
+    "webhook_deliveries_pending": 7,
+    "webhook_deliveries_exhausted": 14,
+    "active_recurring_jobs": 22,
+    "next_scheduled_run_at": "2026-04-01T18:05:00Z"
+  },
+  "historical": {
+    "jobs_today": 148,
+    "jobs_this_week": 891,
+    "jobs_this_month": 3204,
+    "jobs_by_status_7d": { "completed": 820, "failed": 45, "cancelled": 26 },
+    "jobs_by_engine_7d": { "http": 760, "playwright": 131 },
+    "top_users_by_jobs": [
+      { "user_id": "uuid", "email": "a@b.com", "job_count": 312 }
+    ],
+    "minio_storage_bytes": 4509715660,
+    "webhook_delivery_success_rate_7d": 0.94
+  }
+}
+```
 
 **Key rules:**
-- Subscribes to `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.SCRAPEFLOW.*`
-- On advisory: parse `stream_seq` from the payload, look up `job_runs` by `nats_stream_seq`, mark `status='failed'` with `error='Max NATS redeliveries exceeded'`
-- Status filter: only fail runs with `status IN ('pending', 'running', 'processing')` — includes `processing` for LLM jobs exhausting retries
-- Re-raise `asyncio.CancelledError`; catch and log all other exceptions
+- `minio_storage_bytes`: MinIO `bucket_size` API call, cached in Redis with 5-minute TTL (`scrapeflow:cache:minio_storage`)
+- All historical stats query `job_runs.created_at`, not `jobs.created_at`
+- `GET /admin/stats/users/{id}` — per-user breakdown of the same shape
 
-**Tests required** (1 pytest test):
-- Simulate advisory JSON message → verify `job_runs.status='failed'` and error message set
-
-**Spec ref:** §6.3
+**Spec ref:** §5.9

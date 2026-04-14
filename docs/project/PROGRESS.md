@@ -85,12 +85,12 @@
 | 15   | Update result consumer for Phase 2                                    | ✅ Done |
 | 16   | New job routes: PATCH, GET runs, webhook-secret rotate                | ✅ Done |
 | 17   | LLM key management routes                                             | ✅ Done |
-| 18   | Python Playwright worker (new service)                                | ⬜ Todo |
-| 19   | Python LLM worker (new service)                                       | ⬜ Todo |
-| 20   | Scheduler loop background task                                        | ⬜ Todo |
-| 21   | Webhook delivery loop background task                                 | ⬜ Todo |
-| 22   | MaxDeliver advisory subscriber                                        | ⬜ Todo |
-| 23   | Admin panel API routes                                                | ⬜ Todo |
+| 18   | Python Playwright worker (new service)                                | ✅ Done |
+| 19   | Python LLM worker (new service)                                       | ✅ Done |
+| 20   | Scheduler loop background task                                        | ✅ Done |
+| 21   | Webhook delivery loop background task                                 | ✅ Done |
+| 22   | MaxDeliver advisory subscriber                                        | ✅ Done |
+| 23   | Admin panel API routes                                                | ✅ Done |
 | 24   | Admin stats endpoint                                                  | ⬜ Todo |
 | 25   | `scripts/cleanup_old_runs.py`                                         | ⬜ Todo |
 | 26   | Docker Compose: add Playwright + LLM worker services                  | ⬜ Todo |

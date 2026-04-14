@@ -10,13 +10,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import minio, nats
+from app.core.advisory import maxdeliver_advisory_subscriber
 from app.core.db import AsyncSessionLocal
 from app.core.redis import close_pool, create_pool
 from app.core.result_consumer import start_result_consumer
 from app.core.scheduler import scheduler_loop
 from app.core.webhook_loop import webhook_delivery_loop
 from app.middleware.correlation import CorrelationIdMiddleware
-from app.routers import health, jobs, users
+from app.routers import admin, health, jobs, users
 from app.settings import settings
 
 logger = structlog.get_logger()
@@ -73,13 +74,26 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Webhook delivery loop started")
 
+    # MaxDeliver advisory subscriber — marks stalled runs as failed when NATS exhausts retries
+    advisory_task = asyncio.create_task(
+        maxdeliver_advisory_subscriber(app.state.nats_client, AsyncSessionLocal)
+    )
+    logger.info("MaxDeliver advisory subscriber started")
+
     yield
 
     # Shutdown — cancel all background tasks together
     result_consumer_task.cancel()
     scheduler_task.cancel()
     webhook_task.cancel()
-    await asyncio.gather(result_consumer_task, scheduler_task, webhook_task, return_exceptions=True)
+    advisory_task.cancel()
+    await asyncio.gather(
+        result_consumer_task,
+        scheduler_task,
+        webhook_task,
+        advisory_task,
+        return_exceptions=True,
+    )
     logger.info("Background tasks stopped")
 
     await http_client.aclose()
@@ -118,3 +132,4 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(users.router)
 app.include_router(jobs.router)
+app.include_router(admin.router)
