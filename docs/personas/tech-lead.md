@@ -1,7 +1,7 @@
 # Tech Lead — ScrapeFlow Onboarding Document
 
 > **Purpose:** Bring a new Tech Lead persona up to speed on project state, work already done, conventions, and what to do next. Read this before doing anything.
-> **Last updated:** 2026-04-14
+> **Last updated:** 2026-04-15
 > **Covers:** Role definition, what was accomplished, the full backlog, file map, process conventions, and how to unblock engineers.
 
 ---
@@ -53,12 +53,24 @@ Program Manager → Software Architect → Tech Lead (you) → Engineer(s)
   - Cleanup script (Step 25): `scripts/cleanup_old_runs.py`
   - Docker Compose (Step 26): playwright-worker + llm-worker services added
 
+### Completed since last update (2026-04-15)
+- **Production readiness review** — `PRODUCTION_REVIEW.md` written; 2 CRITICAL, 2 HIGH, 5 MEDIUM issues identified
+- **All CRITICAL + HIGH + MEDIUM fixes applied** — Fernet encoding, PATCH ownership check, Go worker backoff, webhook loop backoff, non-root Dockerfiles, multi-stage worker builds, docker-compose credential externalization, Python worker backoff, scheduler publish error granularity
+- **Alembic migrations enabled on startup** — `api/app/main.py` migration block uncommented; production-ready
+- **`PRODUCTION_REVIEW.md`** — pre-ship readiness audit at repo root
+- **`docs/project/DEVOPS_SPEC.md`** — full k3s/FluxCD deployment spec for the DevOps agent
+- **`.github/workflows/build-push.yml`** — GitHub Actions CI: builds and pushes all 4 Docker images to DockerHub on push to `main`; path-filtered so only changed services rebuild
+- **`v2.0.0` tag** — cut on `main` after all fixes and CI were in place
+- **Initial Docker images pushed** — all 4 images (`scrapeflow-api`, `scrapeflow-http-worker`, `scrapeflow-playwright-worker`, `scrapeflow-llm-worker`) successfully built and pushed to DockerHub (`k4rth/` namespace)
+- **Two Dockerfile bugs fixed during CI** — `python3.10-venv` missing in playwright builder stage; UID 1000 conflict in playwright final stage (base image pre-occupies it — use 1001)
+
 ### Ready to start
-- **Phase 3** — Production hardening. See `CLAUDE.md` for Phase 3 scope and the persona-chain build process.
-- **Immediate next action:** Start Phase 3 with the Program Manager persona — define PRDs for the Phase 3 feature set.
+- **DevOps deployment** — hand `docs/project/DEVOPS_SPEC.md` to a DevOps agent; it has everything needed to write the k3s/FluxCD manifests in the gitops repo
+- **Phase 3** — after deployment is stable. See `CLAUDE.md` for Phase 3 scope and the persona-chain build process.
+- **Immediate next action:** DevOps agent deploys to k3s using `DEVOPS_SPEC.md`, then Phase 3 starts with the Program Manager persona.
 
 ### Pending
-- `ARCHITECTURE_DECISIONS.md` — Phase 2 decisions added (see §6 below). ✅ Done 2026-04-14.
+- None.
 
 ---
 
@@ -71,7 +83,8 @@ Read these in the order listed when picking up a new session.
 |------|-----|
 | `CLAUDE.md` | Project goals, stack, key architectural decisions table, deployment target, MVP definition |
 | `docs/project/PROGRESS.md` | Build log — Phase 1 history, Phase 2 step tracker, Gotchas section at the bottom |
-| `docs/project/PHASE2_BACKLOG.md` | The 26-step Phase 2 task breakdown — pick up the lowest incomplete step with no incomplete dependencies |
+| `PRODUCTION_REVIEW.md` | Pre-ship readiness audit — all CRITICAL/HIGH/MEDIUM fixed; LOW deferred to Phase 3 |
+| `docs/project/DEVOPS_SPEC.md` | Full k3s/FluxCD deployment spec — hand to DevOps agent to create gitops manifests |
 
 ### Reference during implementation
 | File | Why |
@@ -179,9 +192,7 @@ docker compose exec http-worker go test ./... -v
 
 ---
 
-## 6. Pending TL Deliverables
-
-These are things you own that are not yet done.
+## 6. Completed TL Deliverables
 
 ### ADR-003 — Job/Run Data Model Split ✅ Done
 Written before Step 12 ran, as required. See `docs/adr/ADR-003-job-run-split.md`.
@@ -195,6 +206,12 @@ Phase 2 decisions added (entries 23–28 in `docs/adr/ARCHITECTURE_DECISIONS.md`
 - LLM worker as a separate Python service
 - Text diff (non-LLM) vs JSON diff (LLM) strategy
 - Pull consumer + semaphore worker pool
+
+### Production readiness + CI/CD ✅ Done (2026-04-15)
+- `PRODUCTION_REVIEW.md` — full pre-ship audit, all C/H/M items fixed
+- `docs/project/DEVOPS_SPEC.md` — k3s deployment spec for DevOps agent
+- `.github/workflows/build-push.yml` — CI pipeline, all 4 images on DockerHub
+- `v2.0.0` tag cut on `main`
 
 ---
 
@@ -224,12 +241,13 @@ Tell your session what you want and this persona picks up the work:
 | Start the next backlog step | "Pick up the next incomplete Phase 2 step" |
 | Implement a specific step | "Implement Phase 2 Step N" |
 | Code review a step | "Review the implementation of Step N against the spec" |
-| Write ADR-003 | "Write ADR-003 for the Job/Run data model split" |
 | Update progress | "Mark Step N as complete in PROGRESS.md" |
 | Add a gotcha | "Add [X] to the Gotchas section" |
 | Unblock a stuck step | "I'm stuck on Step N — [describe the issue]" |
 | Check spec compliance | "Does [this code] match the spec for Step N?" |
 | Update ARCHITECTURE_DECISIONS.md | "Add the [X] decision to ARCHITECTURE_DECISIONS.md" |
+| Check CI run | "Check the latest workflow run on scrapeflow" |
+| Start DevOps deployment | "Read docs/project/DEVOPS_SPEC.md and create the k3s manifests in the gitops repo" |
 
 ---
 
@@ -238,10 +256,9 @@ Tell your session what you want and this persona picks up the work:
 Copy and paste this into a new Claude Code session:
 
 ```
-Read docs/personas/tech-lead.md and docs/project/PROGRESS.md.
-You are the Tech Lead for ScrapeFlow. Phase 1 and Phase 2 are both complete (26/26 Phase 2 steps done).
-Phase 3 (production hardening) is next — it starts with the Program Manager persona.
+Read docs/personas/tech-lead.md.
+You are the Tech Lead for ScrapeFlow. Phase 1 and Phase 2 are both complete.
+Production review is done, all fixes applied, CI is live, v2.0.0 tagged.
+Next step: DevOps agent deploys to k3s using docs/project/DEVOPS_SPEC.md, then Phase 3 begins.
 [Tell me what you want to do next.]
 ```
-
-That gives the session: your role and the current project state. No Phase 2 backlog reading needed — all steps are done.
