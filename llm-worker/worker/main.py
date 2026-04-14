@@ -1,5 +1,5 @@
 """
-LLM worker — entry point.
+LLM worker — entry point (Python/asyncio, user-provided Anthropic/OpenAI key).
 
 Startup sequence (spec §4.3):
   1. Load config from env vars (requires LLM_KEY_ENCRYPTION_KEY)

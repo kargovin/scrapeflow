@@ -1,5 +1,5 @@
 """
-Playwright worker — entry point.
+Playwright worker — entry point (Python/asyncio, Chromium via Playwright).
 
 Startup sequence (spec §4.2):
   1. Load config from env vars
