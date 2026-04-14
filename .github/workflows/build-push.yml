@@ -1,0 +1,135 @@
+name: Build & Push Docker Images
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  # ── Detect which service directories changed ───────────────────────────────
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      http-worker: ${{ steps.filter.outputs.http-worker }}
+      playwright-worker: ${{ steps.filter.outputs.playwright-worker }}
+      llm-worker: ${{ steps.filter.outputs.llm-worker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            api:
+              - 'api/**'
+            http-worker:
+              - 'http-worker/**'
+            playwright-worker:
+              - 'playwright-worker/**'
+            llm-worker:
+              - 'llm-worker/**'
+
+  # ── API ────────────────────────────────────────────────────────────────────
+  build-api:
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate timestamp
+        id: ts
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWD }}
+
+      - name: Build and push scrapeflow-api
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          file: ./api/Dockerfile
+          target: production
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/scrapeflow-api:${{ github.ref_name }}-${{ steps.ts.outputs.ts }}-${{ github.sha }}
+
+  # ── Go HTTP Worker ─────────────────────────────────────────────────────────
+  build-http-worker:
+    needs: changes
+    if: needs.changes.outputs.http-worker == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate timestamp
+        id: ts
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWD }}
+
+      - name: Build and push scrapeflow-http-worker
+        uses: docker/build-push-action@v5
+        with:
+          context: ./http-worker
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/scrapeflow-http-worker:${{ github.ref_name }}-${{ steps.ts.outputs.ts }}-${{ github.sha }}
+
+  # ── Playwright Worker ──────────────────────────────────────────────────────
+  build-playwright-worker:
+    needs: changes
+    if: needs.changes.outputs.playwright-worker == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate timestamp
+        id: ts
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWD }}
+
+      - name: Build and push scrapeflow-playwright-worker
+        uses: docker/build-push-action@v5
+        with:
+          context: ./playwright-worker
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/scrapeflow-playwright-worker:${{ github.ref_name }}-${{ steps.ts.outputs.ts }}-${{ github.sha }}
+
+  # ── LLM Worker ────────────────────────────────────────────────────────────
+  build-llm-worker:
+    needs: changes
+    if: needs.changes.outputs.llm-worker == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate timestamp
+        id: ts
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWD }}
+
+      - name: Build and push scrapeflow-llm-worker
+        uses: docker/build-push-action@v5
+        with:
+          context: ./llm-worker
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/scrapeflow-llm-worker:${{ github.ref_name }}-${{ steps.ts.outputs.ts }}-${{ github.sha }}
