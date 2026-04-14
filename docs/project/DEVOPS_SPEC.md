@@ -419,24 +419,44 @@ Verify the exact service names after the HelmReleases reconcile — bitnami char
 
 ---
 
-## 13. One Required Code Change Before Building Images
+## 13. CI/CD — GitHub Actions
 
-**File:** `scrapeflow/api/app/main.py`, lines 37–43
+The workflow file is already committed at `.github/workflows/build-push.yml` in the ScrapeFlow repo.
 
-Uncomment the Alembic migration block (described in §7). This must be done and committed before building the `scrapeflow-api` Docker image. Without it, the database schema will never be created in production.
+### How it works
 
----
+1. Triggers on every push to `main`
+2. A `changes` job runs `dorny/paths-filter` to detect which service directories changed
+3. Four build jobs (`build-api`, `build-http-worker`, `build-playwright-worker`, `build-llm-worker`) each `need: changes` and only run if their respective directory was modified — so pushing a fix to `llm-worker/` does not rebuild the other three images
+4. Each job builds and pushes to DockerHub with the tag format: `main-<unix_ts>-<sha>` — identical to the existing `gitops-test-app` pattern, so Flux ImagePolicy regexes match consistently
 
-## 14. Build and Push Order
+### Required GitHub repository secrets
 
-Build and push images in this order (workers have no dependency on the API image, but the API must be working before workers are useful):
+Add these two secrets to the ScrapeFlow GitHub repo (`Settings → Secrets → Actions`):
 
-1. `api` — `docker build --target production -t k4rth/scrapeflow-api:main-<sha> ./api`
-2. `http-worker` — `docker build -t k4rth/scrapeflow-http-worker:main-<sha> ./http-worker`
-3. `playwright-worker` — `docker build -t k4rth/scrapeflow-playwright-worker:main-<sha> ./playwright-worker`
-4. `llm-worker` — `docker build -t k4rth/scrapeflow-llm-worker:main-<sha> ./llm-worker`
+| Secret | Value |
+|--------|-------|
+| `DOCKER_USERNAME` | Your DockerHub username (e.g. `k4rth`) |
+| `DOCKER_PASSWD` | DockerHub access token (not your account password — generate one at hub.docker.com → Account Settings → Security) |
 
-Going forward, CI (GitHub Actions) should build and push on every merge to `main`. Flux image automation will pick up the new tags.
+### Tag format and Flux ImagePolicy
+
+The pushed tag format is: `main-<unix_ts>-<sha>`
+
+Example: `main-1745612400-a1b2c3d4e5f6...`
+
+When writing `ImagePolicy` resources in the gitops repo, use this regex filter:
+
+```yaml
+filterTags:
+  pattern: '^main-\d+-[a-f0-9]+'
+  extract: '$ts'
+policy:
+  numerical:
+    order: asc
+```
+
+This selects the tag with the highest timestamp — i.e., the most recently built image on `main`.
 
 ---
 
