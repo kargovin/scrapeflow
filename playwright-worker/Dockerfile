@@ -16,7 +16,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /app
 COPY worker/ ./worker/
 
-RUN useradd --no-create-home --uid 1000 appuser
+RUN useradd --no-create-home --uid 1001 appuser
 USER appuser
 
 CMD ["python", "-m", "worker.main"]
