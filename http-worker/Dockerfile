@@ -13,6 +13,9 @@ COPY . .
 RUN go build -o worker ./cmd/worker
 
 FROM alpine:3.19
+RUN apk add --no-cache ca-certificates && \
+    adduser -S -u 1000 appuser
 WORKDIR /app
 COPY --from=builder /app/worker .
+USER appuser
 CMD ["./worker"]

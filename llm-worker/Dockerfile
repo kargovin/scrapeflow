@@ -1,11 +1,21 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS builder
 
-WORKDIR /app
+WORKDIR /build
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 COPY pyproject.toml .
-RUN pip install -e .
+RUN pip install --no-cache-dir .
 
+FROM python:3.12-slim
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
 COPY worker/ ./worker/
-COPY tests/ ./tests/
+
+RUN useradd --no-create-home --uid 1000 appuser
+USER appuser
 
 CMD ["python", "-m", "worker.main"]

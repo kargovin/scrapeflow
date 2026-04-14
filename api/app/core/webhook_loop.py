@@ -34,6 +34,7 @@ async def webhook_delivery_loop(
     fernet: Fernet,
 ) -> None:
     """Background task: deliver pending webhooks with exponential backoff."""
+    db_error_backoff = 2  # seconds; doubles on consecutive DB errors, capped at 60
     while True:
         await asyncio.sleep(15)  # sleep at top — no immediate trigger on startup
         try:
@@ -51,6 +52,7 @@ async def webhook_delivery_loop(
             # Session closes here — row locks released.
             # _attempt_delivery re-fetches by ID and re-checks status as a race guard.
 
+            db_error_backoff = 2  # reset on successful DB query
             for delivery in deliveries:
                 try:
                     await _attempt_delivery(delivery.id, db_factory, http_client, fernet)
@@ -62,7 +64,12 @@ async def webhook_delivery_loop(
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("webhook_delivery_loop: unhandled error, continuing")
+            logger.exception(
+                "webhook_delivery_loop: unhandled error, backing off",
+                backoff=db_error_backoff,
+            )
+            await asyncio.sleep(db_error_backoff)
+            db_error_backoff = min(db_error_backoff * 2, 60)
 
 
 async def _attempt_delivery(

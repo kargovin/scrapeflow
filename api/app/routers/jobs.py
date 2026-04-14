@@ -349,6 +349,14 @@ async def patch_jobs(
                     status.HTTP_409_CONFLICT,
                     detail="LLM config cant be updated as job run in process",
                 )
+            if value is not None:
+                key_id = value.get("llm_key_id")
+                if key_id is not None:
+                    user_llm_key = await db.get(UserLLMKey, key_id)
+                    if user_llm_key is None or user_llm_key.user_id != user.id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND, detail="LLM Key not found"
+                        )
 
         setattr(job, field, value)
 

@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any
 
 import anthropic
@@ -8,10 +9,12 @@ from openai import AsyncOpenAI
 
 from worker.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 def _decrypt_key(encrypted_api_key: str) -> str:
     """Fernet-decrypt an LLM API key using the shared encryption key."""
-    fernet = Fernet(settings.llm_key_encryption_key.encode())
+    fernet = Fernet(settings.llm_key_encryption_key)
     return fernet.decrypt(encrypted_api_key.encode()).decode()
 
 
@@ -82,6 +85,13 @@ async def call_llm(
     api_key = _decrypt_key(encrypted_api_key)
 
     if len(content) > settings.llm_max_content_chars:
+        logger.warning(
+            "Content truncated before LLM call",
+            extra={
+                "original_len": len(content),
+                "truncated_to": settings.llm_max_content_chars,
+            },
+        )
         content = content[: settings.llm_max_content_chars]
 
     if provider == "anthropic":

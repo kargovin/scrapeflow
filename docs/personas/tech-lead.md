@@ -1,7 +1,7 @@
 # Tech Lead — ScrapeFlow Onboarding Document
 
 > **Purpose:** Bring a new Tech Lead persona up to speed on project state, work already done, conventions, and what to do next. Read this before doing anything.
-> **Last updated:** 2026-04-12
+> **Last updated:** 2026-04-14
 > **Covers:** Role definition, what was accomplished, the full backlog, file map, process conventions, and how to unblock engineers.
 
 ---
@@ -29,7 +29,7 @@ Program Manager → Software Architect → Tech Lead (you) → Engineer(s)
 
 ---
 
-## 2. Project State When This Document Was Written (2026-04-12)
+## 2. Project State When This Document Was Last Updated (2026-04-14)
 
 ### Completed
 - **Phase 1 MVP** — 9 steps, fully implemented and tested (auth, job CRUD, Go HTTP worker, MinIO storage, Redis rate limiting, Clerk auth)
@@ -39,26 +39,26 @@ Program Manager → Software Architect → Tech Lead (you) → Engineer(s)
 - **ADR-003** — Job/Run Data Model Split — written before Step 12 (Migration 2.4) as required
 - **ADR index** (`docs/adr/README.md`) — created with status tracking and supersession protocol
 - **ADR-001** — updated with partial supersession markers (inline ⚠ notices at §2, §3, §8)
-- **Phase 2 backlog** (`docs/project/PHASE2_BACKLOG.md`) — 26 ordered steps with dependencies, spec refs, verify commands
-- **`PROGRESS.md`** — Phase 2 tracking table updated (Steps 1–17 ✅ Done, Steps 18–26 ⬜ Todo)
-- **Phase 2 Steps 1–17** — all implemented and committed:
+- **Phase 2 backlog** (`docs/project/PHASE2_BACKLOG.md`) — 26 ordered steps, all complete; deviation notes added
+- **`PROGRESS.md`** — Phase 2 tracking table updated (all 26 steps ✅ Done)
+- **Phase 2 Steps 1–26** — all implemented and committed:
   - Foundation (Steps 1–3): SSRF refactor, admin user dependency, Fernet setup
   - Migrations (Steps 4–9, 12): all six additive migrations + irreversible run-state column drop
   - API routes (Steps 10–11, 16–17): POST/GET/DELETE/PATCH /jobs updated + LLM key routes
   - NATS + Go worker (Steps 13–14): constants, nats-init, Go worker Phase 2 update
   - Result consumer (Step 15): full Phase 2 rewrite with LLM dispatch, diff, webhook creation
+  - Python workers (Steps 18–19): Playwright worker + LLM worker services
+  - Background tasks (Steps 20–22): scheduler loop, webhook delivery loop, MaxDeliver advisory subscriber
+  - Admin panel (Steps 23–24): admin routes + stats endpoint
+  - Cleanup script (Step 25): `scripts/cleanup_old_runs.py`
+  - Docker Compose (Step 26): playwright-worker + llm-worker services added
 
 ### Ready to start
-- **Phase 2 Steps 18–26** — 9 steps remaining
-- **Immediate next action:** Steps 18, 19, 20, 21, 22 are all unblocked — pick any of:
-  - Step 18: Python Playwright worker (new service)
-  - Step 19: Python LLM worker (new service)
-  - Step 20: Scheduler loop background task
-  - Step 21: Webhook delivery loop background task
-  - Step 22: MaxDeliver advisory subscriber
+- **Phase 3** — Production hardening. See `CLAUDE.md` for Phase 3 scope and the persona-chain build process.
+- **Immediate next action:** Start Phase 3 with the Program Manager persona — define PRDs for the Phase 3 feature set.
 
 ### Pending
-- Nothing is currently blocking any remaining step. Steps 18 and 19 can be developed in parallel; Steps 20–22 depend only on Step 13 (done); Steps 23–26 depend on Group B migrations (all done).
+- `ARCHITECTURE_DECISIONS.md` — Phase 2 decisions added (see §6 below). ✅ Done 2026-04-14.
 
 ---
 
@@ -87,6 +87,8 @@ Read these in the order listed when picking up a new session.
 |------|-----|
 | `docs/adr/ARCHITECTURE_DECISIONS.md` | 22 Phase 1 implementation decisions with rationale and alternatives |
 | `docs/personas/architect.md` | Architect persona onboarding — full record of every Phase 2 design decision |
+| `docs/project/PHASE3_DEFERRED.md` | Living list of everything deferred out of Phase 2 — add to it whenever something is punted; read it at Phase 3 kickoff |
+| `docs/project/open-questions.md` | Implementation-time questions that need a decision before code is written; check before starting any step that touches schema or contracts |
 
 ### Archive (historical — only needed for incident investigation)
 | File | What it was |
@@ -118,25 +120,25 @@ Full details in `docs/project/PHASE2_BACKLOG.md`. This is the TL summary — dep
 - Step 11: `GET/DELETE /jobs` Phase 2 ✅
 - Steps 16–17: New job routes + LLM key routes ✅
 
-**Group D — Workers: partially done**
+**Group D — Workers: ✅ All done**
 - Step 13: NATS constants + docker-compose nats-init ✅
 - Step 14: Go HTTP worker update ✅
-- Step 18: Python Playwright worker (new service) ⬜ — unblocked, ready to start
-- Step 19: Python LLM worker (new service) ⬜ — unblocked, can parallel with Step 18
+- Step 18: Python Playwright worker (new service) ✅
+- Step 19: Python LLM worker (new service) ✅
 
-**Group E — Background tasks: partially done**
+**Group E — Background tasks: ✅ All done**
 - Step 15: Result consumer full Phase 2 rewrite ✅
-- Step 20: Scheduler loop ⬜ — unblocked
-- Step 21: Webhook delivery loop ⬜ — unblocked
-- Step 22: MaxDeliver advisory subscriber ⬜ — unblocked
+- Step 20: Scheduler loop ✅
+- Step 21: Webhook delivery loop ✅
+- Step 22: MaxDeliver advisory subscriber ✅
 
-**Group F — Admin + cleanup: ⬜ All remaining**
-- Steps 23–24: Admin panel routes + stats endpoint ⬜
-- Step 25: `cleanup_old_runs.py` script ⬜
-- Step 26: Docker Compose — add Playwright + LLM worker service definitions ⬜
+**Group F — Admin + cleanup: ✅ All done**
+- Steps 23–24: Admin panel routes + stats endpoint ✅
+- Step 25: `cleanup_old_runs.py` script ✅
+- Step 26: Docker Compose — add Playwright + LLM worker service definitions ✅
 
-### Remaining steps (9 of 26)
-Steps 18–26. All dependencies are satisfied. Steps 18, 19, 20, 21, 22 can all start now; Step 26 should follow Steps 18 and 19 since it adds their Docker Compose service entries.
+### Remaining steps
+None. All 26 steps complete. Phase 2 is done — proceed to Phase 3.
 
 ---
 
@@ -184,9 +186,9 @@ These are things you own that are not yet done.
 ### ADR-003 — Job/Run Data Model Split ✅ Done
 Written before Step 12 ran, as required. See `docs/adr/ADR-003-job-run-split.md`.
 
-### `ARCHITECTURE_DECISIONS.md` additions (non-blocking, do as implementation progresses)
+### `ARCHITECTURE_DECISIONS.md` additions ✅ Done (2026-04-14)
 
-Steps 1–17 are done. Add entries for each of these Phase 2 decisions — some may already be present; verify before adding:
+Phase 2 decisions added (entries 23–28 in `docs/adr/ARCHITECTURE_DECISIONS.md`):
 - Fernet symmetric encryption for LLM API keys and webhook secrets
 - `FOR UPDATE SKIP LOCKED` for scheduler multi-instance coordination
 - Webhook delivery via `webhook_deliveries` table (not NATS)
@@ -209,6 +211,7 @@ These decisions are already made by the Architect and embedded in the spec. Do n
 | `latest/` + `history/` dual MinIO paths | Workers write both; `result_path` always stores the `history/` path |
 | ADR-001 principles (§4, §5, §6, §7) | Ack timing, retry policy, cancellation — unchanged from Phase 1 |
 | No `transaction = False` in migrations | Use COMMIT/BEGIN trick in `upgrade()` for the ALTER TYPE migration |
+| `DELETE /jobs/{id}` pauses scheduled jobs | Cancels the active `job_runs` row AND sets `schedule_status='paused'` + `next_run_at=NULL` if `schedule_cron IS NOT NULL` — without this, the scheduler re-fires the job at the next cron tick (spec gap resolved 2026-04-14, see ADR-003 §4) |
 
 ---
 
@@ -235,10 +238,10 @@ Tell your session what you want and this persona picks up the work:
 Copy and paste this into a new Claude Code session:
 
 ```
-Read docs/personas/tech-lead.md, docs/project/PROGRESS.md, and docs/project/PHASE2_BACKLOG.md.
-You are the Tech Lead for ScrapeFlow. Phase 1 is complete. Phase 2 is 17/26 steps done (Steps 1–17 ✅).
-The next incomplete steps are 18–26 — all dependencies are satisfied.
-[Tell me what you want to do next, or ask me to pick up the next step.]
+Read docs/personas/tech-lead.md and docs/project/PROGRESS.md.
+You are the Tech Lead for ScrapeFlow. Phase 1 and Phase 2 are both complete (26/26 Phase 2 steps done).
+Phase 3 (production hardening) is next — it starts with the Program Manager persona.
+[Tell me what you want to do next.]
 ```
 
-That gives the session: your role, the current project state, and the full task backlog. No other context is needed to start implementing.
+That gives the session: your role and the current project state. No Phase 2 backlog reading needed — all steps are done.

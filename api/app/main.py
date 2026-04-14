@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
     http_client = httpx.AsyncClient()
 
     # Fernet instance — same key used for LLM key encryption (validated at settings load)
-    fernet = Fernet(settings.llm_key_encryption_key.encode())
+    fernet = Fernet(settings.llm_key_encryption_key)
 
     # Scheduler — dispatches due cron jobs every 60s
     scheduler_task = asyncio.create_task(scheduler_loop(AsyncSessionLocal, app.state.nats_js))

@@ -39,10 +39,13 @@ docker compose exec api uv run alembic upgrade head
 ## Current state
 
 - Branch: `develop`
-- Steps 1–24 complete
-- **138 API tests passing** (`docker compose exec api uv run pytest tests/ -v`)
+- **Phase 2 complete — all 26 steps done**
+- **Phase 2 production readiness review complete — all CRITICAL + HIGH + MEDIUM issues resolved**
+- **139 API tests passing** (`docker compose -f docker/docker-compose.yml exec api uv run python -m pytest`)
 - **28 playwright-worker tests passing** (`docker compose exec playwright-worker python -m pytest tests/ -v`)
 - **27 llm-worker tests passing** (`docker compose exec llm-worker python -m pytest tests/ -v`)
+- All 8 Docker Compose services healthy and verified with a live e2e smoke test
+- `PRODUCTION_REVIEW.md` at repo root documents all findings and their resolution status
 
 ---
 
@@ -307,25 +310,125 @@ Two new routes completing the admin panel API:
 
 ---
 
-## Next step
+## What was built in Step 25
 
-**Step 25**: `scripts/cleanup_old_runs.py`
+**Step 25** — Run history cleanup script (`api/scripts/cleanup_old_runs.py`):
 
-From `docs/project/PHASE2_BACKLOG.md` Step 25:
+Standalone async script that purges `job_runs` older than `SCHEDULE_RUN_RETENTION_DAYS` (default 90). In production runs as a k3s CronJob at 2am daily.
 
-**Files to implement:**
-- NEW `api/scripts/cleanup_old_runs.py` — standalone async script (spec §8.3)
+### Files created/modified
 
-**Key rules:**
-- Batches of 500 rows
-- MinIO delete BEFORE DB delete (MinIO failure leaves DB row for retry; inverse is unrecoverable)
-- `successful_ids` built inside loop — only append on successful MinIO delete
-- Deletes: `job_runs`, their `webhook_deliveries`, their `history/` MinIO objects
-- Never deletes: `latest/` MinIO objects, `jobs` rows
+| File | Change |
+|------|--------|
+| `api/scripts/cleanup_old_runs.py` | NEW — batched cleanup script |
+| `api/Dockerfile` | Added `COPY scripts/ scripts/` to `base` stage |
+| `.env.example` | Added `SCHEDULE_RUN_RETENTION_DAYS=90` |
 
-**Verify:**
+### Key implementation facts
+
+- **MinIO first, DB second**: MinIO and Postgres have no shared transaction. DB delete failure leaves a retryable row; MinIO delete failure after DB delete = orphaned object with no reference to find it.
+- **`result_path` parsing**: stored as `"{bucket}/{key}"` (e.g. `scrapeflow-results/history/abc/123.html`). Use `path.partition("/")` to extract the key — same pattern as `diff.py:29`. The spec's `startswith("history/")` check is a bug (path starts with bucket name, not `"history/"`).
+- **`successful_ids` built inside the loop**: append only after successful MinIO delete (or when `result_path` is None — failed runs have no object). Never filter after the loop.
+- **`break` on empty `successful_ids`**: spec uses `continue` which causes infinite loop when MinIO is persistently down. Use `break` with error log.
+- **Scope**: deletes `job_runs`, their `webhook_deliveries`, their `history/` MinIO objects. Never touches `latest/` objects or `jobs` rows.
+
+### Verify
+
 ```bash
-docker compose exec api python scripts/cleanup_old_runs.py
+docker compose exec api uv run python scripts/cleanup_old_runs.py
 ```
 
-**Spec ref:** §8.3
+---
+
+## What was done in this session (Step 26 / Phase 2 close-out)
+
+**Step 26** — Docker Compose was already complete (services were wired in Steps 18–19). Session was used to fix two bugs surfaced by the e2e smoke test and verify the full stack.
+
+### Bug 1: `go-worker` NATS consumer subject mismatch
+- **Symptom**: `http-worker` crash-looping — `nats: subject does not match consumer`
+- **Root cause**: The `go-worker` durable consumer was created in Phase 1 with filter `scrapeflow.jobs.run`. Phase 2 changed the subject to `scrapeflow.jobs.run.http`. NATS stores consumer config persistently; `PullSubscribe` does not update an existing consumer.
+- **Fix**: Delete the stale consumer via `nats consumer delete SCRAPEFLOW go-worker`, then restart the worker so it recreates with the correct filter.
+- **Key fact**: NATS stream also had ~40k stale messages from hundreds of test runs (stream had no TTL, worker was broken so nothing drained). Purged with `nats stream purge SCRAPEFLOW -f`.
+
+### Bug 2: Go worker Alpine image missing CA certificates
+- **Symptom**: All HTTPS fetches fail — `x509: certificate signed by unknown authority`
+- **Root cause**: `alpine:3.19` runtime image ships without CA certificates. Go's `net/http` uses the OS trust store.
+- **Fix**: Added `RUN apk add --no-cache ca-certificates` to `http-worker/Dockerfile` runtime stage.
+
+### E2e smoke test result
+- `POST /jobs` with `http://example.com` → `status: completed` in ~133ms
+- `result_path: scrapeflow-results/history/{job_id}/{ts}.md` written to MinIO
+- Markdown content verified: `# Example Domain`
+
+---
+
+## What was done: Phase 2 Production Readiness Review
+
+A full review was written to `PRODUCTION_REVIEW.md` (repo root, not committed). All CRITICAL, HIGH, and MEDIUM items were fixed.
+
+### C1 — Fernet encoding inconsistency (FIXED)
+
+`main.py` and `llm-worker/worker/llm.py` called `Fernet(settings.llm_key_encryption_key.encode())` while all API routes and the rest of the codebase used `Fernet(settings.llm_key_encryption_key)` (string, no `.encode()`). Standardized to string (no `.encode()`) everywhere to match the majority pattern and `api/app/core/encryption.py`.
+
+### C2 — Missing LLM key ownership check in PATCH /jobs (FIXED)
+
+`PATCH /jobs/{id}` accepted `llm_config.llm_key_id` without verifying the key belonged to the authenticated user — a user knowing another user's key UUID could reference it. Added the same ownership check that `POST /jobs` already had. New test: `test_patch_job_llm_config_other_user_key` in `api/tests/test_jobs.py`.
+
+### H1 — Go HTTP worker busy-loop on NATS disconnect (FIXED)
+
+`http-worker/internal/worker/worker.go` — on any fetch error, the loop called `continue` with no sleep. Added `backoff := 2 * time.Second` before the loop; `nats.ErrTimeout` (normal empty queue) continues immediately; any other error doubles the backoff (capped at 30s) and sleeps before retrying.
+
+### H2 — Webhook delivery loop busy-loop on DB error (FIXED)
+
+`api/app/core/webhook_loop.py` — the outer `except Exception` had no sleep before re-entering the loop. Added `db_error_backoff = 2` (doubles on each DB error, capped at 60s); reset to 2 on each successful DB query.
+
+### M1 — Non-root users in Dockerfiles (FIXED)
+
+All four Dockerfiles now run as `appuser` (uid 1000):
+- `api/Dockerfile` — `adduser` + `USER appuser` in `production` stage only
+- `http-worker/Dockerfile` — `adduser -S` (Alpine) in final stage
+- `llm-worker/Dockerfile` — `useradd` in new final stage
+- `playwright-worker/Dockerfile` — `useradd` in new final stage
+
+### M2 — Worker Dockerfiles: multi-stage + drop test artifacts (FIXED)
+
+`llm-worker/Dockerfile` and `playwright-worker/Dockerfile` rewritten as multi-stage:
+- Builder stage: creates `/opt/venv`, runs `pip install --no-cache-dir .` (non-editable)
+- Final stage: copies `/opt/venv` only; copies `worker/` only — `tests/` never enters the final image
+- playwright-worker uses the same base image for both stages to preserve browser binaries at `/ms-playwright`
+
+### M3 — docker-compose.yml hardcoded credentials (FIXED)
+
+All Postgres and MinIO credentials in `docker/docker-compose.yml` replaced with `${VAR:-default}` substitution. All four app services updated consistently. New vars documented in `.env.example`. Dev behavior unchanged (defaults match the old hardcoded values).
+
+### M4 — Python workers fixed 1s backoff on NATS errors (FIXED)
+
+Both `playwright-worker/worker/main.py` and `llm-worker/worker/main.py` — replaced `asyncio.sleep(1)` with exponential backoff: `fetch_backoff` starts at 2s, doubles on each consecutive non-timeout error, capped at 60s. Reset to 2s on success or `TimeoutError`.
+
+### M5 — Scheduler NATS publishes not individually caught (FIXED)
+
+`api/app/core/scheduler.py` — all four `js.publish()` calls (in `_dispatch_due_jobs` and `_recover_stale_pending`) are now individually wrapped in `try/except` with a log message that explicitly identifies the failure as a publish error and references the stale-pending recovery window.
+
+### Items deferred (L1–L3)
+
+- **L1**: No healthchecks for worker services — deferred to Phase 3 k8s liveness probes
+- **L2**: No resource limits in docker-compose.yml — deferred to Phase 3 k8s manifests
+- **L3**: `/health/ready` leaks service topology — acceptable behind Traefik on homelab
+
+---
+
+## Next step
+
+**Phase 3** — Production hardening. See `docs/project/PHASE3_DEFERRED.md` for deferred items from Phase 2.
+
+Phase 3 uses a multi-persona build process (PM → Architect → Tech Lead → Engineer). Start by reading `CLAUDE.md` §"Phase 3 — Build Process" for the workflow.
+
+**Phase 3 work items** (from `docs/project/PHASE2_BACKLOG.md` §Deferred):
+- k3s manifests for `playwright-worker`, `llm-worker`, and the cleanup CronJob
+- Re-validate `webhook_url` on each delivery attempt (DNS rebinding / SSRF gap)
+- Per-event webhook subscriptions
+- Proxy rotation (pluggable provider config)
+- robots.txt compliance toggle
+- Billing/quotas (per-user job limits)
+- Admin SPA (React)
+- MCP server (`scrape_url`, `get_result`, `list_jobs`)

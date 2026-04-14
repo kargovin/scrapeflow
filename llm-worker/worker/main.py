@@ -89,6 +89,9 @@ async def run() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
+    fetch_backoff = (
+        2  # seconds; doubles on consecutive non-timeout errors, capped at 60
+    )
     while not stop.is_set():
         available = sem._value
         if available == 0:
@@ -97,11 +100,13 @@ async def run() -> None:
 
         try:
             msgs = await psub.fetch(batch=available, timeout=5)
+            fetch_backoff = 2  # reset on success
         except nats.errors.TimeoutError:
             continue
         except Exception as exc:
-            log.error("fetch_error", error=str(exc))
-            await asyncio.sleep(1)
+            log.error("fetch_error", error=str(exc), backoff=fetch_backoff)
+            await asyncio.sleep(fetch_backoff)
+            fetch_backoff = min(fetch_backoff * 2, 60)
             continue
 
         for msg in msgs:

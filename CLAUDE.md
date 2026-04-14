@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phase 2 — in progress. Phase 1 MVP is complete. Phase 2 core features are actively being built.**
+> **Status: Phase 2 complete. Phase 1 MVP and all 26 Phase 2 steps are done. Phase 3 (production hardening) is next.**
 
 ## Goal
 

@@ -1,12 +1,21 @@
+FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy AS builder
+
+WORKDIR /build
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
 FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 WORKDIR /app
-
-# Install Python dependencies first (layer-cached until pyproject.toml changes)
-COPY pyproject.toml .
-RUN pip install -e .
-
 COPY worker/ ./worker/
-COPY tests/ ./tests/
+
+RUN useradd --no-create-home --uid 1000 appuser
+USER appuser
 
 CMD ["python", "-m", "worker.main"]

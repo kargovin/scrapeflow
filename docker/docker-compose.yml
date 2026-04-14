@@ -4,9 +4,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: scrapeflow
-      POSTGRES_PASSWORD: scrapeflow
-      POSTGRES_DB: scrapeflow
+      POSTGRES_USER: ${POSTGRES_USER:-scrapeflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scrapeflow}
+      POSTGRES_DB: ${POSTGRES_DB:-scrapeflow}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -48,8 +48,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: scrapeflow
-      MINIO_ROOT_PASSWORD: scrapeflow_secret
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
     volumes:
       - minio_data:/data
     ports:
@@ -93,12 +93,12 @@ services:
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://scrapeflow:scrapeflow@postgres:5432/scrapeflow
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scrapeflow}:${POSTGRES_PASSWORD:-scrapeflow}@postgres:5432/${POSTGRES_DB:-scrapeflow}
       REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: scrapeflow
-      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
       MINIO_SECURE: 'false'
     volumes:
       - ../api/app:/app/app
@@ -125,7 +125,7 @@ services:
         - action: rebuild
           path: ../api/pyproject.toml
 
-  # ── Go HTTP scraper worker ───────────────────────────────────────────────────
+  # ── Python Playwright worker ─────────────────────────────────────────────────
 
   playwright-worker:
     build:
@@ -133,8 +133,8 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: scrapeflow
-      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
       MINIO_BUCKET: scrapeflow-results
       MINIO_SECURE: 'false'
       PLAYWRIGHT_MAX_WORKERS: '3'
@@ -156,8 +156,8 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: scrapeflow
-      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
       MINIO_BUCKET: scrapeflow-results
       MINIO_SECURE: 'false'
       LLM_MAX_WORKERS: '3'
@@ -170,6 +170,8 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # ── Go HTTP scraper worker ───────────────────────────────────────────────────
+
   http-worker:
     build:
       context: ../http-worker
@@ -177,8 +179,8 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: scrapeflow
-      MINIO_SECRET_KEY: scrapeflow_secret
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
       MINIO_BUCKET: scrapeflow-results
       MINIO_SECURE: 'false'
       FETCH_TIMEOUT_SECS: '30'

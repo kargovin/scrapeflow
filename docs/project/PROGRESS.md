@@ -92,8 +92,8 @@
 | 22   | MaxDeliver advisory subscriber                                        | ✅ Done |
 | 23   | Admin panel API routes                                                | ✅ Done |
 | 24   | Admin stats endpoint                                                  | ✅ Done |
-| 25   | `scripts/cleanup_old_runs.py`                                         | ⬜ Todo |
-| 26   | Docker Compose: add Playwright + LLM worker services                  | ⬜ Todo |
+| 25   | `scripts/cleanup_old_runs.py`                                         | ✅ Done |
+| 26   | Docker Compose: add Playwright + LLM worker services                  | ✅ Done |
 
 </details>
 
@@ -123,6 +123,8 @@ Gotchas
 - Go worker does not need Postgres — only NATS + MinIO. If you see a Postgres dependency in the worker, something is wrong architecturally.
 - Go Dockerfile must copy both `go.mod` and `go.sum` before `go mod download` to get proper layer caching. Copying only `go.mod` causes full re-download on every code change.
 - Bot-protected sites (Amazon, Cloudflare-backed) will return 503/CAPTCHA pages to the plain HTTP worker — this is expected behaviour, not a bug. Playwright worker (Phase 2) addresses this.
+- Go worker Alpine runtime image needs `RUN apk add --no-cache ca-certificates` — Alpine ships without CA certificates, so all HTTPS fetches fail with "x509: certificate signed by unknown authority" without it.
+- NATS durable consumer filter subjects are stored persistently on disk. If the worker subject changes (e.g. Phase 1 `scrapeflow.jobs.run` → Phase 2 `scrapeflow.jobs.run.http`), the old consumer must be manually deleted (`nats consumer delete SCRAPEFLOW <name>`) so the worker can recreate it with the correct filter. PullSubscribe does not update an existing consumer's config.
 </details>
 
 <details>

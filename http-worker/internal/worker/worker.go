@@ -89,6 +89,7 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int, workerPoolSize int) er
 	// sem is a buffered channel used as a semaphore to cap concurrent jobs.
 	// Sending to sem acquires a slot; receiving from sem releases one.
 	sem := make(chan struct{}, workerPoolSize)
+	backoff := 2 * time.Second // NATS fetch error backoff, doubles on each non-timeout error
 
 	for {
 		// Check for shutdown before each fetch — ctx.Done() is closed on SIGTERM.
@@ -110,8 +111,19 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int, workerPoolSize int) er
 		// causing spurious NATS redelivery.
 		msgs, err := sub.Fetch(available, nats.MaxWait(5*time.Second))
 		if err != nil {
+			// nats.ErrTimeout fires every ~5s when the queue is empty — that is normal.
+			// Any other error (connection lost, server gone) gets exponential backoff
+			// to avoid a busy-loop burning 100% CPU while NATS is down.
+			if err != nats.ErrTimeout {
+				backoff = min(backoff*2, 30*time.Second)
+				slog.Warn("NATS fetch error, backing off", "backoff", backoff, "error", err)
+				time.Sleep(backoff)
+			} else {
+				backoff = 2 * time.Second // reset after a clean timeout
+			}
 			continue
 		}
+		backoff = 2 * time.Second // reset on successful fetch
 
 		for _, msg := range msgs {
 			sem <- struct{}{} // Acquire a slot

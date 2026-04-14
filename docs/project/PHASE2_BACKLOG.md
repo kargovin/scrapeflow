@@ -1,10 +1,23 @@
 # ScrapeFlow Phase 2 — Implementation Backlog
 
 > **Owner:** Tech Lead
-> **Status:** Ready for implementation
+> **Status:** ✅ Complete — all 26 steps implemented and committed (2026-04-14)
 > **Spec source:** `docs/phase2/phase2-engineering-spec-v3.md` (approved, v3 — all architect review issues resolved)
 > **Test command (Python):** `docker compose exec api python -m pytest`
 > **Test command (Go):** `docker compose exec http-worker go test ./...`
+
+## Implementation Deviations from Spec
+
+These are naming and structural choices made during implementation that differ from the spec's conventions. All are functionally correct.
+
+| Spec said | Implemented as | Notes |
+|-----------|---------------|-------|
+| `playwright-worker/app/` package | `playwright-worker/worker/` | Clearer package name for a worker process |
+| `llm-worker/app/` package | `llm-worker/worker/` | Consistent with playwright-worker naming |
+| `api/app/models/llm_key.py` | `api/app/models/llm_keys.py` | Plural naming consistent with other model files |
+| `api/app/models/job_run.py` | `api/app/models/job_runs.py` | Plural naming consistent with other model files |
+| `playwright-worker/app/worker.py` | Logic inlined into `worker/main.py` | Single-file worker loop; separate file added no value |
+| Result consumer: pull consumer (implied) | Push subscriber via `js.subscribe()` | Push is correct for event-driven consumer; pull consumer mandate only applies to scrape workers (§4.1–4.3) |
 
 ---
 

@@ -320,3 +320,108 @@
 | Rate limiting | Fixed window counter (`INCR` + `EXPIRE`) | Simple, cheap, correct for MVP; 2–3 Redis ops | Sliding window log (planned upgrade), token bucket |
 | API key creation response | Two Pydantic models (`ApiKeyCreatedResponse` includes `key`, `ApiKeyResponse` does not) | Enforces at type level that raw key is shown once only | Single model with optional `key` field |
 | Clerk `authorized_parties` | `None` in dev, explicit domain list in prod | Empty list `[]` rejects all tokens including dashboard-issued ones | Hardcode domain, skip check entirely |
+| LLM/webhook secret encryption | Fernet (symmetric AES-128-CBC + HMAC) | Single shared key; deterministic — decryptable at runtime without per-record metadata | Asymmetric encryption (complex key management), plaintext (unacceptable) |
+| Scheduler multi-instance coordination | `FOR UPDATE SKIP LOCKED` | Advisory lock semantics; competing replicas silently skip locked rows without blocking | Redis distributed lock, single-scheduler instance requirement |
+| Webhook delivery mechanism | `webhook_deliveries` table polled by loop | Delivery loop can retry with backoff, track attempts, and survive API restarts | NATS publish (fire-and-forget, no retry tracking), immediate HTTP POST in result consumer |
+| LLM worker isolation | Separate Python service (`llm-worker/`) | Isolates LLM dependency surface (Anthropic/OpenAI SDKs) from API; independent scaling | LLM calls inside API request handler, inline in result consumer |
+| Diff strategy | Text diff (non-LLM runs) + JSON diff (LLM runs) | Non-LLM produces markdown/HTML — text diff is meaningful; LLM produces structured JSON — field-level diff is more useful | Unified diff algorithm for both, no diff |
+| Scrape worker pool | Pull consumer + semaphore | Fetch exactly `available_slots` messages — prevents AckWait timer starting on messages that can't run yet | Push consumer (starts timers regardless of capacity), thread pool |
+
+---
+
+## 23. Fernet Encryption for LLM API Keys and Webhook Secrets
+
+**What was done:** LLM API keys (`user_llm_keys.encrypted_api_key`) and webhook secrets (`jobs.webhook_secret`) are encrypted at rest using Fernet (from the `cryptography` library). The encryption key (`LLM_KEY_ENCRYPTION_KEY`) is a 32-byte base64-urlsafe string stored in the `.env` file, validated at startup.
+
+**Why Fernet:** LLM API keys must be decryptable at runtime — the LLM worker needs the plaintext key to call the provider API. Irreversible hashing (bcrypt) is inappropriate here. Fernet provides authenticated encryption (AES-128-CBC + HMAC-SHA256) with a simple API: `Fernet.encrypt()` / `Fernet.decrypt()`. It handles IV generation and MAC verification internally.
+
+**Why symmetric (not asymmetric):** The same process (API) encrypts and later decrypts (via `get_fernet` dependency). There is no trust boundary between encryptor and decryptor — asymmetric encryption would add complexity with no security benefit.
+
+**Key management:** A single `LLM_KEY_ENCRYPTION_KEY` is used across all records. A future improvement (Phase 3 / hardening) would rotate to per-record keys or a KMS-backed envelope encryption scheme if the key is ever compromised.
+
+**Alternatives:**
+- Asymmetric encryption — correct only if the encryptor and decryptor are separate (e.g. client encrypts, server decrypts)
+- Vault / KMS — production-grade key management; over-engineered for homelab Phase 2
+- Plaintext — unacceptable for third-party API keys
+
+---
+
+## 24. Scheduler Multi-Instance Coordination: `FOR UPDATE SKIP LOCKED`
+
+**What was done:** The scheduler loop uses `SELECT ... FOR UPDATE SKIP LOCKED` when querying jobs with `next_run_at <= NOW()`. Each row is locked for the duration of the job dispatch transaction; competing API replicas that run the same query silently skip already-locked rows.
+
+**Why:** Without `SKIP LOCKED`, a second replica would block waiting for the first to release its lock, then dispatch the same job a second time after the lock is released. `SKIP LOCKED` eliminates this — a replica only processes rows it actually acquired a lock on. Commit-per-job (rather than a batch commit) ensures each row lock is released immediately after the run is created and NATS message published.
+
+**Why DB commit before NATS publish:** If the process crashes after committing but before publishing to NATS, the `job_runs` row exists with `status='pending'`. The stale-pending recovery loop (re-publishes runs with `status='pending'` older than 10 minutes) catches this. The inverse (NATS publish before commit) would silently lose the run on DB failure with no recovery path.
+
+**Alternatives:**
+- Redis distributed lock — works, but adds a Redis round-trip and a separate lock TTL concern
+- Single scheduler instance (enforced via k8s leader election) — eliminates the problem but adds infrastructure complexity and a SPOF
+
+---
+
+## 25. Webhook Delivery: `webhook_deliveries` Table + Polling Loop
+
+**What was done:** When a scrape result triggers a webhook, a `WebhookDelivery` row is inserted (atomically with the `job_runs` status update) with `status='pending'`. A separate `webhook_delivery_loop` background task polls every 15 seconds for pending deliveries and fires the HTTP POST with exponential backoff.
+
+**Why a DB table instead of NATS or immediate HTTP:**
+- Durability: delivery state survives API restarts
+- Retry tracking: `attempts`, `last_error`, `next_attempt_at`, and `status='exhausted'` are all queryable by the admin API
+- Backoff: the backoff schedule (0s, 30s, 5m, 30m, 2h) is enforced by `next_attempt_at <= NOW()` — no in-memory timers needed
+- Admin retrigger: `POST /admin/webhooks/deliveries/{id}/retry` resets `attempts=0` and `status='pending'` — trivial because the delivery is a DB row
+
+**Why not publish to NATS:** NATS JetStream redelivery is configurable (max deliver, ack wait) but not designed for multi-hour backoff schedules or admin-triggered retries. The delivery table gives full observability and control.
+
+**HMAC signing:** Every delivery POST includes `X-ScrapeFlow-Signature: sha256=<hmac>`. The webhook secret (Fernet-encrypted at rest) is decrypted at delivery time and used as the HMAC key over the JSON payload body. Receivers can verify integrity and authenticity without a shared session.
+
+**Alternatives:**
+- Immediate HTTP POST in the result consumer — no retry, no tracking, blocks the consumer on slow endpoints
+- Celery task — heavier infrastructure, requires a separate worker and broker for a background loop already running in the API
+
+---
+
+## 26. LLM Worker as a Separate Python Service
+
+**What was done:** LLM structured extraction runs as an independent `llm-worker` Python service. It consumes from `scrapeflow.jobs.llm` (a separate NATS subject), decrypts the user's API key, calls the provider (Anthropic or OpenAI-compatible), writes structured JSON to MinIO, and publishes a result event.
+
+**Why a separate service:**
+- **Dependency isolation:** Anthropic and OpenAI SDKs (and their transitive dependencies) are contained to the LLM worker. They do not bloat the API image.
+- **Independent scaling:** LLM calls are slow (seconds to tens of seconds). The API can handle thousands of requests/second while the LLM worker processes a handful concurrently. Keeping them separate allows the right resource allocation.
+- **Failure isolation:** An LLM provider outage or SDK bug cannot bring down the API.
+- **Subject-based routing:** The result consumer transitions the `job_runs` row to `status='processing'` and publishes the LLM payload to `scrapeflow.jobs.llm` — the LLM worker picks it up without the API knowing which provider or model is involved.
+
+**Why `scrapeflow.jobs.llm` is a separate subject from `scrapeflow.jobs.run.*`:** The LLM worker needs a different message schema (includes `encrypted_api_key`, `output_schema`, `raw_minio_path`). Subject-based routing also means the Go and Playwright workers never accidentally receive LLM dispatch messages.
+
+**Alternatives:**
+- LLM calls inline in the result consumer — simpler, but blocks the result consumer on slow LLM calls
+- LLM calls as a FastAPI background task — correct, but couples LLM retries to the API's NATS consumer retry budget
+
+---
+
+## 27. Text Diff vs JSON Diff Strategy
+
+**What was done:** The diff algorithm used for change detection depends on the upstream worker:
+- **HTTP / Playwright worker** (no LLM) → `compute_text_diff()`: fetches two `history/` MinIO objects, diffs line-by-line using `difflib.unified_diff`, returns `{detected: bool, summary: {added: int, removed: int}}`
+- **LLM worker** → `compute_json_diff()`: parses both MinIO objects as JSON, compares field-by-field, returns `{detected: bool, summary: {changed_fields: [...]}}`
+
+**Why two strategies:** The output format determines what a meaningful "diff" is. Markdown/HTML output from scrape workers is best compared as text (line diffs surface wording changes). Structured JSON from the LLM is better compared as a field-level diff (a change in `{"price": 100}` → `{"price": 105}` should report `changed_fields: ["price"]`, not a raw text diff of the JSON string).
+
+**Discriminated dispatch:** The result consumer dispatches to `compute_text_diff` vs `compute_json_diff` based on `job_run.status` at the time the `completed` result arrives: `status='running'` → text diff (from scrape worker); `status='processing'` → JSON diff (from LLM worker).
+
+**Alternatives:**
+- Single unified diff algorithm — loses the structured signal for LLM outputs; unified text diff of a JSON string is noisy and hard to interpret
+- LLM-based diff ("did the content change meaningfully?") — expensive, latent, circular (using LLM to evaluate LLM output)
+
+---
+
+## 28. Pull Consumer + Semaphore Worker Pool
+
+**What was done:** Both the Playwright worker and LLM worker use a pull consumer (`js.pull_subscribe()` / nats-py equivalent) with an `asyncio.Semaphore`. The fetch batch size equals `semaphore._value` (current available slots) — the worker only fetches as many messages as it can immediately start processing.
+
+**Why pull over push:** A push consumer delivers messages as fast as NATS can send them, regardless of worker capacity. If the worker is slow (Playwright rendering, LLM call), unprocessed messages start their AckWait timers as soon as they're delivered. When AckWait expires, NATS redelivers — the worker processes the same message twice even though it was never lost. Pull consumers start the AckWait timer only when the message is actually fetched.
+
+**Why semaphore over threading:** The workers are async Python — `asyncio.Semaphore` caps concurrency within the event loop without spawning OS threads. Each job runs as a coroutine; the semaphore ensures at most `MAX_WORKERS` coroutines are in-flight simultaneously. This matches the Playwright browser's constraints (each job gets its own context; too many concurrent contexts OOMs).
+
+**Alternatives:**
+- Push consumer with `max_inflight` — NATS-side flow control, but AckWait timing still starts at delivery, not at processing
+- Thread pool executor — correct, but mixes async and threading; adds complexity with no benefit in an async-first codebase

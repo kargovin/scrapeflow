@@ -79,11 +79,19 @@ async def _dispatch_due_jobs(
                 "url": job.url,
                 "output_format": job.output_format.value,
             }
-            if job.engine == "playwright":
-                payload["playwright_options"] = job.playwright_options  # already a dict (JSONB)
-                await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, json.dumps(payload).encode())
-            else:
-                await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, json.dumps(payload).encode())
+            try:
+                if job.engine == "playwright":
+                    payload["playwright_options"] = job.playwright_options  # already a dict (JSONB)
+                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, json.dumps(payload).encode())
+                else:
+                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, json.dumps(payload).encode())
+            except Exception:
+                logger.exception(
+                    "scheduler: NATS publish failed after DB commit — stale-pending recovery will retry",
+                    job_id=str(job.id),
+                    run_id=str(run.id),
+                )
+                continue
 
             logger.info(
                 "scheduler: dispatched job",
@@ -126,11 +134,19 @@ async def _recover_stale_pending(
                 "url": job.url,
                 "output_format": job.output_format.value,
             }
-            if job.engine == "playwright":
-                payload["playwright_options"] = job.playwright_options
-                await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, json.dumps(payload).encode())
-            else:
-                await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, json.dumps(payload).encode())
+            try:
+                if job.engine == "playwright":
+                    payload["playwright_options"] = job.playwright_options
+                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, json.dumps(payload).encode())
+                else:
+                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, json.dumps(payload).encode())
+            except Exception:
+                logger.exception(
+                    "scheduler: NATS publish failed for stale-pending recovery — will retry next cycle",
+                    run_id=str(run.id),
+                    job_id=str(job.id),
+                )
+                continue
 
             logger.info(
                 "scheduler: re-published stale pending run",

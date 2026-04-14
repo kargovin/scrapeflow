@@ -809,6 +809,37 @@ async def test_patch_job_llm_config_409(client, auth_headers, mock_jetstream):
     assert resp.status_code == 409
 
 
+async def test_patch_job_llm_config_other_user_key(client, auth_headers, db_user, mock_jetstream):
+    """PATCH /jobs/{id} with an llm_key_id belonging to another user returns 404."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    # Create an LLM key owned by db_user (a different user)
+    other_key = UserLLMKey(
+        user_id=db_user.id, name="other", provider="anthropic", encrypted_api_key="testkey"
+    )
+    async with AsyncSessionLocal() as db:
+        db.add(other_key)
+        await db.commit()
+        await db.refresh(other_key)
+
+    resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={
+            "llm_config": {
+                "llm_key_id": str(other_key.id),
+                "model": "claude-3",
+                "output_schema": {},
+            }
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
 async def test_patch_job_other_user(client, auth_headers, db_user):
     """PATCH /jobs/{id} returns 404 for a job belonging to another user."""
     job = Job(user_id=db_user.id, url="https://other.com")
