@@ -25,6 +25,10 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-001](ADR-001-worker-job-contract.md) | Worker Job Contract | **Partially Superseded** | 2026-03-25 | — | ADR-002 (§2 Subjects, §3 Schemas, §8 MinIO paths) |
 | [ADR-002](ADR-002-phase2-worker-contract.md) | Phase 2 Worker Contract | **Accepted** | 2026-04-02 | ADR-001 (§2, §3, §8) | — |
 | [ADR-003](ADR-003-job-run-split.md) | Job/Run Data Model Split | **Accepted** | 2026-04-09 | — | — |
+| [ADR-004](ADR-004-phase3-fat-message-schema.md) | Phase 3 Fat Message Schema v2 | **Accepted** | 2026-04-15 | — | — |
+| [ADR-005](ADR-005-site-crawl-bfs-coordinator.md) | Site Crawl BFS Coordinator | **Accepted** | 2026-04-15 | — | — |
+| [ADR-006](ADR-006-batch-scraping-data-model.md) | Batch Scraping Data Model | **Accepted** | 2026-04-15 | — | — |
+| [ADR-007](ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** | 2026-04-15 | — | — |
 
 ---
 

@@ -91,7 +91,7 @@
 
 **What:** `jobs.updated_at` was added in Phase 1 with `onupdate=lambda: datetime.now(UTC)`. After Migration 2.4 drops `jobs.status`/`result_path`/`error`, the only remaining mutable fields on `jobs` are Phase 2 additions (`schedule_cron`, `schedule_status`, `next_run_at`, `last_run_at`, `webhook_url`, etc.). Some mutation paths (cancel route, scheduler updates to `next_run_at`) may bypass ORM assignment and go through `db.execute(update(...))` — in which case `onupdate` silently does not fire.
 
-**Why deferred:** Not queried anywhere in Phase 2. Admin stats use `job_runs.created_at`, not `jobs.updated_at`.
+**Why deferred:** Not queried anywhere in Phase 2. Admin stats use `job_runs.created_at`, not `jobs.updated_at`. Becomes important for Admin SPA sort order in Phase 3.
 
 **What Phase 3 needs to decide:**
 - Option A: Remove the column entirely (no misleading stale data)

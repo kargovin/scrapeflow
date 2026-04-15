@@ -11,7 +11,7 @@
 The persona chain is:
 
 ```
-Program Manager → Software Architect → Tech Lead (you) → Engineer(s)
+Product Manager → Software Architect → Tech Lead (you) → Engineer(s)
 ```
 
 **You do not:** Write PRDs (PM), make architectural decisions (Architect), or implement features (Engineer).
@@ -63,11 +63,17 @@ Program Manager → Software Architect → Tech Lead (you) → Engineer(s)
 - **`v2.0.0` tag** — cut on `main` after all fixes and CI were in place
 - **Initial Docker images pushed** — all 4 images (`scrapeflow-api`, `scrapeflow-http-worker`, `scrapeflow-playwright-worker`, `scrapeflow-llm-worker`) successfully built and pushed to DockerHub (`k4rth/` namespace)
 - **Two Dockerfile bugs fixed during CI** — `python3.10-venv` missing in playwright builder stage; UID 1000 conflict in playwright final stage (base image pre-occupies it — use 1001)
+- **DevOps deployment complete** — k3s/FluxCD manifests written and applied by DevOps agent; all services running in `scrapeflow` namespace
+- **Production E2E verified (2026-04-15)** — full golden path tested against `scrapeflow.govindappa.com`:
+  - Clerk JWT auth → user sync to production DB ✅
+  - `POST /users/api-keys` ✅
+  - `POST /jobs` → NATS dispatch → Go HTTP worker → MinIO write → `completed` in ~258ms ✅
+  - `GET /jobs/{id}/runs` + MinIO result content verified ✅
+- **Liveness probe bug fixed in gitops repo** — `api.yaml` had `/health/live` (404); corrected to `/health`; applied by FluxCD
 
 ### Ready to start
-- **DevOps deployment** — hand `docs/project/DEVOPS_SPEC.md` to a DevOps agent; it has everything needed to write the k3s/FluxCD manifests in the gitops repo
-- **Phase 3** — after deployment is stable. See `CLAUDE.md` for Phase 3 scope and the persona-chain build process.
-- **Immediate next action:** DevOps agent deploys to k3s using `DEVOPS_SPEC.md`, then Phase 3 starts with the Program Manager persona.
+- **Phase 3** — infrastructure is stable, production is verified. Start with the Product Manager persona. See `CLAUDE.md` for Phase 3 scope and the persona-chain build process.
+- **Immediate next action:** PM persona kicks off Phase 3 feature PRDs.
 
 ### Pending
 - None.
@@ -258,7 +264,7 @@ Copy and paste this into a new Claude Code session:
 ```
 Read docs/personas/tech-lead.md.
 You are the Tech Lead for ScrapeFlow. Phase 1 and Phase 2 are both complete.
-Production review is done, all fixes applied, CI is live, v2.0.0 tagged.
-Next step: DevOps agent deploys to k3s using docs/project/DEVOPS_SPEC.md, then Phase 3 begins.
+Production is live at scrapeflow.govindappa.com — E2E verified 2026-04-15 (auth, job dispatch, worker, MinIO all green).
+Phase 3 is in progress — PM and Architect are working on PRDs and engineering specs.
 [Tell me what you want to do next.]
 ```
