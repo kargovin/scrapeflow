@@ -4,7 +4,7 @@
 
 ## Goal
 
-A self-hosted, multi-tenant web scraping platform. Primary use case: structured data extraction and change detection to feed ML/data pipelines. Built as a production-grade portfolio project.
+A self-hosted, multi-tenant web scraping platform. Primary use case: structured data extraction and change detection to feed ML/data pipelines. Built as a production-grade portfolio project, designed to scale beyond single-user deployments.
 
 ---
 
@@ -29,7 +29,7 @@ When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 
 ### Deployment
 - **Local dev**: Docker Compose (Postgres, Redis, NATS, MinIO)
-- **Production**: k3s homelab — namespace `scrapeflow`, domain `scrapeflow.govindappa.com`
+- **Production**: k3s cluster — namespace `scrapeflow`, domain `scrapeflow.govindappa.com`
   - Traefik ingress, ExternalDNS (Cloudflare), cert-manager (letsencrypt-prod)
   - GitOps via FluxCD — infra repo at `/home/karthik/Documents/govindappa/govindappa-k8s-config`
 
@@ -65,7 +65,7 @@ Phase 3 simulates how a larger engineering organization works by dividing the bu
 
 | Persona | Responsibilities | Outputs |
 |---------|-----------------|---------|
-| **Program Manager** | Defines scope, priorities, success criteria, and stakeholder requirements for each feature | PRD per feature, prioritized backlog |
+| **Product Manager** | Defines scope, priorities, success criteria, and stakeholder requirements for each feature | PRD per feature, prioritized backlog |
 | **Software Architect** | Translates PRDs into technical design decisions, system contracts, and ADRs | Design docs, ADRs, updated engineering spec |
 | **Tech Lead** | Breaks the engineering spec into an ordered implementation backlog with dependencies and sequencing | Task breakdown, sprint plan, dependency graph |
 | **Engineer(s)** | Implements tasks from the backlog, writes tests, raises blockers to Tech Lead | Code, tests, implementation notes |
@@ -82,7 +82,7 @@ Each persona operates with only the outputs from the persona before them — the
 | Tenancy | Multi-tenant | Each user has isolated jobs/data |
 | Scraping engine | HTTP first, Playwright opt-in later | Most structured data sites are server-rendered |
 | LLM output | User provides own API key + schema | Avoids shared LLM cost; users control their models |
-| Proxy rotation | Skip for MVP | Low volume personal use; add as pluggable provider later |
+| Proxy rotation | Skip for MVP | Not needed for MVP scale; add as pluggable provider in Phase 3 |
 | Change detection | Yes, Phase 2 | Key feature for ML data pipeline use cases |
 | Output formats | Raw HTML, cleaned Markdown, JSON | Feed directly into ML pipelines |
 | Worker design | Light worker — NATS + MinIO only, no DB access | Keeps worker DB-ignorant; all business logic in API |
