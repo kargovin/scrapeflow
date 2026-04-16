@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # Clerk
     clerk_secret_key: str = ""  # used by backend SDK for JWT verification + API calls
 
-    # Rate limiting — per-user fixed window counter
+    # Rate limiting — per-user sliding window (Redis sorted set + Lua)
     rate_limit_requests: int = 60  # max requests allowed per window
     rate_limit_window_seconds: int = 60  # window size in seconds
 
