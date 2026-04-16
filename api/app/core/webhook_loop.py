@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+from asyncio import get_running_loop
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -19,6 +20,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.security import _validate_no_ssrf
 from app.models.job import Job
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
@@ -83,6 +85,25 @@ async def _attempt_delivery(
         delivery = await db.get(WebhookDelivery, delivery_id)
         if delivery is None or delivery.status != "pending":
             return  # already handled by another replica or deleted
+
+        # Re-validate SSRF on every attempt — DNS rebinding can change what IP
+        # a hostname resolves to after the initial check at POST /jobs time.
+        # This check runs before incrementing attempts: a rebinding block is a
+        # security event, not a real delivery attempt.
+        try:
+            await get_running_loop().run_in_executor(None, _validate_no_ssrf, delivery.webhook_url)
+        except ValueError as exc:
+            delivery.status = "exhausted"
+            delivery.last_error = f"ssrf_blocked: {exc}"
+            logger.warning(
+                "webhook: ssrf blocked — delivery marked exhausted",
+                delivery_id=str(delivery_id),
+                job_id=str(delivery.job_id),
+                url=delivery.webhook_url,
+                error=str(exc),
+            )
+            await db.commit()
+            return
 
         delivery.attempts += 1
 
