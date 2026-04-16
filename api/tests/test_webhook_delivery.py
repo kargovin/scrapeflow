@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 
@@ -107,6 +108,25 @@ async def near_exhausted_delivery(job_with_webhook):
 
 
 # ---------------------------------------------------------------------------
+# SSRF bypass — applied to every test in this file by default.
+#
+# The fixture URL (hooks.example.com) does not resolve in CI/test environments.
+# Without this patch, _validate_no_ssrf would raise ValueError("could not be
+# resolved") and mark every delivery exhausted before the HTTP call is made,
+# breaking all non-SSRF tests.
+#
+# SSRF-specific tests override this fixture by calling monkeypatch.setattr
+# again with their own side_effect — subsequent setattr on the same target
+# in the same test takes precedence.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _bypass_ssrf(monkeypatch):
+    monkeypatch.setattr("app.core.webhook_loop._validate_no_ssrf", lambda url: None)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -199,3 +219,47 @@ async def test_network_error_backsoff(pending_delivery):
     assert d.attempts == 1
     assert d.status == "pending"
     assert "connection refused" in d.last_error
+
+
+# ---------------------------------------------------------------------------
+# SSRF re-validation tests (PRD-003 / Step 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_ssrf_block_marks_exhausted_immediately(pending_delivery, monkeypatch):
+    """A DNS-rebinding block marks the delivery exhausted without a retry attempt."""
+    monkeypatch.setattr(
+        "app.core.webhook_loop._validate_no_ssrf",
+        lambda url: (_ for _ in ()).throw(
+            ValueError("URL resolves to a private address: 169.254.169.254")
+        ),
+    )
+    mock_http = _mock_http(200)
+
+    await _attempt_delivery(pending_delivery.id, AsyncSessionLocal, mock_http, _fernet)
+
+    async with AsyncSessionLocal() as db:
+        d = await db.get(WebhookDelivery, pending_delivery.id)
+
+    assert d.status == "exhausted"
+    assert "ssrf_blocked" in d.last_error
+    assert "169.254.169.254" in d.last_error
+    # HTTP call must never have been made
+    mock_http.post.assert_not_called()
+
+
+async def test_ssrf_block_does_not_increment_attempts(pending_delivery, monkeypatch):
+    """SSRF block does not count as a delivery attempt — attempts stays at 0."""
+    monkeypatch.setattr(
+        "app.core.webhook_loop._validate_no_ssrf",
+        lambda url: (_ for _ in ()).throw(
+            ValueError("URL resolves to a private address: 10.0.0.1")
+        ),
+    )
+
+    await _attempt_delivery(pending_delivery.id, AsyncSessionLocal, _mock_http(200), _fernet)
+
+    async with AsyncSessionLocal() as db:
+        d = await db.get(WebhookDelivery, pending_delivery.id)
+
+    assert d.attempts == 0  # untouched — SSRF is a security event, not a retry

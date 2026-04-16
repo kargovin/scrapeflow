@@ -97,16 +97,45 @@
 
 </details>
 
-<details><summary> <h2 style='display:inline'>
-Phase 3 — Production hardening [LATER]
+<details open>
+<summary> <h2 style='display:inline'>
+Phase 3 — Production hardening
 </h2></summary>
 
-- Proxy rotation (pluggable provider config)
-- robots.txt compliance toggle
-- Billing/quotas
-- Admin SPA (React)
-- MCP server (scrape_url, get_result, list_jobs)
-- K8s manifests for k3s (namespace: scrapeflow, scrapeflow.govindappa.com)
+> Full task breakdown: `docs/project/PHASE3_BACKLOG.md` (28 steps)
+> Engineering spec: `docs/phase3/phase3-engineering-spec.md`
+
+| Step | Description                                                                                  | Status  |
+| ---- | -------------------------------------------------------------------------------------------- | ------- |
+| 1    | K8s manifests: playwright-worker, llm-worker, cleanup CronJob (PRD-001)                     | ✅ Done |
+| 2    | Sliding window rate limiter (PRD-002)                                                        | ✅ Done |
+| 3    | SSRF re-validation on webhook delivery (PRD-003)                                             | ✅ Done |
+| 4    | Migration 3.1: `jobs.respect_robots`                                                         | ⬜ Todo |
+| 5    | Migration 3.2: `jobs.proxy_provider`                                                         | ⬜ Todo |
+| 6    | Migration 3.3: `jobs.actions`, `webhook_url TEXT`, `webhook_events`                          | ⬜ Todo |
+| 7    | Migration 3.4: `job_secrets` table + `job_secret_type` ENUM ⚠ hand-written                  | ⬜ Todo |
+| 8    | Migration 3.5: `batches` + `batch_items` tables                                              | ⬜ Todo |
+| 9    | Migration 3.6: `job_runs` nullable `job_id`, `batch_item_id`, check constraint, `content_hash` ⚠ | ⬜ Todo |
+| 10   | Migration 3.7: `crawls`, `crawl_pages`, `crawl_queue` tables                                | ⬜ Todo |
+| 11   | Migration 3.8: `user_quotas` table                                                           | ⬜ Todo |
+| 12   | Migration 3.9: `jobs.updated_at` DB trigger ⚠ hand-written                                  | ⬜ Todo |
+| 13   | Migration 3.10: `api_keys (user_id, name)` uniqueness constraint                            | ⬜ Todo |
+| 14   | Go HTTP worker: schema_version 2 struct + proxy routing + robots.txt                        | ⬜ Todo |
+| 15   | Playwright worker: schema_version 2 + proxy + cookies + actions + robots.txt                | ⬜ Todo |
+| 16   | PRD-004: robots.txt — API integration                                                        | ⬜ Todo |
+| 17   | PRD-005: proxy rotation — API integration                                                    | ⬜ Todo |
+| 18   | PRD-008: authenticated scraping — API integration                                            | ⬜ Todo |
+| 19   | PRD-009: page actions — API integration                                                      | ⬜ Todo |
+| 20   | PRD-013: webhook event filter                                                                | ⬜ Todo |
+| 21   | PRD-006: batch scraping — API + result consumer                                              | ⬜ Todo |
+| 22   | PRD-007: site crawl — API routes                                                             | ⬜ Todo |
+| 23   | PRD-007: coordinator service + Docker Compose                                                | ⬜ Todo |
+| 24   | PRD-010: MCP server                                                                          | ⬜ Todo |
+| 25   | PRD-012: billing/quotas — enforcement + admin endpoint                                       | ⬜ Todo |
+| 26   | PRD-014: WebSocket real-time job tracking                                                    | ⬜ Todo |
+| 27   | PRD-015: content deduplication                                                               | ⬜ Todo |
+| 28   | PRD-011: Admin SPA + CI build + permanent delete                                             | ⬜ Todo |
+
 </details>
 
 <details> <summary> <h2 style='display:inline'>
