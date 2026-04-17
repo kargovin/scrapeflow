@@ -3,7 +3,17 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import VARCHAR, CheckConstraint, DateTime, Enum, ForeignKey, Index, Text, text
+from sqlalchemy import (
+    ARRAY,
+    VARCHAR,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -64,13 +74,21 @@ class Job(Base):
 
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    webhook_url: Mapped[str | None] = mapped_column(nullable=True)
+    webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     webhook_secret: Mapped[str | None] = mapped_column(nullable=True)  # Fernet-encrypted at rest
+
+    webhook_events: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
 
     llm_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # JSONB
 
     playwright_options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # JSONB
+
+    playwright_actions: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    respect_robots: Mapped[bool] = mapped_column(server_default="false", nullable=False)
+
+    proxy_provider: Mapped[str | None] = mapped_column(VARCHAR(50), nullable=True)
 
     __table_args__ = (
         Index(

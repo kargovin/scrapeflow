@@ -1,7 +1,7 @@
 # Tech Lead — ScrapeFlow Onboarding Document
 
 > **Purpose:** Bring a new Tech Lead persona up to speed on project state, work already done, conventions, and what to do next. Read this before doing anything.
-> **Last updated:** 2026-04-15
+> **Last updated:** 2026-04-16
 > **Covers:** Role definition, what was accomplished, the full backlog, file map, process conventions, and how to unblock engineers.
 
 ---
@@ -71,9 +71,20 @@ Product Manager → Software Architect → Tech Lead (you) → Engineer(s)
   - `GET /jobs/{id}/runs` + MinIO result content verified ✅
 - **Liveness probe bug fixed in gitops repo** — `api.yaml` had `/health/live` (404); corrected to `/health`; applied by FluxCD
 
+### Completed since last update (2026-04-16)
+- **Phase 3 backlog** (`docs/project/PHASE3_BACKLOG.md`) — 28 ordered steps, dependency groups, critical path, and non-negotiables
+- **`PROGRESS.md`** — Phase 3 tracking table added; Steps 1–5 now ✅ Done
+- **Step 1** — K8s manifests for `playwright-worker`, `llm-worker`, `cleanup` CronJob committed to infra repo (PRD-001)
+- **Step 2** — Sliding window rate limiter (PRD-002): replaced fixed-window `INCR/EXPIRE` with Redis sorted set + atomic Lua script; `api/app/core/rate_limit.py` fully rewritten; 7 tests
+- **Step 3** — SSRF re-validation on webhook delivery (PRD-003): `security.py` refactored into private `_validate_no_ssrf` (raises `ValueError`) + public HTTP adapter; delivery loop re-validates on every attempt; rebinding block → `exhausted` immediately, no retry, no attempt increment; 7 tests
+- **Step 4** — Migration 3.1: `jobs.respect_robots BOOLEAN NOT NULL DEFAULT false` applied ✅
+- **Step 5** — Migration 3.2: `jobs.proxy_provider VARCHAR(50) NULL` applied ✅
+- **Alembic auto-run disabled in `main.py`** during Phase 3 migration development — re-enable after all 10 migrations (Steps 4–13) are finalised to avoid hot-reload applying partial hand-written DDL
+
 ### Ready to start
-- **Phase 3** — infrastructure is stable, production is verified. Start with the Product Manager persona. See `CLAUDE.md` for Phase 3 scope and the persona-chain build process.
-- **Immediate next action:** PM persona kicks off Phase 3 feature PRDs.
+- **Step 6** — Migration 3.3: `jobs.actions JSONB`, `webhook_url TEXT` (type change), `webhook_events TEXT[]`
+- **Steps 7–13** — remaining schema migrations (hand-written ENUMs, batch tables, crawl tables, quotas, trigger)
+- After migrations: Steps 14–15 (worker schema_version 2) must be deployed before Steps 16–20
 
 ### Pending
 - None.
@@ -176,16 +187,16 @@ None. All 26 steps complete. Phase 2 is done — proceed to Phase 3.
 4. If the step deviated from the spec, note it in `PHASE2_BACKLOG.md` under the step
 
 ### When a migration step runs
-- Run `docker compose exec api python -m pytest tests/ -v` BEFORE and AFTER to confirm no regression
+- Run `docker compose exec api uv run pytest tests/ -v` BEFORE and AFTER to confirm no regression
 - For Step 12 specifically: verify `job_runs` is populated (`SELECT COUNT(*) FROM job_runs`) before dropping columns
 
 ### Test commands (never run tests locally — always inside Docker)
 ```bash
-# Python API tests
-docker compose exec api python -m pytest tests/ -v
+# Python API tests (must use uv run — uv manages the .venv inside the container)
+docker compose exec api uv run pytest tests/ -v
 
 # Single test file
-docker compose exec api python -m pytest tests/test_jobs.py -v
+docker compose exec api uv run pytest tests/test_jobs.py -v
 
 # Go worker tests
 docker compose exec http-worker go test ./... -v
@@ -265,6 +276,8 @@ Copy and paste this into a new Claude Code session:
 Read docs/personas/tech-lead.md.
 You are the Tech Lead for ScrapeFlow. Phase 1 and Phase 2 are both complete.
 Production is live at scrapeflow.govindappa.com — E2E verified 2026-04-15 (auth, job dispatch, worker, MinIO all green).
-Phase 3 is in progress — PM and Architect are working on PRDs and engineering specs.
+Phase 3 is in progress — Steps 1–5 done, Step 6 is next.
+Steps done: K8s manifests (1), sliding window rate limiter (2), SSRF webhook re-validation (3), migration 3.1 respect_robots (4), migration 3.2 proxy_provider (5).
+Alembic auto-run is temporarily commented out in main.py — re-enable after all Phase 3 migrations (Steps 4–13) are complete.
 [Tell me what you want to do next.]
 ```
