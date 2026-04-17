@@ -117,7 +117,7 @@ Phase 3 — Production hardening
 | 8    | Migration 3.5: `batches` + `batch_items` tables                                              | ✅ Done |
 | 9    | Migration 3.6: `job_runs` nullable `job_id`, `batch_item_id`, check constraint, `content_hash` ⚠ | ✅ Done |
 | 10   | Migration 3.7: `crawls`, `crawl_pages`, `crawl_queue` tables                                | ✅ Done |
-| 11   | Migration 3.8: `user_quotas` table                                                           | ⬜ Todo |
+| 11   | Migration 3.8: `user_quotas` table                                                           | ✅ Done |
 | 12   | Migration 3.9: `jobs.updated_at` DB trigger ⚠ hand-written                                  | ⬜ Todo |
 | 13   | Migration 3.10: `api_keys (user_id, name)` uniqueness constraint                            | ⬜ Todo |
 | 14   | Go HTTP worker: schema_version 2 struct + proxy routing + robots.txt                        | ⬜ Todo |
