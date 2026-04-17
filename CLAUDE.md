@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phase 2 complete. Phase 1 MVP and all 26 Phase 2 steps are done. Phase 3 (production hardening) is next.**
+> **Status: Phase 2 complete. Phase 3 in progress — Steps 1–13 done (all schema migrations complete). Steps 14–28 remaining.**
 
 ## Goal
 
@@ -45,14 +45,14 @@ When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 - **Rate limiting**: Redis-backed per-user quotas
 - **Docker Compose**: full local dev stack
 
-### Phase 2 — Core features [IN PROGRESS]
+### Phase 2 — Core features [COMPLETE]
 - **Playwright worker**: opt-in JS rendering for dynamic/SPA sites, configurable per job
 - **LLM processing**: user provides their own Anthropic/OpenAI API key + output schema; worker extracts structured data
 - **Change detection**: recurring/scheduled jobs, diff detection, notify on change
 - **Webhook delivery**: configurable webhooks with exponential backoff retry
 - **Admin panel API**: manage users, view all jobs, usage stats
 
-### Phase 3 — Production hardening [LATER]
+### Phase 3 — Production hardening [IN PROGRESS]
 - **Proxy rotation**: pluggable proxy provider config (Bright Data, Oxylabs, etc.)
 - **robots.txt compliance**: respect/ignore toggle per job
 - **Billing/quotas**: per-user job limits, usage tracking
@@ -97,6 +97,13 @@ Each persona operates with only the outputs from the persona before them — the
 | MinIO path convention | Dual write: `latest/{job_id}.{ext}` (overwritten) + `history/{job_id}/{unix_ts}.{ext}` (immutable); `job_runs.result_path` always stores the `history/` path | history path enables per-run diff; latest path for convenience access |
 | Worker routing (Phase 2) | Subject-based: `scrapeflow.jobs.run.http` for Go worker, `scrapeflow.jobs.run.playwright` for Playwright worker | Workers subscribe to their own subject; wrong engine never receives the message |
 | `nats_stream_seq` | Stored on `job_runs` from the worker's "running" result message | MaxDeliver advisory carries only stream seq — used to identify stalled runs (Step 22) |
+| Rate limiting (Phase 3) | Sliding window via Redis sorted set + Lua atomic script | Fixes 2× burst exploit in fixed-window; PRD-002 |
+| SSRF re-validation | Re-validated on every webhook delivery attempt, not just job creation | DNS rebinding attack — URL can resolve differently at delivery time; PRD-003 |
+| Batch data model | New `batches`/`batch_items` tables; nullable `job_id` on `job_runs` + `batch_item_id` FK; mutual exclusion CHECK constraint | ADR-006 Option B — keeps `jobs` as template-only, workers unchanged |
+| BFS crawl coordinator | Dedicated Python process at `coordinator/`; BFS queue persisted in `crawl_queue` Postgres table | ADR-005 Option B — API rolling deploys must not abort in-progress crawls |
+| `jobs.updated_at` | Postgres BEFORE UPDATE trigger, not SQLAlchemy `onupdate` | `onupdate` silently skips `db.execute(update(...))` paths (scheduler, cancel route); trigger fires on every UPDATE regardless of path |
+| Batch `job_runs` routing | `job_runs.batch_item_id` FK set; `job_id = NULL` for batch runs; result consumer routes by checking which FK is set | ADR-006 — workers are unchanged, result consumer gains a routing branch |
+| API keys uniqueness | `UniqueConstraint(user_id, name)` on `api_keys`; `POST /users/api-keys` returns 409 on duplicate | Revoked keys still hold their name — names are identifiers, not recycled |
 
 ---
 
