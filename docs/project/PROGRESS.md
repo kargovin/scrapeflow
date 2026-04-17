@@ -110,11 +110,11 @@ Phase 3 — Production hardening
 | 1    | K8s manifests: playwright-worker, llm-worker, cleanup CronJob (PRD-001)                     | ✅ Done |
 | 2    | Sliding window rate limiter (PRD-002)                                                        | ✅ Done |
 | 3    | SSRF re-validation on webhook delivery (PRD-003)                                             | ✅ Done |
-| 4    | Migration 3.1: `jobs.respect_robots`                                                         | ⬜ Todo |
-| 5    | Migration 3.2: `jobs.proxy_provider`                                                         | ⬜ Todo |
-| 6    | Migration 3.3: `jobs.actions`, `webhook_url TEXT`, `webhook_events`                          | ⬜ Todo |
-| 7    | Migration 3.4: `job_secrets` table + `job_secret_type` ENUM ⚠ hand-written                  | ⬜ Todo |
-| 8    | Migration 3.5: `batches` + `batch_items` tables                                              | ⬜ Todo |
+| 4    | Migration 3.1: `jobs.respect_robots`                                                         | ✅ Done |
+| 5    | Migration 3.2: `jobs.proxy_provider`                                                         | ✅ Done |
+| 6    | Migration 3.3: `jobs.playwright_actions`, `webhook_url TEXT`, `webhook_events`               | ✅ Done |
+| 7    | Migration 3.4: `job_secrets` table + `job_secret_type` ENUM                                 | ✅ Done |
+| 8    | Migration 3.5: `batches` + `batch_items` tables                                              | ✅ Done |
 | 9    | Migration 3.6: `job_runs` nullable `job_id`, `batch_item_id`, check constraint, `content_hash` ⚠ | ⬜ Todo |
 | 10   | Migration 3.7: `crawls`, `crawl_pages`, `crawl_queue` tables                                | ⬜ Todo |
 | 11   | Migration 3.8: `user_quotas` table                                                           | ⬜ Todo |
