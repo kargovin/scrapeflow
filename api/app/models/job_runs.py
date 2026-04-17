@@ -11,8 +11,11 @@ from app.core.db import Base
 class JobRun(Base):
     __tablename__ = "job_runs"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    batch_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("batch_items.id", ondelete="CASCADE"), nullable=True
     )
     status: Mapped[str] = mapped_column(
         VARCHAR(20),
@@ -27,6 +30,7 @@ class JobRun(Base):
     diff_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     nats_stream_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(VARCHAR(16), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -34,6 +38,15 @@ class JobRun(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "(job_id IS NOT NULL) != (batch_item_id IS NOT NULL)",
+            name="chk_job_runs_single_parent",
+        ),
+        Index(
+            "idx_job_runs_batch_item_id",
+            "batch_item_id",
+            postgresql_where=text("batch_item_id IS NOT NULL"),
+        ),
         Index(
             "idx_job_runs_nats_stream_seq",
             "nats_stream_seq",
