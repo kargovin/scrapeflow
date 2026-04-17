@@ -119,7 +119,7 @@ Phase 3 — Production hardening
 | 10   | Migration 3.7: `crawls`, `crawl_pages`, `crawl_queue` tables                                | ✅ Done |
 | 11   | Migration 3.8: `user_quotas` table                                                           | ✅ Done |
 | 12   | Migration 3.9: `jobs.updated_at` DB trigger ⚠ hand-written                                  | ✅ Done |
-| 13   | Migration 3.10: `api_keys (user_id, name)` uniqueness constraint                            | ⬜ Todo |
+| 13   | Migration 3.10: `api_keys (user_id, name)` uniqueness constraint                            | ✅ Done |
 | 14   | Go HTTP worker: schema_version 2 struct + proxy routing + robots.txt                        | ⬜ Todo |
 | 15   | Playwright worker: schema_version 2 + proxy + cookies + actions + robots.txt                | ⬜ Todo |
 | 16   | PRD-004: robots.txt — API integration                                                        | ⬜ Todo |

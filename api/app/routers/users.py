@@ -5,6 +5,7 @@ import structlog
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.api_key import generate_api_key, hash_api_key
@@ -48,7 +49,13 @@ async def create_api_key(
         name=body.name,
     )
     db.add(api_key)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as err:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="API key name already exists"
+        ) from err
 
     logger.info("api_key_created", key_id=str(api_key.id), user_id=str(user.id))
     return ApiKeyCreatedResponse(
