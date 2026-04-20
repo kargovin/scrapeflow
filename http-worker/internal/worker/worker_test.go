@@ -152,13 +152,14 @@ func TestProcessJob(t *testing.T) {
 			w := newTestWorker(t, bucket)
 			jobID := uniqueJobID()
 
-			job := &jobMessage{
-				JobID:        jobID,
-				URL:          tc.url,
-				OutputFormat: tc.outputFormat,
+			job := &ScrapeMessage{
+				SchemaVersion: 2,
+				JobID:         jobID,
+				URL:           tc.url,
+				OutputFormat:  tc.outputFormat,
 			}
 
-			minioPath, err := w.processJob(context.Background(), job)
+			minioPath, err := w.processJob(context.Background(), job, w.fetcher)
 
 			if tc.wantErr {
 				if err == nil {

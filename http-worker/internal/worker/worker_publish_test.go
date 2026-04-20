@@ -11,17 +11,20 @@ import (
 
 // mockJS implements jetStreamClient for testing.
 // publishErr controls whether Publish returns an error.
+// published captures every payload sent to Publish for inspection.
 type mockJS struct {
 	publishErr   error
 	publishCalls int
+	published    [][]byte
 }
 
 func (m *mockJS) PullSubscribe(_ string, _ string, _ ...nats.SubOpt) (*nats.Subscription, error) {
 	return nil, nil
 }
 
-func (m *mockJS) Publish(_ string, _ []byte, _ ...nats.PubOpt) (*nats.PubAck, error) {
+func (m *mockJS) Publish(_ string, data []byte, _ ...nats.PubOpt) (*nats.PubAck, error) {
 	m.publishCalls++
+	m.published = append(m.published, data)
 	if m.publishErr != nil {
 		return nil, m.publishErr
 	}

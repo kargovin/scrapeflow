@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -34,6 +35,21 @@ func New(timeoutSecs int) *Fetcher {
 			// behaviour (follow redirects) is preserved.
 		},
 	}
+}
+
+// WithProxy returns a new Fetcher that routes all requests through the given proxy URL.
+// The original Fetcher's timeout is preserved on the new client.
+func (f *Fetcher) WithProxy(rawProxyURL string) (*Fetcher, error) {
+	proxyURL, err := url.Parse(rawProxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %w", err)
+	}
+	return &Fetcher{
+		client: &http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+			Timeout:   f.client.Timeout,
+		},
+	}, nil
 }
 
 // Fetch retrieves the URL and returns the body bytes and final URL.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/kargovin/scrapeflow/http-worker/internal/fetcher"
 	"github.com/kargovin/scrapeflow/http-worker/internal/formatter"
+	"github.com/kargovin/scrapeflow/http-worker/internal/robots"
 	"github.com/kargovin/scrapeflow/http-worker/internal/storage"
 )
 
@@ -25,14 +26,39 @@ const (
 	durableName       = "go-worker"
 )
 
-// jobMessage is the incoming message shape published by the API (ADR-002 §3).
-// Go's json.Unmarshal maps JSON keys to struct fields via `json:"..."` tags.
-// This is the Go equivalent of a Pydantic model used only for parsing.
-type jobMessage struct {
-	JobID        string `json:"job_id"`
-	RunID        string `json:"run_id"`
-	URL          string `json:"url"`
-	OutputFormat string `json:"output_format"`
+// Credentials carries per-job secrets resolved by the API before dispatch.
+// The HTTP worker only uses ProxyURL; cookies are consumed by the Playwright worker.
+type Credentials struct {
+	ProxyURL string `json:"proxy_url,omitempty"`
+}
+
+// Options carries per-job behavioural flags.
+// Actions are consumed by the Playwright worker only — not defined here.
+type Options struct {
+	RespectRobots bool `json:"respect_robots"`
+}
+
+// CrawlContext is set only when this run was dispatched by the BFS coordinator (ADR-005).
+// The HTTP worker passes it through to the result message so the coordinator can route it.
+type CrawlContext struct {
+	CrawlID     string `json:"crawl_id"`
+	CrawlPageID string `json:"crawl_page_id"`
+	Depth       int    `json:"depth"`
+}
+
+// ScrapeMessage is the schema_version 2 incoming message shape (ADR-004).
+// Fields not used by the HTTP worker (llm_config, playwright_options, credentials.cookies,
+// options.actions) are not defined here — json.Unmarshal silently ignores unknown fields.
+type ScrapeMessage struct {
+	SchemaVersion int           `json:"schema_version"`
+	JobID         string        `json:"job_id"`
+	RunID         string        `json:"run_id"`
+	URL           string        `json:"url"`
+	OutputFormat  string        `json:"output_format"`
+	Engine        string        `json:"engine"`
+	Credentials   *Credentials  `json:"credentials"`
+	Options       *Options      `json:"options"`
+	CrawlContext  *CrawlContext `json:"crawl_context"`
 }
 
 // resultMessage is the outgoing message shape published back to the API (ADR-002 §3).
@@ -53,11 +79,17 @@ type jetStreamClient interface {
 	Publish(subj string, data []byte, opts ...nats.PubOpt) (*nats.PubAck, error)
 }
 
+// storageClient is the subset of storage.Client used by Worker.
+// The narrow interface lets unit tests inject a mock without a real MinIO connection.
+type storageClient interface {
+	Upload(ctx context.Context, jobID, ext string, data []byte) (string, error)
+}
+
 // Worker holds the dependencies needed to process scrape jobs.
 type Worker struct {
 	js      jetStreamClient
 	fetcher *fetcher.Fetcher
-	storage *storage.Client
+	storage storageClient
 }
 
 // New creates a Worker with the given dependencies.
@@ -136,16 +168,18 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int, workerPoolSize int) er
 }
 
 // handleMessage implements the full ADR-002 job lifecycle:
-//  1. Parse message
-//  2. Publish "running" progress event (with nats_stream_seq)
-//  3. Fetch URL
-//  4. Format output
-//  5. Upload to MinIO (latest/ + history/)
-//  6. Publish "completed" or "failed" result event
-//  7. Ack the NATS message (only after MinIO write succeeds)
+//  1. Parse message (schema_version 2 — ADR-004)
+//  2. Resolve per-job fetcher (proxy transport if credentials.proxy_url is set)
+//  3. Enforce robots.txt if options.respect_robots is true (TODO: Step 14 — wire internal/robots)
+//  4. Publish "running" progress event (with nats_stream_seq)
+//  5. Fetch URL
+//  6. Format output
+//  7. Upload to MinIO (latest/ + history/)
+//  8. Publish "completed" or "failed" result event
+//  9. Ack the NATS message (only after MinIO write succeeds)
 func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
-	// --- Step 1: Parse the incoming job message ---
-	var job jobMessage
+	// --- Step 1: Parse the incoming job message (schema_version 2) ---
+	var job ScrapeMessage
 	if err := json.Unmarshal(msg.Data, &job); err != nil {
 		slog.Error("Malformed job message, discarding", "error", err, "data", string(msg.Data))
 		if err := msg.Ack(); err != nil {
@@ -154,9 +188,61 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
-	slog.Info("Received job", "job_id", job.JobID, "run_id", job.RunID, "url", job.URL, "format", job.OutputFormat)
+	slog.Info("Received job", "job_id", job.JobID, "run_id", job.RunID, "url", job.URL,
+		"format", job.OutputFormat, "schema_version", job.SchemaVersion)
 
-	// --- Step 2: Publish "running" progress event (ADR-002 §3) ---
+	// --- Step 2: Resolve per-job fetcher ---
+	// Default to the worker's shared fetcher (no proxy).
+	// If credentials.proxy_url is set, create a one-off fetcher with a proxy transport.
+	// Malformed proxy URL is a config error — fail immediately, do not retry.
+	f := w.fetcher
+	if job.Credentials != nil && job.Credentials.ProxyURL != "" {
+		pf, err := w.fetcher.WithProxy(job.Credentials.ProxyURL)
+		if err != nil {
+			slog.Error("Malformed proxy URL, failing run", "job_id", job.JobID, "run_id", job.RunID, "error", err)
+			if pubErr := w.publishResult(resultMessage{
+				JobID:  job.JobID,
+				RunID:  job.RunID,
+				Status: "failed",
+				Error:  "malformed_proxy_url: " + err.Error(),
+			}); pubErr != nil {
+				slog.Error("Failed to publish proxy-error result", "job_id", job.JobID, "error", pubErr)
+			}
+			if ackErr := msg.Ack(); ackErr != nil {
+				slog.Error("Failed to ack after proxy error", "job_id", job.JobID, "error", ackErr)
+			}
+			return
+		}
+		f = pf
+		slog.Info("Using proxy for job", "job_id", job.JobID, "proxy", job.Credentials.ProxyURL)
+	}
+
+	// --- Step 3: robots.txt enforcement ---
+	// Fetched directly — never via the job proxy (spec §3.4).
+	// Fetch failure is treated as no restrictions (proceed).
+	if job.Options != nil && job.Options.RespectRobots {
+		disallowed, err := robots.IsDisallowed(ctx, job.URL)
+		if err != nil {
+			slog.Warn("robots.txt check error, proceeding", "job_id", job.JobID, "url", job.URL, "error", err)
+		}
+		if disallowed {
+			slog.Info("robots.txt disallows URL, failing run", "job_id", job.JobID, "url", job.URL)
+			if pubErr := w.publishResult(resultMessage{
+				JobID:  job.JobID,
+				RunID:  job.RunID,
+				Status: "failed",
+				Error:  "robots_txt_disallowed",
+			}); pubErr != nil {
+				slog.Error("Failed to publish robots-blocked result", "job_id", job.JobID, "error", pubErr)
+			}
+			if ackErr := msg.Ack(); ackErr != nil {
+				slog.Error("Failed to ack after robots block", "job_id", job.JobID, "error", ackErr)
+			}
+			return
+		}
+	}
+
+	// --- Step 4: Publish "running" progress event (ADR-002 §3) ---
 	// nats_stream_seq is stored by the result consumer on job_runs.nats_stream_seq.
 	// The MaxDeliver advisory subscriber (Step 22) uses it to identify stalled runs —
 	// NATS advisory messages carry only stream_seq, no job_id or run_id.
@@ -172,8 +258,8 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		slog.Error("Failed to publish 'running' result", "job_id", job.JobID, "run_id", job.RunID, "error", err)
 	}
 
-	// --- Steps 3–5: Fetch, format, upload ---
-	minioPath, err := w.processJob(ctx, &job)
+	// --- Steps 5–7: Fetch, format, upload ---
+	minioPath, err := w.processJob(ctx, &job, f)
 	if err != nil {
 		slog.Error("Job failed", "job_id", job.JobID, "run_id", job.RunID, "error", err)
 		if pubErr := w.publishResult(resultMessage{
@@ -196,7 +282,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
-	// --- Step 6: Publish "completed" result event ---
+	// --- Step 8: Publish "completed" result event ---
 	if err := w.publishResult(resultMessage{
 		JobID:     job.JobID,
 		RunID:     job.RunID,
@@ -210,7 +296,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
-	// --- Step 7: Ack after MinIO write succeeds (ADR-002 §6) ---
+	// --- Step 9: Ack after MinIO write succeeds (ADR-002 §6) ---
 	// If the worker crashes before this line, NATS redelivers the message.
 	// Acking here means: "I have durably stored the result; stop tracking this message."
 	if err := msg.Ack(); err != nil {
@@ -220,8 +306,9 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 }
 
 // processJob runs the fetch → format → upload pipeline and returns the MinIO history path.
-func (w *Worker) processJob(ctx context.Context, job *jobMessage) (string, error) {
-	fetchResult, err := w.fetcher.Fetch(ctx, job.URL)
+// f is the per-job fetcher — either the worker's default or a proxy-configured one.
+func (w *Worker) processJob(ctx context.Context, job *ScrapeMessage, f *fetcher.Fetcher) (string, error) {
+	fetchResult, err := f.Fetch(ctx, job.URL)
 	if err != nil {
 		return "", fmt.Errorf("fetch failed: %w", err)
 	}

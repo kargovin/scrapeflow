@@ -605,6 +605,20 @@ await page.set_extra_http_headers({
 
 4. **`DELETE /batch/{id}`:** Set all `pending`/`running` `batch_items` to `cancelled`; result consumer already discards results for cancelled runs via status check
 
+**Admin query audit (migration 3.6 post-migration action — fix before shipping this step):**
+
+The following INNER JOINs in `api/app/routers/admin.py` will silently exclude batch runs once batch scraping is live. Fix each as described:
+
+| Location | Query purpose | Fix |
+|----------|--------------|-----|
+| `admin.py:112` | Run status counts | Add `WHERE JobRun.job_id IS NOT NULL` or change to `LEFT JOIN` + count all runs |
+| `admin.py:314` | Admin job listing filtered by user | Keep INNER JOIN — intentionally excludes batch runs (batch has its own routes) |
+| `admin.py:346` | Active runs by engine | Change to `LEFT JOIN Job` + handle `NULL job_id` rows, or add batch engine lookup |
+| `admin.py:420` | Stats listing filtered by user | Keep INNER JOIN — same reasoning as 314 |
+| `admin.py:454` | Status breakdown for the week | Change to `LEFT JOIN` — batch runs should appear in usage stats |
+| `admin.py:462` | Engine breakdown for the week | Change to `LEFT JOIN` — batch runs use an engine too |
+| `admin.py:481` | Top users by run count | Change to `LEFT JOIN` — batch runs count toward usage |
+
 **Tests:**
 - `POST /batch` with 3 URLs → 3 `batch_items`, 3 NATS messages dispatched
 - `POST /batch` with SSRF URL → 422 before any rows created
@@ -613,6 +627,7 @@ await page.set_extra_http_headers({
 - `DELETE /batch/{id}` → items cancelled
 - `GET /batch/{id}` returns accurate counters at each state transition
 - `GET /jobs` does not include batch runs (filter: `WHERE job_runs.job_id IS NOT NULL` or query `jobs` table directly)
+- Admin stats endpoints include batch run counts after fix
 
 ---
 
@@ -963,7 +978,7 @@ if previous_run and previous_run.content_hash == content_hash:
 | 11 | Migration 3.8: `user_quotas` | PRD-012 | — | ⬜ Todo |
 | 12 | Migration 3.9: `jobs.updated_at` trigger ⚠ hand-written | Spec §2.3 | — | ⬜ Todo |
 | 13 | Migration 3.10: `api_keys (user_id, name)` unique constraint | PRD-011 | — | ⬜ Todo |
-| 14 | Go HTTP worker: schema_version 2 + proxy routing + robots.txt | ADR-004, PRD-004, PRD-005 | 4, 5 | ⬜ Todo |
+| 14 | Go HTTP worker: schema_version 2 + proxy routing + robots.txt | ADR-004, PRD-004, PRD-005 | 4, 5 | ✅ Done |
 | 15 | Playwright worker: schema_version 2 + proxy + cookies + actions + robots.txt | ADR-004, PRD-004, PRD-005, PRD-008, PRD-009 | 4, 5, 6 | ⬜ Todo |
 | 16 | PRD-004: robots.txt — API integration | PRD-004 | 4, 14, 15 | ⬜ Todo |
 | 17 | PRD-005: proxy rotation — API integration | PRD-005 | 5, 7, 14, 15 | ⬜ Todo |
