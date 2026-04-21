@@ -54,8 +54,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 - Branch: `develop`
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
-- **Phase 3 in progress — Steps 1–15 done, Step 16 is next**
-- 143 API tests passing; 69 playwright-worker tests passing
+- **Phase 3 in progress — Steps 1–16 done, Step 17 is next**
+- 145 API tests passing; 69 playwright-worker tests passing
 
 ### Phase 3 steps done
 
@@ -82,9 +82,12 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 | 15 | Playwright worker: schema_version 2 + proxy + cookies + actions + robots.txt (ADR-004, PRD-004/005/008/009) | `handle_message` extracted to `worker/worker.py` (mirrors LLM worker + Go worker pattern); `Credentials`/`Options`/`CrawlContext` models added; robots check fires **before** `"running"` publish matching Go contract; proxy via `browser.new_context(proxy={"server": url})`; cookies injected before `page.goto()` with domain inferred from job URL; CSP `connect-src` header set before goto when actions present; 8-action executor in `worker/actions.py` — partial-failure loop, screenshots stored to MinIO; `worker/robots.py` direct-fetch client (httpx, never proxy); 69 tests passing (up from 28); Dockerfile updated to include `tests/` + `pyproject.toml` |
 
+| 16 | PRD-004: robots.txt — API integration | `respect_robots: bool = False` added to `_MutableJobFields` (exposed on `JobCreate`/`JobPatch`); persisted onto `Job` model in `create_job()`; all three dispatch sites (router `create_job`, scheduler `_dispatch_due_jobs`, scheduler `_recover_stale_pending`) upgraded from v1 flat payload to schema_version 2 with `engine`, `credentials: null`, `options: {respect_robots}`, `crawl_context: null`; 2 new tests — 145 API tests passing |
+
 ### Next step
 
-**Step 16 — PRD-004: robots.txt — API integration** (`docs/project/PHASE3_BACKLOG.md` §Step 16):
-- Wire `respect_robots` field from `POST /jobs` into the fat message dispatched to workers
-- Both workers (Go HTTP + Playwright) are already deployed and ready to enforce it
-- The API is the missing link: it must read `jobs.respect_robots` and set `options.respect_robots` in the v2 message
+**Step 17 — PRD-005: proxy rotation — API integration** (`docs/project/PHASE3_BACKLOG.md` §Step 17):
+- Wire `proxy_provider` from `jobs` DB into `credentials.proxy_url` in the v2 NATS message
+- Both workers already accept `credentials.proxy_url` and route the scrape through it
+- The API must resolve the provider name → proxy URL (likely from env/settings) and set it in the dispatch payload
+- `jobs.proxy_provider VARCHAR(50)` already exists (migration 3.2); the `job_secrets` table (migration 3.4) holds per-job proxy credentials if needed
