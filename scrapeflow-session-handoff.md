@@ -54,8 +54,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 - Branch: `develop`
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
-- **Phase 3 in progress — Steps 1–14 done, Step 15 is next**
-- 143 API tests passing
+- **Phase 3 in progress — Steps 1–15 done, Step 16 is next**
+- 143 API tests passing; 69 playwright-worker tests passing
 
 ### Phase 3 steps done
 
@@ -80,13 +80,11 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 | 14 | Go HTTP worker: schema_version 2 + proxy routing + robots.txt (ADR-004, PRD-004, PRD-005) | `ScrapeMessage` v2 struct with `Credentials`/`Options`/`CrawlContext`; `fetcher.WithProxy()` builds proxy transport reusing original timeout; `internal/robots` package — `IsDisallowed()` direct fetch (never via proxy), `isPathDisallowed()` pure parser (ScrapeFlow > `*` precedence, longest-match wins); `storageClient` interface added to Worker for test injection; 4 `handleMessage` unit tests (disallowed, allowed-proceeds, skip-when-false, malformed-proxy) |
 
+| 15 | Playwright worker: schema_version 2 + proxy + cookies + actions + robots.txt (ADR-004, PRD-004/005/008/009) | `handle_message` extracted to `worker/worker.py` (mirrors LLM worker + Go worker pattern); `Credentials`/`Options`/`CrawlContext` models added; robots check fires **before** `"running"` publish matching Go contract; proxy via `browser.new_context(proxy={"server": url})`; cookies injected before `page.goto()` with domain inferred from job URL; CSP `connect-src` header set before goto when actions present; 8-action executor in `worker/actions.py` — partial-failure loop, screenshots stored to MinIO; `worker/robots.py` direct-fetch client (httpx, never proxy); 69 tests passing (up from 28); Dockerfile updated to include `tests/` + `pyproject.toml` |
+
 ### Next step
 
-**Step 15 — Playwright worker: schema_version 2** (`docs/project/PHASE3_BACKLOG.md` §Step 15):
-- Parse `credentials`, `options`, `crawl_context` sub-objects from message dict
-- Proxy via `browser.new_context(proxy={"server": proxy_url})`
-- Cookie injection after `new_context`, before `page.goto()`
-- `execute_actions(page, actions)` loop with partial-failure handling
-- CSP injection for `execute_js` safety
-- robots.txt enforcement (same direct-fetch logic as Step 14)
-- **Must be deployed to production before Steps 16–20 (API sends v2 messages)**
+**Step 16 — PRD-004: robots.txt — API integration** (`docs/project/PHASE3_BACKLOG.md` §Step 16):
+- Wire `respect_robots` field from `POST /jobs` into the fat message dispatched to workers
+- Both workers (Go HTTP + Playwright) are already deployed and ready to enforce it
+- The API is the missing link: it must read `jobs.respect_robots` and set `options.respect_robots` in the v2 message
