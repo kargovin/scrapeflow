@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phase 2 complete. Phase 3 in progress — Steps 1–16 done. Steps 17–28 remaining.**
+> **Status: Phase 2 complete. Phase 3 in progress — Steps 1–17 done. Steps 18–28 remaining.**
 
 ## Goal
 
