@@ -12,7 +12,6 @@ Startup sequence (spec §4.2):
 
 import asyncio
 import signal
-from typing import Any
 
 import nats
 import nats.errors
@@ -21,110 +20,13 @@ from miniopy_async import Minio
 from playwright.async_api import async_playwright
 
 from .config import settings
-from .formatter import format_output
-from .models import JobMessage, ResultMessage
-from .storage import upload
+from .worker import handle_message
 
 log = structlog.get_logger()
 
 PLAYWRIGHT_SUBJECT = "scrapeflow.jobs.run.playwright"
-RESULT_SUBJECT = "scrapeflow.jobs.result"
 DURABLE_NAME = "python-playwright-worker"
 STREAM_NAME = "SCRAPEFLOW"
-
-
-async def _publish_result(js: Any, result: ResultMessage) -> None:
-    await js.publish(RESULT_SUBJECT, result.to_nats_bytes())
-
-
-async def _handle_message(
-    msg: Any,
-    js: Any,
-    minio: Minio,
-    browser: Any,
-    default_timeout: int,
-) -> None:
-    """Full ADR-002 job lifecycle for a single Playwright job."""
-    # --- Step 1: Parse the incoming job message ---
-    try:
-        job = JobMessage.model_validate_json(msg.data)
-    except Exception as exc:
-        log.error("malformed_message", error=str(exc), data=msg.data[:200])
-        await msg.ack()
-        return
-
-    log.info("job_received", job_id=job.job_id, run_id=job.run_id, url=job.url)
-
-    opts = job.playwright_options
-    timeout_ms = (opts.timeout_seconds if opts else default_timeout) * 1000
-    wait_state = opts.wait_strategy if opts else "load"
-
-    # --- Step 2: Publish "running" with nats_stream_seq (ADR-002 §3) ---
-    # The result consumer stores nats_stream_seq on job_runs so the MaxDeliver
-    # advisory handler (Step 22) can identify stalled runs by sequence number alone.
-    nats_seq = msg.metadata.sequence.stream
-    await _publish_result(
-        js,
-        ResultMessage(
-            job_id=job.job_id,
-            run_id=job.run_id,
-            status="running",
-            nats_stream_seq=nats_seq,
-        ),
-    )
-
-    # --- Steps 3–6: Render, format, upload ---
-    context = await browser.new_context()
-    page = await context.new_page()
-    try:
-        # Optional: block images/fonts/CSS to speed up non-visual scrapes
-        if opts and opts.block_images:
-            await page.route(
-                "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,css}",
-                lambda route: route.abort(),
-            )
-
-        await page.goto(job.url, timeout=timeout_ms)
-        await page.wait_for_load_state(wait_state)
-
-        html = await page.content()
-        final_url = page.url
-
-        content, ext = format_output(html, job.output_format, final_url)
-        minio_path = await upload(minio, job.job_id, ext, content)
-
-        # --- Step 7: Publish "completed" ---
-        await _publish_result(
-            js,
-            ResultMessage(
-                job_id=job.job_id,
-                run_id=job.run_id,
-                status="completed",
-                minio_path=minio_path,
-            ),
-        )
-        # --- Step 8: Ack only after MinIO write succeeds (ADR-002 §6) ---
-        await msg.ack()
-        log.info("job_completed", job_id=job.job_id, run_id=job.run_id, path=minio_path)
-
-    except Exception as exc:
-        log.error("job_failed", job_id=job.job_id, run_id=job.run_id, error=str(exc))
-        await _publish_result(
-            js,
-            ResultMessage(
-                job_id=job.job_id,
-                run_id=job.run_id,
-                status="failed",
-                error=str(exc),
-            ),
-        )
-        # Ack even on failure — the API already knows it failed via the result event.
-        # Not acking would redeliver, but if the page is down/timing out, retry won't help.
-        await msg.ack()
-
-    finally:
-        # Always discard the browser context — no session state leaks between jobs
-        await context.close()
 
 
 async def run() -> None:
@@ -194,7 +96,7 @@ async def run() -> None:
 
     async def handle_with_sem(msg):
         async with sem:
-            await _handle_message(
+            await handle_message(
                 msg,
                 js,
                 minio,

@@ -15,6 +15,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 COPY worker/ ./worker/
+COPY tests/ ./tests/
+COPY pyproject.toml .
 
 RUN useradd --no-create-home --uid 1001 appuser
 USER appuser

@@ -16,6 +16,7 @@ _CONTENT_TYPES: dict[str, str] = {
     "html": "text/html; charset=utf-8",
     "md": "text/markdown; charset=utf-8",
     "json": "application/json",
+    "png": "image/png",
 }
 
 
@@ -40,3 +41,25 @@ async def upload(minio: Minio, job_id: str, ext: str, data: bytes) -> str:
     # Return bucket-qualified path matching the Go worker's convention:
     # "{bucket}/history/{job_id}/{ts}.{ext}"
     return f"{bucket}/{history_key}"
+
+
+async def upload_screenshot(minio: Minio, job_id: str, index: int, data: bytes) -> str:
+    """
+    Upload a screenshot PNG to MinIO; return the bucket-qualified path.
+
+    Screenshots are not overwritten on re-runs (no latest/ write) — each
+    screenshot is immutable at its timestamped path.
+    """
+    bucket = settings.minio_bucket
+    ts = int(time.time())
+    key = f"screenshots/{job_id}/{ts}_{index}.png"
+
+    await minio.put_object(
+        bucket,
+        key,
+        io.BytesIO(data),
+        len(data),
+        content_type="image/png",
+    )
+
+    return f"{bucket}/{key}"

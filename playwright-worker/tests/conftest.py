@@ -3,7 +3,7 @@ Shared test fixtures for playwright-worker unit tests.
 
 No live connections here — everything is mocked. The fixtures below
 provide reusable mock objects; helper functions (make_nats_msg,
-make_browser) live in test_main.py since they need per-test tuning.
+make_browser) live here since they need per-test tuning.
 """
 
 import json
@@ -25,6 +25,10 @@ def make_nats_msg(
     output_format: str = "html",
     playwright_options: dict | None = None,
     stream_seq: int = 42,
+    # Schema version 2 sub-objects (omitted from payload when None)
+    credentials: dict | None = None,
+    options: dict | None = None,
+    crawl_context: dict | None = None,
 ) -> MagicMock:
     """
     Build a mock NATS message whose .data is a valid JobMessage JSON payload.
@@ -38,6 +42,12 @@ def make_nats_msg(
     }
     if playwright_options is not None:
         payload["playwright_options"] = playwright_options
+    if credentials is not None:
+        payload["credentials"] = credentials
+    if options is not None:
+        payload["options"] = options
+    if crawl_context is not None:
+        payload["crawl_context"] = crawl_context
 
     msg = MagicMock()
     msg.data = json.dumps(payload).encode()

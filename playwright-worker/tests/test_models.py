@@ -10,7 +10,7 @@ All tests are synchronous — Pydantic models have no async behavior.
 
 import json
 
-from worker.models import PlaywrightOptions, ResultMessage
+from worker.models import JobMessage, PlaywrightOptions, ResultMessage
 
 
 # ---------------------------------------------------------------------------
@@ -85,3 +85,86 @@ def test_playwright_options_defaults():
     assert opts.wait_strategy == "load"
     assert opts.timeout_seconds == 60
     assert opts.block_images is False
+
+
+# ---------------------------------------------------------------------------
+# Schema version 2 parsing
+# ---------------------------------------------------------------------------
+
+
+def test_schema_version_2_message_parses_all_sub_objects():
+    """A full v2 fat message must parse all sub-objects correctly."""
+    payload = json.dumps(
+        {
+            "schema_version": 2,
+            "job_id": "job-x",
+            "run_id": "run-y",
+            "url": "https://example.com",
+            "output_format": "html",
+            "engine": "playwright",
+            "credentials": {
+                "proxy_url": "http://user:pass@proxy.example.com:8080",
+                "cookies": [{"name": "sess", "value": "abc", "domain": "example.com"}],
+            },
+            "options": {
+                "respect_robots": True,
+                "actions": [{"type": "wait", "milliseconds": 500}],
+            },
+            "crawl_context": {
+                "crawl_id": "crawl-1",
+                "crawl_page_id": "page-1",
+                "depth": 2,
+            },
+        }
+    )
+    msg = JobMessage.model_validate_json(payload)
+
+    assert msg.schema_version == 2
+    assert msg.credentials.proxy_url == "http://user:pass@proxy.example.com:8080"
+    assert msg.credentials.cookies[0]["name"] == "sess"
+    assert msg.options.respect_robots is True
+    assert msg.options.actions[0]["type"] == "wait"
+    assert msg.crawl_context.crawl_id == "crawl-1"
+    assert msg.crawl_context.depth == 2
+
+
+def test_v1_message_parses_with_defaults():
+    """
+    A v1 message (no credentials/options/crawl_context keys) must still parse.
+    schema_version defaults to 1; all new fields default to None.
+    """
+    payload = json.dumps(
+        {
+            "job_id": "job-1",
+            "run_id": "run-1",
+            "url": "https://example.com",
+            "output_format": "html",
+        }
+    )
+    msg = JobMessage.model_validate_json(payload)
+
+    assert msg.schema_version == 1
+    assert msg.credentials is None
+    assert msg.options is None
+    assert msg.crawl_context is None
+
+
+def test_result_message_warnings_and_screenshots_excluded_when_none():
+    """warnings and screenshot_paths must be absent from bytes when not set."""
+    msg = ResultMessage(job_id="j", run_id="r", status="completed", minio_path="p")
+    data = json.loads(msg.to_nats_bytes())
+    assert "warnings" not in data
+    assert "screenshot_paths" not in data
+
+
+def test_result_message_includes_warnings_when_set():
+    """warnings must appear in bytes when actions produced failures."""
+    msg = ResultMessage(
+        job_id="j",
+        run_id="r",
+        status="completed",
+        minio_path="p",
+        warnings=["action click failed: timeout"],
+    )
+    data = json.loads(msg.to_nats_bytes())
+    assert data["warnings"] == ["action click failed: timeout"]

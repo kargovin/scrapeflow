@@ -1,22 +1,27 @@
 """
-Unit tests for worker/main.py — _handle_message().
+Unit tests for worker/worker.py — handle_message().
 
 These tests verify the full ADR-002 job lifecycle without any live
 infrastructure. NATS, MinIO, and the Playwright browser are all AsyncMocks.
 
-The `upload` function is patched at 'worker.main.upload' (the name as it
+The `upload` function is patched at 'worker.worker.upload' (the name as it
 appears in the module under test, not where it's defined in storage.py).
 This is the standard unittest.mock rule for patching imported names.
 
 Lifecycle summary being tested:
   1. Parse JobMessage from msg.data — ack+skip if malformed
-  2. Publish status="running" with nats_stream_seq BEFORE page interaction
-  3. (Optional) Set up image-blocking route on page
-  4. page.goto → page.wait_for_load_state → page.content()
-  5. format_output → upload to MinIO
-  6. Publish status="completed" with minio_path
-  7. msg.ack() — always, even on failure
-  8. context.close() — always (finally block)
+  2. robots.txt check (respect_robots=True) — publish failed+ack if disallowed;
+     fires BEFORE step 3
+  3. Publish status="running" with nats_stream_seq BEFORE page interaction
+  4. new_context(proxy=...) if credentials.proxy_url is set
+  5. add_cookies() before page.goto() if credentials.cookies is set
+  6. set_extra_http_headers(CSP) before page.goto() if actions are present
+  7. page.goto → page.wait_for_load_state → page.content()
+  8. execute_actions() after page.goto
+  9. format_output → upload to MinIO
+  10. Publish status="completed" with minio_path
+  11. msg.ack() — always, even on failure
+  12. context.close() — always (finally block)
 """
 
 import json
@@ -24,25 +29,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from tests.conftest import make_browser, make_nats_msg
-from worker.main import RESULT_SUBJECT, _handle_message
+from worker.worker import RESULT_SUBJECT, handle_message
 
 _FAKE_MINIO_PATH = "scrapeflow-results/history/job-aaa/1234567890.html"
 _DEFAULT_TIMEOUT = 60
 
 
 # ---------------------------------------------------------------------------
-# Helper: run _handle_message with upload patched to return a fixed path
+# Helper: run handle_message with upload patched to return a fixed path
 # ---------------------------------------------------------------------------
 
 
-async def _run(msg, js=None, browser=None):
-    """Run _handle_message with upload stubbed out; returns (js, mock_upload)."""
+async def _run(msg, js=None, browser=None, extra_patches=None):
+    """Run handle_message with upload stubbed out; returns (js, mock_upload)."""
     js = js or AsyncMock()
     if browser is None:
         browser, _, _ = make_browser()
-    with patch("worker.main.upload", new_callable=AsyncMock) as mock_upload:
+    patches = [patch("worker.worker.upload", new_callable=AsyncMock)]
+    if extra_patches:
+        patches.extend(extra_patches)
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.return_value = _FAKE_MINIO_PATH
-        await _handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
+        await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
     return js, mock_upload
 
 
@@ -61,7 +69,7 @@ async def test_malformed_json_is_acked_immediately():
     msg.ack = AsyncMock()
     js = AsyncMock()
 
-    await _handle_message(msg, js, AsyncMock(), AsyncMock(), _DEFAULT_TIMEOUT)
+    await handle_message(msg, js, AsyncMock(), AsyncMock(), _DEFAULT_TIMEOUT)
 
     msg.ack.assert_called_once()
     js.publish.assert_not_called()
@@ -148,7 +156,7 @@ async def test_page_goto_failure_publishes_failed():
     browser, _, page = make_browser()
     page.goto = AsyncMock(side_effect=Exception("connection timeout"))
 
-    await _handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
+    await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
     last_call = js.publish.call_args_list[-1]
     _, payload_bytes = last_call.args
@@ -168,7 +176,7 @@ async def test_ack_called_on_failure():
     browser, _, page = make_browser()
     page.goto = AsyncMock(side_effect=Exception("timeout"))
 
-    await _handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+    await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
     msg.ack.assert_called_once()
 
@@ -179,7 +187,7 @@ async def test_context_closed_on_failure():
     browser, context, page = make_browser()
     page.goto = AsyncMock(side_effect=Exception("timeout"))
 
-    await _handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+    await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
     context.close.assert_called_once()
 
@@ -226,3 +234,220 @@ async def test_block_images_false_does_not_call_page_route():
     await _run(msg, browser=browser)
 
     page.route.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# robots.txt enforcement (Step 15)
+# ---------------------------------------------------------------------------
+
+
+async def test_robots_disallowed_publishes_failed_before_running():
+    """
+    When respect_robots=True and is_disallowed returns True, the worker must:
+    - Publish exactly one result: status='failed', error='robots_txt_disallowed'
+    - NOT publish 'running' at all
+    - Ack the message
+    """
+    msg = make_nats_msg(options={"respect_robots": True})
+    js = AsyncMock()
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.is_disallowed", new_callable=AsyncMock) as mock_check:
+        mock_check.return_value = True
+        await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    assert js.publish.call_count == 1
+    _, payload_bytes = js.publish.call_args_list[0].args
+    data = json.loads(payload_bytes)
+    assert data["status"] == "failed"
+    assert data["error"] == "robots_txt_disallowed"
+    msg.ack.assert_called_once()
+
+
+async def test_robots_allowed_proceeds_to_running():
+    """
+    When respect_robots=True and is_disallowed returns False, the first
+    publish must be 'running' — robots check passed.
+    """
+    msg = make_nats_msg(options={"respect_robots": True})
+    js = AsyncMock()
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.is_disallowed", new_callable=AsyncMock) as mock_check:
+        mock_check.return_value = False
+        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+            mock_upload.return_value = _FAKE_MINIO_PATH
+            await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    first_call = js.publish.call_args_list[0]
+    _, payload_bytes = first_call.args
+    data = json.loads(payload_bytes)
+    assert data["status"] == "running"
+
+
+async def test_respect_robots_false_skips_check():
+    """
+    When respect_robots=False (or options absent), is_disallowed must never
+    be called — even if robots.txt would block the URL.
+    """
+    msg = make_nats_msg(options={"respect_robots": False})
+    js = AsyncMock()
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.is_disallowed", new_callable=AsyncMock) as mock_check:
+        mock_check.return_value = True  # would block, but should never be called
+        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+            mock_upload.return_value = _FAKE_MINIO_PATH
+            await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    mock_check.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Proxy routing (Step 15)
+# ---------------------------------------------------------------------------
+
+
+async def test_proxy_passed_to_new_context():
+    """
+    When credentials.proxy_url is set, browser.new_context must be called
+    with proxy={"server": proxy_url}.
+    """
+    proxy_url = "http://user:pass@proxy.example.com:8080"
+    msg = make_nats_msg(credentials={"proxy_url": proxy_url})
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.return_value = _FAKE_MINIO_PATH
+        await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    browser.new_context.assert_called_once_with(proxy={"server": proxy_url})
+
+
+async def test_no_proxy_calls_new_context_without_proxy():
+    """When no credentials are set, new_context must be called with no arguments."""
+    msg = make_nats_msg()
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.return_value = _FAKE_MINIO_PATH
+        await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    browser.new_context.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# Cookie injection (Step 15)
+# ---------------------------------------------------------------------------
+
+
+async def test_cookies_injected_before_goto():
+    """
+    When credentials.cookies is set, context.add_cookies must be called
+    before page.goto.
+    """
+    cookies = [{"name": "session", "value": "abc123", "domain": "example.com"}]
+    msg = make_nats_msg(credentials={"cookies": cookies})
+    browser, context, page = make_browser()
+
+    call_order = []
+    context.add_cookies = AsyncMock(
+        side_effect=lambda _: call_order.append("add_cookies")
+    )
+    page.goto = AsyncMock(side_effect=lambda *a, **kw: call_order.append("goto"))
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.return_value = _FAKE_MINIO_PATH
+        await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    assert call_order.index("add_cookies") < call_order.index("goto")
+
+
+async def test_cookie_domain_inferred_from_url():
+    """
+    A cookie without a 'domain' key must have domain inferred from the job URL
+    hostname before being passed to add_cookies.
+    """
+    # Cookie has no 'domain' field
+    cookies = [{"name": "token", "value": "xyz"}]
+    msg = make_nats_msg(
+        url="https://example.com/page",
+        credentials={"cookies": cookies},
+    )
+    browser, context, page = make_browser()
+    captured = []
+    context.add_cookies = AsyncMock(side_effect=lambda c: captured.extend(c))
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.return_value = _FAKE_MINIO_PATH
+        await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    assert len(captured) == 1
+    assert captured[0]["domain"] == "example.com"
+
+
+# ---------------------------------------------------------------------------
+# CSP injection (Step 15)
+# ---------------------------------------------------------------------------
+
+
+async def test_csp_set_when_actions_present():
+    """
+    When options.actions is non-empty, page.set_extra_http_headers must be
+    called with a CSP header before page.goto.
+    """
+    actions = [{"type": "wait", "milliseconds": 100}]
+    msg = make_nats_msg(options={"actions": actions})
+    browser, _, page = make_browser()
+
+    call_order = []
+    page.set_extra_http_headers = AsyncMock(
+        side_effect=lambda _: call_order.append("set_headers")
+    )
+    page.goto = AsyncMock(side_effect=lambda *a, **kw: call_order.append("goto"))
+
+    with patch("worker.worker.execute_actions", new_callable=AsyncMock) as mock_actions:
+        mock_actions.return_value = ([], [])
+        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+            mock_upload.return_value = _FAKE_MINIO_PATH
+            await handle_message(
+                msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT
+            )
+
+    page.set_extra_http_headers.assert_called_once()
+    headers: dict = page.set_extra_http_headers.call_args.args[0]
+    assert "Content-Security-Policy" in headers
+    assert "connect-src" in headers["Content-Security-Policy"]
+    assert call_order.index("set_headers") < call_order.index("goto")
+
+
+# ---------------------------------------------------------------------------
+# Action execution (Step 15)
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_actions_called_after_goto():
+    """
+    execute_actions must be called after page.goto resolves, so that actions
+    operate on the fully-loaded page DOM.
+    """
+    actions = [{"type": "wait", "milliseconds": 50}]
+    msg = make_nats_msg(options={"actions": actions})
+    browser, _, page = make_browser()
+
+    call_order = []
+    page.goto = AsyncMock(side_effect=lambda *a, **kw: call_order.append("goto"))
+
+    with patch("worker.worker.execute_actions", new_callable=AsyncMock) as mock_actions:
+        mock_actions.return_value = ([], [])
+        mock_actions.side_effect = lambda *a, **kw: (
+            call_order.append("actions"),
+            ([], []),
+        )[1]
+        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+            mock_upload.return_value = _FAKE_MINIO_PATH
+            await handle_message(
+                msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT
+            )
+
+    assert call_order.index("goto") < call_order.index("actions")
