@@ -908,3 +908,46 @@ async def test_rotate_webhook_secret_other_user(client, auth_headers, db_user):
 
     resp = await client.post(f"/jobs/{job.id}/webhook-secret/rotate", headers=auth_headers)
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PRD-004: respect_robots wired into v2 NATS message (Step 16)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_job_respect_robots_true(client, auth_headers, mock_jetstream):
+    """POST /jobs with respect_robots=true sends schema_version 2 with options.respect_robots=true."""
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "respect_robots": True},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+
+    mock_jetstream.publish.assert_called_once()
+    _, call_payload = mock_jetstream.publish.call_args.args
+    published = json.loads(call_payload.decode())
+
+    assert published["schema_version"] == 2
+    assert published["engine"] == "http"
+    assert published["options"]["respect_robots"] is True
+
+
+async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstream):
+    """POST /jobs without respect_robots produces a schema_version 2 message with options.respect_robots=false."""
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://example.com"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+
+    mock_jetstream.publish.assert_called_once()
+    _, call_payload = mock_jetstream.publish.call_args.args
+    published = json.loads(call_payload.decode())
+
+    assert published["schema_version"] == 2
+    assert published["engine"] == "http"
+    assert published["options"]["respect_robots"] is False
+    assert published["credentials"] is None
+    assert published["crawl_context"] is None

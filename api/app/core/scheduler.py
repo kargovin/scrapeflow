@@ -74,10 +74,15 @@ async def _dispatch_due_jobs(
             await db.commit()  # commit per job — releases row lock immediately
 
             payload: dict = {
+                "schema_version": 2,
                 "job_id": str(job.id),
                 "run_id": str(run.id),
                 "url": job.url,
                 "output_format": job.output_format.value,
+                "engine": job.engine,
+                "credentials": None,
+                "options": {"respect_robots": job.respect_robots},
+                "crawl_context": None,
             }
             try:
                 if job.engine == "playwright":
@@ -129,10 +134,15 @@ async def _recover_stale_pending(
                 continue  # orphaned run — should not happen with CASCADE deletes
 
             payload: dict = {
+                "schema_version": 2,
                 "job_id": str(job.id),
                 "run_id": str(run.id),
                 "url": job.url,
                 "output_format": job.output_format.value,
+                "engine": job.engine,
+                "credentials": None,
+                "options": {"respect_robots": job.respect_robots},
+                "crawl_context": None,
             }
             try:
                 if job.engine == "playwright":

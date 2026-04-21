@@ -143,6 +143,7 @@ async def create_job(
         playwright_options=body.playwright_options.model_dump()
         if body.playwright_options
         else None,
+        respect_robots=body.respect_robots,
     )
     db.add(job)
     await db.flush()
@@ -155,10 +156,15 @@ async def create_job(
     # Publish to NATS after successful DB insert (ADR-001)
     # If NATS is unavailable, job stays as `pending` and can be retried later
     payload: dict[str, Any] = {
+        "schema_version": 2,
         "job_id": str(job.id),
         "run_id": str(job_run.id),
         "url": job.url,
         "output_format": job.output_format.value,
+        "engine": body.engine.value,
+        "credentials": None,
+        "options": {"respect_robots": job.respect_robots},
+        "crawl_context": None,
     }
 
     if body.engine == Engine.http:

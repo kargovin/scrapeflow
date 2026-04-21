@@ -35,6 +35,7 @@ class _MutableJobFields(BaseModel):
     llm_config: LLMJobConfig | None = None
     schedule_cron: str | None = None
     webhook_url: AnyHttpUrl | None = None
+    respect_robots: bool = False
 
     @field_validator("webhook_url", mode="after")
     @classmethod
