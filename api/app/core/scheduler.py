@@ -29,20 +29,32 @@ logger = structlog.get_logger()
 
 
 async def _resolve_credentials(job: Job, db: AsyncSession) -> dict | None:
-    """Resolve proxy credentials for dispatch: per-job secret > platform default > None."""
-    secret = await db.scalar(
+    """Resolve credentials for dispatch: proxy (per-job > platform default) + cookies."""
+    result: dict = {}
+
+    proxy_secret = await db.scalar(
         select(JobSecrets).where(
             JobSecrets.job_id == job.id,
             JobSecrets.secret_type == JobSecretType.proxy,
         )
     )
-    if secret:
+    if proxy_secret:
         f = Fernet(settings.llm_key_encryption_key)
-        proxy_url = f.decrypt(secret.encrypted_value.encode()).decode()
-        return {"proxy_url": proxy_url}
-    if settings.default_proxy_url:
-        return {"proxy_url": settings.default_proxy_url}
-    return None
+        result["proxy_url"] = f.decrypt(proxy_secret.encrypted_value.encode()).decode()
+    elif settings.default_proxy_url:
+        result["proxy_url"] = settings.default_proxy_url
+
+    cookies_secret = await db.scalar(
+        select(JobSecrets).where(
+            JobSecrets.job_id == job.id,
+            JobSecrets.secret_type == JobSecretType.cookies,
+        )
+    )
+    if cookies_secret:
+        f = Fernet(settings.llm_key_encryption_key)
+        result["cookies"] = json.loads(f.decrypt(cookies_secret.encrypted_value.encode()).decode())
+
+    return result or None
 
 
 async def scheduler_loop(

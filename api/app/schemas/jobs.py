@@ -38,6 +38,7 @@ class _MutableJobFields(BaseModel):
     respect_robots: bool = False
     proxy_provider: str | None = None
     proxy_url: str | None = None  # write-only; stored encrypted in job_secrets, never returned
+    cookies: list[dict] | None = None  # write-only; stored encrypted in job_secrets, never returned
 
     @field_validator("webhook_url", mode="after")
     @classmethod
@@ -77,6 +78,7 @@ class JobResponse(BaseModel):
     completed_at: datetime | None = None
     webhook_secret: str | None = None
     has_proxy: bool = False
+    has_cookies: bool = False
     model_config = {"from_attributes": True}
 
 

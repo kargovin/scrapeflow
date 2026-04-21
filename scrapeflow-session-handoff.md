@@ -54,8 +54,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 - Branch: `develop`
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
-- **Phase 3 in progress — Steps 1–17 done, Step 18 is next**
-- 149 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing
+- **Phase 3 in progress — Steps 1–18 done, Step 19 is next**
+- 153 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing
 
 ### Phase 3 steps done
 
@@ -85,12 +85,14 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | 16 | PRD-004: robots.txt — API integration | `respect_robots: bool = False` added to `_MutableJobFields` (exposed on `JobCreate`/`JobPatch`); persisted onto `Job` model in `create_job()`; all three dispatch sites (router `create_job`, scheduler `_dispatch_due_jobs`, scheduler `_recover_stale_pending`) upgraded from v1 flat payload to schema_version 2 with `engine`, `credentials: null`, `options: {respect_robots}`, `crawl_context: null`; 2 new tests — 145 API tests passing |
 
 | 17 | PRD-005: proxy rotation — API integration | `default_proxy_url` added to settings; `proxy_url` (write-only) + `proxy_provider` added to `_MutableJobFields`; `has_proxy: bool` added to `JobResponse`; `_resolve_credentials()` helper (per-job `job_secrets` row > `DEFAULT_PROXY_URL` env > `None`) called at all 3 dispatch sites; `pg_insert(...).on_conflict_do_update()` upsert on create/PATCH; `proxy_url: null` on PATCH deletes the secret; EXISTS correlated subquery for `has_proxy` in `_jobs_with_latest_run_stmt` (callers now unpack 3-tuple); `_resolve_credentials` duplicated inline in `scheduler.py` to avoid circular import; 4 new tests; **conftest fix**: `client` fixture now overrides `check_rate_limit` to no-op (shared mock user exhausted the 60-req window mid-suite); `rate_limited_client` fixture for HTTP rate-limit integration test; phantom `client` dep removed from `mock_clerk_auth` (was silently activating the override) — 149 tests passing, first-run deterministic |
+| 18 | PRD-008: authenticated scraping — API integration | `cookies` (write-only) on `JobCreate`/`JobPatch`; `job_secrets` upsert/delete with `secret_type='cookies'`; `has_cookies: bool` on `JobResponse` via EXISTS subquery; `_resolve_credentials()` updated in both `routers/jobs.py` and `scheduler.py` to decrypt + inject cookies alongside proxy; 4 new tests — 153 tests passing |
 
 ### Next step
 
-**Step 18 — PRD-008: authenticated scraping — API integration** (`docs/project/PHASE3_BACKLOG.md` §Step 18):
-- Expose `cookies` on `JobCreate`/`JobPatch` (write-only, stored encrypted in `job_secrets` under `secret_type='cookies'`)
-- The Playwright worker already accepts `credentials.cookies: list[dict]` and injects them before `page.goto()`
-- Same upsert/delete pattern as proxy (Step 17) — `job_secrets` row with `secret_type='cookies'`
-- `has_cookies: bool` on `JobResponse` (same EXISTS subquery pattern as `has_proxy`)
-- Only the Playwright worker uses cookies; Go HTTP worker receives them in the message but ignores them (no-op)
+**Step 19 — PRD-009: page actions — API integration + Playwright execution** (`docs/project/PHASE3_BACKLOG.md` §Step 19):
+- `actions: list[dict] | None = None` on `JobCreate`/`JobPatch`; stored in `jobs.playwright_actions` (JSONB)
+- `actions` returned in `JobResponse` (not write-only — safe to expose)
+- Validation at `POST /jobs`: actions require `engine: playwright` (422 otherwise); max 20; each needs valid `type`; `wait` needs `milliseconds` 1–10000; `click`/`type`/`wait_for_selector` need non-empty `selector`
+- Dispatch: include `options.actions` in the fat NATS message
+- `GET /jobs/{id}/result`: surface `warnings` from the MinIO result JSON if present
+- Playwright worker already handles actions in `worker/actions.py` (Step 15) — this step is API-side only

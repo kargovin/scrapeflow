@@ -1077,3 +1077,124 @@ async def test_patch_job_remove_proxy(client, auth_headers, mock_jetstream):
             )
         )
     assert secret is None
+
+
+# PRD-008: authenticated scraping — API integration (Step 18)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_job_with_cookies(client, auth_headers, mock_jetstream):
+    """POST /jobs with cookies stores encrypted secret, sets has_cookies=True,
+    omits cookies from response body, and injects decrypted credentials into NATS."""
+    cookies = [{"name": "session", "value": "abc123", "domain": "example.com"}]
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "cookies": cookies},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["has_cookies"] is True
+    assert "cookies" not in data
+
+    # NATS message carries decrypted cookies in credentials
+    mock_jetstream.publish.assert_called_once()
+    _, call_payload = mock_jetstream.publish.call_args.args
+    published = json.loads(call_payload.decode())
+    assert published["credentials"]["cookies"] == cookies
+
+    # Secret was persisted (encrypted) in DB
+    from app.models.job_secrets import JobSecrets, JobSecretType
+
+    job_id = data["id"]
+    async with AsyncSessionLocal() as db:
+        secret = await db.scalar(
+            select(JobSecrets).where(
+                JobSecrets.job_id == uuid.UUID(job_id),
+                JobSecrets.secret_type == JobSecretType.cookies,
+            )
+        )
+    assert secret is not None
+    assert secret.encrypted_value != json.dumps(cookies)  # stored encrypted, not plaintext
+
+
+async def test_create_job_cookies_and_proxy(client, auth_headers, mock_jetstream):
+    """POST /jobs with both cookies and proxy_url produces a credentials dict containing both."""
+    cookies = [{"name": "auth", "value": "tok", "domain": "example.com"}]
+    proxy_url = "http://user:pass@proxy.example.com:8080"
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "cookies": cookies, "proxy_url": proxy_url},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["has_cookies"] is True
+    assert data["has_proxy"] is True
+
+    mock_jetstream.publish.assert_called_once()
+    _, call_payload = mock_jetstream.publish.call_args.args
+    published = json.loads(call_payload.decode())
+    assert published["credentials"]["cookies"] == cookies
+    assert published["credentials"]["proxy_url"] == proxy_url
+
+
+async def test_patch_job_cookies_upsert(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with cookies upserts the job_secrets row and has_cookies becomes True."""
+    from app.models.job_secrets import JobSecrets, JobSecretType
+
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    cookies = [{"name": "token", "value": "xyz789", "domain": "example.com"}]
+    patch_resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={"cookies": cookies},
+        headers=auth_headers,
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["has_cookies"] is True
+
+    async with AsyncSessionLocal() as db:
+        secret = await db.scalar(
+            select(JobSecrets).where(
+                JobSecrets.job_id == uuid.UUID(job_id),
+                JobSecrets.secret_type == JobSecretType.cookies,
+            )
+        )
+    assert secret is not None
+
+
+async def test_patch_job_remove_cookies(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with cookies=null removes the secret and has_cookies becomes False."""
+    from app.models.job_secrets import JobSecrets, JobSecretType
+
+    cookies = [{"name": "session", "value": "abc", "domain": "example.com"}]
+    create_resp = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "cookies": cookies},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    assert create_resp.json()["has_cookies"] is True
+
+    patch_resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={"cookies": None},
+        headers=auth_headers,
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["has_cookies"] is False
+
+    async with AsyncSessionLocal() as db:
+        secret = await db.scalar(
+            select(JobSecrets).where(
+                JobSecrets.job_id == uuid.UUID(job_id),
+                JobSecrets.secret_type == JobSecretType.cookies,
+            )
+        )
+    assert secret is None

@@ -41,20 +41,32 @@ logger = structlog.get_logger()
 
 
 async def _resolve_credentials(job: Job, db: AsyncSession) -> dict | None:
-    """Resolve proxy credentials for dispatch: per-job secret > platform default > None."""
-    secret = await db.scalar(
+    """Resolve credentials for dispatch: proxy (per-job > platform default) + cookies."""
+    result: dict = {}
+
+    proxy_secret = await db.scalar(
         select(JobSecrets).where(
             JobSecrets.job_id == job.id,
             JobSecrets.secret_type == JobSecretType.proxy,
         )
     )
-    if secret:
+    if proxy_secret:
         f = Fernet(settings.llm_key_encryption_key)
-        proxy_url = f.decrypt(secret.encrypted_value.encode()).decode()
-        return {"proxy_url": proxy_url}
-    if settings.default_proxy_url:
-        return {"proxy_url": settings.default_proxy_url}
-    return None
+        result["proxy_url"] = f.decrypt(proxy_secret.encrypted_value.encode()).decode()
+    elif settings.default_proxy_url:
+        result["proxy_url"] = settings.default_proxy_url
+
+    cookies_secret = await db.scalar(
+        select(JobSecrets).where(
+            JobSecrets.job_id == job.id,
+            JobSecrets.secret_type == JobSecretType.cookies,
+        )
+    )
+    if cookies_secret:
+        f = Fernet(settings.llm_key_encryption_key)
+        result["cookies"] = json.loads(f.decrypt(cookies_secret.encrypted_value.encode()).decode())
+
+    return result or None
 
 
 def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
@@ -94,8 +106,15 @@ def _jobs_with_latest_run_stmt(
         .exists()
         .label("has_proxy")
     )
+    has_cookies_sq = (
+        select(JobSecrets.id)
+        .where(JobSecrets.job_id == Job.id, JobSecrets.secret_type == JobSecretType.cookies)
+        .correlate(Job)
+        .exists()
+        .label("has_cookies")
+    )
     stmt = (
-        select(Job, latest_run, has_proxy_sq)
+        select(Job, latest_run, has_proxy_sq, has_cookies_sq)
         .join(latest_run, true())
         .where(Job.user_id == user_id)
         .order_by(Job.created_at.desc())
@@ -199,6 +218,25 @@ async def create_job(
         await db.execute(upsert)
         await db.commit()
 
+    # Persist cookies secret if provided (write-only; never returned)
+    if body.cookies:
+        f = Fernet(settings.llm_key_encryption_key)
+        encrypted = f.encrypt(json.dumps(body.cookies).encode()).decode()
+        upsert = (
+            pg_insert(JobSecrets)
+            .values(
+                job_id=job.id,
+                secret_type=JobSecretType.cookies,
+                encrypted_value=encrypted,
+            )
+            .on_conflict_do_update(
+                constraint="uq_job_secrets_job_type",
+                set_={"encrypted_value": encrypted, "updated_at": func.now()},
+            )
+        )
+        await db.execute(upsert)
+        await db.commit()
+
     # Resolve credentials: per-job secret > platform default > None (PRD-005)
     credentials = await _resolve_credentials(job, db)
 
@@ -238,6 +276,7 @@ async def create_job(
         run_id=job_run.id,
         webhook_secret=webhook_secret_plain,
         has_proxy=body.proxy_url is not None,
+        has_cookies=bool(body.cookies),
     )
 
 
@@ -266,8 +305,9 @@ async def list_jobs(
             error=run.error,
             completed_at=run.completed_at,
             has_proxy=has_proxy,
+            has_cookies=has_cookies,
         )
-        for job, run, has_proxy in rows
+        for job, run, has_proxy, has_cookies in rows
     ]
 
 
@@ -282,7 +322,7 @@ async def get_job(
     row = result.one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    job, run, has_proxy = row
+    job, run, has_proxy, has_cookies = row
     return JobResponse(
         id=job.id,
         user_id=job.user_id,
@@ -297,6 +337,7 @@ async def get_job(
         error=run.error,
         completed_at=run.completed_at,
         has_proxy=has_proxy,
+        has_cookies=has_cookies,
     )
 
 
@@ -405,6 +446,33 @@ async def patch_jobs(
                 )
             )
 
+    # cookies maps to job_secrets — handle before the setattr loop
+    if "cookies" in updates:
+        cookies_val = updates.pop("cookies")
+        if cookies_val:
+            f = Fernet(settings.llm_key_encryption_key)
+            encrypted = f.encrypt(json.dumps(cookies_val).encode()).decode()
+            upsert = (
+                pg_insert(JobSecrets)
+                .values(
+                    job_id=job_id,
+                    secret_type=JobSecretType.cookies,
+                    encrypted_value=encrypted,
+                )
+                .on_conflict_do_update(
+                    constraint="uq_job_secrets_job_type",
+                    set_={"encrypted_value": encrypted, "updated_at": func.now()},
+                )
+            )
+            await db.execute(upsert)
+        else:
+            await db.execute(
+                delete(JobSecrets).where(
+                    JobSecrets.job_id == job_id,
+                    JobSecrets.secret_type == JobSecretType.cookies,
+                )
+            )
+
     for field, value in updates.items():
         if field == "schedule_cron":
             if not croniter.is_valid(value):
@@ -450,7 +518,7 @@ async def patch_jobs(
     stmt = _jobs_with_latest_run_stmt(user.id, job_id=job_id)
     result = await db.execute(stmt)
     row = result.one()
-    job, run, has_proxy = row
+    job, run, has_proxy, has_cookies = row
     return JobResponse(
         id=job.id,
         user_id=job.user_id,
@@ -466,6 +534,7 @@ async def patch_jobs(
         completed_at=run.completed_at,
         webhook_secret=webhook_secret_plain,
         has_proxy=has_proxy,
+        has_cookies=has_cookies,
     )
 
 
