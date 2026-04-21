@@ -124,7 +124,7 @@ Phase 3 — Production hardening
 | 15   | Playwright worker: schema_version 2 + proxy + cookies + actions + robots.txt                | ✅ Done |
 | 16   | PRD-004: robots.txt — API integration                                                        | ✅ Done |
 | 17   | PRD-005: proxy rotation — API integration                                                    | ✅ Done |
-| 18   | PRD-008: authenticated scraping — API integration                                            | ⬜ Todo |
+| 18   | PRD-008: authenticated scraping — API integration                                            | ✅ Done |
 | 19   | PRD-009: page actions — API integration                                                      | ⬜ Todo |
 | 20   | PRD-013: webhook event filter                                                                | ⬜ Todo |
 | 21   | PRD-006: batch scraping — API + result consumer                                              | ⬜ Todo |
