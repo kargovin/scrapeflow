@@ -122,7 +122,9 @@ async def test_rate_limit_per_user_isolation(redis_client):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_rate_limited(client, mock_clerk_auth, redis_client, mock_jetstream):
+async def test_create_job_rate_limited(
+    rate_limited_client, mock_clerk_auth, redis_client, mock_jetstream
+):
     """POST /jobs returns 429 once the rate limit is exhausted."""
     headers = {"Authorization": "Bearer fake.jwt.token"}
 
@@ -142,10 +144,14 @@ async def test_create_job_rate_limited(client, mock_clerk_auth, redis_client, mo
     settings.rate_limit_requests = 2
     try:
         for _ in range(2):
-            resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=headers)
+            resp = await rate_limited_client.post(
+                "/jobs", json={"url": "https://example.com"}, headers=headers
+            )
             assert resp.status_code == 201
 
-        resp = await client.post("/jobs", json={"url": "https://example.com"}, headers=headers)
+        resp = await rate_limited_client.post(
+            "/jobs", json={"url": "https://example.com"}, headers=headers
+        )
         assert resp.status_code == 429
     finally:
         settings.rate_limit_requests = original

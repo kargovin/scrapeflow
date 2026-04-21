@@ -10,7 +10,8 @@ from croniter import croniter
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from nats.js import JetStreamContext
-from sqlalchemy import select, true
+from sqlalchemy import delete, func, select, true
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -22,6 +23,7 @@ from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.models.job_secrets import JobSecrets, JobSecretType
 from app.models.llm_keys import UserLLMKey
 from app.models.user import User
 from app.schemas.jobs import (
@@ -36,6 +38,23 @@ from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = structlog.get_logger()
+
+
+async def _resolve_credentials(job: Job, db: AsyncSession) -> dict | None:
+    """Resolve proxy credentials for dispatch: per-job secret > platform default > None."""
+    secret = await db.scalar(
+        select(JobSecrets).where(
+            JobSecrets.job_id == job.id,
+            JobSecrets.secret_type == JobSecretType.proxy,
+        )
+    )
+    if secret:
+        f = Fernet(settings.llm_key_encryption_key)
+        proxy_url = f.decrypt(secret.encrypted_value.encode()).decode()
+        return {"proxy_url": proxy_url}
+    if settings.default_proxy_url:
+        return {"proxy_url": settings.default_proxy_url}
+    return None
 
 
 def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
@@ -68,8 +87,15 @@ def _jobs_with_latest_run_stmt(
         .lateral()
     )
     latest_run = aliased(JobRun, latest_run_sq)
+    has_proxy_sq = (
+        select(JobSecrets.id)
+        .where(JobSecrets.job_id == Job.id, JobSecrets.secret_type == JobSecretType.proxy)
+        .correlate(Job)
+        .exists()
+        .label("has_proxy")
+    )
     stmt = (
-        select(Job, latest_run)
+        select(Job, latest_run, has_proxy_sq)
         .join(latest_run, true())
         .where(Job.user_id == user_id)
         .order_by(Job.created_at.desc())
@@ -144,6 +170,7 @@ async def create_job(
         if body.playwright_options
         else None,
         respect_robots=body.respect_robots,
+        proxy_provider=body.proxy_provider,
     )
     db.add(job)
     await db.flush()
@@ -152,6 +179,28 @@ async def create_job(
     await db.commit()
     await db.refresh(job)
     await db.refresh(job_run)
+
+    # Persist proxy secret if provided (write-only; never returned)
+    if body.proxy_url:
+        f = Fernet(settings.llm_key_encryption_key)
+        encrypted = f.encrypt(body.proxy_url.encode()).decode()
+        upsert = (
+            pg_insert(JobSecrets)
+            .values(
+                job_id=job.id,
+                secret_type=JobSecretType.proxy,
+                encrypted_value=encrypted,
+            )
+            .on_conflict_do_update(
+                constraint="uq_job_secrets_job_type",
+                set_={"encrypted_value": encrypted, "updated_at": func.now()},
+            )
+        )
+        await db.execute(upsert)
+        await db.commit()
+
+    # Resolve credentials: per-job secret > platform default > None (PRD-005)
+    credentials = await _resolve_credentials(job, db)
 
     # Publish to NATS after successful DB insert (ADR-001)
     # If NATS is unavailable, job stays as `pending` and can be retried later
@@ -162,7 +211,7 @@ async def create_job(
         "url": job.url,
         "output_format": job.output_format.value,
         "engine": body.engine.value,
-        "credentials": None,
+        "credentials": credentials,
         "options": {"respect_robots": job.respect_robots},
         "crawl_context": None,
     }
@@ -188,6 +237,7 @@ async def create_job(
         updated_at=job.updated_at,
         run_id=job_run.id,
         webhook_secret=webhook_secret_plain,
+        has_proxy=body.proxy_url is not None,
     )
 
 
@@ -215,8 +265,9 @@ async def list_jobs(
             diff_detected=run.diff_detected,
             error=run.error,
             completed_at=run.completed_at,
+            has_proxy=has_proxy,
         )
-        for job, run in rows
+        for job, run, has_proxy in rows
     ]
 
 
@@ -231,7 +282,7 @@ async def get_job(
     row = result.one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    job, run = row
+    job, run, has_proxy = row
     return JobResponse(
         id=job.id,
         user_id=job.user_id,
@@ -245,6 +296,7 @@ async def get_job(
         diff_detected=run.diff_detected,
         error=run.error,
         completed_at=run.completed_at,
+        has_proxy=has_proxy,
     )
 
 
@@ -325,6 +377,34 @@ async def patch_jobs(
 
     updates = body.model_dump(exclude_unset=True)
     webhook_secret_plain = None
+
+    # proxy_url maps to job_secrets, not the jobs table — handle before the setattr loop
+    if "proxy_url" in updates:
+        proxy_url_val = updates.pop("proxy_url")
+        if proxy_url_val:
+            f = Fernet(settings.llm_key_encryption_key)
+            encrypted = f.encrypt(proxy_url_val.encode()).decode()
+            upsert = (
+                pg_insert(JobSecrets)
+                .values(
+                    job_id=job_id,
+                    secret_type=JobSecretType.proxy,
+                    encrypted_value=encrypted,
+                )
+                .on_conflict_do_update(
+                    constraint="uq_job_secrets_job_type",
+                    set_={"encrypted_value": encrypted, "updated_at": func.now()},
+                )
+            )
+            await db.execute(upsert)
+        else:
+            await db.execute(
+                delete(JobSecrets).where(
+                    JobSecrets.job_id == job_id,
+                    JobSecrets.secret_type == JobSecretType.proxy,
+                )
+            )
+
     for field, value in updates.items():
         if field == "schedule_cron":
             if not croniter.is_valid(value):
@@ -370,7 +450,7 @@ async def patch_jobs(
     stmt = _jobs_with_latest_run_stmt(user.id, job_id=job_id)
     result = await db.execute(stmt)
     row = result.one()
-    job, run = row
+    job, run, has_proxy = row
     return JobResponse(
         id=job.id,
         user_id=job.user_id,
@@ -385,6 +465,7 @@ async def patch_jobs(
         error=run.error,
         completed_at=run.completed_at,
         webhook_secret=webhook_secret_plain,
+        has_proxy=has_proxy,
     )
 
 

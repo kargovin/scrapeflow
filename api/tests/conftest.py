@@ -10,6 +10,7 @@ from app.auth.api_key import generate_api_key, hash_api_key
 from app.core import minio, nats
 from app.core.db import AsyncSessionLocal
 from app.core.nats import get_jetstream
+from app.core.rate_limit import check_rate_limit
 from app.core.redis import close_pool, create_pool
 from app.main import app
 from app.models.api_key import ApiKey
@@ -30,13 +31,25 @@ async def init_clients():
 
 @pytest_asyncio.fixture
 async def client():
-    """AsyncClient wired directly to the FastAPI app via ASGI transport."""
+    """AsyncClient wired directly to the FastAPI app via ASGI transport.
+    Rate limiting is disabled — all tests share one mock user and would exhaust
+    the Redis sorted-set window mid-suite otherwise.
+    """
+    app.dependency_overrides[check_rate_limit] = lambda: None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.pop(check_rate_limit, None)
+
+
+@pytest_asyncio.fixture
+async def rate_limited_client():
+    """Like `client` but with the real rate limiter active. Used only by rate-limit integration tests."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
 
 @pytest.fixture
-def mock_clerk_auth(client):
+def mock_clerk_auth():
     """Patch Clerk to return a fake valid payload."""
     mock_state = MagicMock()
     mock_state.is_signed_in = True

@@ -36,6 +36,8 @@ class _MutableJobFields(BaseModel):
     schedule_cron: str | None = None
     webhook_url: AnyHttpUrl | None = None
     respect_robots: bool = False
+    proxy_provider: str | None = None
+    proxy_url: str | None = None  # write-only; stored encrypted in job_secrets, never returned
 
     @field_validator("webhook_url", mode="after")
     @classmethod
@@ -74,6 +76,7 @@ class JobResponse(BaseModel):
     updated_at: datetime
     completed_at: datetime | None = None
     webhook_secret: str | None = None
+    has_proxy: bool = False
     model_config = {"from_attributes": True}
 
 

@@ -951,3 +951,129 @@ async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstre
     assert published["options"]["respect_robots"] is False
     assert published["credentials"] is None
     assert published["crawl_context"] is None
+
+
+# ---------------------------------------------------------------------------
+# PRD-005: proxy rotation — API integration (Step 17)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_job_with_proxy_url(client, auth_headers, mock_jetstream):
+    """POST /jobs with proxy_url stores encrypted secret, sets has_proxy=True,
+    omits proxy_url from response body, and injects decrypted credentials into NATS."""
+    proxy_url = "http://user:pass@proxy.example.com:8080"
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "proxy_url": proxy_url},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["has_proxy"] is True
+    assert "proxy_url" not in data
+
+    # NATS message carries decrypted proxy_url in credentials
+    mock_jetstream.publish.assert_called_once()
+    _, call_payload = mock_jetstream.publish.call_args.args
+    published = json.loads(call_payload.decode())
+    assert published["credentials"] == {"proxy_url": proxy_url}
+
+    # Secret was persisted (encrypted) in DB
+    from app.models.job_secrets import JobSecrets, JobSecretType
+
+    job_id = data["id"]
+    async with AsyncSessionLocal() as db:
+        secret = await db.scalar(
+            select(JobSecrets).where(
+                JobSecrets.job_id == uuid.UUID(job_id),
+                JobSecrets.secret_type == JobSecretType.proxy,
+            )
+        )
+    assert secret is not None
+    assert secret.encrypted_value != proxy_url  # stored encrypted, not plaintext
+
+
+async def test_create_job_default_proxy(client, auth_headers, mock_jetstream):
+    """When no per-job proxy_url is given but default_proxy_url is configured,
+    the platform default appears in credentials in the NATS message."""
+    from app.settings import settings as app_settings
+
+    default_proxy = "http://platform-proxy.example.com:3128"
+    original = app_settings.default_proxy_url
+    app_settings.default_proxy_url = default_proxy
+    try:
+        response = await client.post(
+            "/jobs",
+            json={"url": "https://example.com"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["has_proxy"] is False  # no per-job secret, only platform default
+        _, call_payload = mock_jetstream.publish.call_args.args
+        published = json.loads(call_payload.decode())
+        assert published["credentials"] == {"proxy_url": default_proxy}
+    finally:
+        app_settings.default_proxy_url = original
+
+
+async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with proxy_url upserts the job_secrets row and has_proxy becomes True."""
+    from app.models.job_secrets import JobSecrets, JobSecretType
+
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    proxy_url = "http://user:pass@new-proxy.example.com:9090"
+    patch_resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={"proxy_url": proxy_url},
+        headers=auth_headers,
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["has_proxy"] is True
+
+    # Verify secret row exists in DB
+    async with AsyncSessionLocal() as db:
+        secret = await db.scalar(
+            select(JobSecrets).where(
+                JobSecrets.job_id == uuid.UUID(job_id),
+                JobSecrets.secret_type == JobSecretType.proxy,
+            )
+        )
+    assert secret is not None
+
+
+async def test_patch_job_remove_proxy(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with proxy_url=null removes the secret and has_proxy becomes False."""
+    from app.models.job_secrets import JobSecrets, JobSecretType
+
+    create_resp = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "proxy_url": "http://proxy.example.com:8080"},
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    assert create_resp.json()["has_proxy"] is True
+
+    patch_resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={"proxy_url": None},
+        headers=auth_headers,
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["has_proxy"] is False
+
+    # Secret row removed from DB
+    async with AsyncSessionLocal() as db:
+        secret = await db.scalar(
+            select(JobSecrets).where(
+                JobSecrets.job_id == uuid.UUID(job_id),
+                JobSecrets.secret_type == JobSecretType.proxy,
+            )
+        )
+    assert secret is None

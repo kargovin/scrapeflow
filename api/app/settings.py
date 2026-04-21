@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # Webhook delivery
     webhook_max_attempts: int = 5
 
+    # Proxy rotation — platform-level default (PRD-005)
+    default_proxy_url: str = ""  # optional; per-job proxy in job_secrets takes precedence
+
     @field_validator("llm_key_encryption_key")
     def validate_fernet_key(cls, v):
         if not v:
