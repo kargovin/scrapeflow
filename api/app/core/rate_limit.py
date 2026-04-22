@@ -39,6 +39,32 @@ redis.call('EXPIRE', KEYS[1], ttl)
 return {1, 0}
 """
 
+# Batch variant: atomically adds `count` entries if `current + count <= limit`.
+# ARGV[5] carries the batch size; each entry gets a unique member key.
+_SLIDING_WINDOW_BATCH_SCRIPT = """
+local now        = tonumber(ARGV[1])
+local window_ms  = tonumber(ARGV[2])
+local limit      = tonumber(ARGV[3])
+local ttl        = tonumber(ARGV[4])
+local count      = tonumber(ARGV[5])
+local cutoff     = now - window_ms
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
+local current = redis.call('ZCARD', KEYS[1])
+
+if current + count > limit then
+    local oldest    = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+    local oldest_ms = tonumber(oldest[2]) or now
+    return {0, oldest_ms}
+end
+
+for i = 1, count do
+    redis.call('ZADD', KEYS[1], now, now .. '-' .. i .. '-' .. math.random(1000000))
+end
+redis.call('EXPIRE', KEYS[1], ttl)
+return {1, 0}
+"""
+
 
 async def check_rate_limit(
     user: User = Depends(get_current_user),
@@ -81,5 +107,35 @@ async def _increment_and_check(user_id: uuid.UUID, redis: aioredis.Redis) -> Non
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded: {settings.rate_limit_requests} requests "
             f"per {settings.rate_limit_window_seconds}s",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def check_rate_limit_n(count: int, user_id: uuid.UUID, redis: aioredis.Redis) -> None:
+    """Atomically deduct `count` quota units — used by POST /batch."""
+    now_ms = int(time.time() * 1000)
+    window_ms = settings.rate_limit_window_seconds * 1000
+    ttl_seconds = settings.rate_limit_window_seconds * 2
+    key = f"rate:user:{user_id}"
+
+    result = await redis.eval(
+        _SLIDING_WINDOW_BATCH_SCRIPT,
+        1,
+        key,
+        now_ms,
+        window_ms,
+        settings.rate_limit_requests,
+        ttl_seconds,
+        count,
+    )
+
+    allowed, oldest_ms = int(result[0]), int(result[1])
+
+    if not allowed:
+        retry_after = max(1, (oldest_ms + window_ms - now_ms) // 1000)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded: batch of {count} would exceed "
+            f"{settings.rate_limit_requests} requests per {settings.rate_limit_window_seconds}s",
             headers={"Retry-After": str(retry_after)},
         )

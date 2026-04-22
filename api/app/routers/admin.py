@@ -13,6 +13,7 @@ from app.auth.dependencies import get_current_admin_user
 from app.core.db import get_db
 from app.core.minio import get_minio
 from app.core.redis import get_redis
+from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.user import User
@@ -109,6 +110,7 @@ async def admin_get_user(
 
     counts_result = await db.execute(
         select(JobRun.status, func.count(JobRun.id).label("cnt"))
+        .where(JobRun.job_id.is_not(None))
         .join(Job, JobRun.job_id == Job.id)
         .where(Job.user_id == user_id)
         .group_by(JobRun.status)
@@ -341,14 +343,19 @@ async def _build_operational_stats(
     ).scalar_one()
 
     engine_stmt = (
-        select(Job.engine, func.count(JobRun.id).label("cnt"))
+        select(
+            func.coalesce(Job.engine, Batch.engine).label("engine"),
+            func.count(JobRun.id).label("cnt"),
+        )
         .select_from(JobRun)
-        .join(Job, JobRun.job_id == Job.id)
+        .outerjoin(Job, JobRun.job_id == Job.id)
+        .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
+        .outerjoin(Batch, BatchItem.batch_id == Batch.id)
         .where(JobRun.status.in_(["running", "pending"]))
-        .group_by(Job.engine)
+        .group_by(func.coalesce(Job.engine, Batch.engine))
     )
     if user_id is not None:
-        engine_stmt = engine_stmt.where(Job.user_id == user_id)
+        engine_stmt = engine_stmt.where(func.coalesce(Job.user_id, Batch.user_id) == user_id)
     jobs_by_engine: dict[str, int] = {
         str(r[0]): int(r[1]) for r in (await db.execute(engine_stmt)).all()
     }
@@ -451,37 +458,52 @@ async def _build_historical_stats(
         .group_by(JobRun.status)
     )
     if user_id is not None:
-        status_stmt = status_stmt.join(Job, JobRun.job_id == Job.id).where(Job.user_id == user_id)
+        status_stmt = (
+            status_stmt.where(JobRun.job_id.is_not(None))
+            .join(Job, JobRun.job_id == Job.id)
+            .where(Job.user_id == user_id)
+        )
     jobs_by_status_7d: dict[str, int] = {
         str(r[0]): int(r[1]) for r in (await db.execute(status_stmt)).all()
     }
 
     engine_7d_stmt = (
-        select(Job.engine, func.count(JobRun.id).label("cnt"))
+        select(
+            func.coalesce(Job.engine, Batch.engine).label("engine"),
+            func.count(JobRun.id).label("cnt"),
+        )
         .select_from(JobRun)
-        .join(Job, JobRun.job_id == Job.id)
+        .outerjoin(Job, JobRun.job_id == Job.id)
+        .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
+        .outerjoin(Batch, BatchItem.batch_id == Batch.id)
         .where(JobRun.created_at >= week_ago)
-        .group_by(Job.engine)
+        .group_by(func.coalesce(Job.engine, Batch.engine))
     )
     if user_id is not None:
-        engine_7d_stmt = engine_7d_stmt.where(Job.user_id == user_id)
+        engine_7d_stmt = engine_7d_stmt.where(func.coalesce(Job.user_id, Batch.user_id) == user_id)
     jobs_by_engine_7d: dict[str, int] = {
         str(r[0]): int(r[1]) for r in (await db.execute(engine_7d_stmt)).all()
     }
 
     # top_users_by_jobs is a leaderboard across all users — skip for per-user scope
     if user_id is None:
+        batch_user = aliased(User)
         top_stmt = (
             select(
-                User.id.label("user_id"),
-                User.email,
+                func.coalesce(User.id, batch_user.id).label("user_id"),
+                func.coalesce(User.email, batch_user.email).label("email"),
                 func.count(JobRun.id).label("job_count"),
             )
             .select_from(JobRun)
-            .join(Job, JobRun.job_id == Job.id)
-            .join(User, Job.user_id == User.id)
+            .outerjoin(Job, JobRun.job_id == Job.id)
+            .outerjoin(User, Job.user_id == User.id)
+            .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
+            .outerjoin(Batch, BatchItem.batch_id == Batch.id)
+            .outerjoin(batch_user, Batch.user_id == batch_user.id)
             .where(JobRun.created_at >= week_ago)
-            .group_by(User.id, User.email)
+            .group_by(
+                func.coalesce(User.id, batch_user.id), func.coalesce(User.email, batch_user.email)
+            )
             .order_by(func.count(JobRun.id).desc())
             .limit(10)
         )

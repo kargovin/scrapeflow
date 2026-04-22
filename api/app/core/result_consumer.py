@@ -13,6 +13,7 @@ from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RESULT_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.diff import compute_json_diff, compute_text_diff
 from app.core.webhooks import create_webhook_delivery
+from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
@@ -37,11 +38,66 @@ async def _get_previous_completed_run(db, job_id: str, current_run_id: str) -> J
     return result.scalar_one_or_none()
 
 
+async def _handle_batch_result(
+    db, run: JobRun, worker_status: str, minio_path, error, nats_seq, msg
+) -> None:
+    """Update batch item + batch counters atomically. Caller owns commit."""
+    item = await db.get(BatchItem, run.batch_item_id)
+    if item is None:
+        return
+
+    batch = await db.get(Batch, item.batch_id)
+    if batch is None:
+        return
+
+    now = datetime.now(UTC)
+
+    if worker_status == "running":
+        run.status = "running"
+        run.started_at = msg.metadata.timestamp
+        run.nats_stream_seq = nats_seq
+        if batch.status == "queued":
+            batch.status = "running"
+        return
+
+    if worker_status == "completed":
+        run.status = "completed"
+        run.result_path = minio_path
+        run.completed_at = now
+        item.status = "completed"
+        item.result_path = minio_path
+        item.completed_at = now
+        batch.completed += 1
+    else:
+        # failed
+        run.status = "failed"
+        run.error = error
+        run.completed_at = now
+        item.status = "failed"
+        item.error = error
+        item.completed_at = now
+        batch.failed += 1
+
+    # Batch completion check — all items are terminal.
+    if batch.completed + batch.failed == batch.total:
+        batch.status = "completed" if batch.failed == 0 else "partial_failure"
+        batch.completed_at = now
+        logger.info(
+            "batch_completed",
+            batch_id=str(batch.id),
+            status=batch.status,
+            completed=batch.completed,
+            failed=batch.failed,
+        )
+        # Note: batch.completed webhook not yet implemented — WebhookDelivery.job_id
+        # is non-nullable (FK to jobs); batch webhooks need a schema extension.
+
+
 async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
     """Process a single job result message from the worker (ADR-002)."""
     try:
         data = json.loads(msg.data.decode())
-        job_id = data["job_id"]
+        job_id = data.get("job_id")  # None for batch runs (ADR-006 §4)
         run_id = data["run_id"]
         worker_status = data["status"]
         minio_path = data.get("minio_path")
@@ -66,6 +122,14 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         if run.status == "cancelled":
             logger.info("Run was cancelled, discarding worker result", run_id=run_id)
             await msg.ack()
+            return
+
+        # Route by which FK is set — batch_item_id means this is a batch run (ADR-006).
+        if run.batch_item_id is not None:
+            await _handle_batch_result(db, run, worker_status, minio_path, error, nats_seq, msg)
+            await db.commit()
+            await msg.ack()
+            logger.info("Batch item result processed", run_id=run_id, status=worker_status)
             return
 
         if worker_status == "running":
