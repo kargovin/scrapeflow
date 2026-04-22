@@ -9,10 +9,10 @@ Only the columns the coordinator reads/writes are included.
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Text, VARCHAR
+from sqlalchemy import ARRAY, Boolean, DateTime, ForeignKey, Index, Integer, Text, VARCHAR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from db import Base
+from coordinator.db import Base
 
 
 class Crawl(Base):
@@ -23,8 +23,8 @@ class Crawl(Base):
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False)
     max_depth: Mapped[int] = mapped_column(Integer, nullable=False)
     max_pages: Mapped[int] = mapped_column(Integer, nullable=False)
-    include_paths: Mapped[list[str] | None] = mapped_column(nullable=True)
-    exclude_paths: Mapped[list[str] | None] = mapped_column(nullable=True)
+    include_paths: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    exclude_paths: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     ignore_sitemap: Mapped[bool] = mapped_column(Boolean, nullable=False)
     engine: Mapped[str] = mapped_column(VARCHAR(20), nullable=False)
     webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)

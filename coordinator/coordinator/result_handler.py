@@ -22,10 +22,10 @@ from miniopy_async import Minio
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from db import AsyncSessionLocal
-from link_extractor import extract_links
-from models import Crawl, CrawlPage, CrawlQueueItem
-from sitemap import discover_sitemap_urls
+from coordinator.db import AsyncSessionLocal
+from coordinator.link_extractor import extract_links
+from coordinator.models import Crawl, CrawlPage, CrawlQueueItem
+from coordinator.sitemap import discover_sitemap_urls
 
 log = structlog.get_logger()
 

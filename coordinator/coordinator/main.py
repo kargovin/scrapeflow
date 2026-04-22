@@ -12,14 +12,13 @@ import asyncio
 import signal
 
 import nats
-import nats.errors
 import structlog
 from miniopy_async import Minio
 
-from bfs import dispatch_loop, reenqueue_stalled
-from config import settings
-from db import AsyncSessionLocal
-from result_handler import result_handler_loop
+from coordinator.bfs import dispatch_loop, reenqueue_stalled
+from coordinator.config import settings
+from coordinator.db import AsyncSessionLocal
+from coordinator.result_handler import result_handler_loop
 
 log = structlog.get_logger()
 
@@ -61,7 +60,7 @@ async def run() -> None:
         await minio.make_bucket(settings.minio_bucket)
     log.info("minio_connected", bucket=settings.minio_bucket)
 
-    # Crash recovery: reset stalled dispatched items before the loops start.
+    # Crash recovery: reset stalled dispatched items before loops start.
     async with AsyncSessionLocal() as db:
         await reenqueue_stalled(db)
         await db.commit()

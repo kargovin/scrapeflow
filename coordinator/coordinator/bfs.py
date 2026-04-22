@@ -11,13 +11,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import aiohttp
-import nats.errors
 import structlog
 from sqlalchemy import func, select, update
 
-from config import settings
-from db import AsyncSessionLocal
-from models import Crawl, CrawlPage, CrawlQueueItem
+from coordinator.config import settings
+from coordinator.db import AsyncSessionLocal
+from coordinator.models import Crawl, CrawlPage, CrawlQueueItem
 
 log = structlog.get_logger()
 
@@ -29,7 +28,7 @@ _TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "skipped"})
 
 
 async def _fire_crawl_webhook(crawl: Crawl) -> None:
-    """Send a crawl.completed webhook directly via httpx. Fire-and-forget."""
+    """Send a crawl.completed webhook directly. Fire-and-forget; failures are logged."""
     if not crawl.webhook_url:
         return
     payload = {
@@ -64,9 +63,8 @@ async def _check_completion(db, crawl: Crawl) -> bool:
         )
     )
     if active_count == 0:
-        now = datetime.now(UTC)
         crawl.status = "completed"
-        crawl.completed_at = now
+        crawl.completed_at = datetime.now(UTC)
         log.info(
             "crawl_completed",
             crawl_id=str(crawl.id),
@@ -95,7 +93,6 @@ async def reenqueue_stalled(db) -> None:
 async def dispatch_loop(js) -> None:
     """Poll pending queue items and dispatch them to workers. Runs until cancelled."""
     log.info("dispatch_loop_started", batch_size=settings.dispatch_batch_size)
-
     while True:
         try:
             await asyncio.sleep(settings.dispatch_poll_interval)
@@ -107,6 +104,8 @@ async def dispatch_loop(js) -> None:
 
 
 async def _dispatch_batch(js) -> None:
+    dispatched_crawl_ids: set[uuid.UUID] = set()
+
     async with AsyncSessionLocal() as db:
         pending = (
             await db.execute(
@@ -122,8 +121,6 @@ async def _dispatch_batch(js) -> None:
             await db.commit()
             return
 
-        dispatched_crawl_ids: set[uuid.UUID] = set()
-
         for item in pending:
             crawl = await db.get(Crawl, item.crawl_id)
             if crawl is None or crawl.status not in _ACTIVE_STATUSES:
@@ -131,10 +128,10 @@ async def _dispatch_batch(js) -> None:
                 item.completed_at = datetime.now(UTC)
                 continue
 
-            # Transition queued → running on first dispatch.
+            # Transition queued → running on first dispatch (seed URL).
             if crawl.status == "queued":
                 crawl.status = "running"
-                crawl.total_queued = 1  # seed URL already in queue
+                crawl.total_queued = 1
 
             page = CrawlPage(
                 crawl_id=item.crawl_id,
@@ -194,7 +191,7 @@ async def _dispatch_batch(js) -> None:
 
 
 async def _check_running_crawls_completion(db) -> None:
-    """Scan all running crawls and mark any that have no active queue items as completed."""
+    """Scan all running crawls and mark any with no active queue items as completed."""
     running = (
         await db.execute(select(Crawl).where(Crawl.status == "running"))
     ).scalars().all()
