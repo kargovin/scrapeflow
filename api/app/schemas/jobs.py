@@ -6,6 +6,10 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
 from app.models.job import OutputFormat
 
+_VALID_WEBHOOK_EVENTS = frozenset(
+    {"job.completed", "job.failed", "crawl.completed", "batch.completed"}
+)
+
 _VALID_ACTION_TYPES = frozenset(
     {
         "wait",
@@ -53,6 +57,17 @@ class _MutableJobFields(BaseModel):
     proxy_url: str | None = None  # write-only; stored encrypted in job_secrets, never returned
     cookies: list[dict] | None = None  # write-only; stored encrypted in job_secrets, never returned
     actions: list[dict] | None = None
+    webhook_events: list[str] | None = None
+
+    @field_validator("webhook_events")
+    @classmethod
+    def validate_webhook_events(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        for event in v:
+            if event not in _VALID_WEBHOOK_EVENTS:
+                raise ValueError(f"unknown webhook event: {event!r}")
+        return v
 
     @field_validator("webhook_url", mode="after")
     @classmethod
@@ -120,6 +135,7 @@ class JobResponse(BaseModel):
     has_proxy: bool = False
     has_cookies: bool = False
     actions: list[dict] | None = None
+    webhook_events: list[str] | None = None
     model_config = {"from_attributes": True}
 
 

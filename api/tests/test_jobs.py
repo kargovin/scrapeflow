@@ -1350,3 +1350,153 @@ async def test_get_result_with_warnings(client, auth_headers, mock_jetstream):
         assert data["result_path"] == "scrapeflow/history/test/123.html"
     finally:
         app.dependency_overrides.pop(get_minio, None)
+
+
+# ---------------------------------------------------------------------------
+# PRD-013: webhook event filter (Step 20)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_job_webhook_events_stored(client, auth_headers, mock_jetstream):
+    """POST /jobs with webhook_events stores the list and returns it in the response."""
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "webhook_url": "https://example.com/webhook",
+            "webhook_events": ["job.completed", "job.failed"],
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["webhook_events"] == ["job.completed", "job.failed"]
+
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, uuid.UUID(data["id"]))
+        assert job is not None
+        assert set(job.webhook_events) == {"job.completed", "job.failed"}
+
+
+async def test_create_job_webhook_events_invalid(client, auth_headers, mock_jetstream):
+    """POST /jobs with an unknown webhook event name returns 422."""
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "webhook_events": ["job.completed", "run.started"],
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_patch_job_webhook_events(client, auth_headers, mock_jetstream):
+    """PATCH /jobs/{id} with webhook_events updates the stored list."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    assert create_resp.json()["webhook_events"] is None
+
+    patch_resp = await client.patch(
+        f"/jobs/{job_id}",
+        json={"webhook_events": ["job.failed"]},
+        headers=auth_headers,
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["webhook_events"] == ["job.failed"]
+
+
+async def test_result_consumer_webhook_event_filtered(db_user):
+    """Webhook delivery is skipped when the event is not in webhook_events."""
+    async with AsyncSessionLocal() as db:
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            webhook_url="https://hook.example.com",
+            webhook_events=["job.failed"],  # only failed events
+        )
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running")
+        db.add(run)
+        await db.commit()
+        await db.refresh(job)
+        await db.refresh(run)
+        job_id = job.id
+        run_id = run.id
+
+    minio_path = f"scrapeflow-results/history/{job_id}/123.html"
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "completed",
+            "minio_path": minio_path,
+        }
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    await _handle_result(msg, AsyncMock(), MagicMock())
+
+    async with AsyncSessionLocal() as db:
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "completed"
+
+        delivery_result = await db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
+        )
+        # job.completed is filtered out — no delivery created
+        assert delivery_result.scalar_one_or_none() is None
+
+    msg.ack.assert_called_once()
+
+
+async def test_result_consumer_webhook_event_allowed(db_user):
+    """Webhook delivery is created when the event matches webhook_events."""
+    async with AsyncSessionLocal() as db:
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            webhook_url="https://hook.example.com",
+            webhook_events=["job.completed"],
+        )
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running")
+        db.add(run)
+        await db.commit()
+        await db.refresh(job)
+        await db.refresh(run)
+        job_id = job.id
+        run_id = run.id
+
+    minio_path = f"scrapeflow-results/history/{job_id}/123.html"
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "completed",
+            "minio_path": minio_path,
+        }
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    await _handle_result(msg, AsyncMock(), MagicMock())
+
+    async with AsyncSessionLocal() as db:
+        delivery_result = await db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
+        )
+        delivery = delivery_result.scalar_one_or_none()
+        assert delivery is not None
+        assert delivery.payload["event"] == "job.completed"
+
+    msg.ack.assert_called_once()

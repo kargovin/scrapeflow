@@ -200,6 +200,7 @@ async def create_job(
         playwright_actions=body.actions,
         respect_robots=body.respect_robots,
         proxy_provider=body.proxy_provider,
+        webhook_events=body.webhook_events,
     )
     db.add(job)
     await db.flush()
@@ -288,6 +289,7 @@ async def create_job(
         has_proxy=body.proxy_url is not None,
         has_cookies=bool(body.cookies),
         actions=job.playwright_actions,
+        webhook_events=job.webhook_events,
     )
 
 
@@ -318,6 +320,7 @@ async def list_jobs(
             has_proxy=has_proxy,
             has_cookies=has_cookies,
             actions=job.playwright_actions,
+            webhook_events=job.webhook_events,
         )
         for job, run, has_proxy, has_cookies in rows
     ]
@@ -351,6 +354,7 @@ async def get_job(
         has_proxy=has_proxy,
         has_cookies=has_cookies,
         actions=job.playwright_actions,
+        webhook_events=job.webhook_events,
     )
 
 
@@ -414,6 +418,7 @@ async def list_job_runs(
             error=run.error,
             completed_at=run.completed_at,
             actions=job.playwright_actions,
+            webhook_events=job.webhook_events,
         )
         for run in runs
     ]
@@ -560,6 +565,7 @@ async def patch_jobs(
         has_proxy=has_proxy,
         has_cookies=has_cookies,
         actions=job.playwright_actions,
+        webhook_events=job.webhook_events,
     )
 
 

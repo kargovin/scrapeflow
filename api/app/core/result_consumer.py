@@ -84,7 +84,9 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                         run.status = "failed"
                         run.error = "LLM key not found or deleted"
                         run.completed_at = datetime.now(UTC)
-                        if job.webhook_url:
+                        if job.webhook_url and (
+                            not job.webhook_events or "job.failed" in job.webhook_events
+                        ):
                             create_webhook_delivery(
                                 db,
                                 job,
@@ -122,7 +124,11 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                         run.diff_detected = diff.detected
                         run.diff_summary = diff.summary
 
-                    if job is not None and job.webhook_url:
+                    if (
+                        job is not None
+                        and job.webhook_url
+                        and (not job.webhook_events or "job.completed" in job.webhook_events)
+                    ):
                         create_webhook_delivery(
                             db,
                             job,
@@ -146,7 +152,11 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                     run.diff_detected = diff.detected
                     run.diff_summary = diff.summary
 
-                if job is not None and job.webhook_url:
+                if (
+                    job is not None
+                    and job.webhook_url
+                    and (not job.webhook_events or "job.completed" in job.webhook_events)
+                ):
                     create_webhook_delivery(
                         db,
                         job,
@@ -163,7 +173,11 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
             run.completed_at = datetime.now(UTC)
 
             job = await db.get(Job, job_id)
-            if job is not None and job.webhook_url:
+            if (
+                job is not None
+                and job.webhook_url
+                and (not job.webhook_events or "job.failed" in job.webhook_events)
+            ):
                 create_webhook_delivery(
                     db,
                     job,

@@ -126,7 +126,7 @@ Phase 3 — Production hardening
 | 17   | PRD-005: proxy rotation — API integration                                                    | ✅ Done |
 | 18   | PRD-008: authenticated scraping — API integration                                            | ✅ Done |
 | 19   | PRD-009: page actions — API integration                                                      | ✅ Done |
-| 20   | PRD-013: webhook event filter                                                                | ⬜ Todo |
+| 20   | PRD-013: webhook event filter                                                                | ✅ Done |
 | 21   | PRD-006: batch scraping — API + result consumer                                              | ⬜ Todo |
 | 22   | PRD-007: site crawl — API routes                                                             | ⬜ Todo |
 | 23   | PRD-007: coordinator service + Docker Compose                                                | ⬜ Todo |

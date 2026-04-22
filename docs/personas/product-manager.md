@@ -1,7 +1,7 @@
 # Product Manager — ScrapeFlow Onboarding Document
 
 > **Purpose:** Bring a new Product Manager persona up to speed on the project, what has been built, what Phase 3 scope has been defined, and how to continue PM work. Read this before writing any PRD.
-> **Last updated:** 2026-04-15
+> **Last updated:** 2026-04-20
 > **Covers:** Role definition, project context, Phase 3 PRD backlog produced, research sources used, conventions, and how to hand off to the Architect.
 
 ---
@@ -113,12 +113,21 @@ Phase 3 scope was informed by a feature audit of two direct competitors:
 
 | Project | What it contributed |
 |---------|-------------------|
-| **crawl4ai** (github.com/unclecode/crawl4ai) | CSS selector extraction strategy, content deduplication via xxhash fingerprinting, BFS/DFS/BestFirst deep crawl strategies, adaptive crawl with convergence detection, browser context pool management |
-| **firecrawl** (github.com/firecrawl/firecrawl) | Batch scraping as a primary primitive (`POST /batch/scrape`), site crawl (`POST /crawl`), pre-crawl page actions (`actions` array), WebSocket real-time tracking (`WS /crawl/{id}`), native MCP support |
+| **crawl4ai** (github.com/unclecode/crawl4ai) | CSS selector extraction strategy, content deduplication via xxhash fingerprinting, BFS/DFS/BestFirst deep crawl strategies, adaptive crawl with convergence detection, browser context pool management, 3-tier proxy escalation with sticky sessions |
+| **firecrawl** (github.com/firecrawl/firecrawl) | Batch scraping as a primary primitive (`POST /batch/scrape`), site crawl (`POST /crawl`), pre-crawl page actions (`actions` array), WebSocket real-time tracking (`WS /crawl/{id}`), native MCP support, zero-config proxy abstraction (`basic`/`stealth`/`auto`) |
+
+**Full research notes:** `RESEARCH_NOTES.md` at project root — not committed to git (in `.gitignore`). Contains raw feature breakdowns, API surface, proxy models, anti-bot tiers, and the full comparative table. Read this before writing new PRDs rather than re-researching from scratch.
 
 **Key insight from the research:** crawl4ai is a developer tool (rich config, composable, self-hosted); firecrawl is a SaaS platform (zero-config, billing-first, managed infra). ScrapeFlow sits between them — self-hosted but multi-tenant. The features adopted from each reflect this positioning: crawl4ai's depth where it fits the self-hosted model, firecrawl's API ergonomics where the user-facing design is cleaner.
 
-**One feature gap not yet in a PRD:** Both competitors support CSS selector-based structured extraction (crawl4ai's `JsonCssExtractionStrategy`) — define a field→selector schema and extract title/price/etc. without an LLM call. ScrapeFlow's only current extraction path is LLM-based (Phase 2). This is worth a Phase 3 or Phase 4 PRD if the Architect confirms it fits cleanly into the existing worker contract.
+### Identified gaps with no PRD yet
+
+These were surfaced during research and are documented in `RESEARCH_NOTES.md § What ScrapeFlow is missing`. They are **not** in the current backlog — decide whether to promote to a PRD or defer to Phase 4:
+
+| Gap | Why it matters | Status |
+|-----|---------------|--------|
+| **CSS selector extraction** (`JsonCssExtractionStrategy` equivalent) | Both competitors treat this as a primary primitive. Lets users extract `title`/`price`/etc. from consistent pages without an LLM call — faster, cheaper, deterministic. ScrapeFlow's only extraction path today is LLM-based (Phase 2). | Phase 4 candidate — confirm with Architect whether it fits the worker contract cleanly |
+| **Proxy session stickiness** (`proxy_session_id` equivalent) | crawl4ai pins a session to one proxy IP. Critical for jobs using PRD-008 authenticated scraping — if the proxy IP changes mid-session, login sessions bound to an IP break. PRD-005 does not cover this. | Raise with Architect during PRD-005 + PRD-008 joint ADR — may be a small addition, not a new PRD |
 
 ---
 
@@ -174,6 +183,9 @@ Copy and paste this into a new Claude Code session:
 Read docs/personas/product-manager.md.
 You are the Product Manager for ScrapeFlow Phase 3.
 Phase 1 and Phase 2 are complete and deployed to production at scrapeflow.govindappa.com.
-The Phase 3 PRD backlog (15 PRDs) is complete and located in docs/project/phase3-prd/.
+The Phase 3 PRD backlog (15 PRDs) is complete in docs/project/phase3-prd/.
+Competitor research notes are in RESEARCH_NOTES.md (project root, not git-tracked).
+Two unwritten gaps exist — CSS selector extraction and proxy session stickiness — documented in §6 of this file.
+Cross-cutting architectural questions Q-ARCH-1 and Q-ARCH-2 are in BACKLOG.md — Architect must answer these before P2 ADR work begins.
 [Tell me what you want to do next — add a new feature, revise a PRD, or hand off to the Architect.]
 ```

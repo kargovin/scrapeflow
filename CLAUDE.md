@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phase 2 complete. Phase 3 in progress — Steps 1–19 done. Steps 20–28 remaining.**
+> **Status: Phase 2 complete. Phase 3 in progress — Steps 1–20 done. Steps 21–28 remaining.**
 
 ## Goal
 
@@ -106,6 +106,7 @@ Each persona operates with only the outputs from the persona before them — the
 | API keys uniqueness | `UniqueConstraint(user_id, name)` on `api_keys`; `POST /users/api-keys` returns 409 on duplicate | Revoked keys still hold their name — names are identifiers, not recycled |
 | Page actions field naming | Schema field `actions` maps to model column `playwright_actions`; popped from PATCH updates dict and set explicitly (same pattern as `proxy_url`/`cookies`) | Consistent with `playwright_options` naming convention on the model |
 | Action warnings persistence | Worker publishes warnings in NATS `ResultMessage`; result consumer persists to `job_runs.warnings JSONB`; `GET /jobs/{id}/result` reads from DB column | Warnings are not stored in MinIO content — they live in the result message and are captured by the consumer |
+| Webhook event filter | `jobs.webhook_events TEXT[]` (null = all events); filter checked at every `create_webhook_delivery` call site in `result_consumer.py` | Null means no filter (backward compatible); validated against known event set at API boundary |
 
 ---
 
