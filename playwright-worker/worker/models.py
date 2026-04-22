@@ -55,6 +55,7 @@ class ResultMessage(BaseModel):
     error: str | None = None
     warnings: list[str] | None = None
     screenshot_paths: list[str] | None = None
+    crawl_context: CrawlContext | None = None
 
     def to_nats_bytes(self) -> bytes:
         # exclude_none omits fields with no value — matches the Go worker's omitempty tags

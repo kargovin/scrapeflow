@@ -65,6 +65,7 @@ async def handle_message(
                     run_id=job.run_id,
                     status="failed",
                     error="robots_txt_disallowed",
+                    crawl_context=job.crawl_context,
                 ),
             )
             await msg.ack()
@@ -79,6 +80,7 @@ async def handle_message(
             run_id=job.run_id,
             status="running",
             nats_stream_seq=nats_seq,
+            crawl_context=job.crawl_context,
         ),
     )
 
@@ -146,6 +148,7 @@ async def handle_message(
                 minio_path=minio_path,
                 warnings=warnings or None,
                 screenshot_paths=screenshot_paths or None,
+                crawl_context=job.crawl_context,
             ),
         )
         # --- Step 12: Ack only after MinIO write succeeds (ADR-002 §6) ---
@@ -161,6 +164,7 @@ async def handle_message(
                 run_id=job.run_id,
                 status="failed",
                 error=str(exc),
+                crawl_context=job.crawl_context,
             ),
         )
         await msg.ack()

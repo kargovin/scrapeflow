@@ -110,6 +110,12 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         await msg.ack()
         return
 
+    # Crawl result messages carry crawl_context — the coordinator handles those via
+    # its own durable consumer. Ack here to prevent double-processing.
+    if data.get("crawl_context") is not None:
+        await msg.ack()
+        return
+
     async with AsyncSessionLocal() as db:
         run = await db.get(JobRun, run_id)
 

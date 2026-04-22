@@ -194,6 +194,34 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # ── Crawl coordinator ───────────────────────────────────────────────────────
+
+  coordinator:
+    build:
+      context: ../coordinator
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scrapeflow}:${POSTGRES_PASSWORD:-scrapeflow}@postgres:5432/${POSTGRES_DB:-scrapeflow}
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
+      MINIO_BUCKET: scrapeflow-results
+      MINIO_SECURE: 'false'
+      COORDINATOR_DISPATCH_BATCH_SIZE: '10'
+      COORDINATOR_DISPATCH_POLL_INTERVAL: '2'
+      COORDINATOR_STALE_THRESHOLD_MINUTES: '10'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:

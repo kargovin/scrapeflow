@@ -64,12 +64,13 @@ type ScrapeMessage struct {
 // resultMessage is the outgoing message shape published back to the API (ADR-002 §3).
 // Omitempty means the field is omitted from JSON if it is the zero value (empty string / 0).
 type resultMessage struct {
-	JobID         string `json:"job_id"`
-	RunID         string `json:"run_id"`
-	Status        string `json:"status"`
-	MinIOPath     string `json:"minio_path,omitempty"`
-	NATSStreamSeq uint64 `json:"nats_stream_seq,omitempty"`
-	Error         string `json:"error,omitempty"`
+	JobID         string        `json:"job_id"`
+	RunID         string        `json:"run_id"`
+	Status        string        `json:"status"`
+	MinIOPath     string        `json:"minio_path,omitempty"`
+	NATSStreamSeq uint64        `json:"nats_stream_seq,omitempty"`
+	Error         string        `json:"error,omitempty"`
+	CrawlContext  *CrawlContext `json:"crawl_context,omitempty"`
 }
 
 // jetStreamClient is the subset of nats.JetStreamContext used by Worker.
@@ -201,10 +202,11 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		if err != nil {
 			slog.Error("Malformed proxy URL, failing run", "job_id", job.JobID, "run_id", job.RunID, "error", err)
 			if pubErr := w.publishResult(resultMessage{
-				JobID:  job.JobID,
-				RunID:  job.RunID,
-				Status: "failed",
-				Error:  "malformed_proxy_url: " + err.Error(),
+				JobID:        job.JobID,
+				RunID:        job.RunID,
+				Status:       "failed",
+				Error:        "malformed_proxy_url: " + err.Error(),
+				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
 				slog.Error("Failed to publish proxy-error result", "job_id", job.JobID, "error", pubErr)
 			}
@@ -228,10 +230,11 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		if disallowed {
 			slog.Info("robots.txt disallows URL, failing run", "job_id", job.JobID, "url", job.URL)
 			if pubErr := w.publishResult(resultMessage{
-				JobID:  job.JobID,
-				RunID:  job.RunID,
-				Status: "failed",
-				Error:  "robots_txt_disallowed",
+				JobID:        job.JobID,
+				RunID:        job.RunID,
+				Status:       "failed",
+				Error:        "robots_txt_disallowed",
+				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
 				slog.Error("Failed to publish robots-blocked result", "job_id", job.JobID, "error", pubErr)
 			}
@@ -247,9 +250,10 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 	// The MaxDeliver advisory subscriber (Step 22) uses it to identify stalled runs —
 	// NATS advisory messages carry only stream_seq, no job_id or run_id.
 	runningMsg := resultMessage{
-		JobID:  job.JobID,
-		RunID:  job.RunID,
-		Status: "running",
+		JobID:        job.JobID,
+		RunID:        job.RunID,
+		Status:       "running",
+		CrawlContext: job.CrawlContext,
 	}
 	if meta, err := msg.Metadata(); err == nil {
 		runningMsg.NATSStreamSeq = meta.Sequence.Stream
@@ -263,10 +267,11 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 	if err != nil {
 		slog.Error("Job failed", "job_id", job.JobID, "run_id", job.RunID, "error", err)
 		if pubErr := w.publishResult(resultMessage{
-			JobID:  job.JobID,
-			RunID:  job.RunID,
-			Status: "failed",
-			Error:  err.Error(),
+			JobID:        job.JobID,
+			RunID:        job.RunID,
+			Status:       "failed",
+			Error:        err.Error(),
+			CrawlContext: job.CrawlContext,
 		}); pubErr != nil {
 			slog.Error("Failed to publish 'failed' result", "job_id", job.JobID, "run_id", job.RunID, "error", pubErr)
 			if nakErr := msg.NakWithDelay(30 * time.Second); nakErr != nil {
@@ -284,10 +289,11 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 
 	// --- Step 8: Publish "completed" result event ---
 	if err := w.publishResult(resultMessage{
-		JobID:     job.JobID,
-		RunID:     job.RunID,
-		Status:    "completed",
-		MinIOPath: minioPath,
+		JobID:        job.JobID,
+		RunID:        job.RunID,
+		Status:       "completed",
+		MinIOPath:    minioPath,
+		CrawlContext: job.CrawlContext,
 	}); err != nil {
 		slog.Error("Failed to publish 'completed' result", "job_id", job.JobID, "run_id", job.RunID, "error", err)
 		if nakErr := msg.NakWithDelay(30 * time.Second); nakErr != nil {
