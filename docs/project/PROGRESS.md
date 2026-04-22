@@ -128,7 +128,7 @@ Phase 3 — Production hardening
 | 19   | PRD-009: page actions — API integration                                                      | ✅ Done |
 | 20   | PRD-013: webhook event filter                                                                | ✅ Done |
 | 21   | PRD-006: batch scraping — API + result consumer                                              | ✅ Done |
-| 22   | PRD-007: site crawl — API routes                                                             | ⬜ Todo |
+| 22   | PRD-007: site crawl — API routes                                                             | ✅ Done |
 | 23   | PRD-007: coordinator service + Docker Compose                                                | ⬜ Todo |
 | 24   | PRD-010: MCP server                                                                          | ⬜ Todo |
 | 25   | PRD-012: billing/quotas — enforcement + admin endpoint                                       | ⬜ Todo |

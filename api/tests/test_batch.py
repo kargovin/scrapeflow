@@ -194,6 +194,7 @@ async def test_cancel_batch(client, auth_headers, mock_jetstream):
 
     async with AsyncSessionLocal() as db:
         batch = await db.get(Batch, uuid.UUID(batch_id))
+        assert batch is not None
         assert batch.status == "cancelled"
 
         from sqlalchemy import select
@@ -278,10 +279,12 @@ async def test_result_consumer_batch_completed_updates_counters():
         batch = await db.get(Batch, batch_id)
         item = await db.get(BatchItem, item_id)
         run = await db.get(JobRun, run_id)
-
+    assert batch is not None
     assert batch.completed == 1
+    assert item is not None
     assert item.status == "completed"
     assert item.result_path == "scrapeflow-results/history/x.md"
+    assert run is not None
     assert run.status == "completed"
 
     async with AsyncSessionLocal() as db:
@@ -292,11 +295,12 @@ async def test_result_consumer_batch_completed_updates_counters():
 
 async def test_result_consumer_batch_all_complete_sets_batch_completed():
     """When completed + failed == total, batches.status becomes 'completed'."""
-    batch_id, item_id, run_id, user_id = await _make_batch_run()
+    batch_id, _, run_id, user_id = await _make_batch_run()
 
     # The total for this batch is 2 but we only created 1 item — set total to 1 first.
     async with AsyncSessionLocal() as db:
         batch = await db.get(Batch, batch_id)
+        assert batch is not None
         batch.total = 1
         await db.commit()
 
@@ -310,7 +314,7 @@ async def test_result_consumer_batch_all_complete_sets_batch_completed():
 
     async with AsyncSessionLocal() as db:
         batch = await db.get(Batch, batch_id)
-
+    assert batch is not None
     assert batch.status == "completed"
     assert batch.completed_at is not None
 
@@ -330,6 +334,7 @@ async def test_result_consumer_batch_partial_failure():
 
     async with AsyncSessionLocal() as db:
         batch = await db.get(Batch, batch_id)
+        assert batch is not None
         batch.total = 1
         await db.commit()
 
@@ -344,9 +349,10 @@ async def test_result_consumer_batch_partial_failure():
     async with AsyncSessionLocal() as db:
         batch = await db.get(Batch, batch_id)
         item = await db.get(BatchItem, item_id)
-
+    assert batch is not None
     assert batch.status == "partial_failure"
     assert batch.failed == 1
+    assert item is not None
     assert item.status == "failed"
     assert item.error == "timeout"
 
