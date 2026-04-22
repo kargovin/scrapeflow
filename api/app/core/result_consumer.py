@@ -47,6 +47,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         minio_path = data.get("minio_path")
         error = data.get("error")
         nats_seq = data.get("nats_stream_seq")
+        warnings = data.get("warnings")
     except (KeyError, json.JSONDecodeError) as e:
         # Malformed message — ack to prevent infinite redelivery, log and discard
         logger.error("Malformed result message, discarding", error=str(e), data=msg.data)
@@ -112,6 +113,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                     run.status = "completed"
                     run.result_path = minio_path
                     run.completed_at = datetime.now(UTC)
+                    run.warnings = warnings
 
                     prev = await _get_previous_completed_run(db, job_id, run_id)
                     diff = None

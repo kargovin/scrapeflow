@@ -114,7 +114,10 @@ async def _dispatch_due_jobs(
                 "output_format": job.output_format.value,
                 "engine": job.engine,
                 "credentials": credentials,
-                "options": {"respect_robots": job.respect_robots},
+                "options": {
+                    "respect_robots": job.respect_robots,
+                    "actions": job.playwright_actions,
+                },
                 "crawl_context": None,
             }
             try:
@@ -175,7 +178,10 @@ async def _recover_stale_pending(
                 "output_format": job.output_format.value,
                 "engine": job.engine,
                 "credentials": credentials,
-                "options": {"respect_robots": job.respect_robots},
+                "options": {
+                    "respect_robots": job.respect_robots,
+                    "actions": job.playwright_actions,
+                },
                 "crawl_context": None,
             }
             try:

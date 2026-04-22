@@ -1198,3 +1198,155 @@ async def test_patch_job_remove_cookies(client, auth_headers, mock_jetstream):
             )
         )
     assert secret is None
+
+
+# ---------------------------------------------------------------------------
+# PRD-009: page actions — API integration (Step 19)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_job_actions_http_engine_422(client, auth_headers, mock_jetstream):
+    """POST /jobs with actions on an http engine returns 422."""
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "actions": [{"type": "wait", "milliseconds": 500}]},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_create_job_actions_too_many(client, auth_headers, mock_jetstream):
+    """POST /jobs with more than 20 actions returns 422."""
+    actions = [{"type": "screenshot"}] * 21
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "engine": "playwright",
+            "playwright_options": {"wait_strategy": "load"},
+            "actions": actions,
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_create_job_actions_invalid_wait_ms(client, auth_headers, mock_jetstream):
+    """wait action with milliseconds=0 (out of range) returns 422."""
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "engine": "playwright",
+            "playwright_options": {"wait_strategy": "load"},
+            "actions": [{"type": "wait", "milliseconds": 0}],
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_create_job_actions_click_no_selector(client, auth_headers, mock_jetstream):
+    """click action missing selector returns 422."""
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "engine": "playwright",
+            "playwright_options": {"wait_strategy": "load"},
+            "actions": [{"type": "click"}],
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_create_job_with_actions(client, auth_headers, mock_jetstream):
+    """POST /jobs with valid actions stores them in DB and includes them in the NATS message."""
+    actions = [
+        {"type": "click", "selector": "#submit"},
+        {"type": "wait", "milliseconds": 500},
+        {"type": "screenshot"},
+    ]
+    response = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "engine": "playwright",
+            "playwright_options": {"wait_strategy": "load"},
+            "actions": actions,
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["actions"] == actions
+
+    mock_jetstream.publish.assert_called_once()
+    _, call_payload = mock_jetstream.publish.call_args.args
+    published = json.loads(call_payload.decode())
+    assert published["options"]["actions"] == actions
+
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, uuid.UUID(data["id"]))
+        assert job is not None
+        assert job.playwright_actions == actions
+
+
+async def test_get_result_no_completed_run(client, auth_headers, mock_jetstream):
+    """GET /jobs/{id}/result returns 404 when no completed run exists."""
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+
+    resp = await client.get(f"/jobs/{job_id}/result", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+async def test_get_result_with_warnings(client, auth_headers, mock_jetstream):
+    """GET /jobs/{id}/result surfaces warnings stored on the completed run."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.core.minio import get_minio
+    from app.main import app
+
+    create_resp = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "engine": "playwright",
+            "playwright_options": {"wait_strategy": "load"},
+        },
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201
+    run_id = uuid.UUID(create_resp.json()["run_id"])
+    job_id = create_resp.json()["id"]
+
+    expected_warnings = ["action click failed: selector not found"]
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        assert run is not None
+        run.status = "completed"
+        run.result_path = "scrapeflow/history/test/123.html"
+        run.warnings = expected_warnings
+        await db.commit()
+
+    mock_response = AsyncMock()
+    mock_response.read = AsyncMock(return_value=b"<html>test</html>")
+    mock_response.close = MagicMock()
+    mock_minio = MagicMock()
+    mock_minio.get_object = AsyncMock(return_value=mock_response)
+
+    app.dependency_overrides[get_minio] = lambda: mock_minio
+    try:
+        resp = await client.get(f"/jobs/{job_id}/result", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["content"] == "<html>test</html>"
+        assert data["warnings"] == expected_warnings
+        assert data["result_path"] == "scrapeflow/history/test/123.html"
+    finally:
+        app.dependency_overrides.pop(get_minio, None)

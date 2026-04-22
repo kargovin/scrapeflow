@@ -9,6 +9,7 @@ import structlog
 from croniter import croniter
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from miniopy_async import Minio
 from nats.js import JetStreamContext
 from sqlalchemy import delete, func, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -18,6 +19,7 @@ from sqlalchemy.orm import aliased
 from app.auth.dependencies import get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
+from app.core.minio import get_minio
 from app.core.nats import get_jetstream
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
@@ -32,6 +34,7 @@ from app.schemas.jobs import (
     JobCreate,
     JobPatch,
     JobResponse,
+    JobResultResponse,
     RotateWebhookSecretResponse,
 )
 from app.settings import settings
@@ -176,6 +179,12 @@ async def create_job(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Playwright options missing"
         )
 
+    if body.actions and body.engine != Engine.playwright:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="actions require engine: playwright",
+        )
+
     job = Job(
         user_id=user.id,
         url=body.url,
@@ -188,6 +197,7 @@ async def create_job(
         playwright_options=body.playwright_options.model_dump()
         if body.playwright_options
         else None,
+        playwright_actions=body.actions,
         respect_robots=body.respect_robots,
         proxy_provider=body.proxy_provider,
     )
@@ -250,7 +260,7 @@ async def create_job(
         "output_format": job.output_format.value,
         "engine": body.engine.value,
         "credentials": credentials,
-        "options": {"respect_robots": job.respect_robots},
+        "options": {"respect_robots": job.respect_robots, "actions": job.playwright_actions},
         "crawl_context": None,
     }
 
@@ -277,6 +287,7 @@ async def create_job(
         webhook_secret=webhook_secret_plain,
         has_proxy=body.proxy_url is not None,
         has_cookies=bool(body.cookies),
+        actions=job.playwright_actions,
     )
 
 
@@ -306,6 +317,7 @@ async def list_jobs(
             completed_at=run.completed_at,
             has_proxy=has_proxy,
             has_cookies=has_cookies,
+            actions=job.playwright_actions,
         )
         for job, run, has_proxy, has_cookies in rows
     ]
@@ -338,6 +350,7 @@ async def get_job(
         completed_at=run.completed_at,
         has_proxy=has_proxy,
         has_cookies=has_cookies,
+        actions=job.playwright_actions,
     )
 
 
@@ -400,6 +413,7 @@ async def list_job_runs(
             diff_detected=run.diff_detected,
             error=run.error,
             completed_at=run.completed_at,
+            actions=job.playwright_actions,
         )
         for run in runs
     ]
@@ -473,6 +487,16 @@ async def patch_jobs(
                 )
             )
 
+    # actions maps to job.playwright_actions — validate engine constraint before writing
+    if "actions" in updates:
+        actions_val = updates.pop("actions")
+        if actions_val and job.engine != "playwright":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="actions require engine: playwright",
+            )
+        job.playwright_actions = actions_val
+
     for field, value in updates.items():
         if field == "schedule_cron":
             if not croniter.is_valid(value):
@@ -535,6 +559,7 @@ async def patch_jobs(
         webhook_secret=webhook_secret_plain,
         has_proxy=has_proxy,
         has_cookies=has_cookies,
+        actions=job.playwright_actions,
     )
 
 
@@ -557,3 +582,39 @@ async def rotate_webhook_secrets(
 
     await db.commit()
     return RotateWebhookSecretResponse(webhook_secret=webhook_secret_plain)
+
+
+@router.get("/{job_id}/result", response_model=JobResultResponse)
+async def get_job_result(
+    job_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
+) -> JobResultResponse:
+    job = await db.get(Job, job_id)
+    if job is None or job.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    result = await db.execute(
+        select(JobRun)
+        .where(JobRun.job_id == job_id, JobRun.status == "completed")
+        .order_by(JobRun.completed_at.desc())
+        .limit(1)
+    )
+    run = result.scalar_one_or_none()
+    if run is None or run.result_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No completed result available"
+        )
+
+    bucket, _, key = run.result_path.partition("/")
+    response = await minio_client.get_object(bucket, key)
+    content_bytes = await response.read()
+    response.close()
+
+    return JobResultResponse(
+        content=content_bytes.decode("utf-8", errors="replace"),
+        output_format=job.output_format.value,
+        result_path=run.result_path,
+        warnings=run.warnings,
+    )
