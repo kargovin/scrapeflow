@@ -1,4 +1,7 @@
+import asyncio
+import contextlib
 import uuid
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -135,3 +138,53 @@ def mock_jetstream():
     app.dependency_overrides[get_jetstream] = lambda: mock_js
     yield mock_js
     app.dependency_overrides.pop(get_jetstream, None)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket test helpers
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _noop_lifespan(app):
+    """No-op lifespan used in WebSocket tests to prevent re-initialising infra."""
+    yield
+
+
+@contextlib.contextmanager
+def patched_ws_app():
+    """Replace the FastAPI lifespan with a no-op for WebSocket tests.
+
+    TestClient(app) triggers the lifespan (re-initialises Redis/NATS/MinIO and
+    starts background tasks) which conflicts with the session-scoped init_clients
+    fixture. Patching the lifespan to a no-op lets TestClient run the WebSocket
+    handshake against the fully-initialised app.state without double-setup.
+    """
+    original = app.router.lifespan_context
+    app.router.lifespan_context = _noop_lifespan
+    try:
+        yield
+    finally:
+        app.router.lifespan_context = original
+
+
+class MockJobNotifier:
+    """Pre-fills queues with the supplied update dicts so WS handlers terminate."""
+
+    def __init__(self, job_updates=None, batch_updates=None):
+        self._job_updates = list(job_updates or [])
+        self._batch_updates = list(batch_updates or [])
+
+    @asynccontextmanager
+    async def subscribe_job(self, job_id: str):
+        queue: asyncio.Queue = asyncio.Queue()
+        for item in self._job_updates:
+            await queue.put(item)
+        yield queue
+
+    @asynccontextmanager
+    async def subscribe_batch(self, batch_id: str):
+        queue: asyncio.Queue = asyncio.Queue()
+        for item in self._batch_updates:
+            await queue.put(item)
+        yield queue

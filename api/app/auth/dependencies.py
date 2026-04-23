@@ -1,10 +1,12 @@
+import httpx
 import structlog
+from clerk_backend_api.security.types import AuthenticateRequestOptions
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.api_key import verify_api_key
-from app.auth.jwt import verify_request
+from app.auth.api_key import API_KEY_PREFIX, verify_api_key
+from app.auth.jwt import get_clerk, verify_request
 from app.auth.user_sync import get_or_create_user
 from app.core.db import get_db
 from app.models.user import User
@@ -52,3 +54,27 @@ def get_current_admin_user(user: User = Depends(get_current_user)):
             detail="Access denied. Admin privileges required.",
         )
     return user
+
+
+async def auth_from_token(token: str, db: AsyncSession) -> User | None:
+    """Authenticate from a raw token string — used by WebSocket endpoints.
+
+    REST endpoints receive tokens via the Authorization/X-API-Key header (handled by
+    get_current_user). WebSocket clients cannot set arbitrary headers in the browser
+    upgrade handshake, so the token arrives as a query parameter instead.
+    """
+    if token.startswith(API_KEY_PREFIX):
+        return await verify_api_key(db, token)
+
+    # Clerk JWT path — build a synthetic httpx.Request with an Authorization header
+    # so the Clerk SDK's authenticate_request() can parse and verify the JWT.
+    req = httpx.Request(
+        method="GET",
+        url="http://localhost/ws",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    clerk = get_clerk()
+    state = clerk.authenticate_request(req, AuthenticateRequestOptions(authorized_parties=None))
+    if not state.is_signed_in or not state.payload:
+        return None
+    return await get_or_create_user(db, state.payload)

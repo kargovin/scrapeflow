@@ -9,7 +9,7 @@ import xxhash
 from miniopy_async import Minio
 from nats.aio.msg import Msg
 from nats.js import JetStreamContext
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RESULT_SUBJECT
 from app.core.db import AsyncSessionLocal
@@ -206,6 +206,27 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                                 if batch.completed + batch.failed == batch.total:
                                     batch.status = "partial_failure"
                                     batch.completed_at = now
+                                await db.execute(
+                                    text("SELECT pg_notify('batch_status', :p)"),
+                                    {
+                                        "p": json.dumps(
+                                            {
+                                                "batch_id": str(batch.id),
+                                                "completed": batch.completed,
+                                                "failed": batch.failed,
+                                                "total": batch.total,
+                                                "status": batch.status,
+                                                "item_url": item.url,
+                                                "item_status": item.status,
+                                            }
+                                        )
+                                    },
+                                )
+                    elif run.job_id is not None:
+                        await db.execute(
+                            text("SELECT pg_notify('job_status', :p)"),
+                            {"p": f"{run.job_id}:{run_id}:failed"},
+                        )
                     await db.commit()
                     await msg.ack()
                     logger.warning(
@@ -221,6 +242,29 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
             # Increment storage atomically with the run status commit.
             if storage_user_id and result_size > 0 and worker_status == "completed":
                 await increment_storage_bytes(storage_user_id, db, result_size)
+            # Emit batch progress notification for completed/failed items.
+            # Skip "running" — no meaningful progress change (no items finished yet).
+            if worker_status in ("completed", "failed"):
+                _item = await db.get(BatchItem, run.batch_item_id)
+                if _item:
+                    _batch = await db.get(Batch, _item.batch_id)
+                    if _batch:
+                        await db.execute(
+                            text("SELECT pg_notify('batch_status', :p)"),
+                            {
+                                "p": json.dumps(
+                                    {
+                                        "batch_id": str(_batch.id),
+                                        "completed": _batch.completed,
+                                        "failed": _batch.failed,
+                                        "total": _batch.total,
+                                        "status": _batch.status,
+                                        "item_url": _item.url,
+                                        "item_status": _item.status,
+                                    }
+                                )
+                            },
+                        )
             await db.commit()
             await msg.ack()
             logger.info("Batch item result processed", run_id=run_id, status=worker_status)
@@ -254,6 +298,10 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                                     "content_dedup: failed to remove history object",
                                     path=minio_path,
                                 )
+                            await db.execute(
+                                text("SELECT pg_notify('job_status', :p)"),
+                                {"p": f"{job_id}:{run_id}:completed"},
+                            )
                             await db.commit()
                             await msg.ack()
                             logger.info(
@@ -383,6 +431,12 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                     error=error,
                 )
 
+        # Notify any WS subscribers watching this job.
+        if run.job_id is not None:
+            await db.execute(
+                text("SELECT pg_notify('job_status', :p)"),
+                {"p": f"{run.job_id}:{run_id}:{run.status}"},
+            )
         await db.commit()
 
     await msg.ack()

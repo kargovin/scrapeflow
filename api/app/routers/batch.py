@@ -5,12 +5,12 @@ from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from nats.js import JetStreamContext
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
 from app.core.nats import get_jetstream
@@ -196,3 +196,88 @@ async def cancel_batch(
     batch.status = "cancelled"
     await db.commit()
     logger.info("batch_cancelled", batch_id=str(batch_id), user_id=str(user.id))
+
+
+_BATCH_TERMINAL_STATUSES = frozenset({"completed", "partial_failure", "cancelled"})
+
+
+def _batch_progress_msg(batch: Batch) -> dict:
+    return {
+        "type": "batch_progress",
+        "batch_id": str(batch.id),
+        "total": batch.total,
+        "completed": batch.completed,
+        "failed": batch.failed,
+        "status": batch.status,
+    }
+
+
+def _batch_terminal_msg(batch: Batch) -> dict:
+    return {
+        "type": batch.status,
+        "batch_id": str(batch.id),
+        "total": batch.total,
+        "completed": batch.completed,
+        "failed": batch.failed,
+        "status": batch.status,
+    }
+
+
+@router.websocket("/{batch_id}/watch")
+async def batch_status_stream(
+    websocket: WebSocket,
+    batch_id: uuid.UUID,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Stream live batch progress until the batch reaches a terminal state.
+
+    Each message reports completed/failed/total counts and the most recently
+    finished item. Auth and close-code semantics mirror /jobs/{id}/watch.
+    """
+    await websocket.accept()
+
+    user = await auth_from_token(token, db)
+    if user is None:
+        await websocket.close(code=4001, reason="unauthorized")
+        return
+
+    batch = await db.get(Batch, batch_id)
+    if batch is None or batch.user_id != user.id:
+        await websocket.close(code=4004, reason="not found")
+        return
+
+    batch_id_str = str(batch_id)
+
+    if batch.status in _BATCH_TERMINAL_STATUSES:
+        await websocket.send_json(_batch_terminal_msg(batch))
+        await websocket.close()
+        return
+
+    await websocket.send_json(_batch_progress_msg(batch))
+
+    notifier = websocket.app.state.job_notifier
+    async with notifier.subscribe_batch(batch_id_str) as queue:
+        while True:
+            update = await queue.get()
+            new_status = update.get("status", "")
+            msg: dict = {
+                "type": "batch_progress"
+                if new_status not in _BATCH_TERMINAL_STATUSES
+                else new_status,
+                "batch_id": batch_id_str,
+                "total": update.get("total", batch.total),
+                "completed": update.get("completed", batch.completed),
+                "failed": update.get("failed", batch.failed),
+                "status": new_status,
+            }
+            if update.get("item_url"):
+                msg["latest_item"] = {
+                    "url": update["item_url"],
+                    "status": update.get("item_status", ""),
+                }
+            await websocket.send_json(msg)
+            if new_status in _BATCH_TERMINAL_STATUSES:
+                break
+
+    await websocket.close()
