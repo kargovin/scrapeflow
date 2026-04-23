@@ -15,6 +15,8 @@ from app.core.redis import close_pool, create_pool
 from app.main import app
 from app.models.api_key import ApiKey
 from app.models.user import User
+from app.routers.batch import check_batch_quota
+from app.routers.jobs import check_job_quota
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session", scope="session")
@@ -32,20 +34,39 @@ async def init_clients():
 @pytest_asyncio.fixture
 async def client():
     """AsyncClient wired directly to the FastAPI app via ASGI transport.
-    Rate limiting is disabled — all tests share one mock user and would exhaust
-    the Redis sorted-set window mid-suite otherwise.
+
+    Rate limiting and quota checks are both disabled — all tests share one mock user
+    and would exhaust the Redis window / concurrent-jobs limit mid-suite otherwise.
+    Use quota_client for tests that need real quota enforcement.
     """
     app.dependency_overrides[check_rate_limit] = lambda: None
+    app.dependency_overrides[check_job_quota] = lambda: None
+    app.dependency_overrides[check_batch_quota] = lambda: None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.pop(check_rate_limit, None)
+    app.dependency_overrides.pop(check_job_quota, None)
+    app.dependency_overrides.pop(check_batch_quota, None)
 
 
 @pytest_asyncio.fixture
 async def rate_limited_client():
     """Like `client` but with the real rate limiter active. Used only by rate-limit integration tests."""
+    app.dependency_overrides[check_job_quota] = lambda: None
+    app.dependency_overrides[check_batch_quota] = lambda: None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
+    app.dependency_overrides.pop(check_job_quota, None)
+    app.dependency_overrides.pop(check_batch_quota, None)
+
+
+@pytest_asyncio.fixture
+async def quota_client():
+    """Like `client` but with real quota enforcement active. Used by quota integration tests."""
+    app.dependency_overrides[check_rate_limit] = lambda: None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.pop(check_rate_limit, None)
 
 
 @pytest.fixture

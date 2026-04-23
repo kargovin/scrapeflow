@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
+from app.core.quota import is_quota_exceeded
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.job_secrets import JobSecrets, JobSecretType
@@ -91,6 +92,21 @@ async def _dispatch_due_jobs(
         jobs = (await db.execute(stmt)).scalars().all()
 
         for job in jobs:
+            if await is_quota_exceeded(job.user_id, db, "monthly_runs"):
+                logger.warning(
+                    "scheduler: skipping dispatch — monthly_runs quota exceeded",
+                    job_id=str(job.id),
+                    user_id=str(job.user_id),
+                )
+                continue
+            if await is_quota_exceeded(job.user_id, db, "concurrent_jobs"):
+                logger.warning(
+                    "scheduler: skipping dispatch — concurrent_jobs quota exceeded",
+                    job_id=str(job.id),
+                    user_id=str(job.user_id),
+                )
+                continue
+
             run = JobRun(job_id=job.id, status="pending")
             db.add(run)
             await db.flush()  # populate run.id before publish

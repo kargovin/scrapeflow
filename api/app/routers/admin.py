@@ -6,6 +6,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from miniopy_async.api import Minio
 from sqlalchemy import case, func, select, true
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -17,6 +18,7 @@ from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.user import User
+from app.models.user_quota import UserQuota
 from app.models.webhook_delivery import WebhookDelivery
 from app.schemas.admin import (
     AdminStatsResponse,
@@ -26,6 +28,8 @@ from app.schemas.admin import (
     HistoricalStats,
     OperationalStats,
     TopUserByJobs,
+    UserQuotaPatch,
+    UserQuotaResponse,
 )
 from app.schemas.jobs import CancelJobResponse, JobResponse
 from app.settings import settings
@@ -124,6 +128,42 @@ async def admin_get_user(
         created_at=user.created_at,
         job_counts=job_counts,
     )
+
+
+@router.patch("/users/{user_id}/quota", response_model=UserQuotaResponse)
+async def admin_patch_user_quota(
+    user_id: uuid.UUID,
+    body: UserQuotaPatch,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserQuotaResponse:
+    """Upsert quota limits for a user. Only provided fields are written; omitted fields
+    keep their existing values (or remain NULL for new rows)."""
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    updates = body.model_dump(exclude_unset=True)
+    insert_values: dict = {"user_id": user_id, "updated_at": func.now(), **updates}
+
+    await db.execute(
+        pg_insert(UserQuota)
+        .values(**insert_values)
+        .on_conflict_do_update(
+            index_elements=["user_id"],
+            set_={**updates, "updated_at": func.now()},
+        )
+    )
+    await db.commit()
+
+    quota_row = await db.get(UserQuota, user_id)
+    logger.info(
+        "admin_quota_patched",
+        user_id=str(user_id),
+        admin_id=str(admin.id),
+        updates=updates,
+    )
+    return UserQuotaResponse.model_validate(quota_row)
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

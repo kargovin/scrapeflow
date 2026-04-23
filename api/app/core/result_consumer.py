@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RESULT_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.diff import compute_json_diff, compute_text_diff
+from app.core.quota import check_storage_quota, increment_storage_bytes
 from app.core.webhooks import create_webhook_delivery
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
@@ -36,6 +38,30 @@ async def _get_previous_completed_run(db, job_id: str, current_run_id: str) -> J
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def _get_user_id_for_run(run: JobRun, db) -> uuid.UUID | None:
+    """Resolve the owning user's ID from either the job or batch path."""
+    if run.job_id is not None:
+        job = await db.get(Job, run.job_id)
+        return job.user_id if job else None
+    if run.batch_item_id is not None:
+        item = await db.get(BatchItem, run.batch_item_id)
+        if item:
+            batch = await db.get(Batch, item.batch_id)
+            return batch.user_id if batch else None
+    return None
+
+
+async def _stat_minio_size(minio: Minio, minio_path: str) -> int:
+    """Return the byte size of an object. Returns 0 on any error (best-effort)."""
+    try:
+        bucket, _, key = minio_path.partition("/")
+        stat = await minio.stat_object(bucket, key)
+        size = stat.size
+        return int(size) if isinstance(size, int) else 0
+    except Exception:
+        return 0
 
 
 async def _handle_batch_result(
@@ -130,9 +156,58 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
             await msg.ack()
             return
 
+        # Storage quota enforcement for completed runs with a MinIO result.
+        # Workers write to MinIO before publishing the result message, so the check
+        # is post-write: stat the object, reject if over quota, delete the object.
+        storage_user_id: uuid.UUID | None = None
+        result_size: int = 0
+        if worker_status == "completed" and minio_path:
+            storage_user_id = await _get_user_id_for_run(run, db)
+            if storage_user_id:
+                result_size = await _stat_minio_size(minio, minio_path)
+                if result_size > 0 and not await check_storage_quota(
+                    storage_user_id, db, result_size
+                ):
+                    bucket, _, key = minio_path.partition("/")
+                    try:
+                        await minio.remove_object(bucket, key)
+                    except Exception:
+                        logger.warning(
+                            "result_consumer: failed to remove oversized object",
+                            path=minio_path,
+                        )
+                    run.status = "failed"
+                    run.error = "storage_quota_exceeded"
+                    run.completed_at = datetime.now(UTC)
+                    # Update batch counters if this was a batch run
+                    if run.batch_item_id is not None:
+                        item = await db.get(BatchItem, run.batch_item_id)
+                        if item:
+                            batch = await db.get(Batch, item.batch_id)
+                            now = datetime.now(UTC)
+                            item.status = "failed"
+                            item.error = "storage_quota_exceeded"
+                            item.completed_at = now
+                            if batch:
+                                batch.failed += 1
+                                if batch.completed + batch.failed == batch.total:
+                                    batch.status = "partial_failure"
+                                    batch.completed_at = now
+                    await db.commit()
+                    await msg.ack()
+                    logger.warning(
+                        "storage_quota_exceeded",
+                        user_id=str(storage_user_id),
+                        run_id=run_id,
+                    )
+                    return
+
         # Route by which FK is set — batch_item_id means this is a batch run (ADR-006).
         if run.batch_item_id is not None:
             await _handle_batch_result(db, run, worker_status, minio_path, error, nats_seq, msg)
+            # Increment storage atomically with the run status commit.
+            if storage_user_id and result_size > 0 and worker_status == "completed":
+                await increment_storage_bytes(storage_user_id, db, result_size)
             await db.commit()
             await msg.ack()
             logger.info("Batch item result processed", run_id=run_id, status=worker_status)
@@ -167,6 +242,9 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                             )
                     else:
                         run.status = "processing"
+                        # Raw content is now in MinIO — count it toward storage.
+                        if storage_user_id and result_size > 0:
+                            await increment_storage_bytes(storage_user_id, db, result_size)
                         llm_payload: dict[str, Any] = {
                             "job_id": job_id,
                             "run_id": run_id,
@@ -186,6 +264,9 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                     run.result_path = minio_path
                     run.completed_at = datetime.now(UTC)
                     run.warnings = warnings
+
+                    if storage_user_id and result_size > 0:
+                        await increment_storage_bytes(storage_user_id, db, result_size)
 
                     prev = await _get_previous_completed_run(db, job_id, run_id)
                     diff = None
@@ -210,9 +291,13 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
 
             elif run.status == "processing":
                 # --- Completed message from LLM worker ---
+                # minio_path here is the LLM JSON output — a second file in history/.
                 run.status = "completed"
                 run.result_path = minio_path
                 run.completed_at = datetime.now(UTC)
+
+                if storage_user_id and result_size > 0:
+                    await increment_storage_bytes(storage_user_id, db, result_size)
 
                 job = await db.get(Job, job_id)
                 prev = await _get_previous_completed_run(db, job_id, run_id)

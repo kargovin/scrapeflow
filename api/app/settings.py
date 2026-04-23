@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # Proxy rotation — platform-level default (PRD-005)
     default_proxy_url: str = ""  # optional; per-job proxy in job_secrets takes precedence
 
+    # Quota defaults (PRD-012) — user_quotas row overrides when present
+    default_quota_monthly_runs: int = 500
+    default_quota_concurrent_jobs: int = 5
+    default_quota_storage_bytes: int = 5368709120  # 5 GB
+
     @field_validator("llm_key_encryption_key")
     def validate_fernet_key(cls, v):
         if not v:

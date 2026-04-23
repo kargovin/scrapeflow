@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.users import UserResponse
 
@@ -78,3 +78,26 @@ class HistoricalStats(BaseModel):
 class AdminStatsResponse(BaseModel):
     operational: OperationalStats
     historical: HistoricalStats
+
+
+# ---------------------------------------------------------------------------
+# Quota
+# ---------------------------------------------------------------------------
+
+
+class UserQuotaPatch(BaseModel):
+    """All fields are optional — only provided fields are upserted."""
+
+    monthly_runs_limit: int | None = Field(default=None, ge=1)
+    concurrent_jobs_limit: int | None = Field(default=None, ge=1)
+    storage_bytes_limit: int | None = Field(default=None, ge=1)
+
+
+class UserQuotaResponse(BaseModel):
+    monthly_runs_limit: int | None
+    concurrent_jobs_limit: int | None
+    storage_bytes_limit: int | None
+    storage_bytes_used: int
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

@@ -19,11 +19,17 @@ async def _cleanup_loop(db: AsyncSession, minio, cutoff: datetime) -> None:
     total_deleted = 0
 
     while True:
+        # Join to jobs/batches to resolve user_id for storage quota decrement.
         rows = (
             await db.execute(
                 text(
-                    "SELECT id, result_path FROM job_runs"
-                    " WHERE created_at < :cutoff ORDER BY created_at LIMIT :limit"
+                    "SELECT jr.id, jr.result_path,"
+                    " COALESCE(j.user_id::text, b.user_id::text) AS user_id"
+                    " FROM job_runs jr"
+                    " LEFT JOIN jobs j ON jr.job_id = j.id"
+                    " LEFT JOIN batch_items bi ON jr.batch_item_id = bi.id"
+                    " LEFT JOIN batches b ON bi.batch_id = b.id"
+                    " WHERE jr.created_at < :cutoff ORDER BY jr.created_at LIMIT :limit"
                 ),
                 {"cutoff": cutoff, "limit": BATCH_SIZE},
             )
@@ -37,6 +43,14 @@ async def _cleanup_loop(db: AsyncSession, minio, cutoff: datetime) -> None:
             if row.result_path is not None:
                 _, _, key = row.result_path.partition("/")
                 if key.startswith("history/"):
+                    # Stat before delete so we can decrement the quota accurately.
+                    file_size = 0
+                    try:
+                        stat = await minio.stat_object(settings.minio_bucket, key)
+                        file_size = stat.size or 0
+                    except Exception:
+                        pass  # best-effort; deletion still proceeds
+
                     try:
                         await minio.remove_object(settings.minio_bucket, key)
                     except Exception:
@@ -46,6 +60,29 @@ async def _cleanup_loop(db: AsyncSession, minio, cutoff: datetime) -> None:
                             key=key,
                         )
                         continue  # leave DB row intact — retry next night
+
+                    # Decrement the owning user's storage quota.
+                    if row.user_id and file_size > 0:
+                        try:
+                            await db.execute(
+                                text("""
+                                    INSERT INTO user_quotas (user_id, storage_bytes_used, updated_at)
+                                    VALUES (:user_id, 0, NOW())
+                                    ON CONFLICT (user_id) DO UPDATE
+                                    SET storage_bytes_used = GREATEST(
+                                            0, user_quotas.storage_bytes_used - :size
+                                        ),
+                                        updated_at = NOW()
+                                """),
+                                {"user_id": row.user_id, "size": file_size},
+                            )
+                        except Exception:
+                            logger.exception(
+                                "cleanup: quota decrement failed",
+                                run_id=str(row.id),
+                                user_id=row.user_id,
+                            )
+
             successful_ids.append(str(row.id))
 
         if not successful_ids:

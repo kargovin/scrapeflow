@@ -21,6 +21,7 @@ from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_S
 from app.core.db import get_db
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
+from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.job import Job
@@ -41,6 +42,20 @@ from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = structlog.get_logger()
+
+
+async def check_job_quota(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """FastAPI dependency — raises 429 if any quota dimension is exceeded.
+
+    Structured as a dependency so tests can override it via dependency_overrides,
+    matching the same pattern used for check_rate_limit.
+    """
+    await check_user_quota(user.id, db, "monthly_runs")
+    await check_user_quota(user.id, db, "concurrent_jobs")
+    await check_user_quota(user.id, db, "storage_bytes")
 
 
 async def _resolve_credentials(job: Job, db: AsyncSession) -> dict | None:
@@ -137,6 +152,7 @@ async def create_job(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
+    _quota: None = Depends(check_job_quota),
     js: JetStreamContext = Depends(get_jetstream),
 ) -> JobResponse:
     # Validate for SSRF for
