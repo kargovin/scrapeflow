@@ -13,6 +13,7 @@ jobs:
       http-worker: ${{ steps.filter.outputs.http-worker }}
       playwright-worker: ${{ steps.filter.outputs.playwright-worker }}
       llm-worker: ${{ steps.filter.outputs.llm-worker }}
+      coordinator: ${{ steps.filter.outputs.coordinator }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -28,6 +29,8 @@ jobs:
               - 'playwright-worker/**'
             llm-worker:
               - 'llm-worker/**'
+            coordinator:
+              - 'coordinator/**'
 
   # ── API ────────────────────────────────────────────────────────────────────
   build-api:
@@ -110,6 +113,32 @@ jobs:
           context: ./playwright-worker
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/scrapeflow-playwright-worker:${{ github.ref_name }}-${{ steps.ts.outputs.ts }}-${{ github.sha }}
+
+  # ── Coordinator ───────────────────────────────────────────────────────────
+  build-coordinator:
+    needs: changes
+    if: needs.changes.outputs.coordinator == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate timestamp
+        id: ts
+        run: echo "ts=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWD }}
+
+      - name: Build and push scrapeflow-coordinator
+        uses: docker/build-push-action@v5
+        with:
+          context: ./coordinator
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/scrapeflow-coordinator:${{ github.ref_name }}-${{ steps.ts.outputs.ts }}-${{ github.sha }}
 
   # ── LLM Worker ────────────────────────────────────────────────────────────
   build-llm-worker:
