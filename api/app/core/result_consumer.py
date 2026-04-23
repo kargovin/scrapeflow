@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
+import xxhash
 from miniopy_async import Minio
 from nats.aio.msg import Msg
 from nats.js import JetStreamContext
@@ -38,6 +39,18 @@ async def _get_previous_completed_run(db, job_id: str, current_run_id: str) -> J
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def _compute_content_hash(minio_path: str, minio: Minio) -> str | None:
+    """Fetch object bytes and return a 16-char xxh64 hex digest. Returns None on any error."""
+    try:
+        bucket, _, key = minio_path.partition("/")
+        response = await minio.get_object(bucket, key)
+        data = await response.read()
+        response.close()
+        return xxhash.xxh64(data).hexdigest()[:16]
+    except Exception:
+        return None
 
 
 async def _get_user_id_for_run(run: JobRun, db) -> uuid.UUID | None:
@@ -222,6 +235,34 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
             if run.status == "running":
                 # --- Completed message from HTTP / Playwright scrape worker ---
                 job = await db.get(Job, job_id)
+
+                if minio_path:
+                    content_hash = await _compute_content_hash(minio_path, minio)
+                    if content_hash:
+                        run.content_hash = content_hash
+                        prev_run = await _get_previous_completed_run(db, job_id, run_id)
+                        if prev_run and prev_run.content_hash == content_hash:
+                            run.status = "completed"
+                            run.completed_at = datetime.now(UTC)
+                            run.diff_detected = False
+                            run.warnings = warnings
+                            bucket, _, key = minio_path.partition("/")
+                            try:
+                                await minio.remove_object(bucket, key)
+                            except Exception:
+                                logger.warning(
+                                    "content_dedup: failed to remove history object",
+                                    path=minio_path,
+                                )
+                            await db.commit()
+                            await msg.ack()
+                            logger.info(
+                                "content_deduplicated",
+                                job_id=job_id,
+                                run_id=run_id,
+                                content_hash=content_hash,
+                            )
+                            return
 
                 if job is not None and job.llm_config:
                     llm_key = await db.get(UserLLMKey, job.llm_config["llm_key_id"])

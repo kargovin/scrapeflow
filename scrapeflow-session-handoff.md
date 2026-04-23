@@ -61,8 +61,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 - Branch: `develop`
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
-- **Phase 3 in progress — Steps 1–25 done, Step 26 is next**
-- 202 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
+- **Phase 3 in progress — Steps 1–27 done (Step 26 deferred), Step 28 is next**
+- 205 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
 
 ### Phase 3 steps done
 
@@ -93,12 +93,16 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | 23 | PRD-007: coordinator service + Docker Compose | `coordinator/` Python service — BFS dispatch loop + NATS result subscriber; polls `crawl_queue WHERE status = 'pending'`; creates `crawl_pages` row, dispatches fat NATS message with `crawl_context`; extracts links via BeautifulSoup; UNIQUE constraint on `(crawl_id, url)` handles dedup silently; crawl completion fires `crawl.completed` webhook; startup re-enqueues stalled dispatched items; separate durable NATS consumer (not shared with API); added to `docker-compose.yml`; `coordinator/coordinator/config.py` uses pydantic-settings |
 | 24 | PRD-010: MCP server | `mcp/` standalone Python service (stdio transport); four tools: `scrape_url` (submit + poll + truncate at 50 KB), `get_result`, `get_job_status`, `list_jobs`; auth via `SCRAPEFLOW_API_KEY` env → `Authorization: Bearer`; tool descriptions explicitly state "single URL only"; not deployed in k3s (user-run); tests mock the HTTP API via custom `AsyncBaseTransport` — patch target is `tools.<module>.make_client` (not `client.make_client`); 14 tests passing |
 | 25 | PRD-012: billing/quotas — enforcement + admin endpoint | `api/app/core/quota.py` — three quota dimensions: `monthly_runs`, `concurrent_jobs`, `storage_bytes`; limits from `user_quotas` row (NULL = env var default: 500 runs, 5 concurrent, 5 GB); `check_user_quota()` raises 429 with structured detail; `is_quota_exceeded()` bool variant for scheduler; `check_storage_quota()` + `increment_storage_bytes()` for result consumer; quota checks as FastAPI deps (`check_job_quota`, `check_batch_quota`) — overridable via `dependency_overrides`; `PATCH /admin/users/{id}/quota` upsert endpoint; `cleanup_old_runs.py` decrements `storage_bytes_used` on delete; `quota_client` fixture for quota integration tests; 202 tests passing |
+| 26 | PRD-014: WebSocket real-time job tracking | **Deferred** — skipped this session |
+| 27 | PRD-015: content deduplication | `_compute_content_hash()` helper in `result_consumer.py` — xxh64 of raw MinIO bytes, stored as `job_runs.content_hash VARCHAR(16)`; dedup check inserted before LLM/diff branch: on hash match sets `diff_detected=False`, deletes redundant `history/` MinIO object, skips LLM dispatch + webhook; `xxhash>=3.0.0` added to `pyproject.toml`; 3 new tests in `tests/test_deduplication.py` (same content short-circuits, different content proceeds, first run has no previous) — 205 tests passing |
 
 ### Next step
 
-**Step 26 — PRD-014: WebSocket real-time job tracking** (`docs/project/PHASE3_BACKLOG.md` §Step 26):
-- New `GET /jobs/{job_id}/stream` WebSocket endpoint in `api/app/routers/jobs.py`
-- Auth via `token` query param (API key or JWT) — normal `Depends(get_current_user)` doesn't work for WebSocket; need a separate `authenticate_token(token, db)` helper
-- Poll loop: fetch latest `job_runs` row every 2s, send JSON `{status, updated_at}`, close on terminal status (`completed`, `failed`, `cancelled`)
-- Close codes: 4001 (auth failed), 4004 (job not found or not owned by user)
-- No dependencies on other pending steps — can go in any time after Step 16
+**Step 28 — PRD-011: Admin SPA + CI build + permanent delete** (`docs/project/PHASE3_BACKLOG.md` §Step 28):
+- React 18 + TypeScript + Vite + React Query + Tailwind + shadcn/ui in `frontend/`
+- Pages: `Users.tsx` (quota management), `Jobs.tsx` (all-user listing), `JobDetail.tsx`, `UsageStats.tsx`
+- Auth via Clerk JS SDK session → JWT → `Authorization: Bearer`
+- FastAPI `StaticFiles` mount at `/admin` pointing to `frontend/dist`
+- `DELETE /jobs/{id}?permanent=true` — deletes MinIO objects before Postgres row (external-before-internal principle)
+- CI frontend build step in `.github/workflows/build-push.yml` + API Dockerfile `COPY frontend/dist`
+- Depends on: Steps 12 (updated_at trigger), 13 (api_keys uniqueness), 25 (quota admin endpoint) — all done

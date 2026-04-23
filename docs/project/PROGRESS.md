@@ -132,8 +132,8 @@ Phase 3 — Production hardening
 | 23   | PRD-007: coordinator service + Docker Compose                                                | ✅ Done |
 | 24   | PRD-010: MCP server                                                                          | ✅ Done |
 | 25   | PRD-012: billing/quotas — enforcement + admin endpoint                                       | ✅ Done |
-| 26   | PRD-014: WebSocket real-time job tracking                                                    | ⬜ Todo |
-| 27   | PRD-015: content deduplication                                                               | ⬜ Todo |
+| 26   | PRD-014: WebSocket real-time job tracking                                                    | ⏸ Deferred |
+| 27   | PRD-015: content deduplication                                                               | ✅ Done |
 | 28   | PRD-011: Admin SPA + CI build + permanent delete                                             | ⬜ Todo |
 
 </details>

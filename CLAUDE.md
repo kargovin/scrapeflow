@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phase 2 complete. Phase 3 in progress — Steps 1–20 done. Steps 21–28 remaining.**
+> **Status: Phase 2 complete. Phase 3 in progress — Steps 1–27 done (Step 26 deferred). Step 28 remaining.**
 
 ## Goal
 
@@ -107,6 +107,7 @@ Each persona operates with only the outputs from the persona before them — the
 | Page actions field naming | Schema field `actions` maps to model column `playwright_actions`; popped from PATCH updates dict and set explicitly (same pattern as `proxy_url`/`cookies`) | Consistent with `playwright_options` naming convention on the model |
 | Action warnings persistence | Worker publishes warnings in NATS `ResultMessage`; result consumer persists to `job_runs.warnings JSONB`; `GET /jobs/{id}/result` reads from DB column | Warnings are not stored in MinIO content — they live in the result message and are captured by the consumer |
 | Webhook event filter | `jobs.webhook_events TEXT[]` (null = all events); filter checked at every `create_webhook_delivery` call site in `result_consumer.py` | Null means no filter (backward compatible); validated against known event set at API boundary |
+| Content deduplication | `job_runs.content_hash VARCHAR(16)` — xxh64 of raw MinIO bytes, truncated to 16 hex chars; checked in result consumer before LLM/diff dispatch; on match: `diff_detected=False`, history/ object deleted, no LLM, no webhook | Only on regular job path (not batch, not crawl); hash stored even when no previous run exists (first-run baseline); fail-open — hash error skips dedup silently |
 
 ---
 

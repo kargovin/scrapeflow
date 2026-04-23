@@ -732,24 +732,112 @@ if job.webhook_events and event_name not in job.webhook_events:
 
 **Problem:** Integrations and the Admin SPA must poll `GET /jobs/{id}` repeatedly to track job progress. Polling adds unnecessary load and latency. Firecrawl ships WebSocket endpoints for live crawl status. A WS endpoint eliminates polling from any integration that needs real-time feedback.
 
-**New endpoint:** `GET /jobs/{job_id}/stream` — WebSocket connection for live job status updates.
+**New endpoint:** `WS /jobs/{job_id}/stream` — WebSocket connection for live job status updates. The connection is server-to-client only in Phase 3; the client never sends messages back. Cancellation remains a REST call.
 
-**Implementation:** FastAPI native WebSocket support.
+**Notification mechanism: Postgres LISTEN/NOTIFY (not polling)**
+
+The PRD requires status updates delivered within 1 second of the status change. A `sleep`-based polling loop inside the WS handler cannot meet this — it delivers updates on its own interval, not on state change. The correct mechanism is Postgres `LISTEN/NOTIFY`:
+
+- `result_consumer.py` calls `SELECT pg_notify('job_status', '<job_id>:<run_id>:<status>')` inside the same transaction that commits every `job_run.status` transition. Postgres delivers the notification to all listeners only after `COMMIT` — atomicity is free.
+- A singleton `JobNotifier` service starts at API startup. It holds one dedicated `asyncpg` connection (outside the SQLAlchemy pool — a LISTEN connection must never be returned to the pool) and issues `LISTEN job_status` once.
+- `JobNotifier` maintains an in-process registry: `dict[str, list[asyncio.Queue]]` keyed by `job_id`. On each NOTIFY, it fans the payload out to every queue registered for that `job_id`.
+- Each WS handler registers an `asyncio.Queue` with `JobNotifier` for its `job_id`, then `await`s the queue until a terminal status arrives.
+
+This delivers status updates within ~50–100ms of the `pg_notify` call regardless of how many clients are connected.
 
 ```python
+# app/core/job_notifier.py
+
+class JobNotifier:
+    """Singleton. One dedicated asyncpg LISTEN connection. Started at API startup."""
+
+    def __init__(self):
+        self._conn: asyncpg.Connection | None = None
+        self._waiters: dict[str, list[asyncio.Queue]] = defaultdict(list)
+
+    async def start(self, dsn: str) -> None:
+        self._conn = await asyncpg.connect(dsn)
+        await self._conn.add_listener("job_status", self._on_notify)
+
+    async def _on_notify(self, conn, pid, channel, payload: str) -> None:
+        # payload format: "<job_id>:<run_id>:<status>"
+        job_id, run_id, status = payload.split(":")
+        for queue in self._waiters.get(job_id, []):
+            await queue.put({"run_id": run_id, "status": status})
+
+    @contextlib.asynccontextmanager
+    async def subscribe(self, job_id: str):
+        queue: asyncio.Queue = asyncio.Queue()
+        self._waiters[job_id].append(queue)
+        try:
+            yield queue
+        finally:
+            self._waiters[job_id].remove(queue)
+            if not self._waiters[job_id]:
+                del self._waiters[job_id]
+```
+
+**WS handler:**
+
+```python
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
 @router.websocket("/jobs/{job_id}/stream")
-async def job_status_stream(websocket: WebSocket, job_id: UUID, ...):
+async def job_status_stream(
+    websocket: WebSocket,
+    job_id: UUID,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await auth_from_token(token, db)      # close 4001 on failure
+    run = await get_latest_run(job_id, user, db) # close 4004 if not found / wrong user
+
     await websocket.accept()
-    while True:
-        run = db.query(latest_run_for_job(job_id))
-        await websocket.send_json({"status": run.status, "updated_at": run.updated_at})
-        if run.status in ('completed', 'failed', 'cancelled'):
-            break
-        await asyncio.sleep(2)
+
+    # Already terminal: send once and close immediately
+    if run.status in TERMINAL_STATUSES:
+        await websocket.send_json(build_terminal_message(run))
+        await websocket.close()
+        return
+
+    # Send current status on connect so client is never in the dark
+    await websocket.send_json(build_status_message(run))
+
+    async with request.app.state.job_notifier.subscribe(str(job_id)) as queue:
+        while True:
+            update = await queue.get()
+            await websocket.send_json(update)
+            if update["status"] in TERMINAL_STATUSES:
+                break
+
     await websocket.close()
 ```
 
-**Auth:** WebSocket connections pass the API key or JWT as a query parameter (`?token=...`) since WebSocket clients cannot set custom headers in the browser. The existing auth middleware is extended to accept `token` query parameter for WebSocket routes.
+**result_consumer.py — add pg_notify inside every status-transition commit:**
+
+```python
+# After db.execute(update(JobRun).where(...).values(status=new_status)):
+await db.execute(
+    sa.text("SELECT pg_notify('job_status', :payload)"),
+    {"payload": f"{job_id}:{run_id}:{new_status}"},
+)
+await db.commit()
+# NOTIFY is delivered to listeners only after this commit — atomicity guaranteed
+```
+
+**JobNotifier startup wiring (`main.py`):**
+
+```python
+# Extract plain DSN — asyncpg.connect() does not accept the +asyncpg dialect prefix
+dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+app.state.job_notifier = JobNotifier()
+await app.state.job_notifier.start(dsn)
+```
+
+**Auth:** `?token=` query parameter — API key or Clerk JWT. WebSocket clients cannot set `Authorization` headers in browser environments. Validated identically to the REST bearer token path.
+
+**Message format:** See PRD-014 for the full JSON envelope definitions (`status_update`, `completed`, `failed`, `batch_progress`).
 
 **Scope:** Single-job tracking only in Phase 3. Batch and crawl streaming is Phase 4.
 

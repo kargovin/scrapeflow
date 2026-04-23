@@ -234,6 +234,32 @@ None of this is in the Phase 2 schema or spec. Adding it mid-Phase 2 would requi
 
 ---
 
+## Real-time Job Tracking — SSE vs WebSocket
+
+**What:** `GET /jobs/{job_id}/stream` — push live job status updates (`{status, updated_at}`) to the client as the job progresses, closing automatically on terminal state.
+
+**Why deferred:** The spec (PRD-014) calls for WebSocket, but the communication is strictly unidirectional (server → client). Server-Sent Events (SSE) is purpose-built for this pattern and removes the need for a WebSocket-specific auth workaround (token query param) since SSE rides normal HTTP and supports the `Authorization` header directly. Error signalling also becomes standard HTTP status codes (401, 404) rather than custom WebSocket close codes (4001, 4004).
+
+**What Phase 3 needs to decide:**
+- Adopt SSE (`text/event-stream`) instead of WebSocket for this endpoint?
+- If SSE: use `StreamingResponse` or the `sse-starlette` library?
+- If staying with WebSocket: document the query-param auth pattern as the project convention (it will recur for crawl streaming)
+
+**Trade-off summary:**
+| | SSE | WebSocket |
+|---|---|---|
+| Direction fit | Exact — unidirectional only | Overkill — bidirectional unused |
+| Auth | Normal `Authorization` header | Token query param workaround |
+| Error signalling | HTTP 401 / 404 | Custom 4001 / 4004 close codes |
+| Reconnect | Built into protocol | Manual |
+| Future bidirectionality (e.g. cancel-over-stream) | Not possible | Supported |
+
+**Decision needed from:** Architect
+
+**Raised during:** Step 26 planning, 2026-04-23
+
+---
+
 ## Open Questions Still Unresolved
 
 These are from `docs/project/open-questions.md` and have not been decided yet:
