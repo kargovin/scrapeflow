@@ -21,6 +21,7 @@ jobs:
           filters: |
             api:
               - 'api/**'
+              - 'frontend/**'
             http-worker:
               - 'http-worker/**'
             playwright-worker:
@@ -50,11 +51,13 @@ jobs:
       - name: Build and push scrapeflow-api
         uses: docker/build-push-action@v5
         with:
-          context: ./api
+          context: .
           file: ./api/Dockerfile
           target: production
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/scrapeflow-api:${{ github.ref_name }}-${{ steps.ts.outputs.ts }}-${{ github.sha }}
+          build-args: |
+            VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
 
   # ── Go HTTP Worker ─────────────────────────────────────────────────────────
   build-http-worker:

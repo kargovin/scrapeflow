@@ -822,40 +822,51 @@ mcp/
 
 **Depends on:** No migration dependencies. Can be implemented any time after Step 16 stabilises the job model.
 
-**Location:** `api/app/routers/jobs.py`
+**Location:** `api/app/routers/jobs.py` (WS endpoint), `api/app/core/job_notifier.py` (new), `api/app/core/result_consumer.py` (add pg_notify), `api/app/main.py` (startup wiring)
 
 **What to build:**
 
-1. **New WebSocket endpoint:**
-```python
-@router.websocket("/jobs/{job_id}/stream")
-async def job_status_stream(websocket: WebSocket, job_id: UUID, token: str | None = None, db: AsyncSession = Depends(get_db)):
-    # Authenticate via token query param (API key or JWT)
-    user = await authenticate_token(token, db)
-    if user is None:
-        await websocket.close(code=4001)
-        return
-    await websocket.accept()
-    while True:
-        run = await get_latest_run(job_id, user.id, db)
-        if run is None:
-            await websocket.close(code=4004)
-            return
-        await websocket.send_json({"status": run.status, "updated_at": run.updated_at.isoformat()})
-        if run.status in ('completed', 'failed', 'cancelled'):
-            break
-        await asyncio.sleep(2)
-    await websocket.close()
-```
+1. **`app/core/job_notifier.py` — new singleton service:**
+   - Holds one dedicated `asyncpg` connection (outside the SQLAlchemy pool — a LISTEN connection must never be returned to the pool)
+   - Issues `LISTEN job_status` once on startup
+   - Maintains `dict[str, list[asyncio.Queue]]` keyed by `job_id` for fan-out
+   - Exposes `async with notifier.subscribe(job_id) as queue` context manager
+   - On each `NOTIFY`, fans the payload (`job_id:run_id:status`) to every registered queue for that `job_id`
 
-2. **Auth:** Extend auth middleware to accept `token` query parameter for WebSocket routes (API key or JWT as string). Browser WebSocket clients cannot set custom headers.
+2. **`main.py` startup wiring:**
+   ```python
+   dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+   app.state.job_notifier = JobNotifier()
+   await app.state.job_notifier.start(dsn)
+   ```
 
-3. **Scope:** Single-job only — batch/crawl streaming is Phase 4.
+3. **`result_consumer.py` — add `pg_notify` inside every status-transition commit:**
+   ```python
+   await db.execute(
+       sa.text("SELECT pg_notify('job_status', :payload)"),
+       {"payload": f"{job_id}:{run_id}:{new_status}"},
+   )
+   await db.commit()
+   # NOTIFY is delivered to listeners only after COMMIT — atomicity guaranteed
+   ```
+
+4. **WebSocket endpoint** (`routers/jobs.py`):
+   - Auth via `?token=` query param (API key or Clerk JWT) — browsers cannot set `Authorization` headers on WS connections
+   - Close `4001` on auth failure, `4004` if job not found or cross-user
+   - If already in terminal status: send one message and close immediately (no registration needed)
+   - Otherwise: send current status on connect, then `await queue.get()` from the `JobNotifier` subscription until a terminal status arrives
+   - Terminal statuses: `completed`, `failed`, `cancelled`
+
+5. **Scope:** Single-job tracking only — batch and crawl streaming is Phase 4.
+
+**Why LISTEN/NOTIFY instead of polling:** A `sleep`-based loop delivers updates on its own interval, not on state change — it cannot meet the <1s latency requirement. `pg_notify` fires inside the same transaction that commits the status change; delivery to the WS handler happens within ~50–100ms of the commit regardless of the number of connected clients.
 
 **Tests:**
-- WebSocket connects, receives status updates, closes on terminal status
+- WebSocket connects, receives status update when result consumer commits a transition, closes on terminal status
+- Already-terminal job: single message sent, connection closed
 - Unauthenticated connection → close with code 4001
 - Non-existent or cross-user job → close with code 4004
+- Multiple concurrent subscribers for the same `job_id` each receive the notification
 
 ---
 
@@ -990,7 +1001,7 @@ if previous_run and previous_run.content_hash == content_hash:
 | 23 | PRD-007: coordinator service + Docker Compose | PRD-007, ADR-005 | 10, 22 | ⬜ Todo |
 | 24 | PRD-010: MCP server | PRD-010 | — | ⬜ Todo |
 | 25 | PRD-012: billing/quotas — enforcement + admin endpoint | PRD-012 | 11, 21 | ⬜ Todo |
-| 26 | PRD-014: WebSocket real-time job tracking | PRD-014 | — | ⬜ Todo |
+| 26 | PRD-014: WebSocket real-time job tracking (LISTEN/NOTIFY) | PRD-014 | — | ✅ Done |
 | 27 | PRD-015: content deduplication | PRD-015 | 9 | ⬜ Todo |
 | 28 | PRD-011: Admin SPA + CI build + permanent delete | PRD-011 | 12, 13, 25 | ⬜ Todo |
 

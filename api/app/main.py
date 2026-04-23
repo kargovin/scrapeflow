@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core import minio, nats
 from app.core.advisory import maxdeliver_advisory_subscriber
 from app.core.db import AsyncSessionLocal
+from app.core.job_notifier import JobNotifier
 from app.core.redis import close_pool, create_pool
 from app.core.result_consumer import start_result_consumer
 from app.core.scheduler import scheduler_loop
@@ -48,6 +49,13 @@ async def lifespan(app: FastAPI):
     # Redis
     app.state.redis_pool = create_pool()
     logger.info("Redis pool created")
+
+    # JobNotifier — dedicated asyncpg LISTEN connection for WS fan-out
+    # Strip the SQLAlchemy dialect prefix: asyncpg.connect() needs a plain DSN.
+    _notifier_dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    app.state.job_notifier = JobNotifier()
+    await app.state.job_notifier.start(_notifier_dsn)
+    logger.info("JobNotifier started")
 
     # MinIO
     app.state.minio = await minio.create_client()
@@ -102,6 +110,9 @@ async def lifespan(app: FastAPI):
     await http_client.aclose()
     logger.info("HTTP client closed")
 
+    await app.state.job_notifier.stop()
+    logger.info("JobNotifier stopped")
+
     await nats.disconnect(app.state.nats_client)
     logger.info("NATS disconnected")
 
@@ -138,3 +149,12 @@ app.include_router(jobs.router)
 app.include_router(batch.router)
 app.include_router(crawls.router)
 app.include_router(admin.router)
+
+# Admin SPA — mounted last so FastAPI routes at /admin/* take precedence.
+# Conditional: skipped when frontend/dist is absent (local dev, test builds).
+import os  # noqa: E402
+
+if os.path.isdir("frontend/dist"):
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/admin", StaticFiles(directory="frontend/dist", html=True), name="admin-spa")

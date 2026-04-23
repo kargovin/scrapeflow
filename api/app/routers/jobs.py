@@ -8,7 +8,15 @@ from typing import Any
 import structlog
 from croniter import croniter
 from cryptography.fernet import Fernet
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    WebSocket,
+    status,
+)
 from miniopy_async import Minio
 from nats.js import JetStreamContext
 from sqlalchemy import delete, func, select, true
@@ -16,7 +24,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
 from app.core.minio import get_minio
@@ -42,6 +50,8 @@ from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = structlog.get_logger()
+
+_FORMAT_EXT: dict[str, str] = {"html": "html", "markdown": "md", "json": "json"}
 
 
 async def check_job_quota(
@@ -377,13 +387,41 @@ async def get_job(
 @router.delete("/{job_id}", response_model=CancelJobResponse)
 async def cancel_job(
     job_id: uuid.UUID,
+    permanent: bool = Query(default=False),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> CancelJobResponse:
+    minio_client: Minio = Depends(get_minio),
+) -> CancelJobResponse | Response:
     job = await db.get(Job, job_id)
     if job is None or job.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
+    if permanent:
+        # Delete MinIO objects before the DB row (external-before-internal principle).
+        runs_result = await db.execute(
+            select(JobRun.result_path).where(
+                JobRun.job_id == job_id, JobRun.result_path.is_not(None)
+            )
+        )
+        for (result_path,) in runs_result.all():
+            bucket, _, key = result_path.partition("/")
+            try:
+                await minio_client.remove_object(bucket, key)
+            except Exception:
+                pass
+
+        ext = _FORMAT_EXT.get(job.output_format.value, job.output_format.value)
+        try:
+            await minio_client.remove_object(settings.minio_bucket, f"latest/{job.id}.{ext}")
+        except Exception:
+            pass
+
+        await db.delete(job)
+        await db.commit()
+        logger.info("job_permanently_deleted", job_id=str(job_id), user_id=str(user.id))
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # Soft cancel (default behaviour — existing semantics unchanged)
     active_statuses = ("pending", "running", "processing")
     result = await db.execute(
         select(JobRun).where(JobRun.job_id == job_id).where(JobRun.status.in_(active_statuses))
@@ -640,3 +678,87 @@ async def get_job_result(
         result_path=run.result_path,
         warnings=run.warnings,
     )
+
+
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _status_msg(job_id: str, run: JobRun) -> dict:
+    return {"type": "status_update", "job_id": job_id, "run_id": str(run.id), "status": run.status}
+
+
+def _terminal_msg(job_id: str, run: JobRun) -> dict:
+    msg: dict = {"type": run.status, "job_id": job_id, "run_id": str(run.id), "status": run.status}
+    if run.status == "completed":
+        msg["result_url"] = f"/jobs/{job_id}/result"
+    return msg
+
+
+@router.websocket("/{job_id}/watch")
+async def job_status_stream(
+    websocket: WebSocket,
+    job_id: uuid.UUID,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Stream live status updates for a single job run until it reaches a terminal state.
+
+    Auth: ?token= query param (API key or Clerk JWT). Browsers cannot set Authorization
+    headers on WebSocket upgrade requests.
+    Close codes: 4001 unauthorized, 4004 not found / wrong user.
+    """
+    await websocket.accept()
+
+    user = await auth_from_token(token, db)
+    if user is None:
+        await websocket.close(code=4001, reason="unauthorized")
+        return
+
+    result = await db.execute(
+        select(Job, JobRun)
+        .join(JobRun, JobRun.job_id == Job.id)
+        .where(Job.id == job_id, Job.user_id == user.id)
+        .order_by(JobRun.created_at.desc())
+        .limit(1)
+    )
+    row = result.one_or_none()
+    if row is None:
+        await websocket.close(code=4004, reason="not found")
+        return
+
+    job, run = row
+    job_id_str = str(job_id)
+
+    if run.status in _TERMINAL_STATUSES:
+        await websocket.send_json(_terminal_msg(job_id_str, run))
+        await websocket.close()
+        return
+
+    await websocket.send_json(_status_msg(job_id_str, run))
+
+    notifier = websocket.app.state.job_notifier
+    async with notifier.subscribe_job(job_id_str) as queue:
+        while True:
+            update = await queue.get()
+            new_status = update["status"]
+            if new_status in _TERMINAL_STATUSES:
+                msg: dict = {
+                    "type": new_status,
+                    "job_id": job_id_str,
+                    "run_id": update["run_id"],
+                    "status": new_status,
+                }
+                if new_status == "completed":
+                    msg["result_url"] = f"/jobs/{job_id_str}/result"
+                await websocket.send_json(msg)
+                break
+            await websocket.send_json(
+                {
+                    "type": "status_update",
+                    "job_id": job_id_str,
+                    "run_id": update["run_id"],
+                    "status": new_status,
+                }
+            )
+
+    await websocket.close()
