@@ -98,7 +98,8 @@ async def _attempt_delivery(
             logger.warning(
                 "webhook: ssrf blocked — delivery marked exhausted",
                 delivery_id=str(delivery_id),
-                job_id=str(delivery.job_id),
+                job_id=str(delivery.job_id) if delivery.job_id else None,
+                batch_id=str(delivery.batch_id) if delivery.batch_id else None,
                 url=delivery.webhook_url,
                 error=str(exc),
             )

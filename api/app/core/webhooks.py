@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.diff import DiffResult
+from app.models.batch import Batch
 from app.models.job import Job
 from app.models.webhook_delivery import WebhookDelivery
 
@@ -50,6 +51,39 @@ def create_webhook_delivery(
             job_id=job.id,
             run_id=run_id,
             webhook_url=job.webhook_url,
+            payload=payload,
+            status="pending",
+            next_attempt_at=datetime.now(UTC),
+        )
+    )
+
+
+def create_batch_webhook_delivery(
+    db: AsyncSession,
+    batch: Batch,
+    run_id: uuid.UUID,
+    event: str,
+) -> None:
+    """Add a pending WebhookDelivery row for a batch event. Caller owns the transaction.
+
+    event — "batch.completed"
+    run_id — the triggering item's run; used for the job_runs FK.
+    Batch webhooks carry no HMAC secret — the signature will be empty.
+    """
+    payload: dict = {
+        "event": event,
+        "batch_id": str(batch.id),
+        "total": batch.total,
+        "completed": batch.completed,
+        "failed": batch.failed,
+        "status": batch.status,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    db.add(
+        WebhookDelivery(
+            batch_id=batch.id,
+            run_id=run_id,
+            webhook_url=batch.webhook_url,
             payload=payload,
             status="pending",
             next_attempt_at=datetime.now(UTC),

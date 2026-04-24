@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import VARCHAR, DateTime, ForeignKey, Index, Integer, Text, text
+from sqlalchemy import VARCHAR, CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,8 +12,11 @@ class WebhookDelivery(Base):
     __tablename__ = "webhook_deliveries"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("batches.id", ondelete="CASCADE"), nullable=True, index=True
     )
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("job_runs.id", ondelete="CASCADE"), nullable=False
@@ -34,6 +37,10 @@ class WebhookDelivery(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "num_nonnulls(job_id, batch_id) = 1",
+            name="ck_webhook_deliveries_job_or_batch",
+        ),
         Index(
             "idx_webhook_deliveries_status_next",
             "next_attempt_at",

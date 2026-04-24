@@ -15,7 +15,7 @@ from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RESULT_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.diff import compute_json_diff, compute_text_diff
 from app.core.quota import check_storage_quota, increment_storage_bytes
-from app.core.webhooks import create_webhook_delivery
+from app.core.webhooks import create_batch_webhook_delivery, create_webhook_delivery
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -77,10 +77,62 @@ async def _stat_minio_size(minio: Minio, minio_path: str) -> int:
         return 0
 
 
+async def _handle_storage_quota_exceeded(db, run: JobRun, minio_path: str, minio: Minio) -> None:
+    """Delete the oversized object, mark run failed, and emit the appropriate notify."""
+    bucket, _, key = minio_path.partition("/")
+    try:
+        await minio.remove_object(bucket, key)
+    except Exception:
+        logger.warning("result_consumer: failed to remove oversized object", path=minio_path)
+
+    run.status = "failed"
+    run.error = "storage_quota_exceeded"
+    run.completed_at = datetime.now(UTC)
+
+    if run.batch_item_id is not None:
+        item = await db.get(BatchItem, run.batch_item_id)
+        if item:
+            batch = await db.get(Batch, item.batch_id)
+            now = datetime.now(UTC)
+            item.status = "failed"
+            item.error = "storage_quota_exceeded"
+            item.completed_at = now
+            if batch:
+                batch.failed += 1
+                if batch.completed + batch.failed == batch.total:
+                    batch.status = "partial_failure"
+                    batch.completed_at = now
+                await db.execute(
+                    text("SELECT pg_notify('batch_status', :p)"),
+                    {
+                        "p": json.dumps(
+                            {
+                                "batch_id": str(batch.id),
+                                "completed": batch.completed,
+                                "failed": batch.failed,
+                                "total": batch.total,
+                                "status": batch.status,
+                                "item_url": item.url,
+                                "item_status": item.status,
+                            }
+                        )
+                    },
+                )
+    elif run.job_id is not None:
+        await db.execute(
+            text("SELECT pg_notify('job_status', :p)"),
+            {"p": f"{run.job_id}:{run.id}:failed"},
+        )
+
+
 async def _handle_batch_result(
-    db, run: JobRun, worker_status: str, minio_path, error, nats_seq, msg
+    db, run: JobRun, worker_status: str, minio_path, error, nats_seq, started_at
 ) -> None:
-    """Update batch item + batch counters atomically. Caller owns commit."""
+    """Update batch item + batch counters, notify, and fire batch webhook on completion.
+
+    Caller owns the commit. pg_notify is emitted for all status transitions including
+    'running' so WebSocket subscribers see the full lifecycle.
+    """
     item = await db.get(BatchItem, run.batch_item_id)
     if item is None:
         return
@@ -93,10 +145,26 @@ async def _handle_batch_result(
 
     if worker_status == "running":
         run.status = "running"
-        run.started_at = msg.metadata.timestamp
+        run.started_at = started_at
         run.nats_stream_seq = nats_seq
         if batch.status == "queued":
             batch.status = "running"
+        await db.execute(
+            text("SELECT pg_notify('batch_status', :p)"),
+            {
+                "p": json.dumps(
+                    {
+                        "batch_id": str(batch.id),
+                        "completed": batch.completed,
+                        "failed": batch.failed,
+                        "total": batch.total,
+                        "status": batch.status,
+                        "item_url": item.url,
+                        "item_status": "running",
+                    }
+                )
+            },
+        )
         return
 
     if worker_status == "completed":
@@ -117,7 +185,6 @@ async def _handle_batch_result(
         item.completed_at = now
         batch.failed += 1
 
-    # Batch completion check — all items are terminal.
     if batch.completed + batch.failed == batch.total:
         batch.status = "completed" if batch.failed == 0 else "partial_failure"
         batch.completed_at = now
@@ -128,8 +195,204 @@ async def _handle_batch_result(
             completed=batch.completed,
             failed=batch.failed,
         )
-        # Note: batch.completed webhook not yet implemented — WebhookDelivery.job_id
-        # is non-nullable (FK to jobs); batch webhooks need a schema extension.
+        if batch.webhook_url:
+            create_batch_webhook_delivery(db, batch, run.id, event="batch.completed")
+
+    await db.execute(
+        text("SELECT pg_notify('batch_status', :p)"),
+        {
+            "p": json.dumps(
+                {
+                    "batch_id": str(batch.id),
+                    "completed": batch.completed,
+                    "failed": batch.failed,
+                    "total": batch.total,
+                    "status": batch.status,
+                    "item_url": item.url,
+                    "item_status": item.status,
+                }
+            )
+        },
+    )
+
+
+async def _handle_scrape_completed(
+    db,
+    run: JobRun,
+    js: JetStreamContext,
+    minio: Minio,
+    job_id: str,
+    run_id: str,
+    minio_path: str | None,
+    warnings: list | None,
+    storage_user_id: uuid.UUID | None,
+    result_size: int,
+) -> None:
+    """Handle 'completed' from HTTP/Playwright worker when run was 'running'."""
+    if minio_path:
+        content_hash = await _compute_content_hash(minio_path, minio)
+        if content_hash:
+            run.content_hash = content_hash
+            prev = await _get_previous_completed_run(db, job_id, run_id)
+            if prev and prev.content_hash == content_hash:
+                run.status = "completed"
+                run.completed_at = datetime.now(UTC)
+                run.diff_detected = False
+                run.warnings = warnings
+                bucket, _, key = minio_path.partition("/")
+                try:
+                    await minio.remove_object(bucket, key)
+                except Exception:
+                    logger.warning(
+                        "content_dedup: failed to remove history object", path=minio_path
+                    )
+                logger.info(
+                    "content_deduplicated",
+                    job_id=job_id,
+                    run_id=run_id,
+                    content_hash=content_hash,
+                )
+                return  # skip LLM/diff/webhook; pg_notify fires in _handle_job_result
+
+    job = await db.get(Job, job_id)
+
+    if job is not None and job.llm_config:
+        llm_key = await db.get(UserLLMKey, job.llm_config["llm_key_id"])
+        if llm_key is None:
+            run.status = "failed"
+            run.error = "LLM key not found or deleted"
+            run.completed_at = datetime.now(UTC)
+            if job.webhook_url and (not job.webhook_events or "job.failed" in job.webhook_events):
+                create_webhook_delivery(
+                    db, job, run_id, event="job.failed", minio_path=None, error=run.error
+                )
+        else:
+            run.status = "processing"
+            if storage_user_id and result_size > 0:
+                await increment_storage_bytes(storage_user_id, db, result_size)
+            llm_payload: dict[str, Any] = {
+                "job_id": job_id,
+                "run_id": run_id,
+                "raw_minio_path": minio_path,
+                "provider": llm_key.provider,
+                "encrypted_api_key": llm_key.encrypted_api_key,
+                "base_url": llm_key.base_url,
+                "model": job.llm_config["model"],
+                "output_schema": job.llm_config["output_schema"],
+            }
+            await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
+    else:
+        # No LLM — finalize immediately with text diff.
+        run.status = "completed"
+        run.result_path = minio_path
+        run.completed_at = datetime.now(UTC)
+        run.warnings = warnings
+        if storage_user_id and result_size > 0:
+            await increment_storage_bytes(storage_user_id, db, result_size)
+        prev = await _get_previous_completed_run(db, job_id, run_id)
+        diff = None
+        if prev and prev.result_path:
+            diff = await compute_text_diff(minio_path, prev.result_path, minio)
+            run.diff_detected = diff.detected
+            run.diff_summary = diff.summary
+        if (
+            job is not None
+            and job.webhook_url
+            and (not job.webhook_events or "job.completed" in job.webhook_events)
+        ):
+            create_webhook_delivery(
+                db, job, run_id, event="job.completed", minio_path=minio_path, diff=diff
+            )
+
+
+async def _handle_llm_completed(
+    db,
+    run: JobRun,
+    minio: Minio,
+    job_id: str,
+    run_id: str,
+    minio_path: str | None,
+    storage_user_id: uuid.UUID | None,
+    result_size: int,
+) -> None:
+    """Handle 'completed' from LLM worker when run was 'processing'."""
+    run.status = "completed"
+    run.result_path = minio_path
+    run.completed_at = datetime.now(UTC)
+    if storage_user_id and result_size > 0:
+        await increment_storage_bytes(storage_user_id, db, result_size)
+    job = await db.get(Job, job_id)
+    prev = await _get_previous_completed_run(db, job_id, run_id)
+    diff = None
+    if prev and prev.result_path:
+        diff = await compute_json_diff(minio_path, prev.result_path, minio)
+        run.diff_detected = diff.detected
+        run.diff_summary = diff.summary
+    if (
+        job is not None
+        and job.webhook_url
+        and (not job.webhook_events or "job.completed" in job.webhook_events)
+    ):
+        create_webhook_delivery(
+            db, job, run_id, event="job.completed", minio_path=minio_path, diff=diff
+        )
+
+
+async def _handle_job_result(
+    db,
+    run: JobRun,
+    js: JetStreamContext,
+    minio: Minio,
+    job_id: str,
+    run_id: str,
+    worker_status: str,
+    minio_path: str | None,
+    error: str | None,
+    nats_seq: int | None,
+    warnings: list | None,
+    storage_user_id: uuid.UUID | None,
+    result_size: int,
+    started_at,
+) -> None:
+    """Handle a result message for a regular (non-batch) job run. Caller owns commit.
+
+    Emits pg_notify('job_status') for every status transition so WebSocket
+    subscribers always see the final run.status regardless of the path taken.
+    """
+    if worker_status == "running":
+        run.status = "running"
+        run.started_at = started_at
+        run.nats_stream_seq = nats_seq
+
+    elif worker_status == "completed" and run.status == "running":
+        await _handle_scrape_completed(
+            db, run, js, minio, job_id, run_id, minio_path, warnings, storage_user_id, result_size
+        )
+
+    elif worker_status == "completed" and run.status == "processing":
+        await _handle_llm_completed(
+            db, run, minio, job_id, run_id, minio_path, storage_user_id, result_size
+        )
+
+    else:
+        # worker_status == "failed" (or unexpected status — treat as failed)
+        run.status = "failed"
+        run.error = error
+        run.completed_at = datetime.now(UTC)
+        job = await db.get(Job, job_id)
+        if (
+            job is not None
+            and job.webhook_url
+            and (not job.webhook_events or "job.failed" in job.webhook_events)
+        ):
+            create_webhook_delivery(
+                db, job, run_id, event="job.failed", minio_path=None, error=error
+            )
+
+    await db.execute(
+        text("SELECT pg_notify('job_status', :p)"),
+        {"p": f"{run.job_id}:{run_id}:{run.status}"},
+    )
 
 
 async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
@@ -144,34 +407,35 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         nats_seq = data.get("nats_stream_seq")
         warnings = data.get("warnings")
     except (KeyError, json.JSONDecodeError) as e:
-        # Malformed message — ack to prevent infinite redelivery, log and discard
         logger.error("Malformed result message, discarding", error=str(e), data=msg.data)
         await msg.ack()
         return
 
-    # Crawl result messages carry crawl_context — the coordinator handles those via
-    # its own durable consumer. Ack here to prevent double-processing.
+    # Crawl result messages carry crawl_context — coordinator handles those via its
+    # own durable consumer. Ack here to prevent double-processing.
     if data.get("crawl_context") is not None:
         await msg.ack()
         return
 
     async with AsyncSessionLocal() as db:
         run = await db.get(JobRun, run_id)
-
         if run is None:
             logger.warning("Received result for unknown run, discarding", run_id=run_id)
             await msg.ack()
             return
 
-        # Cancellation guard — discard results for cancelled runs (ADR-002)
         if run.status == "cancelled":
             logger.info("Run was cancelled, discarding worker result", run_id=run_id)
+            if run.job_id is not None:
+                await db.execute(
+                    text("SELECT pg_notify('job_status', :p)"),
+                    {"p": f"{run.job_id}:{run_id}:cancelled"},
+                )
+            await db.commit()
             await msg.ack()
             return
 
-        # Storage quota enforcement for completed runs with a MinIO result.
-        # Workers write to MinIO before publishing the result message, so the check
-        # is post-write: stat the object, reject if over quota, delete the object.
+        # Storage quota enforcement: stat the object post-write, delete + fail if over limit.
         storage_user_id: uuid.UUID | None = None
         result_size: int = 0
         if worker_status == "completed" and minio_path:
@@ -181,52 +445,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                 if result_size > 0 and not await check_storage_quota(
                     storage_user_id, db, result_size
                 ):
-                    bucket, _, key = minio_path.partition("/")
-                    try:
-                        await minio.remove_object(bucket, key)
-                    except Exception:
-                        logger.warning(
-                            "result_consumer: failed to remove oversized object",
-                            path=minio_path,
-                        )
-                    run.status = "failed"
-                    run.error = "storage_quota_exceeded"
-                    run.completed_at = datetime.now(UTC)
-                    # Update batch counters if this was a batch run
-                    if run.batch_item_id is not None:
-                        item = await db.get(BatchItem, run.batch_item_id)
-                        if item:
-                            batch = await db.get(Batch, item.batch_id)
-                            now = datetime.now(UTC)
-                            item.status = "failed"
-                            item.error = "storage_quota_exceeded"
-                            item.completed_at = now
-                            if batch:
-                                batch.failed += 1
-                                if batch.completed + batch.failed == batch.total:
-                                    batch.status = "partial_failure"
-                                    batch.completed_at = now
-                                await db.execute(
-                                    text("SELECT pg_notify('batch_status', :p)"),
-                                    {
-                                        "p": json.dumps(
-                                            {
-                                                "batch_id": str(batch.id),
-                                                "completed": batch.completed,
-                                                "failed": batch.failed,
-                                                "total": batch.total,
-                                                "status": batch.status,
-                                                "item_url": item.url,
-                                                "item_status": item.status,
-                                            }
-                                        )
-                                    },
-                                )
-                    elif run.job_id is not None:
-                        await db.execute(
-                            text("SELECT pg_notify('job_status', :p)"),
-                            {"p": f"{run.job_id}:{run_id}:failed"},
-                        )
+                    await _handle_storage_quota_exceeded(db, run, minio_path, minio)
                     await db.commit()
                     await msg.ack()
                     logger.warning(
@@ -236,207 +455,30 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                     )
                     return
 
-        # Route by which FK is set — batch_item_id means this is a batch run (ADR-006).
         if run.batch_item_id is not None:
-            await _handle_batch_result(db, run, worker_status, minio_path, error, nats_seq, msg)
-            # Increment storage atomically with the run status commit.
+            await _handle_batch_result(
+                db, run, worker_status, minio_path, error, nats_seq, msg.metadata.timestamp
+            )
             if storage_user_id and result_size > 0 and worker_status == "completed":
                 await increment_storage_bytes(storage_user_id, db, result_size)
-            # Emit batch progress notification for completed/failed items.
-            # Skip "running" — no meaningful progress change (no items finished yet).
-            if worker_status in ("completed", "failed"):
-                _item = await db.get(BatchItem, run.batch_item_id)
-                if _item:
-                    _batch = await db.get(Batch, _item.batch_id)
-                    if _batch:
-                        await db.execute(
-                            text("SELECT pg_notify('batch_status', :p)"),
-                            {
-                                "p": json.dumps(
-                                    {
-                                        "batch_id": str(_batch.id),
-                                        "completed": _batch.completed,
-                                        "failed": _batch.failed,
-                                        "total": _batch.total,
-                                        "status": _batch.status,
-                                        "item_url": _item.url,
-                                        "item_status": _item.status,
-                                    }
-                                )
-                            },
-                        )
-            await db.commit()
-            await msg.ack()
-            logger.info("Batch item result processed", run_id=run_id, status=worker_status)
-            return
-
-        if worker_status == "running":
-            run.status = "running"
-            run.started_at = msg.metadata.timestamp  # publish time on the worker side
-            run.nats_stream_seq = nats_seq  # stored for MaxDeliver advisory (Step 22)
-
-        elif worker_status == "completed":
-            if run.status == "running":
-                # --- Completed message from HTTP / Playwright scrape worker ---
-                job = await db.get(Job, job_id)
-
-                if minio_path:
-                    content_hash = await _compute_content_hash(minio_path, minio)
-                    if content_hash:
-                        run.content_hash = content_hash
-                        prev_run = await _get_previous_completed_run(db, job_id, run_id)
-                        if prev_run and prev_run.content_hash == content_hash:
-                            run.status = "completed"
-                            run.completed_at = datetime.now(UTC)
-                            run.diff_detected = False
-                            run.warnings = warnings
-                            bucket, _, key = minio_path.partition("/")
-                            try:
-                                await minio.remove_object(bucket, key)
-                            except Exception:
-                                logger.warning(
-                                    "content_dedup: failed to remove history object",
-                                    path=minio_path,
-                                )
-                            await db.execute(
-                                text("SELECT pg_notify('job_status', :p)"),
-                                {"p": f"{job_id}:{run_id}:completed"},
-                            )
-                            await db.commit()
-                            await msg.ack()
-                            logger.info(
-                                "content_deduplicated",
-                                job_id=job_id,
-                                run_id=run_id,
-                                content_hash=content_hash,
-                            )
-                            return
-
-                if job is not None and job.llm_config:
-                    llm_key = await db.get(UserLLMKey, job.llm_config["llm_key_id"])
-                    if llm_key is None:
-                        run.status = "failed"
-                        run.error = "LLM key not found or deleted"
-                        run.completed_at = datetime.now(UTC)
-                        if job.webhook_url and (
-                            not job.webhook_events or "job.failed" in job.webhook_events
-                        ):
-                            create_webhook_delivery(
-                                db,
-                                job,
-                                run_id,
-                                event="job.failed",
-                                minio_path=None,
-                                error=run.error,
-                            )
-                    else:
-                        run.status = "processing"
-                        # Raw content is now in MinIO — count it toward storage.
-                        if storage_user_id and result_size > 0:
-                            await increment_storage_bytes(storage_user_id, db, result_size)
-                        llm_payload: dict[str, Any] = {
-                            "job_id": job_id,
-                            "run_id": run_id,
-                            "raw_minio_path": minio_path,
-                            "provider": llm_key.provider,
-                            "encrypted_api_key": llm_key.encrypted_api_key,
-                            "base_url": llm_key.base_url,
-                            "model": job.llm_config["model"],
-                            "output_schema": job.llm_config["output_schema"],
-                        }
-                        await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
-                        # Fall through to outer db.commit() and msg.ack()
-
-                else:
-                    # No LLM — finalize immediately with text diff
-                    run.status = "completed"
-                    run.result_path = minio_path
-                    run.completed_at = datetime.now(UTC)
-                    run.warnings = warnings
-
-                    if storage_user_id and result_size > 0:
-                        await increment_storage_bytes(storage_user_id, db, result_size)
-
-                    prev = await _get_previous_completed_run(db, job_id, run_id)
-                    diff = None
-                    if prev and prev.result_path:
-                        diff = await compute_text_diff(minio_path, prev.result_path, minio)
-                        run.diff_detected = diff.detected
-                        run.diff_summary = diff.summary
-
-                    if (
-                        job is not None
-                        and job.webhook_url
-                        and (not job.webhook_events or "job.completed" in job.webhook_events)
-                    ):
-                        create_webhook_delivery(
-                            db,
-                            job,
-                            run_id,
-                            event="job.completed",
-                            minio_path=minio_path,
-                            diff=diff,
-                        )
-
-            elif run.status == "processing":
-                # --- Completed message from LLM worker ---
-                # minio_path here is the LLM JSON output — a second file in history/.
-                run.status = "completed"
-                run.result_path = minio_path
-                run.completed_at = datetime.now(UTC)
-
-                if storage_user_id and result_size > 0:
-                    await increment_storage_bytes(storage_user_id, db, result_size)
-
-                job = await db.get(Job, job_id)
-                prev = await _get_previous_completed_run(db, job_id, run_id)
-                diff = None
-                if prev and prev.result_path:
-                    diff = await compute_json_diff(minio_path, prev.result_path, minio)
-                    run.diff_detected = diff.detected
-                    run.diff_summary = diff.summary
-
-                if (
-                    job is not None
-                    and job.webhook_url
-                    and (not job.webhook_events or "job.completed" in job.webhook_events)
-                ):
-                    create_webhook_delivery(
-                        db,
-                        job,
-                        run_id,
-                        event="job.completed",
-                        minio_path=minio_path,
-                        diff=diff,
-                    )
-
         else:
-            # worker_status == "failed"
-            run.status = "failed"
-            run.error = error
-            run.completed_at = datetime.now(UTC)
-
-            job = await db.get(Job, job_id)
-            if (
-                job is not None
-                and job.webhook_url
-                and (not job.webhook_events or "job.failed" in job.webhook_events)
-            ):
-                create_webhook_delivery(
-                    db,
-                    job,
-                    run_id,
-                    event="job.failed",
-                    minio_path=None,
-                    error=error,
-                )
-
-        # Notify any WS subscribers watching this job.
-        if run.job_id is not None:
-            await db.execute(
-                text("SELECT pg_notify('job_status', :p)"),
-                {"p": f"{run.job_id}:{run_id}:{run.status}"},
+            await _handle_job_result(
+                db,
+                run,
+                js,
+                minio,
+                job_id,
+                run_id,
+                worker_status,
+                minio_path,
+                error,
+                nats_seq,
+                warnings,
+                storage_user_id,
+                result_size,
+                msg.metadata.timestamp,
             )
+
         await db.commit()
 
     await msg.ack()
