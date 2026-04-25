@@ -149,6 +149,7 @@ async def _handle_batch_result(
     db,
     run: JobRun,
     js: JetStreamContext,
+    minio: Minio,
     worker_status: str,
     minio_path,
     error,
@@ -206,6 +207,15 @@ async def _handle_batch_result(
         if batch.llm_config:
             llm_key = await db.get(UserLLMKey, batch.llm_config["llm_key_id"])
             if llm_key is None:
+                if minio_path:
+                    bucket, _, key = minio_path.partition("/")
+                    try:
+                        await minio.remove_object(bucket, key)
+                    except Exception:
+                        logger.warning(
+                            "result_consumer: failed to remove orphaned batch object on LLM key miss",
+                            path=minio_path,
+                        )
                 run.status = "failed"
                 run.error = "LLM key not found or deleted"
                 run.completed_at = now
@@ -443,6 +453,15 @@ async def _handle_scrape_completed(
     if job is not None and job.llm_config:
         llm_key = await db.get(UserLLMKey, job.llm_config["llm_key_id"])
         if llm_key is None:
+            if minio_path:
+                bucket, _, key = minio_path.partition("/")
+                try:
+                    await minio.remove_object(bucket, key)
+                except Exception:
+                    logger.warning(
+                        "result_consumer: failed to remove orphaned object on LLM key miss",
+                        path=minio_path,
+                    )
             run.status = "failed"
             run.error = "LLM key not found or deleted"
             run.completed_at = datetime.now(UTC)
@@ -679,6 +698,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                 db,
                 run,
                 js,
+                minio,
                 worker_status,
                 minio_path,
                 error,

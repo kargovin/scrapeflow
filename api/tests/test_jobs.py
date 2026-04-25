@@ -375,6 +375,75 @@ async def test_result_consumer_completed_with_llm(db_user):
 
 
 # ---------------------------------------------------------------------------
+# Result consumer — LLM key deleted between dispatch and result (prod review #10)
+# ---------------------------------------------------------------------------
+
+
+async def test_result_consumer_llm_key_deleted_cleans_minio(db_user):
+    """When LLM key is missing at result time, the MinIO object is removed and run is failed."""
+    from sqlalchemy import delete as sa_delete
+
+    async with AsyncSessionLocal() as db:
+        key = UserLLMKey(
+            user_id=db_user.id,
+            name="deleted-key",
+            provider="anthropic",
+            encrypted_api_key="enc_key",
+        )
+        db.add(key)
+        await db.flush()
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            llm_config={"llm_key_id": str(key.id), "model": "claude-3", "output_schema": {}},
+        )
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running")
+        db.add(run)
+        await db.commit()
+        await db.refresh(job)
+        await db.refresh(run)
+        key_id = key.id
+        job_id = job.id
+        run_id = run.id
+
+    # Delete the LLM key to simulate mid-schedule removal.
+    async with AsyncSessionLocal() as db:
+        await db.execute(sa_delete(UserLLMKey).where(UserLLMKey.id == key_id))
+        await db.commit()
+
+    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
+    mock_minio = AsyncMock()
+    mock_minio.stat_object = AsyncMock(side_effect=Exception("not found"))
+    mock_minio.remove_object = AsyncMock()
+
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "completed",
+            "minio_path": minio_path,
+        }
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    await _handle_result(msg, AsyncMock(), mock_minio)
+
+    mock_minio.remove_object.assert_called_once()
+
+    async with AsyncSessionLocal() as db:
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "failed"
+        assert updated_run.error == "LLM key not found or deleted"
+
+    msg.ack.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # 6h-11: Result consumer — cancelled run result is discarded
 # ---------------------------------------------------------------------------
 
