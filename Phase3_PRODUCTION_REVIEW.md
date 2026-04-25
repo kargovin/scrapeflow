@@ -261,27 +261,27 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 9 (orig #30) — `increment_storage_bytes` not atomic with run status update — **HIGH**
+#### [x] 9 (orig #30) — `increment_storage_bytes` not atomic with run status update — **HIGH**
 
 - **File:** `api/app/core/result_consumer.py:272,291,323,463`
 - **Issue:** Storage quota increment and run status write are separate SQL statements in the same session. If the increment fails (DB error, constraint violation), the run is still committed as `completed`. Quota accounting is permanently wrong for that run.
-- **Fix:** Treat quota increment as part of the same unit of work. Catch `increment_storage_bytes` exceptions; on failure, mark the run `failed` instead of `completed`.
+- **Fix:** Added `_try_increment_storage()` helper using `begin_nested()` (PostgreSQL SAVEPOINT) — increment failure rolls back only the savepoint, outer transaction stays clean. All 6 call sites now explicitly mark the run `failed` with `error="storage_accounting_failed"` and ack the NATS message on failure (no indefinite redelivery). Batch paths also update the `failed` counter instead of `completed`.
 
 ---
 
-#### [ ] 10 (orig #24) — MinIO object orphaned + quota leaks when LLM key deleted mid-schedule — **HIGH**
+#### [x] 10 (orig #24) — MinIO object orphaned + quota leaks when LLM key deleted mid-schedule — **HIGH**
 
 - **File:** `api/app/core/result_consumer.py:259-268`
 - **Issue:** When a scheduled job result arrives and the LLM key has since been deleted, the consumer marks the run `failed` but leaves the already-uploaded MinIO object (and its `storage_bytes_used` increment) in place.
-- **Fix:** Delete the MinIO object before marking the run failed (same pattern as `_handle_storage_quota_exceeded`). Do not increment storage if the object is about to be deleted.
+- **Fix:** `_handle_scrape_completed` and `_handle_batch_result` now both call `minio.remove_object()` on the already-written path before marking the run `failed`. Storage is never incremented for objects that are immediately deleted. `_handle_batch_result` gained a `minio: Minio` parameter.
 
 ---
 
-#### [ ] 11 (orig #25) — Admin user delete leaks MinIO objects — **HIGH**
+#### [x] 11 (orig #25) — Admin user delete leaks MinIO objects — **HIGH**
 
 - **File:** `api/app/routers/admin.py:183`
 - **Issue:** `db.delete(user)` cascades through Postgres FKs but MinIO objects are never touched. A deleted user's entire scrape history stays in object storage with no decremented quota accounting.
-- **Fix:** Before `db.delete(user)`, iterate `job_runs.result_path` for all user's jobs and batch-delete MinIO objects, decrementing the platform storage total.
+- **Fix:** `admin_delete_user` now accepts `minio: Minio = Depends(get_minio)`, queries all `job_runs.result_path` owned by the user (both job and batch paths via `COALESCE(Job.user_id, Batch.user_id)`), removes each object, decrements `storage_bytes_used` by total freed bytes, then cascades the DB delete.
 
 ---
 

@@ -64,7 +64,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
 - **Phase 3 complete — all Steps 1–28 done**
 - **Phase 3 production review in progress** — working through `Phase3_PRODUCTION_REVIEW.md` item by item
-- 224 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
+- 229 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
 - Alembic auto-migration is **temporarily commented out** in `api/app/main.py` (disabled to allow migrations to be developed); re-enable before merging `develop → main`
 
 ### Phase 3 steps done
@@ -117,4 +117,7 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 6 | HIGH | Batch jobs with LLM output silently return raw HTML — Migration 3.14 adds `batches.llm_config` | `[x]` done |
 | 7 | HIGH | `decrement_storage_bytes` never called on delete | `[x]` done |
 | 8 | HIGH | PATCH upserts secrets before all validations pass — sentinel pattern defers writes after loop | `[x]` done |
-| 9+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
+| 9 | HIGH | `increment_storage_bytes` not atomic — savepoint helper + explicit fail-run on error | `[x]` done |
+| 10 | HIGH | MinIO orphan on LLM key deleted mid-schedule — delete object before marking failed | `[x]` done |
+| 11 | HIGH | Admin user delete leaks MinIO — stat/remove/decrement before cascade | `[x]` done |
+| 12+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
