@@ -32,11 +32,9 @@ async def verify_request(request: Request) -> dict:
     )
 
     clerk = get_clerk()
-    # TODO: set authorized_parties to ["https://scrapeflow.govindappa.com"] in production
-    # and load from CLERK_AUTHORIZED_PARTIES env var
     request_state = clerk.authenticate_request(
         httpx_request,
-        AuthenticateRequestOptions(authorized_parties=None),
+        AuthenticateRequestOptions(authorized_parties=settings.clerk_authorized_parties),
     )
 
     if not request_state.is_signed_in or not request_state.payload:

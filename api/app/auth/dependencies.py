@@ -10,6 +10,7 @@ from app.auth.jwt import get_clerk, verify_request
 from app.auth.user_sync import get_or_create_user
 from app.core.db import get_db
 from app.models.user import User
+from app.settings import settings
 
 # Extracts the X-API-Key header value (optional — returns None if missing)
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -74,7 +75,9 @@ async def auth_from_token(token: str, db: AsyncSession) -> User | None:
         headers={"Authorization": f"Bearer {token}"},
     )
     clerk = get_clerk()
-    state = clerk.authenticate_request(req, AuthenticateRequestOptions(authorized_parties=None))
+    state = clerk.authenticate_request(
+        req, AuthenticateRequestOptions(authorized_parties=settings.clerk_authorized_parties)
+    )
     if not state.is_signed_in or not state.payload:
         return None
     return await get_or_create_user(db, state.payload)

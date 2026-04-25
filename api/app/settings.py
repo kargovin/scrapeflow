@@ -35,6 +35,9 @@ class Settings(BaseSettings):
 
     # Clerk
     clerk_secret_key: str = ""  # used by backend SDK for JWT verification + API calls
+    clerk_authorized_parties_raw: str = Field(
+        default="", alias="CLERK_AUTHORIZED_PARTIES"
+    )  # env: CLERK_AUTHORIZED_PARTIES (comma-separated; empty = skip azp check in dev)
 
     # Rate limiting — per-user sliding window (Redis sorted set + Lua)
     rate_limit_requests: int = 60  # max requests allowed per window
@@ -79,6 +82,12 @@ class Settings(BaseSettings):
         if self.allowed_origins_raw == "*":
             return ["*"]
         return [o.strip() for o in self.allowed_origins_raw.split(",")]
+
+    @property
+    def clerk_authorized_parties(self) -> list[str] | None:
+        if not self.clerk_authorized_parties_raw:
+            return None
+        return [p.strip() for p in self.clerk_authorized_parties_raw.split(",")]
 
 
 settings = Settings()
