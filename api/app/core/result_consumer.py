@@ -98,8 +98,17 @@ async def _handle_storage_quota_exceeded(db, run: JobRun, minio_path: str, minio
             item.error = "storage_quota_exceeded"
             item.completed_at = now
             if batch:
-                batch.failed += 1
-                if batch.completed + batch.failed == batch.total:
+                sq_row = (
+                    await db.execute(
+                        text(
+                            "UPDATE batches SET failed = failed + 1"
+                            " WHERE id = :id RETURNING completed, failed"
+                        ),
+                        {"id": batch.id},
+                    )
+                ).one()
+                sq_completed, sq_failed = sq_row.completed, sq_row.failed
+                if sq_completed + sq_failed == batch.total:
                     batch.status = "partial_failure"
                     batch.completed_at = now
                 await db.execute(
@@ -108,8 +117,8 @@ async def _handle_storage_quota_exceeded(db, run: JobRun, minio_path: str, minio
                         "p": json.dumps(
                             {
                                 "batch_id": str(batch.id),
-                                "completed": batch.completed,
-                                "failed": batch.failed,
+                                "completed": sq_completed,
+                                "failed": sq_failed,
                                 "total": batch.total,
                                 "status": batch.status,
                                 "item_url": item.url,
@@ -174,7 +183,15 @@ async def _handle_batch_result(
         item.status = "completed"
         item.result_path = minio_path
         item.completed_at = now
-        batch.completed += 1
+        counter_row = (
+            await db.execute(
+                text(
+                    "UPDATE batches SET completed = completed + 1"
+                    " WHERE id = :id RETURNING completed, failed"
+                ),
+                {"id": batch.id},
+            )
+        ).one()
     else:
         # failed
         run.status = "failed"
@@ -183,17 +200,27 @@ async def _handle_batch_result(
         item.status = "failed"
         item.error = error
         item.completed_at = now
-        batch.failed += 1
+        counter_row = (
+            await db.execute(
+                text(
+                    "UPDATE batches SET failed = failed + 1"
+                    " WHERE id = :id RETURNING completed, failed"
+                ),
+                {"id": batch.id},
+            )
+        ).one()
 
-    if batch.completed + batch.failed == batch.total:
-        batch.status = "completed" if batch.failed == 0 else "partial_failure"
+    new_completed, new_failed = counter_row.completed, counter_row.failed
+
+    if new_completed + new_failed == batch.total:
+        batch.status = "completed" if new_failed == 0 else "partial_failure"
         batch.completed_at = now
         logger.info(
             "batch_completed",
             batch_id=str(batch.id),
             status=batch.status,
-            completed=batch.completed,
-            failed=batch.failed,
+            completed=new_completed,
+            failed=new_failed,
         )
         if batch.webhook_url:
             create_batch_webhook_delivery(db, batch, run.id, event="batch.completed")
@@ -204,8 +231,8 @@ async def _handle_batch_result(
             "p": json.dumps(
                 {
                     "batch_id": str(batch.id),
-                    "completed": batch.completed,
-                    "failed": batch.failed,
+                    "completed": new_completed,
+                    "failed": new_failed,
                     "total": batch.total,
                     "status": batch.status,
                     "item_url": item.url,
