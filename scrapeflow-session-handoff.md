@@ -120,4 +120,5 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 9 | HIGH | `increment_storage_bytes` not atomic — savepoint helper + explicit fail-run on error | `[x]` done |
 | 10 | HIGH | MinIO orphan on LLM key deleted mid-schedule — delete object before marking failed | `[x]` done |
 | 11 | HIGH | Admin user delete leaks MinIO — stat/remove/decrement before cascade | `[x]` done |
-| 12+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
+| 12 | HIGH | `cancelled` status never emits `pg_notify` from router — WebSocket hangs if NATS down | `[x]` done |
+| 13+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |

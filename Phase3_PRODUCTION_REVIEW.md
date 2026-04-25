@@ -285,7 +285,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 12 (orig #8) — `cancelled` status never emits `pg_notify` from the router — **HIGH**
+#### [x] 12 (orig #8) — `cancelled` status never emits `pg_notify` from the router — **HIGH**
 
 - **File:** `api/app/routers/jobs.py:430-437`, `api/app/routers/admin.py:283-287`
 - **Issue:** The `cancel_job` route sets `run.status = "cancelled"` and commits but issues no `pg_notify`. WebSocket subscribers waiting on `queue.get()` never receive the terminal status.
@@ -482,10 +482,9 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [~] 38 (orig #7) — WebSocket update not sent when job is cancelled — **HIGH**
+#### [x] 38 (orig #7) — WebSocket update not sent when job is cancelled — **HIGH**
 
-- **Status:** `result_consumer.py` now emits `pg_notify` when discarding a cancelled run. But `cancel_job` route and `admin_delete_or_cancel_job` still issue no notify. If the worker result never arrives (NATS down), the WebSocket never closes.
-- **Remaining fix:** See item #12 above.
+- **Status:** Fixed. `cancel_job` and `admin_delete_or_cancel_job` now emit `pg_notify('job_status', ...)` before commit (item #12). WebSocket subscribers receive `cancelled` immediately regardless of whether the worker result arrives.
 
 ---
 

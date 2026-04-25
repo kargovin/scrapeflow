@@ -352,6 +352,42 @@ async def test_admin_cancel_job(client, admin_headers, db_user):
     assert updated_run.status == "cancelled"
 
 
+async def test_admin_cancel_job_emits_pg_notify(client, admin_headers, db_user):
+    """Admin soft-delete emits pg_notify on job_status so WebSocket subscribers close immediately."""
+    import asyncpg
+
+    from app.settings import settings
+
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://notify-cancel.example.com")
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="pending")
+        db.add(run)
+        await db.commit()
+        job_id = job.id
+        run_id = run.id
+
+    dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    notifications: list[str] = []
+
+    def _collect(con, pid, channel, payload):
+        notifications.append(payload)
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.add_listener("job_status", _collect)
+
+        resp = await client.delete(f"/admin/jobs/{job_id}", headers=admin_headers)
+        assert resp.status_code == 200
+
+        await conn.execute("SELECT 1")
+
+        assert f"{job_id}:{run_id}:cancelled" in notifications
+    finally:
+        await conn.close()
+
+
 async def test_admin_hard_delete_job(client, admin_headers, db_user):
     """hard_delete=true removes the job row; CASCADE handles runs/deliveries."""
     async with AsyncSessionLocal() as db:

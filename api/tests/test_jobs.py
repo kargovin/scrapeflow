@@ -223,6 +223,40 @@ async def test_cancel_job_terminal_run(client, auth_headers, mock_jetstream):
     assert response.json()["message"] == "Job has no active run to cancel"
 
 
+async def test_cancel_job_emits_pg_notify(client, auth_headers, mock_jetstream):
+    """DELETE /jobs/{job_id} emits pg_notify on job_status so WebSocket subscribers close immediately."""
+    import asyncpg
+
+    from app.settings import settings
+
+    create_resp = await client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+    )
+    assert create_resp.status_code == 201
+    job_id = create_resp.json()["id"]
+    run_id = create_resp.json()["run_id"]
+
+    dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    notifications: list[str] = []
+
+    def _collect(con, pid, channel, payload):
+        notifications.append(payload)
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.add_listener("job_status", _collect)
+
+        resp = await client.delete(f"/jobs/{job_id}", headers=auth_headers)
+        assert resp.status_code == 200
+
+        # Force asyncpg to flush its socket buffer — callbacks fire during this read.
+        await conn.execute("SELECT 1")
+
+        assert f"{job_id}:{run_id}:cancelled" in notifications
+    finally:
+        await conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Result consumer tests (Phase 2 — Steps 6h-8 to 6h-11)
 # ---------------------------------------------------------------------------

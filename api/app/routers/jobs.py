@@ -19,7 +19,7 @@ from fastapi import (
 )
 from miniopy_async import Minio
 from nats.js import JetStreamContext
-from sqlalchemy import delete, func, select, true
+from sqlalchemy import delete, func, select, text, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -441,6 +441,10 @@ async def cancel_job(
 
     for run in active_runs:
         run.status = "cancelled"
+        await db.execute(
+            text("SELECT pg_notify('job_status', :p)"),
+            {"p": f"{run.job_id}:{run.id}:cancelled"},
+        )
     await db.commit()
     logger.info("job_cancelled", job_id=str(job_id))
     return CancelJobResponse(message="Job run cancelled")

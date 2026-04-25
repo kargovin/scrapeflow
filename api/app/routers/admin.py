@@ -5,7 +5,7 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from miniopy_async.api import Minio
-from sqlalchemy import case, func, select, true
+from sqlalchemy import case, func, select, text, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -344,6 +344,10 @@ async def admin_delete_or_cancel_job(
 
     for run in active_runs:
         run.status = "cancelled"
+        await db.execute(
+            text("SELECT pg_notify('job_status', :p)"),
+            {"p": f"{run.job_id}:{run.id}:cancelled"},
+        )
     await db.commit()
     logger.info("admin_job_cancelled", job_id=str(job_id), admin_id=str(admin.id))
     return CancelJobResponse(message="Job run cancelled")
