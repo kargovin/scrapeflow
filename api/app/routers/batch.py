@@ -54,10 +54,10 @@ async def create_batch(
     # silent per-item failure after rows have been created.
     loop = get_running_loop()
     for url in body.urls:
-        await loop.run_in_executor(None, validate_no_ssrf, url)
+        await loop.run_in_executor(None, validate_no_ssrf, str(url))
 
     if body.webhook_url:
-        await loop.run_in_executor(None, validate_no_ssrf, body.webhook_url)
+        await loop.run_in_executor(None, validate_no_ssrf, str(body.webhook_url))
 
     # Deduct len(urls) quota units atomically — prevents partial-window exploits.
     await check_rate_limit_n(len(body.urls), user.id, redis)
