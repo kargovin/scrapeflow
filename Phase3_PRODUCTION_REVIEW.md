@@ -253,7 +253,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 8 (orig #29) — PATCH job upserts secrets before all validations pass — **HIGH**
+#### [x] 8 (orig #29) — PATCH job upserts secrets before all validations pass — **HIGH**
 
 - **File:** `api/app/routers/jobs.py:495-547`
 - **Issue:** `proxy_url` and `cookies` secret rows are upserted to `job_secrets` (lines 496–547) before the `processing` check (line 584). If a later validation fails (e.g., job is currently processing), the secrets are committed but job fields are not updated — inconsistent DB state.

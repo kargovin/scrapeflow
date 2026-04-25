@@ -116,4 +116,5 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 36 | HIGH | `execute_js` Playwright action executes arbitrary user JavaScript — CSP only blocks `connect-src` | `[x]` done |
 | 6 | HIGH | Batch jobs with LLM output silently return raw HTML — Migration 3.14 adds `batches.llm_config` | `[x]` done |
 | 7 | HIGH | `decrement_storage_bytes` never called on delete | `[x]` done |
-| 8+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
+| 8 | HIGH | PATCH upserts secrets before all validations pass — sentinel pattern defers writes after loop | `[x]` done |
+| 9+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |

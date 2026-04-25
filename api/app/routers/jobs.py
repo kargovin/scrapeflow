@@ -500,59 +500,10 @@ async def patch_jobs(
     updates = body.model_dump(exclude_unset=True)
     webhook_secret_plain = None
 
-    # proxy_url maps to job_secrets, not the jobs table — handle before the setattr loop
-    if "proxy_url" in updates:
-        proxy_url_val = updates.pop("proxy_url")
-        if proxy_url_val:
-            f = Fernet(settings.llm_key_encryption_key)
-            encrypted = f.encrypt(proxy_url_val.encode()).decode()
-            upsert = (
-                pg_insert(JobSecrets)
-                .values(
-                    job_id=job_id,
-                    secret_type=JobSecretType.proxy,
-                    encrypted_value=encrypted,
-                )
-                .on_conflict_do_update(
-                    constraint="uq_job_secrets_job_type",
-                    set_={"encrypted_value": encrypted, "updated_at": func.now()},
-                )
-            )
-            await db.execute(upsert)
-        else:
-            await db.execute(
-                delete(JobSecrets).where(
-                    JobSecrets.job_id == job_id,
-                    JobSecrets.secret_type == JobSecretType.proxy,
-                )
-            )
-
-    # cookies maps to job_secrets — handle before the setattr loop
-    if "cookies" in updates:
-        cookies_val = updates.pop("cookies")
-        if cookies_val:
-            f = Fernet(settings.llm_key_encryption_key)
-            encrypted = f.encrypt(json.dumps(cookies_val).encode()).decode()
-            upsert = (
-                pg_insert(JobSecrets)
-                .values(
-                    job_id=job_id,
-                    secret_type=JobSecretType.cookies,
-                    encrypted_value=encrypted,
-                )
-                .on_conflict_do_update(
-                    constraint="uq_job_secrets_job_type",
-                    set_={"encrypted_value": encrypted, "updated_at": func.now()},
-                )
-            )
-            await db.execute(upsert)
-        else:
-            await db.execute(
-                delete(JobSecrets).where(
-                    JobSecrets.job_id == job_id,
-                    JobSecrets.secret_type == JobSecretType.cookies,
-                )
-            )
+    _UNSET = object()
+    # Pop secrets now so they don't reach the setattr loop, but defer DB writes until after all validations.
+    proxy_url_pending = updates.pop("proxy_url", _UNSET)
+    cookies_pending = updates.pop("cookies", _UNSET)
 
     # actions maps to job.playwright_actions — validate engine constraint before writing
     if "actions" in updates:
@@ -604,6 +555,57 @@ async def patch_jobs(
                         )
 
         setattr(job, field, value)
+
+    # All validations passed — write secrets now.
+    if proxy_url_pending is not _UNSET:
+        if proxy_url_pending:
+            f = Fernet(settings.llm_key_encryption_key)
+            encrypted = f.encrypt(proxy_url_pending.encode()).decode()
+            upsert = (
+                pg_insert(JobSecrets)
+                .values(
+                    job_id=job_id,
+                    secret_type=JobSecretType.proxy,
+                    encrypted_value=encrypted,
+                )
+                .on_conflict_do_update(
+                    constraint="uq_job_secrets_job_type",
+                    set_={"encrypted_value": encrypted, "updated_at": func.now()},
+                )
+            )
+            await db.execute(upsert)
+        else:
+            await db.execute(
+                delete(JobSecrets).where(
+                    JobSecrets.job_id == job_id,
+                    JobSecrets.secret_type == JobSecretType.proxy,
+                )
+            )
+
+    if cookies_pending is not _UNSET:
+        if cookies_pending:
+            f = Fernet(settings.llm_key_encryption_key)
+            encrypted = f.encrypt(json.dumps(cookies_pending).encode()).decode()
+            upsert = (
+                pg_insert(JobSecrets)
+                .values(
+                    job_id=job_id,
+                    secret_type=JobSecretType.cookies,
+                    encrypted_value=encrypted,
+                )
+                .on_conflict_do_update(
+                    constraint="uq_job_secrets_job_type",
+                    set_={"encrypted_value": encrypted, "updated_at": func.now()},
+                )
+            )
+            await db.execute(upsert)
+        else:
+            await db.execute(
+                delete(JobSecrets).where(
+                    JobSecrets.job_id == job_id,
+                    JobSecrets.secret_type == JobSecretType.cookies,
+                )
+            )
 
     await db.commit()
     stmt = _jobs_with_latest_run_stmt(user.id, job_id=job_id)
