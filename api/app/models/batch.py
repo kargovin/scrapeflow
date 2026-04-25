@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import VARCHAR, Boolean, DateTime, ForeignKey, Index, Integer, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -26,6 +27,7 @@ class Batch(Base):
         Text, nullable=True
     )  # Fernet-encrypted at rest
     respect_robots: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    llm_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     completed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     failed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

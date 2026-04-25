@@ -135,12 +135,26 @@ async def _handle_storage_quota_exceeded(db, run: JobRun, minio_path: str, minio
 
 
 async def _handle_batch_result(
-    db, run: JobRun, worker_status: str, minio_path, error, nats_seq, started_at
+    db,
+    run: JobRun,
+    js: JetStreamContext,
+    worker_status: str,
+    minio_path,
+    error,
+    nats_seq,
+    started_at,
+    storage_user_id: uuid.UUID | None,
+    result_size: int,
 ) -> None:
     """Update batch item + batch counters, notify, and fire batch webhook on completion.
 
     Caller owns the commit. pg_notify is emitted for all status transitions including
     'running' so WebSocket subscribers see the full lifecycle.
+
+    LLM flow: when batch.llm_config is set and the scrape worker completes, the run
+    transitions to 'processing' and a message is dispatched to the LLM subject. The
+    counter increment and batch-done check are deferred until the LLM result arrives
+    (detected by run.status == 'processing' on the second completed message).
     """
     item = await db.get(BatchItem, run.batch_item_id)
     if item is None:
@@ -176,13 +190,89 @@ async def _handle_batch_result(
         )
         return
 
-    if worker_status == "completed":
+    if worker_status == "completed" and run.status == "running":
+        # Scrape worker finished. Dispatch to LLM if configured, otherwise finalise now.
+        if batch.llm_config:
+            llm_key = await db.get(UserLLMKey, batch.llm_config["llm_key_id"])
+            if llm_key is None:
+                run.status = "failed"
+                run.error = "LLM key not found or deleted"
+                run.completed_at = now
+                item.status = "failed"
+                item.error = run.error
+                item.completed_at = now
+                counter_row = (
+                    await db.execute(
+                        text(
+                            "UPDATE batches SET failed = failed + 1"
+                            " WHERE id = :id RETURNING completed, failed"
+                        ),
+                        {"id": batch.id},
+                    )
+                ).one()
+            else:
+                run.status = "processing"
+                if storage_user_id and result_size > 0:
+                    await increment_storage_bytes(storage_user_id, db, result_size)
+                llm_payload: dict[str, Any] = {
+                    "job_id": None,
+                    "run_id": str(run.id),
+                    "raw_minio_path": minio_path,
+                    "provider": llm_key.provider,
+                    "encrypted_api_key": llm_key.encrypted_api_key,
+                    "base_url": llm_key.base_url,
+                    "model": batch.llm_config["model"],
+                    "output_schema": batch.llm_config["output_schema"],
+                }
+                await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
+                await db.execute(
+                    text("SELECT pg_notify('batch_status', :p)"),
+                    {
+                        "p": json.dumps(
+                            {
+                                "batch_id": str(batch.id),
+                                "completed": batch.completed,
+                                "failed": batch.failed,
+                                "total": batch.total,
+                                "status": batch.status,
+                                "item_url": item.url,
+                                "item_status": "processing",
+                            }
+                        )
+                    },
+                )
+                return  # counters updated when LLM result arrives
+
+        else:
+            # No LLM — finalise immediately.
+            run.status = "completed"
+            run.result_path = minio_path
+            run.completed_at = now
+            item.status = "completed"
+            item.result_path = minio_path
+            item.completed_at = now
+            if storage_user_id and result_size > 0:
+                await increment_storage_bytes(storage_user_id, db, result_size)
+            counter_row = (
+                await db.execute(
+                    text(
+                        "UPDATE batches SET completed = completed + 1"
+                        " WHERE id = :id RETURNING completed, failed"
+                    ),
+                    {"id": batch.id},
+                )
+            ).one()
+
+    elif worker_status == "completed" and run.status == "processing":
+        # LLM worker finished for this batch item.
         run.status = "completed"
         run.result_path = minio_path
         run.completed_at = now
         item.status = "completed"
         item.result_path = minio_path
         item.completed_at = now
+        if storage_user_id and result_size > 0:
+            await increment_storage_bytes(storage_user_id, db, result_size)
         counter_row = (
             await db.execute(
                 text(
@@ -192,8 +282,9 @@ async def _handle_batch_result(
                 {"id": batch.id},
             )
         ).one()
+
     else:
-        # failed
+        # worker_status == "failed" (or unexpected — treat as failed)
         run.status = "failed"
         run.error = error
         run.completed_at = now
@@ -485,10 +576,17 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
 
         if run.batch_item_id is not None:
             await _handle_batch_result(
-                db, run, worker_status, minio_path, error, nats_seq, msg.metadata.timestamp
+                db,
+                run,
+                js,
+                worker_status,
+                minio_path,
+                error,
+                nats_seq,
+                msg.metadata.timestamp,
+                storage_user_id,
+                result_size,
             )
-            if storage_user_id and result_size > 0 and worker_status == "completed":
-                await increment_storage_bytes(storage_user_id, db, result_size)
         else:
             await _handle_job_result(
                 db,

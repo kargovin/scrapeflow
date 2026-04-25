@@ -23,6 +23,7 @@ from app.core.redis import get_redis
 from app.core.security import validate_no_ssrf
 from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
+from app.models.llm_keys import UserLLMKey
 from app.models.user import User
 from app.schemas.batch import BatchCreate, BatchItemResponse, BatchResponse
 from app.schemas.jobs import Engine
@@ -63,6 +64,14 @@ async def create_batch(
     if body.webhook_url:
         await loop.run_in_executor(None, validate_no_ssrf, str(body.webhook_url))
 
+    if body.llm_config:
+        key_id = body.llm_config.llm_key_id
+        user_llm_key = await db.get(UserLLMKey, key_id)
+        if user_llm_key is None or user_llm_key.user_id != user.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LLM Key not found")
+        if user_llm_key.base_url:
+            await loop.run_in_executor(None, validate_no_ssrf, str(user_llm_key.base_url))
+
     # Deduct len(urls) quota units atomically — prevents partial-window exploits.
     await check_rate_limit_n(len(body.urls), user.id, redis)
 
@@ -78,6 +87,7 @@ async def create_batch(
         webhook_url=body.webhook_url,
         webhook_secret=webhook_secret_encrypted,
         respect_robots=body.respect_robots,
+        llm_config=body.llm_config.model_dump(mode="json") if body.llm_config else None,
         total=len(body.urls),
         completed=0,
         failed=0,

@@ -4,7 +4,7 @@ from datetime import datetime
 from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
 
 from app.models.job import OutputFormat
-from app.schemas.jobs import Engine
+from app.schemas.jobs import Engine, LLMJobConfig
 
 
 class BatchCreate(BaseModel):
@@ -13,6 +13,7 @@ class BatchCreate(BaseModel):
     engine: Engine = Engine.http
     webhook_url: AnyHttpUrl | None = None
     respect_robots: bool = False
+    llm_config: LLMJobConfig | None = None
 
     @field_validator("urls", mode="after")
     @classmethod
@@ -47,6 +48,7 @@ class BatchResponse(BaseModel):
     failed: int
     webhook_url: str | None
     respect_robots: bool
+    llm_config: dict | None = None
     created_at: datetime
     completed_at: datetime | None = None
     model_config = {"from_attributes": True}

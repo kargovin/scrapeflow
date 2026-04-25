@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import delete, select
 
+from app.constants import NATS_JOBS_LLM_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.result_consumer import _handle_result
 from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
+from app.models.llm_keys import UserLLMKey
 from app.models.user import User
 
 
@@ -362,6 +364,134 @@ async def test_result_consumer_batch_partial_failure():
             await db.execute(delete(Batch).where(Batch.id == batch_id))
         await db.commit()
     async with AsyncSessionLocal() as db:
+        await db.execute(delete(User).where(User.id == user_id))
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Result consumer — batch LLM path
+# ---------------------------------------------------------------------------
+
+
+async def _make_batch_run_with_llm():
+    """Create a Batch with llm_config, one BatchItem, and a pending JobRun."""
+    async with AsyncSessionLocal() as db:
+        user = User(clerk_id=f"user_{uuid.uuid4().hex}", email=f"{uuid.uuid4().hex}@test.com")
+        db.add(user)
+        await db.flush()
+
+        key = UserLLMKey(
+            user_id=user.id,
+            name="test-key",
+            provider="anthropic",
+            encrypted_api_key="enc_key",
+        )
+        db.add(key)
+        await db.flush()
+
+        batch = Batch(
+            user_id=user.id,
+            status="running",
+            output_format="json",
+            engine="http",
+            respect_robots=False,
+            llm_config={"llm_key_id": str(key.id), "model": "claude-3", "output_schema": {}},
+            total=1,
+            completed=0,
+            failed=0,
+        )
+        db.add(batch)
+        await db.flush()
+
+        item = BatchItem(batch_id=batch.id, url="https://example.com", status="pending")
+        db.add(item)
+        await db.flush()
+
+        run = JobRun(batch_item_id=item.id, status="pending")
+        db.add(run)
+        await db.commit()
+
+        await db.refresh(batch)
+        await db.refresh(item)
+        await db.refresh(run)
+
+    return batch.id, item.id, run.id, user.id
+
+
+async def test_result_consumer_batch_scrape_complete_dispatches_to_llm():
+    """When batch.llm_config is set, a scrape-complete message dispatches to the LLM subject
+    and transitions run to 'processing' without incrementing batch counters."""
+    batch_id, item_id, run_id, user_id = await _make_batch_run_with_llm()
+
+    mock_js = AsyncMock()
+    mock_minio = MagicMock()
+
+    msg = _make_nats_msg(run_id, "running")
+    await _handle_result(msg, mock_js, mock_minio)
+
+    msg = _make_nats_msg(run_id, "completed", minio_path="scrapeflow-results/history/x.html")
+    await _handle_result(msg, mock_js, mock_minio)
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        batch = await db.get(Batch, batch_id)
+        item = await db.get(BatchItem, item_id)
+
+    assert run is not None and run.status == "processing"
+    assert batch is not None and batch.completed == 0 and batch.failed == 0
+    assert item is not None and item.status == "pending"
+
+    mock_js.publish.assert_called_once()
+    subject, payload_bytes = mock_js.publish.call_args.args
+    assert subject == NATS_JOBS_LLM_SUBJECT
+    payload = json.loads(payload_bytes.decode())
+    assert payload["run_id"] == str(run_id)
+    assert payload["job_id"] is None
+    assert payload["raw_minio_path"] == "scrapeflow-results/history/x.html"
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Batch).where(Batch.id == batch_id))
+        await db.execute(delete(User).where(User.id == user_id))
+        await db.commit()
+
+
+async def test_result_consumer_batch_llm_complete_finalises_item():
+    """When the LLM result arrives (run.status == 'processing'), the item is finalised
+    and batch.completed is incremented."""
+    batch_id, item_id, run_id, user_id = await _make_batch_run_with_llm()
+
+    mock_js = AsyncMock()
+    mock_minio = MagicMock()
+
+    # running → processing (scrape done, LLM dispatched)
+    for status in ("running", "completed"):
+        msg = _make_nats_msg(
+            run_id,
+            status,
+            minio_path="scrapeflow-results/history/raw.html" if status == "completed" else None,
+        )
+        await _handle_result(msg, mock_js, mock_minio)
+
+    # LLM worker result arrives — run is now "processing" in DB
+    llm_result = _make_nats_msg(
+        run_id, "completed", minio_path="scrapeflow-results/history/out.json"
+    )
+    await _handle_result(llm_result, mock_js, mock_minio)
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        batch = await db.get(Batch, batch_id)
+        item = await db.get(BatchItem, item_id)
+
+    assert run is not None and run.status == "completed"
+    assert run.result_path == "scrapeflow-results/history/out.json"
+    assert batch is not None and batch.completed == 1
+    assert batch.status == "completed"
+    assert item is not None and item.status == "completed"
+    assert item.result_path == "scrapeflow-results/history/out.json"
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Batch).where(Batch.id == batch_id))
         await db.execute(delete(User).where(User.id == user_id))
         await db.commit()
 

@@ -64,8 +64,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
 - **Phase 3 complete — all Steps 1–28 done**
 - **Phase 3 production review in progress** — working through `Phase3_PRODUCTION_REVIEW.md` item by item
-- 222 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
-- Alembic auto-migration is **temporarily commented out** in `api/app/main.py` (disabled to allow Migration 3.13 to be developed); re-enable before merging `develop → main`
+- 224 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
+- Alembic auto-migration is **temporarily commented out** in `api/app/main.py` (disabled to allow migrations to be developed); re-enable before merging `develop → main`
 
 ### Phase 3 steps done
 
@@ -114,5 +114,6 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 5 | CRITICAL | Dedup deletes `history/` object already stored in `job_runs.result_path` | `[x]` done |
 | 35 | CRITICAL | `authorized_parties=None` in both JWT paths — accepts JWTs from any Clerk app on the same instance | `[x]` done |
 | 36 | HIGH | `execute_js` Playwright action executes arbitrary user JavaScript — CSP only blocks `connect-src` | `[x]` done |
-| 6 | HIGH | Batch jobs with LLM output silently return raw HTML | `[ ]` next |
-| 7+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
+| 6 | HIGH | Batch jobs with LLM output silently return raw HTML — Migration 3.14 adds `batches.llm_config` | `[x]` done |
+| 7 | HIGH | `decrement_storage_bytes` never called on delete | `[ ]` next |
+| 8+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |

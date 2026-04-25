@@ -237,7 +237,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 6 (orig #14) — Batch jobs with LLM output silently return raw HTML — **HIGH**
+#### [x] 6 (orig #14) — Batch jobs with LLM output silently return raw HTML — **HIGH**
 
 - **File:** `api/app/core/result_consumer.py` — `_handle_batch_result`
 - **Issue:** `_handle_batch_result` never checks `batch.llm_config` or the item's output format. A batch created with `output_format=json` + LLM config silently stores raw HTML results.
