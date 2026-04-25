@@ -112,13 +112,30 @@ async def handle_message(
             )
 
         # --- Step 6: CSP injection (before goto; restricts execute_js exfil) ---
+        # Injected via page.route so the CSP arrives as a *response* header that
+        # Chromium actually enforces. set_extra_http_headers sends *request* headers
+        # which are ignored by the browser for CSP purposes.
         actions_list = job.options.actions if job.options else None
         if actions_list:
             parsed = urlparse(job.url)
             target_origin = f"{parsed.scheme}://{parsed.netloc}"
-            await page.set_extra_http_headers(
-                {"Content-Security-Policy": f"connect-src 'self' {target_origin}"}
+            csp = (
+                f"connect-src 'self' {target_origin}; "
+                f"img-src 'self' {target_origin}; "
+                f"form-action 'none'; "
+                f"frame-src 'none'"
             )
+
+            async def _inject_csp(route: Any) -> None:
+                if route.request.resource_type == "document":
+                    response = await route.fetch()
+                    headers = dict(response.headers)
+                    headers["content-security-policy"] = csp
+                    await route.fulfill(response=response, headers=headers)
+                else:
+                    await route.fallback()
+
+            await page.route("**", _inject_csp)
 
         # --- Step 7: Navigate ---
         await page.goto(job.url, timeout=timeout_ms)

@@ -22,6 +22,9 @@ class Batch(Base):
     )
     engine: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="http")
     webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_secret: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # Fernet-encrypted at rest
     respect_robots: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     completed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

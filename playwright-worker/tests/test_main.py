@@ -15,7 +15,7 @@ Lifecycle summary being tested:
   3. Publish status="running" with nats_stream_seq BEFORE page interaction
   4. new_context(proxy=...) if credentials.proxy_url is set
   5. add_cookies() before page.goto() if credentials.cookies is set
-  6. set_extra_http_headers(CSP) before page.goto() if actions are present
+  6. page.route("**", csp_handler) before page.goto() if actions are present
   7. page.goto → page.wait_for_load_state → page.content()
   8. execute_actions() after page.goto
   9. format_output → upload to MinIO
@@ -391,19 +391,23 @@ async def test_cookie_domain_inferred_from_url():
 # ---------------------------------------------------------------------------
 
 
-async def test_csp_set_when_actions_present():
+async def test_csp_route_registered_before_goto():
     """
-    When options.actions is non-empty, page.set_extra_http_headers must be
-    called with a CSP header before page.goto.
+    When options.actions is non-empty, page.route("**", handler) must be called
+    before page.goto so the CSP handler is active on the navigation response.
     """
     actions = [{"type": "wait", "milliseconds": 100}]
     msg = make_nats_msg(options={"actions": actions})
     browser, _, page = make_browser()
 
     call_order = []
-    page.set_extra_http_headers = AsyncMock(
-        side_effect=lambda _: call_order.append("set_headers")
-    )
+    captured_handlers: dict = {}
+
+    async def track_route(pattern, handler):
+        call_order.append(f"route:{pattern}")
+        captured_handlers[pattern] = handler
+
+    page.route = AsyncMock(side_effect=track_route)
     page.goto = AsyncMock(side_effect=lambda *a, **kw: call_order.append("goto"))
 
     with patch("worker.worker.execute_actions", new_callable=AsyncMock) as mock_actions:
@@ -414,11 +418,60 @@ async def test_csp_set_when_actions_present():
                 msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT
             )
 
-    page.set_extra_http_headers.assert_called_once()
-    headers: dict = page.set_extra_http_headers.call_args.args[0]
-    assert "Content-Security-Policy" in headers
-    assert "connect-src" in headers["Content-Security-Policy"]
-    assert call_order.index("set_headers") < call_order.index("goto")
+    assert "**" in captured_handlers, "page.route('**', handler) was not registered"
+    assert call_order.index("route:**") < call_order.index("goto")
+
+
+async def test_csp_handler_injects_all_directives():
+    """
+    The registered CSP route handler must inject a Content-Security-Policy
+    response header covering connect-src, img-src, form-action, and frame-src
+    for document requests, and call route.fallback() for non-document requests.
+    """
+    actions = [{"type": "wait", "milliseconds": 100}]
+    msg = make_nats_msg(options={"actions": actions}, url="https://example.com/page")
+    browser, _, page = make_browser()
+
+    captured_handlers: dict = {}
+
+    async def track_route(pattern, handler):
+        captured_handlers[pattern] = handler
+
+    page.route = AsyncMock(side_effect=track_route)
+
+    with patch("worker.worker.execute_actions", new_callable=AsyncMock) as mock_actions:
+        mock_actions.return_value = ([], [])
+        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+            mock_upload.return_value = _FAKE_MINIO_PATH
+            await handle_message(
+                msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT
+            )
+
+    handler = captured_handlers["**"]
+
+    # Document request — handler must fulfill with CSP response header
+    doc_route = AsyncMock()
+    doc_route.request.resource_type = "document"
+    mock_response = MagicMock()
+    mock_response.headers = {"content-type": "text/html"}
+    doc_route.fetch = AsyncMock(return_value=mock_response)
+    await handler(doc_route)
+
+    doc_route.fulfill.assert_called_once()
+    injected_headers: dict = doc_route.fulfill.call_args.kwargs["headers"]
+    csp = injected_headers.get("content-security-policy", "")
+    assert "connect-src" in csp
+    assert "img-src" in csp
+    assert "form-action" in csp
+    assert "frame-src" in csp
+    assert "example.com" in csp
+
+    # Non-document request — handler must fall through, not fulfill
+    img_route = AsyncMock()
+    img_route.request.resource_type = "image"
+    await handler(img_route)
+    img_route.fallback.assert_called_once()
+    img_route.fulfill.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

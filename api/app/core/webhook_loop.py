@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.security import _validate_no_ssrf
+from app.models.batch import Batch
 from app.models.job import Job
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
@@ -108,10 +109,15 @@ async def _attempt_delivery(
 
         delivery.attempts += 1
 
-        job = await db.get(Job, delivery.job_id)
         secret_bytes = b""
-        if job and job.webhook_secret:
-            secret_bytes = fernet.decrypt(job.webhook_secret.encode())
+        if delivery.job_id:
+            job = await db.get(Job, delivery.job_id)
+            if job and job.webhook_secret:
+                secret_bytes = fernet.decrypt(job.webhook_secret.encode())
+        elif delivery.batch_id:
+            batch = await db.get(Batch, delivery.batch_id)
+            if batch and batch.webhook_secret:
+                secret_bytes = fernet.decrypt(batch.webhook_secret.encode())
 
         payload_bytes = json.dumps(delivery.payload).encode()
         sig = hmac.new(secret_bytes, payload_bytes, hashlib.sha256).hexdigest()

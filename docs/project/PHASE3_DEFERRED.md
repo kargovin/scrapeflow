@@ -260,6 +260,23 @@ None of this is in the Phase 2 schema or spec. Adding it mid-Phase 2 would requi
 
 ---
 
+## Security / `execute_js` — sandboxing or removal
+
+**What:** `execute_js` is the only Playwright page action that executes arbitrary caller-controlled code. All other actions (`click`, `type`, `scroll`, `wait`, `wait_for_selector`, `screenshot`) take bounded parameters. The short-term fix (Phase 3 production review item 36) tightens the CSP injected into document responses to cover `connect-src`, `img-src`, `form-action`, and `frame-src`. This limits the exfiltration surface but does not eliminate it — a sufficiently creative script can still abuse same-origin channels (e.g. `navigator.sendBeacon`, `fetch` with `no-cors` mode, WebRTC data channels, DNS prefetch tricks).
+
+**Why deferred:** The short-term CSP tightening is an acceptable risk reduction for a known-user deployment. Eliminating the risk entirely requires a larger architectural decision.
+
+**Options:**
+1. **Drop `execute_js`** — remove the action type from the schema and API validator. This is a breaking change for any user who relies on it, but eliminates the risk class entirely.
+2. **Sandbox via isolated browser context** — run `execute_js` in a dedicated context with no stored credentials, no cookies, and a restrictive network filter. Adds complexity to the worker.
+3. **Allowlist-only actions** — replace the freeform `script` field with a parameterised action set (e.g. `extract_text(selector)`, `extract_attribute(selector, attr)`). No user-controlled code strings enter the worker at all.
+
+**Decision needed from:** PM (should `execute_js` be a supported feature?) → Architect (if yes, which sandboxing model?).
+
+**Source:** Phase 3 production review item 36, 2026-04-25.
+
+---
+
 ## Open Questions Still Unresolved
 
 These are from `docs/project/open-questions.md` and have not been decided yet:

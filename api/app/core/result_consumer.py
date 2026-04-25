@@ -261,11 +261,12 @@ async def _handle_scrape_completed(
         if content_hash:
             run.content_hash = content_hash
             prev = await _get_previous_completed_run(db, job_id, run_id)
-            if prev and prev.content_hash == content_hash:
+            if prev and prev.content_hash == content_hash and prev.result_path:
                 run.status = "completed"
                 run.completed_at = datetime.now(UTC)
                 run.diff_detected = False
                 run.warnings = warnings
+                run.result_path = prev.result_path
                 bucket, _, key = minio_path.partition("/")
                 try:
                     await minio.remove_object(bucket, key)

@@ -1,10 +1,12 @@
 import json
+import secrets
 import uuid
 from asyncio import get_running_loop
 from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
+from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from nats.js import JetStreamContext
 from sqlalchemy import select, update
@@ -13,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
+from app.core.encryption import get_fernet
 from app.core.nats import get_jetstream
 from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit_n
@@ -48,6 +51,7 @@ async def create_batch(
     db: AsyncSession = Depends(get_db),
     js: JetStreamContext = Depends(get_jetstream),
     redis: aioredis.Redis = Depends(get_redis),
+    fernet: Fernet = Depends(get_fernet),
     _quota: None = Depends(check_batch_quota),
 ) -> BatchResponse:
     # SSRF-check all URLs synchronously — sync rejection is better UX than
@@ -62,12 +66,17 @@ async def create_batch(
     # Deduct len(urls) quota units atomically — prevents partial-window exploits.
     await check_rate_limit_n(len(body.urls), user.id, redis)
 
+    webhook_secret_encrypted: str | None = None
+    if body.webhook_url:
+        webhook_secret_encrypted = fernet.encrypt(secrets.token_hex(32).encode()).decode()
+
     batch = Batch(
         user_id=user.id,
         status="queued",
         output_format=body.output_format,
         engine=body.engine.value,
         webhook_url=body.webhook_url,
+        webhook_secret=webhook_secret_encrypted,
         respect_robots=body.respect_robots,
         total=len(body.urls),
         completed=0,
@@ -86,7 +95,7 @@ async def create_batch(
     await db.commit()
 
     # Refresh to get DB-assigned IDs
-    for item, run in zip(items, runs, strict=False):
+    for item, run in zip(items, runs, strict=True):
         await db.refresh(item)
         await db.refresh(run)
 
@@ -97,7 +106,7 @@ async def create_batch(
         if body.engine == Engine.playwright
         else NATS_JOBS_RUN_HTTP_SUBJECT
     )
-    for item, run in zip(items, runs, strict=False):
+    for item, run in zip(items, runs, strict=True):
         payload: dict[str, Any] = {
             "schema_version": 2,
             "job_id": None,
