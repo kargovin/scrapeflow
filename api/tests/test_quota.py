@@ -502,3 +502,59 @@ async def test_admin_hard_delete_decrements_storage_quota(client, quota_user, ad
         quota_row = await db.get(UserQuota, quota_user.id)
         assert quota_row is not None
         assert quota_row.storage_bytes_used == 400  # 800 - 400
+
+
+# ---------------------------------------------------------------------------
+# Result consumer — storage increment failure (step 9)
+# ---------------------------------------------------------------------------
+
+
+async def test_result_consumer_storage_increment_failure_fails_run(quota_user):
+    """If increment_storage_bytes raises, the run is marked failed (not completed)."""
+    from unittest.mock import patch
+
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=quota_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running")
+        db.add(run)
+        db.add(UserQuota(user_id=quota_user.id, storage_bytes_limit=10_000, storage_bytes_used=0))
+        await db.commit()
+        await db.refresh(job)
+        await db.refresh(run)
+        job_id = job.id
+        run_id = run.id
+
+    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
+
+    stat_obj = MagicMock()
+    stat_obj.size = 100
+    mock_minio = AsyncMock()
+    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
+    mock_minio.get_object = AsyncMock(side_effect=Exception("minio error"))
+
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "completed",
+            "minio_path": minio_path,
+        }
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    with patch(
+        "app.core.result_consumer.increment_storage_bytes", side_effect=Exception("db error")
+    ):
+        await _handle_result(msg, AsyncMock(), mock_minio)
+
+    async with AsyncSessionLocal() as db:
+        updated_run = await db.get(JobRun, run_id)
+        assert updated_run is not None
+        assert updated_run.status == "failed"
+        assert updated_run.error == "storage_accounting_failed"
+
+    msg.ack.assert_called_once()

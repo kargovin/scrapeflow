@@ -77,6 +77,17 @@ async def _stat_minio_size(minio: Minio, minio_path: str) -> int:
         return 0
 
 
+async def _try_increment_storage(db, user_id: uuid.UUID, size: int) -> bool:
+    """Increment storage in a savepoint; returns False on failure (outer tx stays clean)."""
+    try:
+        async with db.begin_nested():
+            await increment_storage_bytes(user_id, db, size)
+        return True
+    except Exception:
+        logger.error("storage_increment_failed", user_id=str(user_id), size=size)
+        return False
+
+
 async def _handle_storage_quota_exceeded(db, run: JobRun, minio_path: str, minio: Minio) -> None:
     """Delete the oversized object, mark run failed, and emit the appropriate notify."""
     bucket, _, key = minio_path.partition("/")
@@ -211,48 +222,106 @@ async def _handle_batch_result(
                     )
                 ).one()
             else:
-                run.status = "processing"
+                accounting_ok = True
                 if storage_user_id and result_size > 0:
-                    await increment_storage_bytes(storage_user_id, db, result_size)
-                llm_payload: dict[str, Any] = {
-                    "job_id": None,
-                    "run_id": str(run.id),
-                    "raw_minio_path": minio_path,
-                    "provider": llm_key.provider,
-                    "encrypted_api_key": llm_key.encrypted_api_key,
-                    "base_url": llm_key.base_url,
-                    "model": batch.llm_config["model"],
-                    "output_schema": batch.llm_config["output_schema"],
-                }
-                await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
-                await db.execute(
-                    text("SELECT pg_notify('batch_status', :p)"),
-                    {
-                        "p": json.dumps(
-                            {
-                                "batch_id": str(batch.id),
-                                "completed": batch.completed,
-                                "failed": batch.failed,
-                                "total": batch.total,
-                                "status": batch.status,
-                                "item_url": item.url,
-                                "item_status": "processing",
-                            }
+                    accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
+                if not accounting_ok:
+                    run.status = "failed"
+                    run.error = "storage_accounting_failed"
+                    run.completed_at = now
+                    item.status = "failed"
+                    item.error = "storage_accounting_failed"
+                    item.completed_at = now
+                    counter_row = (
+                        await db.execute(
+                            text(
+                                "UPDATE batches SET failed = failed + 1"
+                                " WHERE id = :id RETURNING completed, failed"
+                            ),
+                            {"id": batch.id},
                         )
-                    },
-                )
-                return  # counters updated when LLM result arrives
+                    ).one()
+                else:
+                    run.status = "processing"
+                    llm_payload: dict[str, Any] = {
+                        "job_id": None,
+                        "run_id": str(run.id),
+                        "raw_minio_path": minio_path,
+                        "provider": llm_key.provider,
+                        "encrypted_api_key": llm_key.encrypted_api_key,
+                        "base_url": llm_key.base_url,
+                        "model": batch.llm_config["model"],
+                        "output_schema": batch.llm_config["output_schema"],
+                    }
+                    await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
+                    await db.execute(
+                        text("SELECT pg_notify('batch_status', :p)"),
+                        {
+                            "p": json.dumps(
+                                {
+                                    "batch_id": str(batch.id),
+                                    "completed": batch.completed,
+                                    "failed": batch.failed,
+                                    "total": batch.total,
+                                    "status": batch.status,
+                                    "item_url": item.url,
+                                    "item_status": "processing",
+                                }
+                            )
+                        },
+                    )
+                    return  # counters updated when LLM result arrives
 
         else:
             # No LLM — finalise immediately.
+            accounting_ok = True
+            if storage_user_id and result_size > 0:
+                accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
+            if accounting_ok:
+                run.status = "completed"
+                run.result_path = minio_path
+                run.completed_at = now
+                item.status = "completed"
+                item.result_path = minio_path
+                item.completed_at = now
+                counter_row = (
+                    await db.execute(
+                        text(
+                            "UPDATE batches SET completed = completed + 1"
+                            " WHERE id = :id RETURNING completed, failed"
+                        ),
+                        {"id": batch.id},
+                    )
+                ).one()
+            else:
+                run.status = "failed"
+                run.error = "storage_accounting_failed"
+                run.completed_at = now
+                item.status = "failed"
+                item.error = "storage_accounting_failed"
+                item.completed_at = now
+                counter_row = (
+                    await db.execute(
+                        text(
+                            "UPDATE batches SET failed = failed + 1"
+                            " WHERE id = :id RETURNING completed, failed"
+                        ),
+                        {"id": batch.id},
+                    )
+                ).one()
+
+    elif worker_status == "completed" and run.status == "processing":
+        # LLM worker finished for this batch item.
+        accounting_ok = True
+        if storage_user_id and result_size > 0:
+            accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
+        if accounting_ok:
             run.status = "completed"
             run.result_path = minio_path
             run.completed_at = now
             item.status = "completed"
             item.result_path = minio_path
             item.completed_at = now
-            if storage_user_id and result_size > 0:
-                await increment_storage_bytes(storage_user_id, db, result_size)
             counter_row = (
                 await db.execute(
                     text(
@@ -262,26 +331,22 @@ async def _handle_batch_result(
                     {"id": batch.id},
                 )
             ).one()
-
-    elif worker_status == "completed" and run.status == "processing":
-        # LLM worker finished for this batch item.
-        run.status = "completed"
-        run.result_path = minio_path
-        run.completed_at = now
-        item.status = "completed"
-        item.result_path = minio_path
-        item.completed_at = now
-        if storage_user_id and result_size > 0:
-            await increment_storage_bytes(storage_user_id, db, result_size)
-        counter_row = (
-            await db.execute(
-                text(
-                    "UPDATE batches SET completed = completed + 1"
-                    " WHERE id = :id RETURNING completed, failed"
-                ),
-                {"id": batch.id},
-            )
-        ).one()
+        else:
+            run.status = "failed"
+            run.error = "storage_accounting_failed"
+            run.completed_at = now
+            item.status = "failed"
+            item.error = "storage_accounting_failed"
+            item.completed_at = now
+            counter_row = (
+                await db.execute(
+                    text(
+                        "UPDATE batches SET failed = failed + 1"
+                        " WHERE id = :id RETURNING completed, failed"
+                    ),
+                    {"id": batch.id},
+                )
+            ).one()
 
     else:
         # worker_status == "failed" (or unexpected — treat as failed)
@@ -386,9 +451,19 @@ async def _handle_scrape_completed(
                     db, job, run_id, event="job.failed", minio_path=None, error=run.error
                 )
         else:
-            run.status = "processing"
             if storage_user_id and result_size > 0:
-                await increment_storage_bytes(storage_user_id, db, result_size)
+                if not await _try_increment_storage(db, storage_user_id, result_size):
+                    run.status = "failed"
+                    run.error = "storage_accounting_failed"
+                    run.completed_at = datetime.now(UTC)
+                    if job.webhook_url and (
+                        not job.webhook_events or "job.failed" in job.webhook_events
+                    ):
+                        create_webhook_delivery(
+                            db, job, run_id, event="job.failed", minio_path=None, error=run.error
+                        )
+                    return
+            run.status = "processing"
             llm_payload: dict[str, Any] = {
                 "job_id": job_id,
                 "run_id": run_id,
@@ -402,12 +477,24 @@ async def _handle_scrape_completed(
             await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
     else:
         # No LLM — finalize immediately with text diff.
+        if storage_user_id and result_size > 0:
+            if not await _try_increment_storage(db, storage_user_id, result_size):
+                run.status = "failed"
+                run.error = "storage_accounting_failed"
+                run.completed_at = datetime.now(UTC)
+                if (
+                    job is not None
+                    and job.webhook_url
+                    and (not job.webhook_events or "job.failed" in job.webhook_events)
+                ):
+                    create_webhook_delivery(
+                        db, job, run_id, event="job.failed", minio_path=None, error=run.error
+                    )
+                return
         run.status = "completed"
         run.result_path = minio_path
         run.completed_at = datetime.now(UTC)
         run.warnings = warnings
-        if storage_user_id and result_size > 0:
-            await increment_storage_bytes(storage_user_id, db, result_size)
         prev = await _get_previous_completed_run(db, job_id, run_id)
         diff = None
         if prev and prev.result_path:
@@ -435,11 +522,24 @@ async def _handle_llm_completed(
     result_size: int,
 ) -> None:
     """Handle 'completed' from LLM worker when run was 'processing'."""
+    if storage_user_id and result_size > 0:
+        if not await _try_increment_storage(db, storage_user_id, result_size):
+            run.status = "failed"
+            run.error = "storage_accounting_failed"
+            run.completed_at = datetime.now(UTC)
+            job = await db.get(Job, job_id)
+            if (
+                job
+                and job.webhook_url
+                and (not job.webhook_events or "job.failed" in job.webhook_events)
+            ):
+                create_webhook_delivery(
+                    db, job, run_id, event="job.failed", minio_path=None, error=run.error
+                )
+            return
     run.status = "completed"
     run.result_path = minio_path
     run.completed_at = datetime.now(UTC)
-    if storage_user_id and result_size > 0:
-        await increment_storage_bytes(storage_user_id, db, result_size)
     job = await db.get(Job, job_id)
     prev = await _get_previous_completed_run(db, job_id, run_id)
     diff = None
