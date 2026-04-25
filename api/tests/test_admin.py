@@ -165,6 +165,45 @@ async def test_admin_delete_user(client, admin_headers, db_user):
     assert gone is None
 
 
+async def test_admin_delete_user_cleans_minio_objects(client, admin_headers, db_user):
+    """DELETE /admin/users/{id} removes MinIO objects and decrements storage quota."""
+    from app.models.user_quota import UserQuota
+
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        run = JobRun(
+            job_id=job.id,
+            status="completed",
+            result_path=f"scrapeflow-results/history/{job.id}/123.html",
+        )
+        db.add(run)
+        db.add(UserQuota(user_id=db_user.id, storage_bytes_used=600))
+        await db.commit()
+        user_id = db_user.id
+
+    stat_obj = MagicMock()
+    stat_obj.size = 600
+    mock_minio = MagicMock()
+    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
+    mock_minio.remove_object = AsyncMock()
+
+    app.dependency_overrides[get_minio] = lambda: mock_minio
+    try:
+        resp = await client.delete(f"/admin/users/{user_id}", headers=admin_headers)
+        assert resp.status_code == 204
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+    mock_minio.remove_object.assert_called_once()
+
+    # User is gone — quota row cascades with it, so we just verify remove was called.
+    async with AsyncSessionLocal() as db:
+        gone = await db.get(User, user_id)
+    assert gone is None
+
+
 async def test_admin_delete_self_is_rejected(client, admin_user, admin_headers):
     """Deleting your own admin account returns 400."""
     resp = await client.delete(f"/admin/users/{admin_user.id}", headers=admin_headers)

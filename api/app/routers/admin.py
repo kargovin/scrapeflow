@@ -172,6 +172,7 @@ async def admin_delete_user(
     user_id: uuid.UUID,
     admin: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
 ) -> None:
     if user_id == admin.id:
         raise HTTPException(
@@ -181,9 +182,48 @@ async def admin_delete_user(
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Collect result_paths for all of this user's runs (job path + batch path).
+    runs_result = await db.execute(
+        select(JobRun.result_path)
+        .outerjoin(Job, JobRun.job_id == Job.id)
+        .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
+        .outerjoin(Batch, BatchItem.batch_id == Batch.id)
+        .where(
+            func.coalesce(Job.user_id, Batch.user_id) == user_id,
+            JobRun.result_path.isnot(None),
+        )
+    )
+    total_freed = 0
+    for (result_path,) in runs_result.all():
+        bucket, _, key = result_path.partition("/")
+        file_size = 0
+        try:
+            stat = await minio_client.stat_object(bucket, key)
+            file_size = stat.size or 0
+        except Exception:
+            pass
+        try:
+            await minio_client.remove_object(bucket, key)
+            total_freed += file_size
+        except Exception:
+            logger.warning(
+                "admin_delete_user: failed to remove object",
+                path=result_path,
+                user_id=str(user_id),
+            )
+
+    if total_freed > 0:
+        await decrement_storage_bytes(user_id, db, total_freed)
+
     await db.delete(user)
     await db.commit()
-    logger.info("admin_user_deleted", user_id=str(user_id), admin_id=str(admin.id))
+    logger.info(
+        "admin_user_deleted",
+        user_id=str(user_id),
+        admin_id=str(admin.id),
+        minio_bytes_freed=total_freed,
+    )
 
 
 # ---------------------------------------------------------------------------
