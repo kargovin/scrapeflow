@@ -29,7 +29,7 @@ from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_S
 from app.core.db import get_db
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
-from app.core.quota import check_user_quota
+from app.core.quota import check_user_quota, decrement_storage_bytes
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.job import Job
@@ -405,8 +405,16 @@ async def cancel_job(
         )
         for (result_path,) in runs_result.all():
             bucket, _, key = result_path.partition("/")
+            file_size = 0
+            try:
+                stat = await minio_client.stat_object(bucket, key)
+                file_size = stat.size or 0
+            except Exception:
+                pass
             try:
                 await minio_client.remove_object(bucket, key)
+                if file_size > 0:
+                    await decrement_storage_bytes(user.id, db, file_size)
             except Exception:
                 pass
 

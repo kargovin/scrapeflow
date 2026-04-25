@@ -408,3 +408,97 @@ async def test_result_consumer_storage_quota_ok_increments_usage(quota_user):
         assert quota_row.storage_bytes_used == 200
 
     msg.ack.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# DELETE /jobs/{id}?permanent=true — storage quota decrement
+# ---------------------------------------------------------------------------
+
+
+async def test_permanent_delete_decrements_storage_quota(
+    client, quota_user, quota_headers, mock_jetstream
+):
+    """DELETE /jobs/{id}?permanent=true decrements storage_bytes_used for each deleted run."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.core.minio import get_minio
+    from app.main import app
+
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=quota_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        run = JobRun(
+            job_id=job.id,
+            status="completed",
+            result_path=f"scrapeflow-results/history/{job.id}/123.html",
+        )
+        db.add(run)
+        db.add(UserQuota(user_id=quota_user.id, storage_bytes_used=500))
+        await db.commit()
+        job_id = job.id
+
+    stat_obj = MagicMock()
+    stat_obj.size = 300
+    mock_minio = MagicMock()
+    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
+    mock_minio.remove_object = AsyncMock()
+
+    app.dependency_overrides[get_minio] = lambda: mock_minio
+    try:
+        resp = await client.delete(f"/jobs/{job_id}?permanent=true", headers=quota_headers)
+        assert resp.status_code == 204
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+    async with AsyncSessionLocal() as db:
+        quota_row = await db.get(UserQuota, quota_user.id)
+        assert quota_row is not None
+        assert quota_row.storage_bytes_used == 200  # 500 - 300
+
+
+# ---------------------------------------------------------------------------
+# DELETE /admin/jobs/{id}?hard_delete=true — storage quota decrement
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_hard_delete_decrements_storage_quota(client, quota_user, admin_headers):
+    """DELETE /admin/jobs/{id}?hard_delete=true decrements storage_bytes_used and cleans MinIO."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.core.minio import get_minio
+    from app.main import app
+
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=quota_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        run = JobRun(
+            job_id=job.id,
+            status="completed",
+            result_path=f"scrapeflow-results/history/{job.id}/456.html",
+        )
+        db.add(run)
+        db.add(UserQuota(user_id=quota_user.id, storage_bytes_used=800))
+        await db.commit()
+        job_id = job.id
+
+    stat_obj = MagicMock()
+    stat_obj.size = 400
+    mock_minio = MagicMock()
+    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
+    mock_minio.remove_object = AsyncMock()
+
+    app.dependency_overrides[get_minio] = lambda: mock_minio
+    try:
+        resp = await client.delete(f"/admin/jobs/{job_id}?hard_delete=true", headers=admin_headers)
+        assert resp.status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+    mock_minio.remove_object.assert_called_once()
+
+    async with AsyncSessionLocal() as db:
+        quota_row = await db.get(UserQuota, quota_user.id)
+        assert quota_row is not None
+        assert quota_row.storage_bytes_used == 400  # 800 - 400

@@ -245,11 +245,11 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 7 (orig #15) — `decrement_storage_bytes` never called on delete — **HIGH**
+#### [x] 7 (orig #15) — `decrement_storage_bytes` never called on delete — **HIGH**
 
 - **File:** `api/app/core/quota.py:192-206` — zero call sites outside this file
 - **Issue:** Every job/run delete (`DELETE /jobs/{id}`, admin hard-delete, `cleanup_old_runs.py`) removes MinIO objects without decrementing `user_quotas.storage_bytes_used`. Storage quota grows unboundedly even as actual data shrinks. Note: `cleanup_old_runs.py` already has inline decrement SQL — that path is covered. The gap is `cancel_job` (permanent delete) and `admin_delete_or_cancel_job` (hard_delete).
-- **Fix:** Call `decrement_storage_bytes(user_id, db, size)` in `cancel_job` (permanent path, `jobs.py:399-421`) and `admin_delete_or_cancel_job` (hard_delete path, `admin.py:270-272`) after the MinIO stat+delete loop.
+- **Fix:** Both paths now stat before delete and call `decrement_storage_bytes` on success. Admin hard-delete also gained MinIO cleanup (previously left orphaned objects). 2 new tests in `test_quota.py` — 226 passing.
 
 ---
 

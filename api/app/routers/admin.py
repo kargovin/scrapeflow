@@ -13,6 +13,7 @@ from sqlalchemy.orm import aliased
 from app.auth.dependencies import get_current_admin_user
 from app.core.db import get_db
 from app.core.minio import get_minio
+from app.core.quota import decrement_storage_bytes
 from app.core.redis import get_redis
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
@@ -261,12 +262,32 @@ async def admin_delete_or_cancel_job(
     hard_delete: bool = Query(default=False),
     admin: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
 ) -> CancelJobResponse:
     job = await db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     if hard_delete:
+        runs_result = await db.execute(
+            select(JobRun.result_path).where(
+                JobRun.job_id == job_id, JobRun.result_path.is_not(None)
+            )
+        )
+        for (result_path,) in runs_result.all():
+            bucket, _, key = result_path.partition("/")
+            file_size = 0
+            try:
+                stat = await minio_client.stat_object(bucket, key)
+                file_size = stat.size or 0
+            except Exception:
+                pass
+            try:
+                await minio_client.remove_object(bucket, key)
+                if file_size > 0:
+                    await decrement_storage_bytes(job.user_id, db, file_size)
+            except Exception:
+                pass
         await db.delete(job)
         await db.commit()
         logger.info("admin_job_hard_deleted", job_id=str(job_id), admin_id=str(admin.id))
