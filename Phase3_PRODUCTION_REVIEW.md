@@ -321,7 +321,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 16 (orig #2) — WebSocket not wired into Admin SPA — **MEDIUM**
+#### [x] 16 (orig #2) — WebSocket not wired into Admin SPA — **MEDIUM**
 
 - **File:** `frontend/src/pages/JobDetail.tsx`, `frontend/src/pages/Jobs.tsx`
 - **Issue:** The Admin SPA was built without using the `/jobs/{id}/watch` or `/batch/{id}/watch` WebSocket endpoints. Job and batch status in the UI is static until page refresh.

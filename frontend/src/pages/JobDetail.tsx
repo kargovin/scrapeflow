@@ -1,7 +1,18 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
-import { apiGet, apiDelete, type AdminJob } from '../api'
+import { apiGet, apiDelete, API_BASE, type AdminJob } from '../api'
+
+const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+
+const STATUS_COLOURS: Record<string, string> = {
+  pending: 'bg-yellow-100 text-yellow-700',
+  running: 'bg-blue-100 text-blue-700',
+  completed: 'bg-green-100 text-green-700',
+  failed: 'bg-red-100 text-red-700',
+  cancelled: 'bg-gray-100 text-gray-600',
+  processing: 'bg-purple-100 text-purple-700',
+}
 
 interface Props {
   jobId: string
@@ -12,6 +23,8 @@ export default function JobDetail({ jobId, onBack }: Props) {
   const { getToken } = useAuth()
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [liveStatus, setLiveStatus] = useState<string | null>(null)
+  const [wsLive, setWsLive] = useState(false)
 
   const { data: token } = useQuery({
     queryKey: ['token'],
@@ -33,6 +46,31 @@ export default function JobDetail({ jobId, onBack }: Props) {
     },
   })
 
+  useEffect(() => {
+    if (!token || !job || TERMINAL.has(job.status)) return
+
+    const base = API_BASE || window.location.origin
+    const wsBase = base.replace(/^https/, 'wss').replace(/^http/, 'ws')
+    const ws = new WebSocket(`${wsBase}/jobs/${jobId}/watch?token=${encodeURIComponent(token)}`)
+
+    ws.onopen = () => setWsLive(true)
+    ws.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data) as { status: string }
+      setLiveStatus(msg.status)
+      if (TERMINAL.has(msg.status)) {
+        qc.invalidateQueries({ queryKey: ['admin-job', jobId] })
+        setWsLive(false)
+      }
+    }
+    ws.onclose = () => setWsLive(false)
+    ws.onerror = () => ws.close()
+
+    return () => {
+      ws.close()
+      setWsLive(false)
+    }
+  }, [token, jobId, job?.status, qc])
+
   if (isLoading || !token) {
     return <p className="text-sm text-gray-500">Loading…</p>
   }
@@ -40,12 +78,26 @@ export default function JobDetail({ jobId, onBack }: Props) {
     return <p className="text-sm text-red-600">Job not found.</p>
   }
 
-  const fields: [string, string][] = [
+  const status = liveStatus ?? job.status
+
+  const fields: [string, React.ReactNode][] = [
     ['ID', job.id],
     ['User ID', job.user_id],
     ['URL', job.url],
     ['Engine', job.output_format],
-    ['Status', job.status],
+    ['Status', (
+      <span className="flex items-center gap-2">
+        <span className={`inline-flex px-2 py-0.5 text-xs rounded-full ${STATUS_COLOURS[status] ?? 'bg-gray-100 text-gray-600'}`}>
+          {status}
+        </span>
+        {wsLive && (
+          <span className="flex items-center gap-1 text-xs text-green-600">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+            live
+          </span>
+        )}
+      </span>
+    )],
     ['Result path', job.result_path ?? '—'],
     ['Error', job.error ?? '—'],
     ['Created', new Date(job.created_at).toLocaleString()],

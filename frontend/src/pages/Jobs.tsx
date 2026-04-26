@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
 import { apiGet, type AdminJob } from '../api'
+import type { Query } from '@tanstack/react-query'
+
+const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 
 const STATUS_COLOURS: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-700',
@@ -35,6 +38,8 @@ export default function Jobs({ onSelectJob }: Props) {
     queryKey: ['admin-jobs', offset, statusFilter],
     queryFn: () => apiGet(`/admin/jobs?${params}`, token!),
     enabled: !!token,
+    refetchInterval: (query: Query<AdminJob[]>) =>
+      (query.state.data ?? []).some(j => !TERMINAL.has(j.status)) ? 5_000 : false,
   })
 
   return (

@@ -124,4 +124,5 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 13/49 | HIGH | Coordinator `_dispatch_batch` has no `FOR UPDATE SKIP LOCKED` — duplicate dispatch under multi-replica | `[x]` done |
 | 14 | MEDIUM | Crawl page `?status=` filter accepts any string — whitelist check added | `[x]` done |
 | 15 | MEDIUM | Coordinator fires crawl completion webhook with no retry — Migration 3.15 + `_enqueue_crawl_webhook` + 2 new tests | `[x]` done |
-| 16+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
+| 16 | MEDIUM | WebSocket not wired into Admin SPA — `JobDetail.tsx` WS hook + live badge; `Jobs.tsx` refetchInterval; `vite-env.d.ts` added | `[x]` done |
+| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
