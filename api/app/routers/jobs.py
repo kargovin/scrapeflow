@@ -26,6 +26,7 @@ from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
+from app.core.credentials import resolve_credentials
 from app.core.db import get_db
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
@@ -66,35 +67,6 @@ async def check_job_quota(
     await check_user_quota(user.id, db, "monthly_runs")
     await check_user_quota(user.id, db, "concurrent_jobs")
     await check_user_quota(user.id, db, "storage_bytes")
-
-
-async def _resolve_credentials(job: Job, db: AsyncSession) -> dict | None:
-    """Resolve credentials for dispatch: proxy (per-job > platform default) + cookies."""
-    result: dict = {}
-
-    proxy_secret = await db.scalar(
-        select(JobSecrets).where(
-            JobSecrets.job_id == job.id,
-            JobSecrets.secret_type == JobSecretType.proxy,
-        )
-    )
-    if proxy_secret:
-        f = Fernet(settings.llm_key_encryption_key)
-        result["proxy_url"] = f.decrypt(proxy_secret.encrypted_value.encode()).decode()
-    elif settings.default_proxy_url:
-        result["proxy_url"] = settings.default_proxy_url
-
-    cookies_secret = await db.scalar(
-        select(JobSecrets).where(
-            JobSecrets.job_id == job.id,
-            JobSecrets.secret_type == JobSecretType.cookies,
-        )
-    )
-    if cookies_secret:
-        f = Fernet(settings.llm_key_encryption_key)
-        result["cookies"] = json.loads(f.decrypt(cookies_secret.encrypted_value.encode()).decode())
-
-    return result or None
 
 
 def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
@@ -275,7 +247,7 @@ async def create_job(
         await db.commit()
 
     # Resolve credentials: per-job secret > platform default > None (PRD-005)
-    credentials = await _resolve_credentials(job, db)
+    credentials = await resolve_credentials(job, db)
 
     # Publish to NATS after successful DB insert (ADR-001)
     # If NATS is unavailable, job stays as `pending` and can be retried later

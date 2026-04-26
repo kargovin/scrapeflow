@@ -14,48 +14,17 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from croniter import croniter
-from cryptography.fernet import Fernet
 from nats.js import JetStreamContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
+from app.core.credentials import resolve_credentials
 from app.core.quota import is_quota_exceeded
 from app.models.job import Job
 from app.models.job_runs import JobRun
-from app.models.job_secrets import JobSecrets, JobSecretType
-from app.settings import settings
 
 logger = structlog.get_logger()
-
-
-async def _resolve_credentials(job: Job, db: AsyncSession) -> dict | None:
-    """Resolve credentials for dispatch: proxy (per-job > platform default) + cookies."""
-    result: dict = {}
-
-    proxy_secret = await db.scalar(
-        select(JobSecrets).where(
-            JobSecrets.job_id == job.id,
-            JobSecrets.secret_type == JobSecretType.proxy,
-        )
-    )
-    if proxy_secret:
-        f = Fernet(settings.llm_key_encryption_key)
-        result["proxy_url"] = f.decrypt(proxy_secret.encrypted_value.encode()).decode()
-    elif settings.default_proxy_url:
-        result["proxy_url"] = settings.default_proxy_url
-
-    cookies_secret = await db.scalar(
-        select(JobSecrets).where(
-            JobSecrets.job_id == job.id,
-            JobSecrets.secret_type == JobSecretType.cookies,
-        )
-    )
-    if cookies_secret:
-        f = Fernet(settings.llm_key_encryption_key)
-        result["cookies"] = json.loads(f.decrypt(cookies_secret.encrypted_value.encode()).decode())
-
-    return result or None
 
 
 async def scheduler_loop(
@@ -121,7 +90,7 @@ async def _dispatch_due_jobs(
 
             await db.commit()  # commit per job — releases row lock immediately
 
-            credentials = await _resolve_credentials(job, db)
+            credentials = await resolve_credentials(job, db)
             payload: dict = {
                 "schema_version": 2,
                 "job_id": str(job.id),
@@ -185,7 +154,7 @@ async def _recover_stale_pending(
             if job is None:
                 continue  # orphaned run — should not happen with CASCADE deletes
 
-            credentials = await _resolve_credentials(job, db)
+            credentials = await resolve_credentials(job, db)
             payload: dict = {
                 "schema_version": 2,
                 "job_id": str(job.id),
