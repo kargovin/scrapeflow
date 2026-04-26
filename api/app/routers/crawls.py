@@ -113,6 +113,11 @@ async def list_crawl_pages(
         .offset(offset)
     )
     if page_status is not None:
+        if page_status not in {"pending", "processing", "completed", "failed"}:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Page Status not valid",
+            )
         stmt = stmt.where(CrawlPage.status == page_status)
 
     result = await db.execute(stmt)

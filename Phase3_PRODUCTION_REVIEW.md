@@ -305,7 +305,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 14 (orig #23) — Crawl page status filter accepts any string — **MEDIUM**
+#### [x] 14 (orig #23) — Crawl page status filter accepts any string — **MEDIUM**
 
 - **File:** `api/app/routers/crawls.py:115-116`
 - **Issue:** `page_status` is used directly in `.where(CrawlPage.status == page_status)` with no whitelist check. A typo like `?status=typo` returns an empty 200 instead of 422, silently masking client bugs.
