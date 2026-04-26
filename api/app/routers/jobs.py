@@ -211,7 +211,7 @@ async def create_job(
 
     # Persist proxy secret if provided (write-only; never returned)
     if body.proxy_url:
-        f = Fernet(settings.llm_key_encryption_key)
+        f = Fernet(settings.credentials_encryption_key)
         encrypted = f.encrypt(body.proxy_url.encode()).decode()
         upsert = (
             pg_insert(JobSecrets)
@@ -230,7 +230,7 @@ async def create_job(
 
     # Persist cookies secret if provided (write-only; never returned)
     if body.cookies:
-        f = Fernet(settings.llm_key_encryption_key)
+        f = Fernet(settings.credentials_encryption_key)
         encrypted = f.encrypt(json.dumps(body.cookies).encode()).decode()
         upsert = (
             pg_insert(JobSecrets)
@@ -536,7 +536,7 @@ async def patch_jobs(
     # All validations passed — write secrets now.
     if proxy_url_pending is not _UNSET:
         if proxy_url_pending:
-            f = Fernet(settings.llm_key_encryption_key)
+            f = Fernet(settings.credentials_encryption_key)
             encrypted = f.encrypt(proxy_url_pending.encode()).decode()
             upsert = (
                 pg_insert(JobSecrets)
@@ -561,7 +561,7 @@ async def patch_jobs(
 
     if cookies_pending is not _UNSET:
         if cookies_pending:
-            f = Fernet(settings.llm_key_encryption_key)
+            f = Fernet(settings.credentials_encryption_key)
             encrypted = f.encrypt(json.dumps(cookies_pending).encode()).decode()
             upsert = (
                 pg_insert(JobSecrets)

@@ -55,11 +55,12 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 38 — Default proxy URL transmitted as plaintext in NATS messages — **MEDIUM**
+#### [x] 38 — Default proxy URL transmitted as plaintext in NATS messages — **MEDIUM**
 
 - **File:** `api/app/core/scheduler.py:127`, `api/app/routers/jobs.py:288`
 - **Issue:** `settings.default_proxy_url` is injected into the NATS fat-message `credentials.proxy_url` field as a plaintext string. Any party with NATS read access (e.g., a compromised worker container) can read the platform-level proxy credentials. Per-job proxy secrets in `job_secrets` are encrypted at rest but are *decrypted before being placed in the NATS message*.
-- **Fix (pragmatic):** Accept the risk for now given the NATS cluster is internal. **Fix (proper):** Encrypt credentials in NATS messages using a shared symmetric key, decrypt in the worker. Document the accepted risk in the ADR if not fixing.
+- **Fix:** Introduced a dedicated `CREDENTIALS_ENCRYPTION_KEY` (separate from `LLM_KEY_ENCRYPTION_KEY`) using Fernet symmetric encryption. Per-job secrets (`job_secrets` rows) are forwarded as ciphertext directly — no decrypt/re-encrypt round-trip. `default_proxy_url` is encrypted at dispatch time. Field renamed `credentials.proxy_url` → `credentials.encrypted_proxy_url` (and `cookies` → `encrypted_cookies`) in the NATS schema; workers decrypt before use. `docker-compose.yml` updated to inject the key via `env_file: ../.env` on playwright-worker and http-worker.
+- **⚠ K8s TODO (before production deploy):** Add `CREDENTIALS_ENCRYPTION_KEY` to the k8s Secret and to the `env` array of the API, playwright-worker, and http-worker Deployments in `govindappa-k8s-config`. Generate the key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and store it in the sealed secret alongside `LLM_KEY_ENCRYPTION_KEY`.
 
 ---
 
@@ -75,7 +76,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 40 — Coordinator hardcodes NATS subjects — **HIGH**
+#### [x] 40 — Coordinator hardcodes NATS subjects — **HIGH**
 
 - **File:** `coordinator/coordinator/bfs.py:23-24`, `coordinator/coordinator/result_handler.py:32`
 - **Issue:** NATS subject strings are copy-pasted as literals (`"scrapeflow.jobs.run.http"`, `"scrapeflow.jobs.run.playwright"`, `"scrapeflow.jobs.result"`) rather than imported from a shared constants file. The API's authoritative source is `api/app/constants.py`. If a subject name ever changes, the coordinator silently breaks with no compile-time error.
@@ -442,7 +443,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 32 (orig #40) — Coordinator hardcodes NATS subjects — **LOW**
+#### [x] 32 (orig #40) — Coordinator hardcodes NATS subjects — **LOW**
 
 - *(See item #40 in Part 1 — LOW when coordinator is single-process; HIGH if multi-replica)*
 

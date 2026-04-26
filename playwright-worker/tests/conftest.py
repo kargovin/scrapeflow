@@ -7,9 +7,20 @@ make_browser) live here since they need per-test tuning.
 """
 
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
+
+# Must be module-level: Settings() runs at import time, before any fixture executes.
+_TEST_CREDS_KEY = Fernet.generate_key().decode()
+os.environ.setdefault("CREDENTIALS_ENCRYPTION_KEY", _TEST_CREDS_KEY)
+
+
+def encrypt_credential(plaintext: str) -> str:
+    """Encrypt a plaintext credential using the test key — mirrors API-side encryption."""
+    return Fernet(_TEST_CREDS_KEY).encrypt(plaintext.encode()).decode()
 
 
 @pytest.fixture

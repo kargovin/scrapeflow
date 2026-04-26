@@ -103,8 +103,8 @@ def test_schema_version_2_message_parses_all_sub_objects():
             "output_format": "html",
             "engine": "playwright",
             "credentials": {
-                "proxy_url": "http://user:pass@proxy.example.com:8080",
-                "cookies": [{"name": "sess", "value": "abc", "domain": "example.com"}],
+                "encrypted_proxy_url": "gAAAAAB_proxy_ciphertext",
+                "encrypted_cookies": "gAAAAAB_cookies_ciphertext",
             },
             "options": {
                 "respect_robots": True,
@@ -120,8 +120,8 @@ def test_schema_version_2_message_parses_all_sub_objects():
     msg = JobMessage.model_validate_json(payload)
 
     assert msg.schema_version == 2
-    assert msg.credentials.proxy_url == "http://user:pass@proxy.example.com:8080"
-    assert msg.credentials.cookies[0]["name"] == "sess"
+    assert msg.credentials.encrypted_proxy_url == "gAAAAAB_proxy_ciphertext"
+    assert msg.credentials.encrypted_cookies == "gAAAAAB_cookies_ciphertext"
     assert msg.options.respect_robots is True
     assert msg.options.actions[0]["type"] == "wait"
     assert msg.crawl_context.crawl_id == "crawl-1"

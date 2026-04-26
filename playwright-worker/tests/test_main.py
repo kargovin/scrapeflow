@@ -13,8 +13,8 @@ Lifecycle summary being tested:
   2. robots.txt check (respect_robots=True) — publish failed+ack if disallowed;
      fires BEFORE step 3
   3. Publish status="running" with nats_stream_seq BEFORE page interaction
-  4. new_context(proxy=...) if credentials.proxy_url is set
-  5. add_cookies() before page.goto() if credentials.cookies is set
+  4. new_context(proxy=...) if credentials.encrypted_proxy_url is set (decrypted first)
+  5. add_cookies() before page.goto() if credentials.encrypted_cookies is set (decrypted first)
   6. page.route("**", csp_handler) before page.goto() if actions are present
   7. page.goto → page.wait_for_load_state → page.content()
   8. execute_actions() after page.goto
@@ -27,8 +27,7 @@ Lifecycle summary being tested:
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
-from tests.conftest import make_browser, make_nats_msg
+from tests.conftest import encrypt_credential, make_browser, make_nats_msg
 from worker.worker import RESULT_SUBJECT, handle_message
 
 _FAKE_MINIO_PATH = "scrapeflow-results/history/job-aaa/1234567890.html"
@@ -310,11 +309,13 @@ async def test_respect_robots_false_skips_check():
 
 async def test_proxy_passed_to_new_context():
     """
-    When credentials.proxy_url is set, browser.new_context must be called
-    with proxy={"server": proxy_url}.
+    When credentials.encrypted_proxy_url is set, browser.new_context must be called
+    with proxy={"server": proxy_url} after decryption.
     """
     proxy_url = "http://user:pass@proxy.example.com:8080"
-    msg = make_nats_msg(credentials={"proxy_url": proxy_url})
+    msg = make_nats_msg(
+        credentials={"encrypted_proxy_url": encrypt_credential(proxy_url)}
+    )
     browser, _, _ = make_browser()
 
     with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
@@ -343,11 +344,13 @@ async def test_no_proxy_calls_new_context_without_proxy():
 
 async def test_cookies_injected_before_goto():
     """
-    When credentials.cookies is set, context.add_cookies must be called
-    before page.goto.
+    When credentials.encrypted_cookies is set, context.add_cookies must be called
+    before page.goto after decryption.
     """
     cookies = [{"name": "session", "value": "abc123", "domain": "example.com"}]
-    msg = make_nats_msg(credentials={"cookies": cookies})
+    msg = make_nats_msg(
+        credentials={"encrypted_cookies": encrypt_credential(json.dumps(cookies))}
+    )
     browser, context, page = make_browser()
 
     call_order = []
@@ -372,7 +375,7 @@ async def test_cookie_domain_inferred_from_url():
     cookies = [{"name": "token", "value": "xyz"}]
     msg = make_nats_msg(
         url="https://example.com/page",
-        credentials={"cookies": cookies},
+        credentials={"encrypted_cookies": encrypt_credential(json.dumps(cookies))},
     )
     browser, context, page = make_browser()
     captured = []

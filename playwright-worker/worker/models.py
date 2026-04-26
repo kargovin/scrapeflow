@@ -11,11 +11,8 @@ class PlaywrightOptions(BaseModel):
 
 
 class Credentials(BaseModel):
-    proxy_url: str | None = None
-    # Cookies are kept as raw dicts so Playwright's add_cookies() receives
-    # the camelCase keys it expects (httpOnly, sameSite, etc.) without a
-    # translation layer that could silently drop unknown fields.
-    cookies: list[dict] | None = None
+    encrypted_proxy_url: str | None = None
+    encrypted_cookies: str | None = None
 
 
 class Options(BaseModel):

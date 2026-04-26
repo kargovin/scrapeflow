@@ -4,7 +4,10 @@ import (
 	"testing"
 )
 
-// setRequiredVars sets all 4 required environment variables using t.Setenv,
+// testCredentialsKey is a valid Fernet key used only in tests.
+const testCredentialsKey = "Ke0tYTJtBsP8_QaQfF7WgCcIveEQlcyH8SgGaSVmMuk="
+
+// setRequiredVars sets all required environment variables using t.Setenv,
 // which automatically restores the original values after the test.
 func setRequiredVars(t *testing.T) {
 	t.Helper()
@@ -12,6 +15,7 @@ func setRequiredVars(t *testing.T) {
 	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
 	t.Setenv("MINIO_ACCESS_KEY", "testkey")
 	t.Setenv("MINIO_SECRET_KEY", "testsecret")
+	t.Setenv("CREDENTIALS_ENCRYPTION_KEY", testCredentialsKey)
 }
 
 func TestLoad_RequiredVars(t *testing.T) {
@@ -67,6 +71,16 @@ func TestLoad_RequiredVars(t *testing.T) {
 		_, err := Load()
 		if err == nil {
 			t.Fatal("expected error when MINIO_SECRET_KEY is missing")
+		}
+	})
+
+	t.Run("CREDENTIALS_ENCRYPTION_KEY missing returns error", func(t *testing.T) {
+		setRequiredVars(t)
+		t.Setenv("CREDENTIALS_ENCRYPTION_KEY", "")
+
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error when CREDENTIALS_ENCRYPTION_KEY is missing")
 		}
 	})
 }

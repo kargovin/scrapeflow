@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/fernet/fernet-go"
 	"github.com/nats-io/nats.go"
 
 	"github.com/kargovin/scrapeflow/http-worker/internal/fetcher"
@@ -168,8 +169,18 @@ func TestHandleMessage_MalformedProxyURL_FailsWithoutRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Generate a test key and encrypt the malformed proxy URL — worker decrypts before parsing.
+	var testKey fernet.Key
+	if err := testKey.Generate(); err != nil {
+		t.Fatalf("failed to generate test fernet key: %v", err)
+	}
+	token, err := fernet.EncryptAndSign([]byte("://not-a-url"), &testKey)
+	if err != nil {
+		t.Fatalf("failed to encrypt test proxy URL: %v", err)
+	}
+
 	js := &mockJS{}
-	w := &Worker{js: js, fetcher: fetcher.New(5), storage: &mockStorage{}}
+	w := &Worker{js: js, fetcher: fetcher.New(5), storage: &mockStorage{}, credentialsKey: &testKey}
 
 	msg := makeMsg(t, ScrapeMessage{
 		SchemaVersion: 2,
@@ -177,7 +188,7 @@ func TestHandleMessage_MalformedProxyURL_FailsWithoutRetry(t *testing.T) {
 		RunID:         "run-proxy-bad",
 		URL:           srv.URL,
 		OutputFormat:  "html",
-		Credentials:   &Credentials{ProxyURL: "://not-a-url"},
+		Credentials:   &Credentials{EncryptedProxyURL: string(token)},
 	})
 
 	w.handleMessage(context.Background(), msg)

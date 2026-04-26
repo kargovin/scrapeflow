@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/fernet/fernet-go"
 	"github.com/nats-io/nats.go"
 
 	"github.com/kargovin/scrapeflow/http-worker/internal/config"
@@ -73,11 +74,17 @@ func main() {
 	}
 	log.Printf("MinIO connected: bucket=%s", cfg.MinIOBucket)
 
+	// --- Decode the credentials encryption key (Fernet) ---
+	credKey, err := fernet.DecodeKey(cfg.CredentialsEncryptionKey)
+	if err != nil {
+		log.Fatalf("Invalid CREDENTIALS_ENCRYPTION_KEY: %v", err)
+	}
+
 	// --- Create the HTTP fetcher ---
 	fetch := fetcher.New(cfg.FetchTimeoutSecs)
 
 	// --- Wire the worker ---
-	w := worker.New(js, fetch, store)
+	w := worker.New(js, fetch, store, credKey)
 
 	// --- Graceful shutdown via OS signal handling ---
 	// context.WithCancel creates a context that we can cancel manually.

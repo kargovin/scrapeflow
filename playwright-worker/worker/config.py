@@ -1,7 +1,16 @@
-from pydantic_settings import BaseSettings
+from pathlib import Path
+
+from cryptography.fernet import Fernet, InvalidToken
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_FILE = Path(__file__).parent.parent.parent / ".env"
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
     nats_url: str = "nats://localhost:4222"
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "scrapeflow"
@@ -10,6 +19,21 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     playwright_max_workers: int = 3
     playwright_default_timeout_seconds: int = 60
+    credentials_encryption_key: str = ""
+
+    @field_validator("credentials_encryption_key")
+    def validate_fernet_key(cls, v):
+        if not v:
+            raise ValueError(
+                "CREDENTIALS_ENCRYPTION_KEY must be set to a valid Fernet key"
+            )
+        try:
+            Fernet(v)
+        except (ValueError, InvalidToken):
+            raise ValueError(
+                "CREDENTIALS_ENCRYPTION_KEY is not a valid Fernet key"
+            ) from None
+        return v
 
 
 settings = Settings()

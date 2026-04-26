@@ -46,7 +46,12 @@ class Settings(BaseSettings):
     # LLM
     llm_key_encryption_key: str = Field(
         default="", alias="LLM_KEY_ENCRYPTION_KEY"
-    )  # symmetric key for encrypting LLM API keys in DB
+    )  # symmetric key for encrypting LLM API keys + webhook HMAC secrets in DB
+
+    # Credentials
+    credentials_encryption_key: str = Field(
+        default="", alias="CREDENTIALS_ENCRYPTION_KEY"
+    )  # symmetric key for encrypting proxy URLs + cookies in NATS messages
 
     # Cron Scheduler
     schedule_min_interval_minutes: int = 5
@@ -71,6 +76,16 @@ class Settings(BaseSettings):
             Fernet(v)
         except (ValueError, InvalidToken):
             raise ValueError("LLM_KEY_ENCRYPTION_KEY is not a valid Fernet key") from None
+        return v
+
+    @field_validator("credentials_encryption_key")
+    def validate_credentials_fernet_key(cls, v):
+        if not v:
+            raise ValueError("CREDENTIALS_ENCRYPTION_KEY must be set to a valid Fernet key")
+        try:
+            Fernet(v)
+        except (ValueError, InvalidToken):
+            raise ValueError("CREDENTIALS_ENCRYPTION_KEY is not a valid Fernet key") from None
         return v
 
     # Allowed origins - CORS

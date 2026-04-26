@@ -130,6 +130,8 @@ services:
   playwright-worker:
     build:
       context: ../playwright-worker
+    env_file:
+      - ../.env
     environment:
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
@@ -176,6 +178,8 @@ services:
     build:
       context: ../http-worker
       dockerfile: Dockerfile
+    env_file:
+      - ../.env
     environment:
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000

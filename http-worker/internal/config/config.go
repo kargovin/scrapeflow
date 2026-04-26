@@ -24,6 +24,9 @@ type Config struct {
 	MinIOBucket    string // MINIO_BUCKET — defaults to scrapeflow-results
 	MinIOSecure    bool   // MINIO_SECURE — false for local dev (no TLS)
 
+	// Credentials
+	CredentialsEncryptionKey string // CREDENTIALS_ENCRYPTION_KEY — Fernet key for proxy/cookies in NATS messages
+
 	// HTTP fetcher
 	FetchTimeoutSecs int // FETCH_TIMEOUT_SECS — per-URL HTTP timeout
 
@@ -54,6 +57,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("MINIO_SECRET_KEY is required")
 	}
 
+	credentialsKey := os.Getenv("CREDENTIALS_ENCRYPTION_KEY")
+	if credentialsKey == "" {
+		return nil, fmt.Errorf("CREDENTIALS_ENCRYPTION_KEY is required")
+	}
+
 	return &Config{
 		NATSUrl:        natsURL,
 		NATSMaxDeliver: envInt("NATS_MAX_DELIVER", 3),
@@ -63,6 +71,8 @@ func Load() (*Config, error) {
 		MinIOSecretKey: minioSecretKey,
 		MinIOBucket:    envStr("MINIO_BUCKET", "scrapeflow-results"),
 		MinIOSecure:    envBool("MINIO_SECURE", false),
+
+		CredentialsEncryptionKey: credentialsKey,
 
 		FetchTimeoutSecs: envInt("FETCH_TIMEOUT_SECS", 30),
 		WorkerPoolSize:   envInt("WORKER_POOL_SIZE", runtime.NumCPU()),

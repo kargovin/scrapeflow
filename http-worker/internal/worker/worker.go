@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/fernet/fernet-go"
 	"github.com/nats-io/nats.go"
 
 	"github.com/kargovin/scrapeflow/http-worker/internal/fetcher"
@@ -26,10 +27,11 @@ const (
 	durableName       = "go-worker"
 )
 
-// Credentials carries per-job secrets resolved by the API before dispatch.
-// The HTTP worker only uses ProxyURL; cookies are consumed by the Playwright worker.
+// Credentials carries per-job secrets from the API. Values are Fernet ciphertexts —
+// decrypted in handleMessage using the worker's credentialsKey.
+// Cookies are consumed by the Playwright worker only — not defined here.
 type Credentials struct {
-	ProxyURL string `json:"proxy_url,omitempty"`
+	EncryptedProxyURL string `json:"encrypted_proxy_url,omitempty"`
 }
 
 // Options carries per-job behavioural flags.
@@ -88,16 +90,17 @@ type storageClient interface {
 
 // Worker holds the dependencies needed to process scrape jobs.
 type Worker struct {
-	js      jetStreamClient
-	fetcher *fetcher.Fetcher
-	storage storageClient
+	js             jetStreamClient
+	fetcher        *fetcher.Fetcher
+	storage        storageClient
+	credentialsKey *fernet.Key // decoded once at startup; used to decrypt proxy URL per message
 }
 
 // New creates a Worker with the given dependencies.
 // This is the idiomatic Go constructor pattern — a New() function that
 // returns a pointer to the struct. No classes, no __init__.
-func New(js nats.JetStreamContext, f *fetcher.Fetcher, s *storage.Client) *Worker {
-	return &Worker{js: js, fetcher: f, storage: s}
+func New(js nats.JetStreamContext, f *fetcher.Fetcher, s *storage.Client, credKey *fernet.Key) *Worker {
+	return &Worker{js: js, fetcher: f, storage: s, credentialsKey: credKey}
 }
 
 // Run subscribes to the jobs.run.http subject and processes messages in a pull loop.
@@ -194,11 +197,30 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 
 	// --- Step 2: Resolve per-job fetcher ---
 	// Default to the worker's shared fetcher (no proxy).
-	// If credentials.proxy_url is set, create a one-off fetcher with a proxy transport.
-	// Malformed proxy URL is a config error — fail immediately, do not retry.
+	// If credentials.encrypted_proxy_url is set, decrypt it and create a one-off fetcher
+	// with a proxy transport. Decryption or URL parse failure is a config error —
+	// fail immediately, do not retry.
 	f := w.fetcher
-	if job.Credentials != nil && job.Credentials.ProxyURL != "" {
-		pf, err := w.fetcher.WithProxy(job.Credentials.ProxyURL)
+	if job.Credentials != nil && job.Credentials.EncryptedProxyURL != "" {
+		plaintext := fernet.VerifyAndDecrypt([]byte(job.Credentials.EncryptedProxyURL), 0, []*fernet.Key{w.credentialsKey})
+		if plaintext == nil {
+			slog.Error("Failed to decrypt proxy URL, failing run", "job_id", job.JobID, "run_id", job.RunID)
+			if pubErr := w.publishResult(resultMessage{
+				JobID:        job.JobID,
+				RunID:        job.RunID,
+				Status:       "failed",
+				Error:        "proxy_decryption_failed",
+				CrawlContext: job.CrawlContext,
+			}); pubErr != nil {
+				slog.Error("Failed to publish decrypt-error result", "job_id", job.JobID, "error", pubErr)
+			}
+			if ackErr := msg.Ack(); ackErr != nil {
+				slog.Error("Failed to ack after decrypt error", "job_id", job.JobID, "error", ackErr)
+			}
+			return
+		}
+		proxyURL := string(plaintext)
+		pf, err := w.fetcher.WithProxy(proxyURL)
 		if err != nil {
 			slog.Error("Malformed proxy URL, failing run", "job_id", job.JobID, "run_id", job.RunID, "error", err)
 			if pubErr := w.publishResult(resultMessage{
@@ -216,7 +238,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 			return
 		}
 		f = pf
-		slog.Info("Using proxy for job", "job_id", job.JobID, "proxy", job.Credentials.ProxyURL)
+		slog.Info("Using proxy for job", "job_id", job.JobID)
 	}
 
 	// --- Step 3: robots.txt enforcement ---

@@ -5,13 +5,16 @@ Separated from main.py so the job lifecycle can be unit-tested
 without standing up a NATS pull consumer loop.
 """
 
+import json
 from typing import Any
 from urllib.parse import urlparse
 
 import structlog
+from cryptography.fernet import Fernet
 from miniopy_async import Minio
 
 from .actions import execute_actions
+from .config import settings
 from .formatter import format_output
 from .models import JobMessage, ResultMessage
 from .robots import is_disallowed
@@ -84,25 +87,37 @@ async def handle_message(
         ),
     )
 
-    # --- Steps 4–11: Render, format, upload ---
+    # --- Step 4: Decrypt credentials (Fernet ciphertext from NATS) ---
+    proxy_url: str | None = None
+    cookies: list[dict] | None = None
+    if job.credentials:
+        f = Fernet(settings.credentials_encryption_key)
+        if job.credentials.encrypted_proxy_url:
+            proxy_url = f.decrypt(job.credentials.encrypted_proxy_url.encode()).decode()
+        if job.credentials.encrypted_cookies:
+            cookies = json.loads(
+                f.decrypt(job.credentials.encrypted_cookies.encode()).decode()
+            )
+
+    # --- Steps 5–12: Render, format, upload ---
     # Build context options — proxy is set at context level so all traffic routes through it.
     context_kwargs: dict = {}
-    if job.credentials and job.credentials.proxy_url:
-        context_kwargs["proxy"] = {"server": job.credentials.proxy_url}
+    if proxy_url:
+        context_kwargs["proxy"] = {"server": proxy_url}
 
     context = await browser.new_context(**context_kwargs)
     page = await context.new_page()
     try:
         # --- Step 5: Cookie injection (before goto so cookies are live on first load) ---
-        if job.credentials and job.credentials.cookies:
+        if cookies:
             parsed = urlparse(job.url)
-            cookies = []
-            for cookie in job.credentials.cookies:
+            cookies_to_add = []
+            for cookie in cookies:
                 c = dict(cookie)
                 if "domain" not in c or not c["domain"]:
                     c["domain"] = parsed.hostname
-                cookies.append(c)
-            await context.add_cookies(cookies)
+                cookies_to_add.append(c)
+            await context.add_cookies(cookies_to_add)
 
         # Optional: block images/fonts/CSS to speed up non-visual scrapes
         if opts and opts.block_images:
