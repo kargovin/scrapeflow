@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -642,9 +643,18 @@ async def _build_historical_stats(
         if cached is not None:
             minio_bytes = int(cached)
         else:
-            minio_bytes = 0
-            async for obj in minio_client.list_objects(settings.minio_bucket, recursive=True):
-                minio_bytes += obj.size or 0
+
+            async def _sum_minio_bytes() -> int:
+                total = 0
+                async for obj in minio_client.list_objects(settings.minio_bucket, recursive=True):
+                    total += obj.size or 0
+                return total
+
+            try:
+                minio_bytes = await asyncio.wait_for(_sum_minio_bytes(), timeout=10.0)
+            except TimeoutError:
+                minio_bytes = 0
+                logger.warning("admin stats: MinIO list_objects timed out, returning 0")
             await redis_client.setex(
                 MINIO_STORAGE_CACHE_KEY, MINIO_STORAGE_CACHE_TTL, str(minio_bytes)
             )
