@@ -2,7 +2,7 @@
 
 scheduler_loop polls every 60 seconds and:
   1. Dispatches any cron jobs whose next_run_at <= now() (FOR UPDATE SKIP LOCKED)
-  2. Re-publishes any job_runs stuck in 'pending' for > 10 minutes (stale-pending recovery)
+  2. Re-publishes any job_runs stuck in 'pending' beyond the configured threshold (stale-pending recovery)
 
 DB is committed before NATS publish (ADR-001): a NATS failure after commit leaves a
 pending JobRun that the stale-pending recovery will re-publish on the next cycle.
@@ -23,6 +23,7 @@ from app.core.credentials import resolve_credentials
 from app.core.quota import is_quota_exceeded
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.settings import settings
 
 logger = structlog.get_logger()
 
@@ -131,12 +132,12 @@ async def _recover_stale_pending(
     db_factory: async_sessionmaker[AsyncSession],
     js: JetStreamContext,
 ) -> None:
-    """Re-publish NATS messages for job_runs stuck in pending > 10 minutes.
+    """Re-publish NATS messages for job_runs stuck in pending longer than the configured threshold.
 
     This catches the crash-after-commit-before-publish failure mode from _dispatch_due_jobs.
     No new JobRun is created — the existing run is re-published as-is.
     """
-    stale_cutoff = datetime.now(UTC) - timedelta(minutes=10)
+    stale_cutoff = datetime.now(UTC) - timedelta(minutes=settings.stale_pending_threshold_minutes)
 
     async with db_factory() as db:
         stmt = (

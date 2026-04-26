@@ -48,8 +48,9 @@ class Settings(BaseSettings):
         default="", alias="LLM_KEY_ENCRYPTION_KEY"
     )  # symmetric key for encrypting LLM API keys in DB
 
-    # Cron Sheduler
+    # Cron Scheduler
     schedule_min_interval_minutes: int = 5
+    stale_pending_threshold_minutes: int = 10  # re-publish pending runs older than this
 
     # Webhook delivery
     webhook_max_attempts: int = 5
