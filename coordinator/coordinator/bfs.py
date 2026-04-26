@@ -10,13 +10,12 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import aiohttp
 import structlog
 from sqlalchemy import func, select, update
 
 from coordinator.config import settings
 from coordinator.db import AsyncSessionLocal
-from coordinator.models import Crawl, CrawlPage, CrawlQueueItem
+from coordinator.models import Crawl, CrawlPage, CrawlQueueItem, WebhookDelivery
 
 log = structlog.get_logger()
 
@@ -27,29 +26,25 @@ _ACTIVE_STATUSES = frozenset({"queued", "running"})
 _TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "skipped"})
 
 
-async def _fire_crawl_webhook(crawl: Crawl) -> None:
-    """Send a crawl.completed webhook directly. Fire-and-forget; failures are logged."""
+def _enqueue_crawl_webhook(db, crawl: Crawl) -> None:
+    """Insert a pending WebhookDelivery row. Caller owns the transaction."""
     if not crawl.webhook_url:
         return
-    payload = {
-        "event": "crawl.completed",
-        "crawl_id": str(crawl.id),
-        "status": crawl.status,
-        "total_queued": crawl.total_queued,
-        "total_completed": crawl.total_completed,
-        "total_failed": crawl.total_failed,
-        "completed_at": crawl.completed_at.isoformat() if crawl.completed_at else None,
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            await session.post(
-                crawl.webhook_url,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
-        log.info("crawl_webhook_sent", crawl_id=str(crawl.id), url=crawl.webhook_url)
-    except Exception as exc:
-        log.warning("crawl_webhook_failed", crawl_id=str(crawl.id), error=str(exc))
+    db.add(WebhookDelivery(
+        crawl_id=crawl.id,
+        webhook_url=crawl.webhook_url,
+        payload={
+            "event": "crawl.completed",
+            "crawl_id": str(crawl.id),
+            "status": crawl.status,
+            "total_queued": crawl.total_queued,
+            "total_completed": crawl.total_completed,
+            "total_failed": crawl.total_failed,
+            "completed_at": crawl.completed_at.isoformat() if crawl.completed_at else None,
+        },
+        status="pending",
+        next_attempt_at=datetime.now(UTC),
+    ))
 
 
 async def _check_completion(db, crawl: Crawl) -> bool:
@@ -186,8 +181,8 @@ async def _dispatch_batch(js) -> None:
             crawl = await db.get(Crawl, crawl_id)
             if crawl and crawl.status == "running":
                 completed = await _check_completion(db, crawl)
-                if completed and crawl.webhook_url:
-                    asyncio.create_task(_fire_crawl_webhook(crawl))
+                if completed:
+                    _enqueue_crawl_webhook(db, crawl)
         await db.commit()
 
 
@@ -199,5 +194,5 @@ async def _check_running_crawls_completion(db) -> None:
 
     for crawl in running:
         completed = await _check_completion(db, crawl)
-        if completed and crawl.webhook_url:
-            asyncio.create_task(_fire_crawl_webhook(crawl))
+        if completed:
+            _enqueue_crawl_webhook(db, crawl)

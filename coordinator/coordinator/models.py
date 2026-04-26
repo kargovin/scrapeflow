@@ -10,6 +10,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import ARRAY, Boolean, DateTime, ForeignKey, Index, Integer, Text, VARCHAR
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from coordinator.db import Base
@@ -90,3 +91,21 @@ class CrawlQueueItem(Base):
 
     crawl: Mapped["Crawl"] = relationship("Crawl", back_populates="queue")
     crawl_page: Mapped["CrawlPage | None"] = relationship("CrawlPage")
+
+
+class WebhookDelivery(Base):
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    crawl_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("crawls.id", ondelete="CASCADE"), nullable=True
+    )
+    webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="pending")
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )

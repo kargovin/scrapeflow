@@ -313,11 +313,11 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 15 (orig #31) — Coordinator fires crawl completion webhook with no retry — **MEDIUM**
+#### [x] 15 (orig #31) — Coordinator fires crawl completion webhook with no retry — **MEDIUM**
 
 - **File:** `coordinator/coordinator/bfs.py:30-52`
 - **Issue:** `_fire_crawl_webhook` is a direct HTTP POST — fire-and-forget with no retry. A transient 5xx or network error loses the event forever. All other webhook types use `WebhookDelivery` + exponential backoff.
-- **Fix:** Write a `WebhookDelivery` row (with `crawl_id=crawl.id`, `job_id=None`, `batch_id=None`) and let the existing `webhook_delivery_loop` handle delivery. This requires adding a `crawl_id` FK column to `webhook_deliveries`.
+- **Fix:** Migration 3.15 adds `webhook_deliveries.crawl_id` FK, makes `run_id` nullable, drops old CHECK `num_nonnulls(job_id, batch_id) = 1` and replaces with two constraints: `num_nonnulls(job_id, batch_id, crawl_id) = 1` and `num_nonnulls(run_id, crawl_id) = 1`. `_fire_crawl_webhook` replaced with synchronous `_enqueue_crawl_webhook(db, crawl)` that inserts a `WebhookDelivery` row in the same transaction as the crawl completion status update. `WebhookDelivery` model added to `coordinator/coordinator/models.py`. 2 new tests in `test_bfs.py` — 46 coordinator tests passing.
 
 ---
 

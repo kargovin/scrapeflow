@@ -21,8 +21,10 @@ from coordinator.bfs import (
     PLAYWRIGHT_SUBJECT,
     _check_completion,
     _dispatch_batch,
+    _enqueue_crawl_webhook,
     reenqueue_stalled,
 )
+from coordinator.models import WebhookDelivery
 from tests.conftest import make_crawl, make_mock_db, make_queue_item
 
 
@@ -253,3 +255,42 @@ async def test_dispatch_batch_no_publish_when_queue_empty():
         await _dispatch_batch(js)
 
     js.publish.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _enqueue_crawl_webhook
+# ---------------------------------------------------------------------------
+
+
+def test_enqueue_crawl_webhook_adds_row_with_correct_fields():
+    """
+    When webhook_url is set, db.add must be called once with a WebhookDelivery
+    whose crawl_id matches the crawl and whose payload carries the completion fields.
+    crawl_id is critical — omitting it violates the DB CHECK constraint.
+    """
+    crawl = make_crawl(webhook_url="https://hooks.example.com/crawl", total_completed=5, total_failed=1)
+    crawl.status = "completed"
+    db = make_mock_db(crawl=crawl)
+
+    _enqueue_crawl_webhook(db, crawl)
+
+    db.add.assert_called_once()
+    row = db.add.call_args.args[0]
+    assert isinstance(row, WebhookDelivery)
+    assert row.crawl_id == crawl.id
+    assert row.webhook_url == "https://hooks.example.com/crawl"
+    assert row.status == "pending"
+    assert row.payload["event"] == "crawl.completed"
+    assert row.payload["crawl_id"] == str(crawl.id)
+    assert row.payload["total_completed"] == 5
+    assert row.payload["total_failed"] == 1
+
+
+def test_enqueue_crawl_webhook_no_op_when_webhook_url_is_none():
+    """When webhook_url is None, db.add must not be called — no row inserted."""
+    crawl = make_crawl(webhook_url=None)
+    db = make_mock_db(crawl=crawl)
+
+    _enqueue_crawl_webhook(db, crawl)
+
+    db.add.assert_not_called()
