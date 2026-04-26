@@ -47,7 +47,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 37 — `_validate_no_ssrf` imported as internal symbol — **MEDIUM**
+#### [x] 37 — `_validate_no_ssrf` imported as internal symbol — **MEDIUM**
 
 - **File:** `api/app/core/webhook_loop.py:23`
 - **Issue:** `from app.core.security import _validate_no_ssrf` imports a private (underscore-prefixed) function, bypassing the public `validate_no_ssrf` adapter. This tightly couples the webhook loop to the module's internal API and would be silently broken if `_validate_no_ssrf` were renamed or refactored.

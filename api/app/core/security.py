@@ -5,11 +5,11 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, status
 
 
-def _validate_no_ssrf(url: str) -> None:
+def validate_no_ssrf_core(url: str) -> None:
     """Core SSRF check — raises ValueError if the URL targets a private/internal address.
 
-    Used by both the HTTP route layer (wrapped in validate_no_ssrf below) and the
-    webhook delivery loop, where HTTPException is not appropriate.
+    Use this in non-HTTP contexts (e.g. background tasks) where ValueError is handled
+    by the caller. HTTP route callers should use validate_no_ssrf instead.
     """
     hostname = urlparse(url).hostname
     if not hostname:
@@ -29,11 +29,10 @@ def _validate_no_ssrf(url: str) -> None:
 def validate_no_ssrf(url: str) -> None:
     """HTTP route SSRF check — raises HTTPException for API callers.
 
-    Thin adapter over _validate_no_ssrf. Use _validate_no_ssrf directly in
-    non-HTTP contexts (e.g. background tasks) where you handle ValueError yourself.
+    Thin adapter over validate_no_ssrf_core for use in FastAPI route handlers.
     """
     try:
-        _validate_no_ssrf(url)
+        validate_no_ssrf_core(url)
     except ValueError as exc:
         msg = str(exc)
         if "no hostname" in msg or "could not be resolved" in msg:

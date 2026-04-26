@@ -111,7 +111,7 @@ async def near_exhausted_delivery(job_with_webhook):
 # SSRF bypass — applied to every test in this file by default.
 #
 # The fixture URL (hooks.example.com) does not resolve in CI/test environments.
-# Without this patch, _validate_no_ssrf would raise ValueError("could not be
+# Without this patch, validate_no_ssrf_core would raise ValueError("could not be
 # resolved") and mark every delivery exhausted before the HTTP call is made,
 # breaking all non-SSRF tests.
 #
@@ -123,7 +123,7 @@ async def near_exhausted_delivery(job_with_webhook):
 
 @pytest.fixture(autouse=True)
 def _bypass_ssrf(monkeypatch):
-    monkeypatch.setattr("app.core.webhook_loop._validate_no_ssrf", lambda url: None)
+    monkeypatch.setattr("app.core.webhook_loop.validate_no_ssrf_core", lambda url: None)
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ async def test_network_error_backsoff(pending_delivery):
 async def test_ssrf_block_marks_exhausted_immediately(pending_delivery, monkeypatch):
     """A DNS-rebinding block marks the delivery exhausted without a retry attempt."""
     monkeypatch.setattr(
-        "app.core.webhook_loop._validate_no_ssrf",
+        "app.core.webhook_loop.validate_no_ssrf_core",
         lambda url: (_ for _ in ()).throw(
             ValueError("URL resolves to a private address: 169.254.169.254")
         ),
@@ -251,7 +251,7 @@ async def test_ssrf_block_marks_exhausted_immediately(pending_delivery, monkeypa
 async def test_ssrf_block_does_not_increment_attempts(pending_delivery, monkeypatch):
     """SSRF block does not count as a delivery attempt — attempts stays at 0."""
     monkeypatch.setattr(
-        "app.core.webhook_loop._validate_no_ssrf",
+        "app.core.webhook_loop.validate_no_ssrf_core",
         lambda url: (_ for _ in ()).throw(
             ValueError("URL resolves to a private address: 10.0.0.1")
         ),

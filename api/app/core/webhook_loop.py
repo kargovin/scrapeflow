@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.security import _validate_no_ssrf
+from app.core.security import validate_no_ssrf_core
 from app.models.batch import Batch
 from app.models.job import Job
 from app.models.webhook_delivery import WebhookDelivery
@@ -92,7 +92,9 @@ async def _attempt_delivery(
         # This check runs before incrementing attempts: a rebinding block is a
         # security event, not a real delivery attempt.
         try:
-            await get_running_loop().run_in_executor(None, _validate_no_ssrf, delivery.webhook_url)
+            await get_running_loop().run_in_executor(
+                None, validate_no_ssrf_core, delivery.webhook_url
+            )
         except ValueError as exc:
             delivery.status = "exhausted"
             delivery.last_error = f"ssrf_blocked: {exc}"
