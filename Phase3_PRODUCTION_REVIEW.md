@@ -159,7 +159,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 49 — `_dispatch_batch` in coordinator has no FOR UPDATE SKIP LOCKED — **HIGH**
+#### [x] 49 — `_dispatch_batch` in coordinator has no FOR UPDATE SKIP LOCKED — **HIGH**
 
 - **File:** `coordinator/coordinator/bfs.py:111-117`
 - **Issue:** The BFS dispatch query selects `pending` items with `ORDER BY created_at LIMIT batch_size` but has no `FOR UPDATE SKIP LOCKED`. If multiple coordinator replicas are deployed (or the coordinator restarts while items are selected), two replicas can select the same items concurrently, dispatching duplicate NATS messages for the same crawl page.
@@ -294,7 +294,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 13 (orig #49) — Coordinator `_dispatch_batch` has no `FOR UPDATE SKIP LOCKED` — **HIGH**
+#### [x] 13 (orig #49) — Coordinator `_dispatch_batch` has no `FOR UPDATE SKIP LOCKED` — **HIGH**
 
 - **File:** `coordinator/coordinator/bfs.py:111-117`
 - *(See item #49 in Part 1 — combined here for completeness)*

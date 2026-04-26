@@ -113,6 +113,7 @@ async def _dispatch_batch(js) -> None:
                 .where(CrawlQueueItem.status == "pending")
                 .order_by(CrawlQueueItem.created_at)
                 .limit(settings.dispatch_batch_size)
+                .with_for_update(skip_locked=True)
             )
         ).scalars().all()
 

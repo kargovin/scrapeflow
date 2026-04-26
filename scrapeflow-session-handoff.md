@@ -121,4 +121,5 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 10 | HIGH | MinIO orphan on LLM key deleted mid-schedule — delete object before marking failed | `[x]` done |
 | 11 | HIGH | Admin user delete leaks MinIO — stat/remove/decrement before cascade | `[x]` done |
 | 12 | HIGH | `cancelled` status never emits `pg_notify` from router — WebSocket hangs if NATS down | `[x]` done |
-| 13+ | HIGH–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
+| 13/49 | HIGH | Coordinator `_dispatch_batch` has no `FOR UPDATE SKIP LOCKED` — duplicate dispatch under multi-replica | `[x]` done |
+| 14+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending |
