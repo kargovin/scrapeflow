@@ -329,7 +329,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 17 (orig #26) — `_resolve_credentials` copy-pasted in two modules — **MEDIUM**
+#### [x] 17 (orig #26) — `_resolve_credentials` copy-pasted in two modules — **MEDIUM**
 
 - **File:** `api/app/routers/jobs.py:71`, `api/app/core/scheduler.py:32`
 - **Issue:** Identical function bodies. Adding a new secret type requires editing both files; they will inevitably diverge.
@@ -337,7 +337,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 18 (orig #27) — Stale-pending recovery threshold hardcoded — **MEDIUM**
+#### [x] 18 (orig #27) — Stale-pending recovery threshold hardcoded — **MEDIUM**
 
 - **File:** `api/app/core/scheduler.py:170`
 - **Issue:** `timedelta(minutes=10)` is hardcoded. Playwright + LLM jobs can legitimately take several minutes; 10-minute threshold may trigger spurious re-publishes.
@@ -345,7 +345,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 19 (orig #28) — Admin stats `list_objects` has no timeout or iteration cap — **MEDIUM**
+#### [x] 19 (orig #28) — Admin stats `list_objects` has no timeout or iteration cap — **MEDIUM**
 
 - **File:** `api/app/routers/admin.py:581`
 - **Issue:** The cold-cache MinIO enumeration iterates all objects with no timeout. A slow or unresponsive MinIO will block the admin stats endpoint indefinitely.
@@ -353,7 +353,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 20 (orig #12) — `batches.status` / `batch_items.status` have no DB CHECK constraint — **MEDIUM**
+#### [x] 20 (orig #12) — `batches.status` / `batch_items.status` have no DB CHECK constraint — **MEDIUM**
 
 - **File:** Migration `8d05cd602f03`
 - **Issue:** Both are `VARCHAR(20)` with no CHECK. A typo in application code can silently write a garbage status that never appears in any query filter.
