@@ -22,6 +22,7 @@ from miniopy_async import Minio
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from coordinator.constants import NATS_JOBS_RESULT_SUBJECT, NATS_STREAM_NAME
 from coordinator.db import AsyncSessionLocal
 from coordinator.link_extractor import extract_links
 from coordinator.models import Crawl, CrawlPage, CrawlQueueItem
@@ -29,9 +30,7 @@ from coordinator.sitemap import discover_sitemap_urls
 
 log = structlog.get_logger()
 
-RESULT_SUBJECT = "scrapeflow.jobs.result"
 DURABLE_NAME = "coordinator-result-consumer"
-STREAM_NAME = "SCRAPEFLOW"
 
 
 async def _fetch_minio_bytes(minio: Minio, minio_path: str) -> bytes:
@@ -145,8 +144,8 @@ async def _process_crawl_result(db, minio: Minio, data: dict) -> None:
 
 async def result_handler_loop(js, minio: Minio) -> None:
     """Pull crawl result messages and process them. Runs until cancelled."""
-    sub = await js.pull_subscribe(RESULT_SUBJECT, durable=DURABLE_NAME, stream=STREAM_NAME)
-    log.info("result_handler_subscribed", subject=RESULT_SUBJECT, durable=DURABLE_NAME)
+    sub = await js.pull_subscribe(NATS_JOBS_RESULT_SUBJECT, durable=DURABLE_NAME, stream=NATS_STREAM_NAME)
+    log.info("result_handler_subscribed", subject=NATS_JOBS_RESULT_SUBJECT, durable=DURABLE_NAME)
 
     backoff = 2
     while True:

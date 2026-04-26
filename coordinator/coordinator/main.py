@@ -17,12 +17,11 @@ from miniopy_async import Minio
 
 from coordinator.bfs import dispatch_loop, reenqueue_stalled
 from coordinator.config import settings
+from coordinator.constants import NATS_STREAM_NAME
 from coordinator.db import AsyncSessionLocal
 from coordinator.result_handler import result_handler_loop
 
 log = structlog.get_logger()
-
-STREAM_NAME = "SCRAPEFLOW"
 
 
 async def run() -> None:
@@ -42,9 +41,9 @@ async def run() -> None:
     js = nc.jetstream()
 
     try:
-        await js.stream_info(STREAM_NAME)
+        await js.stream_info(NATS_STREAM_NAME)
     except Exception as exc:
-        log.error("stream_not_found", stream=STREAM_NAME, error=str(exc))
+        log.error("stream_not_found", stream=NATS_STREAM_NAME, error=str(exc))
         await nc.drain()
         return
 

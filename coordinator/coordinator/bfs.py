@@ -14,13 +14,11 @@ import structlog
 from sqlalchemy import func, select, update
 
 from coordinator.config import settings
+from coordinator.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from coordinator.db import AsyncSessionLocal
 from coordinator.models import Crawl, CrawlPage, CrawlQueueItem, WebhookDelivery
 
 log = structlog.get_logger()
-
-HTTP_SUBJECT = "scrapeflow.jobs.run.http"
-PLAYWRIGHT_SUBJECT = "scrapeflow.jobs.run.playwright"
 
 _ACTIVE_STATUSES = frozenset({"queued", "running"})
 _TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "skipped"})
@@ -143,7 +141,7 @@ async def _dispatch_batch(js) -> None:
             item.crawl_page_id = page.id
             item.dispatched_at = now
 
-            subject = PLAYWRIGHT_SUBJECT if crawl.engine == "playwright" else HTTP_SUBJECT
+            subject = NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT if crawl.engine == "playwright" else NATS_JOBS_RUN_HTTP_SUBJECT
             payload = json.dumps({
                 "schema_version": 2,
                 "job_id": str(page.id),   # crawl_page_id used as job_id for MinIO path
