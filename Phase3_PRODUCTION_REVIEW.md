@@ -123,7 +123,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 45 — `validate_cron_min_interval` uses naive (non-UTC) datetime — **MEDIUM**
+#### [x] 45 — `validate_cron_min_interval` uses naive (non-UTC) datetime — **MEDIUM**
 
 - **File:** `api/app/routers/jobs.py:101`
 - **Issue:** `datetime.now()` (no timezone) is passed as the croniter base. The rest of the codebase uses `datetime.now(UTC)` consistently. On servers in a non-UTC timezone (or near DST transitions), the minimum-interval validation can silently pass for a schedule that would fail in UTC.
@@ -147,7 +147,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 48 — WebSocket handlers have no connection timeout — **MEDIUM**
+#### [x] 48 — WebSocket handlers have no connection timeout — **MEDIUM**
 
 - **File:** `api/app/routers/jobs.py:741-763`, `api/app/routers/batch.py:260-281`
 - **Issue:** Both WebSocket handlers block indefinitely waiting on `queue.get()`. If a job is permanently stuck in a non-terminal state (NATS down after `running` is published but before the result arrives), the WebSocket connection never closes. Under load, this can exhaust server file descriptors.
@@ -375,13 +375,13 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 23 (orig #45) — `validate_cron_min_interval` uses naive datetime — **MEDIUM**
+#### [x] 23 (orig #45) — `validate_cron_min_interval` uses naive datetime — **MEDIUM**
 
 - *(See item #45 in Part 1)*
 
 ---
 
-#### [ ] 24 (orig #48) — WebSocket handlers have no connection timeout — **MEDIUM**
+#### [x] 24 (orig #48) — WebSocket handlers have no connection timeout — **MEDIUM**
 
 - *(See item #48 in Part 1)*
 

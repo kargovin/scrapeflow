@@ -1,3 +1,4 @@
+import asyncio
 import json
 import secrets
 import uuid
@@ -278,7 +279,11 @@ async def batch_status_stream(
     notifier = websocket.app.state.job_notifier
     async with notifier.subscribe_batch(batch_id_str) as queue:
         while True:
-            update = await queue.get()
+            try:
+                update = await asyncio.wait_for(queue.get(), timeout=300)
+            except TimeoutError:
+                await websocket.send_json({"type": "timeout"})
+                break
             new_status = update.get("status", "")
             msg: dict = {
                 "type": "batch_progress"

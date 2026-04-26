@@ -1,3 +1,4 @@
+import asyncio
 import json
 import secrets
 import uuid
@@ -70,7 +71,7 @@ async def check_job_quota(
 
 
 def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
-    base = datetime.now()
+    base = datetime.now(UTC)
     c = croniter(cron_expr, base)
     prev = c.get_next(datetime)
     cutoff = base + timedelta(minutes=min_minutes * 2)
@@ -725,7 +726,11 @@ async def job_status_stream(
     notifier = websocket.app.state.job_notifier
     async with notifier.subscribe_job(job_id_str) as queue:
         while True:
-            update = await queue.get()
+            try:
+                update = await asyncio.wait_for(queue.get(), timeout=300)
+            except TimeoutError:
+                await websocket.send_json({"type": "timeout"})
+                break
             new_status = update["status"]
             if new_status in _TERMINAL_STATUSES:
                 msg: dict = {
