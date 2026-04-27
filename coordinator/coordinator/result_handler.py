@@ -131,6 +131,12 @@ async def _process_crawl_result(db, minio: Minio, data: dict) -> None:
         page.status = "running"
         return
 
+    # Idempotency guard: if the coordinator crashed after db.commit() but before
+    # msg.ack(), NATS redelivers this message. The page is already terminal — skip
+    # to avoid double-counting total_completed / total_failed.
+    if page.status in ("completed", "failed"):
+        return
+
     # Terminal result — update crawl_queue item that was linked to this page.
     queue_terminal = "completed" if worker_status == "completed" else "failed"
     await db.execute(

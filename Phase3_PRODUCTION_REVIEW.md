@@ -176,11 +176,19 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 51 — `result_handler_loop` does not handle coordinator restart mid-crawl cleanly — **MEDIUM**
+#### [x] 51 — `result_handler_loop` does not handle coordinator restart mid-crawl cleanly — **MEDIUM**
 
 - **File:** `coordinator/coordinator/result_handler.py:146-192`
 - **Issue:** On coordinator restart, `reenqueue_stalled` resets `dispatched` items to `pending`. But `running` items (where the worker published a "running" result) are not reset — they remain in `running` status in `crawl_queue`. If the worker then publishes "completed", the coordinator's `result_handler` updates `crawl_queue` via `CrawlQueueItem.crawl_page_id == crawl_page_id`, but if the `crawl_page_id` was already reset by `reenqueue_stalled`, the update hits zero rows and the completion is silently lost.
 - **Fix:** Include `running` items (not just `dispatched`) in `reenqueue_stalled`'s reset condition, or treat them differently.
+
+---
+
+#### [x] 52 — `_process_crawl_result` is not idempotent on NATS redelivery — **MEDIUM**
+
+- **File:** `coordinator/coordinator/result_handler.py`
+- **Issue:** If the coordinator commits a terminal result to the DB but crashes before calling `msg.ack()`, NATS JetStream redelivers the message. `_process_crawl_result` runs again for the same `crawl_page_id` — `crawl.total_completed` (or `total_failed`) is incremented a second time, corrupting the crawl counters that surface in `GET /crawls/{id}`.
+- **Fix:** Added an early-return guard after the `"running"` branch: if `page.status` is already `"completed"` or `"failed"`, return immediately. The `"running"` branch is safe to re-apply (idempotent by nature). 2 new tests — 48 coordinator tests passing.
 
 ---
 

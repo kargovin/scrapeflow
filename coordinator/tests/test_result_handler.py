@@ -295,3 +295,46 @@ async def test_missing_page_returns_without_error():
     data = make_result_data(crawl_id=str(crawl_id), crawl_page_id=str(page_id))
 
     await _process_crawl_result(db, AsyncMock(), data)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Idempotency guard (NATS redelivery after crash-before-ack)
+# ---------------------------------------------------------------------------
+
+
+async def test_redelivered_completed_result_is_idempotent():
+    """
+    If the coordinator crashes after db.commit() but before msg.ack(), NATS
+    redelivers the message. _process_crawl_result must detect the page is already
+    'completed' and return early — total_completed must not be incremented again.
+    """
+    crawl_id = uuid.uuid4()
+    page_id = uuid.uuid4()
+    crawl = make_crawl(crawl_id=crawl_id, total_completed=1)
+    page = make_page(page_id=page_id, crawl_id=crawl_id, status="completed")
+    db = make_mock_db(crawl=crawl, page=page)
+
+    data = make_result_data(crawl_id=str(crawl_id), crawl_page_id=str(page_id), status="completed")
+
+    await _process_crawl_result(db, AsyncMock(), data)
+
+    assert crawl.total_completed == 1  # unchanged — idempotency guard fired
+    db.execute.assert_not_called()
+
+
+async def test_redelivered_failed_result_is_idempotent():
+    """
+    Same redelivery scenario for a failed page — total_failed must not increment again.
+    """
+    crawl_id = uuid.uuid4()
+    page_id = uuid.uuid4()
+    crawl = make_crawl(crawl_id=crawl_id, total_failed=2)
+    page = make_page(page_id=page_id, crawl_id=crawl_id, status="failed")
+    db = make_mock_db(crawl=crawl, page=page)
+
+    data = make_result_data(crawl_id=str(crawl_id), crawl_page_id=str(page_id), status="failed")
+
+    await _process_crawl_result(db, AsyncMock(), data)
+
+    assert crawl.total_failed == 2  # unchanged
+    db.execute.assert_not_called()
