@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import delete, select
 
 from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RUN_HTTP_SUBJECT
@@ -14,6 +15,7 @@ from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
 from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
+from app.settings import settings
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -1063,7 +1065,7 @@ async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstre
 
 async def test_create_job_with_proxy_url(client, auth_headers, mock_jetstream):
     """POST /jobs with proxy_url stores encrypted secret, sets has_proxy=True,
-    omits proxy_url from response body, and injects decrypted credentials into NATS."""
+    omits proxy_url from response body, and injects encrypted credentials into NATS."""
     proxy_url = "http://user:pass@proxy.example.com:8080"
     response = await client.post(
         "/jobs",
@@ -1075,11 +1077,13 @@ async def test_create_job_with_proxy_url(client, auth_headers, mock_jetstream):
     assert data["has_proxy"] is True
     assert "proxy_url" not in data
 
-    # NATS message carries decrypted proxy_url in credentials
+    # NATS message carries Fernet-encrypted proxy_url — never plaintext in transit
     mock_jetstream.publish.assert_called_once()
     _, call_payload = mock_jetstream.publish.call_args.args
     published = json.loads(call_payload.decode())
-    assert published["credentials"] == {"proxy_url": proxy_url}
+    f = Fernet(settings.credentials_encryption_key)
+    decrypted_proxy = f.decrypt(published["credentials"]["encrypted_proxy_url"].encode()).decode()
+    assert decrypted_proxy == proxy_url
 
     # Secret was persisted (encrypted) in DB
     from app.models.job_secrets import JobSecrets, JobSecretType
@@ -1098,12 +1102,10 @@ async def test_create_job_with_proxy_url(client, auth_headers, mock_jetstream):
 
 async def test_create_job_default_proxy(client, auth_headers, mock_jetstream):
     """When no per-job proxy_url is given but default_proxy_url is configured,
-    the platform default appears in credentials in the NATS message."""
-    from app.settings import settings as app_settings
-
+    the platform default appears encrypted in credentials in the NATS message."""
     default_proxy = "http://platform-proxy.example.com:3128"
-    original = app_settings.default_proxy_url
-    app_settings.default_proxy_url = default_proxy
+    original = settings.default_proxy_url
+    settings.default_proxy_url = default_proxy
     try:
         response = await client.post(
             "/jobs",
@@ -1115,9 +1117,13 @@ async def test_create_job_default_proxy(client, auth_headers, mock_jetstream):
         assert data["has_proxy"] is False  # no per-job secret, only platform default
         _, call_payload = mock_jetstream.publish.call_args.args
         published = json.loads(call_payload.decode())
-        assert published["credentials"] == {"proxy_url": default_proxy}
+        f = Fernet(settings.credentials_encryption_key)
+        decrypted_proxy = f.decrypt(
+            published["credentials"]["encrypted_proxy_url"].encode()
+        ).decode()
+        assert decrypted_proxy == default_proxy
     finally:
-        app_settings.default_proxy_url = original
+        settings.default_proxy_url = original
 
 
 async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_jetstream):
@@ -1188,7 +1194,7 @@ async def test_patch_job_remove_proxy(client, auth_headers, mock_jetstream):
 
 async def test_create_job_with_cookies(client, auth_headers, mock_jetstream):
     """POST /jobs with cookies stores encrypted secret, sets has_cookies=True,
-    omits cookies from response body, and injects decrypted credentials into NATS."""
+    omits cookies from response body, and injects encrypted credentials into NATS."""
     cookies = [{"name": "session", "value": "abc123", "domain": "example.com"}]
     response = await client.post(
         "/jobs",
@@ -1200,11 +1206,15 @@ async def test_create_job_with_cookies(client, auth_headers, mock_jetstream):
     assert data["has_cookies"] is True
     assert "cookies" not in data
 
-    # NATS message carries decrypted cookies in credentials
+    # NATS message carries Fernet-encrypted cookies — never plaintext in transit
     mock_jetstream.publish.assert_called_once()
     _, call_payload = mock_jetstream.publish.call_args.args
     published = json.loads(call_payload.decode())
-    assert published["credentials"]["cookies"] == cookies
+    f = Fernet(settings.credentials_encryption_key)
+    decrypted_cookies = json.loads(
+        f.decrypt(published["credentials"]["encrypted_cookies"].encode()).decode()
+    )
+    assert decrypted_cookies == cookies
 
     # Secret was persisted (encrypted) in DB
     from app.models.job_secrets import JobSecrets, JobSecretType
@@ -1238,8 +1248,13 @@ async def test_create_job_cookies_and_proxy(client, auth_headers, mock_jetstream
     mock_jetstream.publish.assert_called_once()
     _, call_payload = mock_jetstream.publish.call_args.args
     published = json.loads(call_payload.decode())
-    assert published["credentials"]["cookies"] == cookies
-    assert published["credentials"]["proxy_url"] == proxy_url
+    f = Fernet(settings.credentials_encryption_key)
+    decrypted_cookies = json.loads(
+        f.decrypt(published["credentials"]["encrypted_cookies"].encode()).decode()
+    )
+    decrypted_proxy = f.decrypt(published["credentials"]["encrypted_proxy_url"].encode()).decode()
+    assert decrypted_cookies == cookies
+    assert decrypted_proxy == proxy_url
 
 
 async def test_patch_job_cookies_upsert(client, auth_headers, mock_jetstream):
