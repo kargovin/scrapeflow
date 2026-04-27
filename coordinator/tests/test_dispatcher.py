@@ -1,12 +1,12 @@
 """
-Unit tests for coordinator/bfs.py.
+Unit tests for coordinator/dispatcher.py and completion helpers in result_handler.py.
 
 DB and NATS are mocked — no live infrastructure required.
 
 Key helpers under test:
-  reenqueue_stalled(db)       — resets stale dispatched items to pending on startup
-  _check_completion(db, crawl)— marks crawl completed when queue is empty
-  _dispatch_batch(js)         — creates crawl_pages, publishes NATS, updates queue items
+  reenqueue_stalled(db)        — resets stale dispatched items to pending on startup
+  check_completion(db, crawl)  — marks crawl completed when queue is empty
+  _dispatch_batch(js)          — creates crawl_pages, publishes NATS, updates queue items
 """
 
 import json
@@ -16,15 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coordinator.bfs import (
-    HTTP_SUBJECT,
-    PLAYWRIGHT_SUBJECT,
-    _check_completion,
-    _dispatch_batch,
-    _enqueue_crawl_webhook,
-    reenqueue_stalled,
+from coordinator.constants import (
+    NATS_JOBS_RUN_HTTP_SUBJECT as HTTP_SUBJECT,
+    NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT as PLAYWRIGHT_SUBJECT,
 )
+from coordinator.dispatcher import _dispatch_batch, reenqueue_stalled
 from coordinator.models import WebhookDelivery
+from coordinator.result_handler import check_completion, enqueue_crawl_webhook
 from tests.conftest import make_crawl, make_mock_db, make_queue_item
 
 
@@ -56,7 +54,7 @@ async def test_reenqueue_stalled_zero_rows_no_error():
 
 
 # ---------------------------------------------------------------------------
-# _check_completion
+# check_completion
 # ---------------------------------------------------------------------------
 
 
@@ -69,7 +67,7 @@ async def test_check_completion_marks_crawl_when_queue_empty():
     db = make_mock_db(crawl=crawl)
     db.scalar = AsyncMock(return_value=0)
 
-    result = await _check_completion(db, crawl)
+    result = await check_completion(db, crawl)
 
     assert result is True
     assert crawl.status == "completed"
@@ -85,7 +83,7 @@ async def test_check_completion_no_action_when_items_remain():
     db = make_mock_db(crawl=crawl)
     db.scalar = AsyncMock(return_value=5)
 
-    result = await _check_completion(db, crawl)
+    result = await check_completion(db, crawl)
 
     assert result is False
     assert crawl.status == "running"
@@ -98,13 +96,7 @@ async def test_check_completion_no_action_when_items_remain():
 
 
 def _make_session_ctx(db):
-    """
-    Return a callable that always yields `db` as an async context manager.
-
-    _dispatch_batch calls AsyncSessionLocal() twice (one session for dispatch,
-    one for completion check). Both calls must yield the same mock db so that
-    assertions on db state are coherent.
-    """
+    """Return a callable that always yields `db` as an async context manager."""
 
     @asynccontextmanager
     async def _ctx():
@@ -131,7 +123,7 @@ async def test_dispatch_batch_publishes_to_http_subject_for_http_engine():
 
     js = AsyncMock()
 
-    with patch("coordinator.bfs.AsyncSessionLocal", _make_session_ctx(db)):
+    with patch("coordinator.dispatcher.AsyncSessionLocal", _make_session_ctx(db)):
         await _dispatch_batch(js)
 
     js.publish.assert_called_once()
@@ -154,7 +146,7 @@ async def test_dispatch_batch_publishes_to_playwright_subject_for_playwright_eng
 
     js = AsyncMock()
 
-    with patch("coordinator.bfs.AsyncSessionLocal", _make_session_ctx(db)):
+    with patch("coordinator.dispatcher.AsyncSessionLocal", _make_session_ctx(db)):
         await _dispatch_batch(js)
 
     subject = js.publish.call_args.args[0]
@@ -179,7 +171,7 @@ async def test_dispatch_batch_payload_contains_crawl_context():
 
     js = AsyncMock()
 
-    with patch("coordinator.bfs.AsyncSessionLocal", _make_session_ctx(db)):
+    with patch("coordinator.dispatcher.AsyncSessionLocal", _make_session_ctx(db)):
         await _dispatch_batch(js)
 
     _, payload_bytes = js.publish.call_args.args
@@ -209,7 +201,7 @@ async def test_dispatch_batch_skips_cancelled_crawl():
 
     js = AsyncMock()
 
-    with patch("coordinator.bfs.AsyncSessionLocal", _make_session_ctx(db)):
+    with patch("coordinator.dispatcher.AsyncSessionLocal", _make_session_ctx(db)):
         await _dispatch_batch(js)
 
     js.publish.assert_not_called()
@@ -234,7 +226,7 @@ async def test_dispatch_batch_transitions_queued_to_running():
 
     js = AsyncMock()
 
-    with patch("coordinator.bfs.AsyncSessionLocal", _make_session_ctx(db)):
+    with patch("coordinator.dispatcher.AsyncSessionLocal", _make_session_ctx(db)):
         await _dispatch_batch(js)
 
     assert crawl.status == "running"
@@ -251,14 +243,14 @@ async def test_dispatch_batch_no_publish_when_queue_empty():
 
     js = AsyncMock()
 
-    with patch("coordinator.bfs.AsyncSessionLocal", _make_session_ctx(db)):
+    with patch("coordinator.dispatcher.AsyncSessionLocal", _make_session_ctx(db)):
         await _dispatch_batch(js)
 
     js.publish.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# _enqueue_crawl_webhook
+# enqueue_crawl_webhook
 # ---------------------------------------------------------------------------
 
 
@@ -272,7 +264,7 @@ def test_enqueue_crawl_webhook_adds_row_with_correct_fields():
     crawl.status = "completed"
     db = make_mock_db(crawl=crawl)
 
-    _enqueue_crawl_webhook(db, crawl)
+    enqueue_crawl_webhook(db, crawl)
 
     db.add.assert_called_once()
     row = db.add.call_args.args[0]
@@ -291,6 +283,6 @@ def test_enqueue_crawl_webhook_no_op_when_webhook_url_is_none():
     crawl = make_crawl(webhook_url=None)
     db = make_mock_db(crawl=crawl)
 
-    _enqueue_crawl_webhook(db, crawl)
+    enqueue_crawl_webhook(db, crawl)
 
     db.add.assert_not_called()

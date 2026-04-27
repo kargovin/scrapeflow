@@ -15,7 +15,7 @@ import nats
 import structlog
 from miniopy_async import Minio
 
-from coordinator.bfs import dispatch_loop, reenqueue_stalled
+from coordinator.dispatcher import dispatch_loop, reenqueue_stalled
 from coordinator.config import settings
 from coordinator.constants import NATS_STREAM_NAME
 from coordinator.db import AsyncSessionLocal
