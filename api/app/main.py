@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 import httpx
@@ -149,7 +150,6 @@ app.include_router(admin.router)
 
 # Admin SPA — mounted last so FastAPI routes at /admin/* take precedence.
 # Conditional: skipped when frontend/dist is absent (local dev, test builds).
-import os  # noqa: E402
 
 if os.path.isdir("frontend/dist"):
     from fastapi.staticfiles import StaticFiles
