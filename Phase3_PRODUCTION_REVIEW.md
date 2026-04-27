@@ -140,11 +140,11 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 47 — `email.ilike` search has no index — **LOW**
+#### [x] 47 — `email.ilike` search has no index — **LOW**
 
 - **File:** `api/app/routers/admin.py:100`
 - **Issue:** `User.email.ilike(f"%{email}%")` uses a leading wildcard, preventing B-tree index usage. On a large user table this is a sequential scan.
-- **Fix:** Add a GIN `pg_trgm` index on `users.email` if email search is expected to be frequent. Otherwise, document the limitation.
+- **Fix:** Migration 3.17 — `CREATE EXTENSION IF NOT EXISTS pg_trgm` + GIN index `idx_users_email_trgm ON users USING gin (email gin_trgm_ops)`. Index declared in `User.__table_args__` to keep model and DB in sync.
 
 ---
 
@@ -473,7 +473,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 37 (orig #47) — `email.ilike` search has no index — **LOW**
+#### [x] 37 (orig #47) — `email.ilike` search has no index — **LOW**
 
 - *(See item #47 in Part 1)*
 

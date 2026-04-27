@@ -131,5 +131,6 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 41 | MEDIUM | `result_consumer.py` monolith — `handle_storage_quota_exceeded` moved to `quota.py`; `delete_minio_object` + `stat_minio_size` extracted to new `api/app/core/storage.py`; admin.py inline stat+delete loops replaced; bool return on delete for conditional accounting | `[x]` done |
 | 44 | LOW | `JobNotifier` subscriber queues unbounded — `asyncio.Queue(maxsize=100)` on both `subscribe_job`/`subscribe_batch`; `await queue.put` → `put_nowait` + `QueueFull` drop+log in both notify callbacks | `[x]` done |
 | 46 | LOW | `import os` at module bottom in `main.py` — already fixed (line 2) | `[x]` done |
+| 47 | LOW | `email.ilike` search has no index — Migration 3.17: `pg_trgm` extension + GIN index `idx_users_email_trgm ON users USING gin (email gin_trgm_ops)`; declared in `User.__table_args__` | `[x]` done |
 | 43 | LOW | Content hash re-reads freshly-written MinIO object — deferred; fix requires schema_version 3 worker contract change; bundle with other Phase 4 worker changes | `[ ]` deferred to Phase 4 |
 | 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; next up: #21 (k8s manifest missing `SCHEDULE_MIN_INTERVAL_MINUTES`) |
