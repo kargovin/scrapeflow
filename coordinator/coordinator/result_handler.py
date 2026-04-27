@@ -19,18 +19,64 @@ import nats
 import nats.errors
 import structlog
 from miniopy_async import Minio
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from coordinator.constants import NATS_JOBS_RESULT_SUBJECT, NATS_STREAM_NAME
 from coordinator.db import AsyncSessionLocal
 from coordinator.link_extractor import extract_links
-from coordinator.models import Crawl, CrawlPage, CrawlQueueItem
+from coordinator.models import Crawl, CrawlPage, CrawlQueueItem, WebhookDelivery
 from coordinator.sitemap import discover_sitemap_urls
 
 log = structlog.get_logger()
 
 DURABLE_NAME = "coordinator-result-consumer"
+
+_TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "skipped"})
+
+
+def enqueue_crawl_webhook(db, crawl: Crawl) -> None:
+    """Insert a pending WebhookDelivery row. Caller owns the transaction."""
+    if not crawl.webhook_url:
+        return
+    db.add(WebhookDelivery(
+        crawl_id=crawl.id,
+        webhook_url=crawl.webhook_url,
+        payload={
+            "event": "crawl.completed",
+            "crawl_id": str(crawl.id),
+            "status": crawl.status,
+            "total_queued": crawl.total_queued,
+            "total_completed": crawl.total_completed,
+            "total_failed": crawl.total_failed,
+            "completed_at": crawl.completed_at.isoformat() if crawl.completed_at else None,
+        },
+        status="pending",
+        next_attempt_at=datetime.now(UTC),
+    ))
+
+
+async def check_completion(db, crawl: Crawl) -> bool:
+    """Return True and mark completed if no pending or dispatched queue items remain."""
+    active_count = await db.scalar(
+        select(func.count())
+        .select_from(CrawlQueueItem)
+        .where(
+            CrawlQueueItem.crawl_id == crawl.id,
+            CrawlQueueItem.status.not_in(list(_TERMINAL_QUEUE_STATUSES)),
+        )
+    )
+    if active_count == 0:
+        crawl.status = "completed"
+        crawl.completed_at = datetime.now(UTC)
+        log.info(
+            "crawl_completed",
+            crawl_id=str(crawl.id),
+            total_completed=crawl.total_completed,
+            total_failed=crawl.total_failed,
+        )
+        return True
+    return False
 
 
 async def _fetch_minio_bytes(minio: Minio, minio_path: str) -> bytes:
@@ -140,6 +186,11 @@ async def _process_crawl_result(db, minio: Minio, data: dict) -> None:
         page.error = error
         page.completed_at = now
         crawl.total_failed += 1
+
+    if crawl.status == "running":
+        completed = await check_completion(db, crawl)
+        if completed:
+            enqueue_crawl_webhook(db, crawl)
 
 
 async def result_handler_loop(js, minio: Minio) -> None:

@@ -168,7 +168,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 50 — `_check_completion` runs inside `_dispatch_batch` after-commit but in a new session without FOR UPDATE — **MEDIUM**
+#### [x] 50 — `_check_completion` runs inside `_dispatch_batch` after-commit but in a new session without FOR UPDATE — **MEDIUM**
 
 - **File:** `coordinator/coordinator/bfs.py:183-190`
 - **Issue:** After committing the dispatch transaction, a second session opens to check crawl completion. Between the two sessions, another dispatcher could add new queue items. The completion check could fire prematurely, marking the crawl `completed` while items are still in-flight.
