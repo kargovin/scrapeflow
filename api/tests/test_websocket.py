@@ -412,3 +412,65 @@ async def test_batch_watch_streams_progress():
 
     assert messages[2]["type"] == "completed"
     assert messages[2]["completed"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Connection limit (item #39)
+# ---------------------------------------------------------------------------
+
+
+async def test_job_watch_connection_limit_exceeded():
+    """User at connection cap → close 4029."""
+    user = _user()
+    job = _job(user.id)
+    run = _run(job.id, "running")
+    app.state.job_notifier = MockJobNotifier(raise_limit=True)
+    app.dependency_overrides[get_db] = _override_db(_db_with_job_run(job, run))
+
+    messages = []
+
+    def _do():
+        with patched_ws_app(), TestClient(app, raise_server_exceptions=False) as client:
+            with patch("app.routers.jobs.auth_from_token", new=AsyncMock(return_value=user)):
+                try:
+                    with client.websocket_connect(f"/jobs/{job.id}/watch?token=sf_any") as ws:
+                        ws.receive_json()  # initial status message sent before subscribe
+                        ws.receive_text()  # close frame → raises
+                except WebSocketDisconnect as e:
+                    messages.append(e.code)
+
+    try:
+        await asyncio.to_thread(_do)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.state.job_notifier = None
+
+    assert messages == [4029]
+
+
+async def test_batch_watch_connection_limit_exceeded():
+    """User at connection cap → close 4029."""
+    user = _user()
+    batch = _batch(user.id, "running")
+    app.state.job_notifier = MockJobNotifier(raise_limit=True)
+    app.dependency_overrides[get_db] = _override_db(_db_with_batch(batch))
+
+    messages = []
+
+    def _do():
+        with patched_ws_app(), TestClient(app, raise_server_exceptions=False) as client:
+            with patch("app.routers.batch.auth_from_token", new=AsyncMock(return_value=user)):
+                try:
+                    with client.websocket_connect(f"/batch/{batch.id}/watch?token=sf_any") as ws:
+                        ws.receive_json()  # initial progress message sent before subscribe
+                        ws.receive_text()  # close frame → raises
+                except WebSocketDisconnect as e:
+                    messages.append(e.code)
+
+    try:
+        await asyncio.to_thread(_do)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.state.job_notifier = None
+
+    assert messages == [4029]

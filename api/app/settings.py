@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Rate limiting — per-user sliding window (Redis sorted set + Lua)
     rate_limit_requests: int = 60  # max requests allowed per window
     rate_limit_window_seconds: int = 60  # window size in seconds
+    ws_max_connections_per_user: int = 25  # max concurrent WebSocket connections per user
 
     # LLM
     llm_key_encryption_key: str = Field(

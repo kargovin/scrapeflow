@@ -17,6 +17,7 @@ from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
 from app.core.encryption import get_fernet
+from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.nats import get_jetstream
 from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit_n
@@ -277,31 +278,35 @@ async def batch_status_stream(
     await websocket.send_json(_batch_progress_msg(batch))
 
     notifier = websocket.app.state.job_notifier
-    async with notifier.subscribe_batch(batch_id_str) as queue:
-        while True:
-            try:
-                update = await asyncio.wait_for(queue.get(), timeout=300)
-            except TimeoutError:
-                await websocket.send_json({"type": "timeout"})
-                break
-            new_status = update.get("status", "")
-            msg: dict = {
-                "type": "batch_progress"
-                if new_status not in _BATCH_TERMINAL_STATUSES
-                else new_status,
-                "batch_id": batch_id_str,
-                "total": update.get("total", batch.total),
-                "completed": update.get("completed", batch.completed),
-                "failed": update.get("failed", batch.failed),
-                "status": new_status,
-            }
-            if update.get("item_url"):
-                msg["latest_item"] = {
-                    "url": update["item_url"],
-                    "status": update.get("item_status", ""),
+    try:
+        async with notifier.subscribe_batch(batch_id_str, str(user.id)) as queue:
+            while True:
+                try:
+                    update = await asyncio.wait_for(queue.get(), timeout=300)
+                except TimeoutError:
+                    await websocket.send_json({"type": "timeout"})
+                    break
+                new_status = update.get("status", "")
+                msg: dict = {
+                    "type": "batch_progress"
+                    if new_status not in _BATCH_TERMINAL_STATUSES
+                    else new_status,
+                    "batch_id": batch_id_str,
+                    "total": update.get("total", batch.total),
+                    "completed": update.get("completed", batch.completed),
+                    "failed": update.get("failed", batch.failed),
+                    "status": new_status,
                 }
-            await websocket.send_json(msg)
-            if new_status in _BATCH_TERMINAL_STATUSES:
-                break
+                if update.get("item_url"):
+                    msg["latest_item"] = {
+                        "url": update["item_url"],
+                        "status": update.get("item_status", ""),
+                    }
+                await websocket.send_json(msg)
+                if new_status in _BATCH_TERMINAL_STATUSES:
+                    break
+    except WebSocketConnectionLimitExceeded:
+        await websocket.close(code=4029, reason="connection limit exceeded")
+        return
 
     await websocket.close()

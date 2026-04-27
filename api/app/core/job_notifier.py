@@ -6,10 +6,16 @@ from contextlib import asynccontextmanager
 import asyncpg
 import structlog
 
+from app.settings import settings
+
 logger = structlog.get_logger()
 
 _JOB_CHANNEL = "job_status"
 _BATCH_CHANNEL = "batch_status"
+
+
+class WebSocketConnectionLimitExceeded(Exception):
+    pass
 
 
 class JobNotifier:
@@ -24,6 +30,7 @@ class JobNotifier:
         self._conn: asyncpg.Connection | None = None
         self._job_waiters: dict[str, list[asyncio.Queue]] = defaultdict(list)
         self._batch_waiters: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        self._user_connection_counts: dict[str, int] = defaultdict(int)
 
     async def start(self, dsn: str) -> None:
         self._conn = await asyncpg.connect(dsn)
@@ -46,7 +53,10 @@ class JobNotifier:
             logger.warning("job_notifier: malformed job_status payload", payload=payload)
             return
         for queue in list(self._job_waiters.get(job_id, [])):
-            await queue.put({"run_id": run_id, "status": new_status})
+            try:
+                queue.put_nowait({"run_id": run_id, "status": new_status})
+            except asyncio.QueueFull:
+                logger.warning("job_notifier: dropped update, subscriber queue full", job_id=job_id)
 
     async def _on_batch_notify(
         self, conn: asyncpg.Connection, pid: int, channel: str, payload: str
@@ -59,11 +69,22 @@ class JobNotifier:
             return
         batch_id = data.get("batch_id", "")
         for queue in list(self._batch_waiters.get(batch_id, [])):
-            await queue.put(data)
+            try:
+                queue.put_nowait(data)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "job_notifier: dropped update, subscriber queue full", batch_id=batch_id
+                )
 
     @asynccontextmanager
-    async def subscribe_job(self, job_id: str):
-        queue: asyncio.Queue = asyncio.Queue()
+    async def subscribe_job(self, job_id: str, user_id: str):
+        limit = settings.ws_max_connections_per_user
+        if self._user_connection_counts[user_id] >= limit:
+            raise WebSocketConnectionLimitExceeded(
+                f"Maximum {limit} concurrent WebSocket connections exceeded"
+            )
+        self._user_connection_counts[user_id] += 1
+        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         self._job_waiters[job_id].append(queue)
         try:
             yield queue
@@ -74,10 +95,19 @@ class JobNotifier:
                 pass
             if not self._job_waiters.get(job_id):
                 self._job_waiters.pop(job_id, None)
+            self._user_connection_counts[user_id] -= 1
+            if not self._user_connection_counts[user_id]:
+                self._user_connection_counts.pop(user_id, None)
 
     @asynccontextmanager
-    async def subscribe_batch(self, batch_id: str):
-        queue: asyncio.Queue = asyncio.Queue()
+    async def subscribe_batch(self, batch_id: str, user_id: str):
+        limit = settings.ws_max_connections_per_user
+        if self._user_connection_counts[user_id] >= limit:
+            raise WebSocketConnectionLimitExceeded(
+                f"Maximum {limit} concurrent WebSocket connections exceeded"
+            )
+        self._user_connection_counts[user_id] += 1
+        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         self._batch_waiters[batch_id].append(queue)
         try:
             yield queue
@@ -88,3 +118,6 @@ class JobNotifier:
                 pass
             if not self._batch_waiters.get(batch_id):
                 self._batch_waiters.pop(batch_id, None)
+            self._user_connection_counts[user_id] -= 1
+            if not self._user_connection_counts[user_id]:
+                self._user_connection_counts.pop(user_id, None)

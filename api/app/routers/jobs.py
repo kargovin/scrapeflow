@@ -29,6 +29,7 @@ from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.credentials import resolve_credentials
 from app.core.db import get_db
+from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
 from app.core.quota import check_user_quota, decrement_storage_bytes
@@ -724,32 +725,36 @@ async def job_status_stream(
     await websocket.send_json(_status_msg(job_id_str, run))
 
     notifier = websocket.app.state.job_notifier
-    async with notifier.subscribe_job(job_id_str) as queue:
-        while True:
-            try:
-                update = await asyncio.wait_for(queue.get(), timeout=300)
-            except TimeoutError:
-                await websocket.send_json({"type": "timeout"})
-                break
-            new_status = update["status"]
-            if new_status in _TERMINAL_STATUSES:
-                msg: dict = {
-                    "type": new_status,
-                    "job_id": job_id_str,
-                    "run_id": update["run_id"],
-                    "status": new_status,
-                }
-                if new_status == "completed":
-                    msg["result_url"] = f"/jobs/{job_id_str}/result"
-                await websocket.send_json(msg)
-                break
-            await websocket.send_json(
-                {
-                    "type": "status_update",
-                    "job_id": job_id_str,
-                    "run_id": update["run_id"],
-                    "status": new_status,
-                }
-            )
+    try:
+        async with notifier.subscribe_job(job_id_str, str(user.id)) as queue:
+            while True:
+                try:
+                    update = await asyncio.wait_for(queue.get(), timeout=300)
+                except TimeoutError:
+                    await websocket.send_json({"type": "timeout"})
+                    break
+                new_status = update["status"]
+                if new_status in _TERMINAL_STATUSES:
+                    msg: dict = {
+                        "type": new_status,
+                        "job_id": job_id_str,
+                        "run_id": update["run_id"],
+                        "status": new_status,
+                    }
+                    if new_status == "completed":
+                        msg["result_url"] = f"/jobs/{job_id_str}/result"
+                    await websocket.send_json(msg)
+                    break
+                await websocket.send_json(
+                    {
+                        "type": "status_update",
+                        "job_id": job_id_str,
+                        "run_id": update["run_id"],
+                        "status": new_status,
+                    }
+                )
+    except WebSocketConnectionLimitExceeded:
+        await websocket.close(code=4029, reason="connection limit exceeded")
+        return
 
     await websocket.close()
