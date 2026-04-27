@@ -16,6 +16,7 @@ from app.core.db import get_db
 from app.core.minio import get_minio
 from app.core.quota import decrement_storage_bytes
 from app.core.redis import get_redis
+from app.core.storage import delete_minio_object, stat_minio_size
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -197,22 +198,9 @@ async def admin_delete_user(
     )
     total_freed = 0
     for (result_path,) in runs_result.all():
-        bucket, _, key = result_path.partition("/")
-        file_size = 0
-        try:
-            stat = await minio_client.stat_object(bucket, key)
-            file_size = stat.size or 0
-        except Exception:
-            pass
-        try:
-            await minio_client.remove_object(bucket, key)
+        file_size = await stat_minio_size(minio_client, result_path)
+        if await delete_minio_object(minio_client, result_path, "user object on admin delete"):
             total_freed += file_size
-        except Exception:
-            logger.warning(
-                "admin_delete_user: failed to remove object",
-                path=result_path,
-                user_id=str(user_id),
-            )
 
     if total_freed > 0:
         await decrement_storage_bytes(user_id, db, total_freed)
@@ -316,19 +304,12 @@ async def admin_delete_or_cancel_job(
             )
         )
         for (result_path,) in runs_result.all():
-            bucket, _, key = result_path.partition("/")
-            file_size = 0
-            try:
-                stat = await minio_client.stat_object(bucket, key)
-                file_size = stat.size or 0
-            except Exception:
-                pass
-            try:
-                await minio_client.remove_object(bucket, key)
+            file_size = await stat_minio_size(minio_client, result_path)
+            if await delete_minio_object(
+                minio_client, result_path, "job object on admin hard delete"
+            ):
                 if file_size > 0:
                     await decrement_storage_bytes(job.user_id, db, file_size)
-            except Exception:
-                pass
         await db.delete(job)
         await db.commit()
         logger.info("admin_job_hard_deleted", job_id=str(job_id), admin_id=str(admin.id))

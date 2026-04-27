@@ -14,7 +14,12 @@ from sqlalchemy import select, text
 from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RESULT_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.diff import compute_json_diff, compute_text_diff
-from app.core.quota import check_storage_quota, increment_storage_bytes
+from app.core.quota import (
+    check_storage_quota,
+    handle_storage_quota_exceeded,
+    increment_storage_bytes,
+)
+from app.core.storage import delete_minio_object, stat_minio_size
 from app.core.webhooks import create_batch_webhook_delivery, create_webhook_delivery
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
@@ -66,17 +71,6 @@ async def _get_user_id_for_run(run: JobRun, db) -> uuid.UUID | None:
     return None
 
 
-async def _stat_minio_size(minio: Minio, minio_path: str) -> int:
-    """Return the byte size of an object. Returns 0 on any error (best-effort)."""
-    try:
-        bucket, _, key = minio_path.partition("/")
-        stat = await minio.stat_object(bucket, key)
-        size = stat.size
-        return int(size) if isinstance(size, int) else 0
-    except Exception:
-        return 0
-
-
 async def _try_increment_storage(db, user_id: uuid.UUID, size: int) -> bool:
     """Increment storage in a savepoint; returns False on failure (outer tx stays clean)."""
     try:
@@ -86,63 +80,6 @@ async def _try_increment_storage(db, user_id: uuid.UUID, size: int) -> bool:
     except Exception:
         logger.error("storage_increment_failed", user_id=str(user_id), size=size)
         return False
-
-
-async def _handle_storage_quota_exceeded(db, run: JobRun, minio_path: str, minio: Minio) -> None:
-    """Delete the oversized object, mark run failed, and emit the appropriate notify."""
-    bucket, _, key = minio_path.partition("/")
-    try:
-        await minio.remove_object(bucket, key)
-    except Exception:
-        logger.warning("result_consumer: failed to remove oversized object", path=minio_path)
-
-    run.status = "failed"
-    run.error = "storage_quota_exceeded"
-    run.completed_at = datetime.now(UTC)
-
-    if run.batch_item_id is not None:
-        item = await db.get(BatchItem, run.batch_item_id)
-        if item:
-            batch = await db.get(Batch, item.batch_id)
-            now = datetime.now(UTC)
-            item.status = "failed"
-            item.error = "storage_quota_exceeded"
-            item.completed_at = now
-            if batch:
-                sq_row = (
-                    await db.execute(
-                        text(
-                            "UPDATE batches SET failed = failed + 1"
-                            " WHERE id = :id RETURNING completed, failed"
-                        ),
-                        {"id": batch.id},
-                    )
-                ).one()
-                sq_completed, sq_failed = sq_row.completed, sq_row.failed
-                if sq_completed + sq_failed == batch.total:
-                    batch.status = "partial_failure"
-                    batch.completed_at = now
-                await db.execute(
-                    text("SELECT pg_notify('batch_status', :p)"),
-                    {
-                        "p": json.dumps(
-                            {
-                                "batch_id": str(batch.id),
-                                "completed": sq_completed,
-                                "failed": sq_failed,
-                                "total": batch.total,
-                                "status": batch.status,
-                                "item_url": item.url,
-                                "item_status": item.status,
-                            }
-                        )
-                    },
-                )
-    elif run.job_id is not None:
-        await db.execute(
-            text("SELECT pg_notify('job_status', :p)"),
-            {"p": f"{run.job_id}:{run.id}:failed"},
-        )
 
 
 async def _handle_batch_result(
@@ -208,14 +145,9 @@ async def _handle_batch_result(
             llm_key = await db.get(UserLLMKey, batch.llm_config["llm_key_id"])
             if llm_key is None:
                 if minio_path:
-                    bucket, _, key = minio_path.partition("/")
-                    try:
-                        await minio.remove_object(bucket, key)
-                    except Exception:
-                        logger.warning(
-                            "result_consumer: failed to remove orphaned batch object on LLM key miss",
-                            path=minio_path,
-                        )
+                    await delete_minio_object(
+                        minio, minio_path, "orphaned batch object on LLM key miss"
+                    )
                 run.status = "failed"
                 run.error = "LLM key not found or deleted"
                 run.completed_at = now
@@ -433,13 +365,7 @@ async def _handle_scrape_completed(
                 run.diff_detected = False
                 run.warnings = warnings
                 run.result_path = prev.result_path
-                bucket, _, key = minio_path.partition("/")
-                try:
-                    await minio.remove_object(bucket, key)
-                except Exception:
-                    logger.warning(
-                        "content_dedup: failed to remove history object", path=minio_path
-                    )
+                await delete_minio_object(minio, minio_path, "history object on content dedup")
                 logger.info(
                     "content_deduplicated",
                     job_id=job_id,
@@ -454,14 +380,7 @@ async def _handle_scrape_completed(
         llm_key = await db.get(UserLLMKey, job.llm_config["llm_key_id"])
         if llm_key is None:
             if minio_path:
-                bucket, _, key = minio_path.partition("/")
-                try:
-                    await minio.remove_object(bucket, key)
-                except Exception:
-                    logger.warning(
-                        "result_consumer: failed to remove orphaned object on LLM key miss",
-                        path=minio_path,
-                    )
+                await delete_minio_object(minio, minio_path, "orphaned object on LLM key miss")
             run.status = "failed"
             run.error = "LLM key not found or deleted"
             run.completed_at = datetime.now(UTC)
@@ -679,11 +598,11 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         if worker_status == "completed" and minio_path:
             storage_user_id = await _get_user_id_for_run(run, db)
             if storage_user_id:
-                result_size = await _stat_minio_size(minio, minio_path)
+                result_size = await stat_minio_size(minio, minio_path)
                 if result_size > 0 and not await check_storage_quota(
                     storage_user_id, db, result_size
                 ):
-                    await _handle_storage_quota_exceeded(db, run, minio_path, minio)
+                    await handle_storage_quota_exceeded(db, run, minio_path, minio)
                     await db.commit()
                     await msg.ack()
                     logger.warning(
