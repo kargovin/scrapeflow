@@ -128,7 +128,8 @@ async def _process_crawl_result(db, minio: Minio, data: dict) -> None:
         return
 
     if worker_status == "running":
-        page.status = "running"
+        if page.status not in ("completed", "failed"):
+            page.status = "running"
         return
 
     # Idempotency guard: if the coordinator crashed after db.commit() but before

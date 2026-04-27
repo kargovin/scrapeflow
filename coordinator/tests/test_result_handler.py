@@ -338,3 +338,25 @@ async def test_redelivered_failed_result_is_idempotent():
 
     assert crawl.total_failed == 2  # unchanged
     db.execute.assert_not_called()
+
+
+async def test_running_message_does_not_overwrite_completed_status():
+    """
+    With multiple coordinator replicas sharing the same durable NATS consumer,
+    a 'completed' result can be processed by one replica while the unacked
+    'running' message is redelivered to another. The 'running' branch must
+    not overwrite a terminal page status — otherwise the page is stuck in
+    'running' and check_completion can never fire.
+    """
+    crawl_id = uuid.uuid4()
+    page_id = uuid.uuid4()
+    crawl = make_crawl(crawl_id=crawl_id, total_completed=1)
+    page = make_page(page_id=page_id, crawl_id=crawl_id, status="completed")
+    db = make_mock_db(crawl=crawl, page=page)
+
+    data = make_result_data(crawl_id=str(crawl_id), crawl_page_id=str(page_id), status="running")
+
+    await _process_crawl_result(db, AsyncMock(), data)
+
+    assert page.status == "completed"  # must not be overwritten to "running"
+    assert crawl.total_completed == 1  # counters untouched
