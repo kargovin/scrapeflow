@@ -64,7 +64,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
 - **Phase 3 complete — all Steps 1–28 done**
 - **Phase 3 production review in progress** — working through `Phase3_PRODUCTION_REVIEW.md` item by item
-- 229 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
+- 233 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
 - Alembic auto-migration is **temporarily commented out** in `api/app/main.py` (disabled to allow migrations to be developed); re-enable before merging `develop → main`
 
 ### Phase 3 steps done
@@ -127,4 +127,9 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 14 | MEDIUM | Crawl page `?status=` filter accepts any string — whitelist check added | `[x]` done |
 | 15 | MEDIUM | Coordinator fires crawl completion webhook with no retry — Migration 3.15 + `_enqueue_crawl_webhook` + 2 new tests | `[x]` done |
 | 16 | MEDIUM | WebSocket not wired into Admin SPA — `JobDetail.tsx` WS hook + live badge; `Jobs.tsx` refetchInterval; `vite-env.d.ts` added | `[x]` done |
-| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; next up: #39 (WS rate limiting) |
+| 39 | MEDIUM | WS rate limiting — per-user cap in `JobNotifier`; close 4029 | `[x]` done |
+| 41 | MEDIUM | `result_consumer.py` monolith — `handle_storage_quota_exceeded` moved to `quota.py`; `delete_minio_object` + `stat_minio_size` extracted to new `api/app/core/storage.py`; admin.py inline stat+delete loops replaced; bool return on delete for conditional accounting | `[x]` done |
+| 44 | LOW | `JobNotifier` subscriber queues unbounded — `asyncio.Queue(maxsize=100)` on both `subscribe_job`/`subscribe_batch`; `await queue.put` → `put_nowait` + `QueueFull` drop+log in both notify callbacks | `[x]` done |
+| 46 | LOW | `import os` at module bottom in `main.py` — already fixed (line 2) | `[x]` done |
+| 43 | LOW | Content hash re-reads freshly-written MinIO object — deferred; fix requires schema_version 3 worker contract change; bundle with other Phase 4 worker changes | `[ ]` deferred to Phase 4 |
+| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; next up: #21 (k8s manifest missing `SCHEDULE_MIN_INTERVAL_MINUTES`) |

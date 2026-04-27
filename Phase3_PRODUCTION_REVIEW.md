@@ -64,11 +64,11 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 39 — No rate limiting on WebSocket endpoints — **MEDIUM**
+#### [x] 39 — No rate limiting on WebSocket endpoints — **MEDIUM**
 
 - **File:** `api/app/routers/jobs.py:697`, `api/app/routers/batch.py:226`
 - **Issue:** `GET /jobs/{id}/watch` and `GET /batch/{id}/watch` require auth but skip `check_rate_limit`. An authenticated user can open thousands of concurrent WebSocket connections, exhausting file descriptors and asyncpg listener queues.
-- **Fix:** Apply `check_rate_limit` dependency; alternatively, cap open WS connections per user in `JobNotifier.subscribe_job` and close with code 4029 if exceeded.
+- **Fix:** Per-user concurrent connection cap in `JobNotifier`. `subscribe_job` and `subscribe_batch` now accept `user_id: str`; a shared `_user_connection_counts` dict tracks open connections across both channels. On subscribe, if `count >= settings.ws_max_connections_per_user` (default 25) a `WebSocketConnectionLimitExceeded` exception is raised — caught by both WS handlers and closed with code 4029. Counter decrements in `finally` so it's exact even under abrupt disconnects. 2 new tests — 231 WS tests passing.
 
 ---
 
@@ -84,7 +84,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 41 — `result_consumer.py` is a 506-line orchestration monolith — **MEDIUM**
+#### [x] 41 — `result_consumer.py` is a 506-line orchestration monolith — **MEDIUM**
 
 - **File:** `api/app/core/result_consumer.py`
 - **Issue:** One file owns: storage quota enforcement, content deduplication, LLM dispatch, text/JSON diff, batch routing, pg_notify emission, webhook scheduling, and MinIO object lifecycle. Any bug in one concern is surrounded by other concerns — hard to test in isolation, hard to reason about. Six private async functions share the same `db` session passed by reference, with unclear ownership of commit.
@@ -96,15 +96,15 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 42 — `_build_operational_stats` runs 6+ sequential DB queries — **MEDIUM**
+#### [ ] 42 — `_build_operational_stats` runs 6+ sequential DB queries — **MEDIUM** *(deferred to Phase 4)*
 
 - **File:** `api/app/routers/admin.py:348-450`
 - **Issue:** `admin_get_stats` executes 6 sequential `SELECT` queries (jobs_running, jobs_pending, jobs_by_engine, wh_pending, wh_exhausted, active_recurring, next_run) plus 3–7 more in `_build_historical_stats`. All are independent and could run concurrently.
-- **Fix:** Wrap independent queries in `asyncio.gather()`. For the heaviest endpoint, consider a single CTE query that returns all operational counts in one round trip.
+- **Fix:** Collapse scalar counts into a single CTE query (one round trip); `asyncio.gather()` with separate sessions for the grouped queries (`engine_stmt`, `status_stmt`, `top_stmt`). Admin-only endpoint — pool pressure is acceptable.
 
 ---
 
-#### [ ] 43 — Content hash recomputed by re-reading freshly-written MinIO object — **LOW**
+#### [ ] 43 — Content hash recomputed by re-reading freshly-written MinIO object — **LOW** *(deferred to Phase 4)*
 
 - **File:** `api/app/core/result_consumer.py:44-53`
 - **Issue:** `_compute_content_hash` fetches the object from MinIO that the worker *just wrote*. This is an extra network round trip (read after write). The worker already has the bytes in memory at upload time.
@@ -112,7 +112,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 44 — `JobNotifier` subscriber queues are unbounded — **LOW**
+#### [x] 44 — `JobNotifier` subscriber queues are unbounded — **LOW**
 
 - **File:** `api/app/core/job_notifier.py:25-26`
 - **Issue:** `asyncio.Queue()` is created with no `maxsize`. A slow WebSocket consumer (or a runaway scheduled job publishing rapid-fire `pg_notify` events) can grow the queue unboundedly, causing API memory growth under load.
@@ -132,7 +132,7 @@ These items were **not** in `Phase3_PRODTODO.md`. Numbered from 35 onward to avo
 
 ---
 
-#### [ ] 46 — `import os` placed at module bottom — **LOW**
+#### [x] 46 — `import os` placed at module bottom — **LOW**
 
 - **File:** `api/app/main.py:155`
 - **Issue:** `import os` appears after all other code, violating PEP 8 E402. Ruff's `E402` is in the ignore list (`E501`) but `E402` is not, so this should have been caught — possibly because it's inside an `if` guard. Makes the import order unpredictable.
@@ -455,19 +455,19 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 34 (orig #42) — Admin stats runs 6+ sequential DB queries — **LOW**
+#### [ ] 34 (orig #42) — Admin stats runs 6+ sequential DB queries — **LOW** *(deferred to Phase 4)*
 
 - *(See item #42 in Part 1)*
 
 ---
 
-#### [ ] 35 (orig #44) — `JobNotifier` subscriber queues are unbounded — **LOW**
+#### [x] 35 (orig #44) — `JobNotifier` subscriber queues are unbounded — **LOW**
 
 - *(See item #44 in Part 1)*
 
 ---
 
-#### [ ] 36 (orig #46) — `import os` at module bottom in `main.py` — **LOW**
+#### [x] 36 (orig #46) — `import os` at module bottom in `main.py` — **LOW**
 
 - *(See item #46 in Part 1)*
 
