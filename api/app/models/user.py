@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -32,6 +32,15 @@ class User(Base):
     )
     jobs: Mapped[list[Job]] = relationship(
         "Job", back_populates="user", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_users_email_trgm",
+            "email",
+            postgresql_using="gin",
+            postgresql_ops={"email": "gin_trgm_ops"},
+        ),
     )
 
     def __repr__(self) -> str:
