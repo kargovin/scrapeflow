@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from coordinator.config import settings
 from coordinator.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
@@ -27,6 +27,25 @@ _ACTIVE_STATUSES = frozenset({"queued", "running"})
 async def reenqueue_stalled(db) -> None:
     """Reset dispatched items older than stale_threshold back to pending on startup."""
     cutoff = datetime.now(UTC) - timedelta(minutes=settings.stale_threshold_minutes)
+
+    # Delete CrawlPage rows that are about to lose their FK reference.
+    # Without this, the dispatcher creates page2 for the same queue item while
+    # page1 still exists — breaking the 1:1 invariant and causing duplicate scrapes.
+    page_ids = (
+        await db.execute(
+            select(CrawlQueueItem.crawl_page_id)
+            .where(
+                CrawlQueueItem.status == "dispatched",
+                CrawlQueueItem.dispatched_at < cutoff,
+                CrawlQueueItem.crawl_page_id.is_not(None),
+            )
+        )
+    ).scalars().all()
+
+    if page_ids:
+        await db.execute(delete(CrawlPage).where(CrawlPage.id.in_(page_ids)))
+        log.info("stalled_pages_deleted", count=len(page_ids))
+
     result = await db.execute(
         update(CrawlQueueItem)
         .where(

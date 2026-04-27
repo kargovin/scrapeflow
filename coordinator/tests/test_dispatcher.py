@@ -31,26 +31,49 @@ from tests.conftest import make_crawl, make_mock_db, make_queue_item
 # ---------------------------------------------------------------------------
 
 
-async def test_reenqueue_stalled_calls_update():
-    """reenqueue_stalled must execute an UPDATE query against crawl_queue."""
+async def test_reenqueue_stalled_deletes_linked_pages():
+    """
+    When stale dispatched items have crawl_page_id set, reenqueue_stalled must
+    DELETE those CrawlPage rows before nulling the FK — preventing orphaned pages
+    that would break the 1:1 CrawlQueueItem <> CrawlPage invariant.
+    Execute is called three times: SELECT page_ids, DELETE pages, UPDATE items.
+    """
+    page_id = uuid.uuid4()
+
+    select_result = MagicMock()
+    select_result.scalars.return_value.all.return_value = [page_id]
+
+    delete_result = MagicMock()
+    delete_result.rowcount = 1
+
+    update_result = MagicMock()
+    update_result.rowcount = 1
+
     db = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 2
-    db.execute = AsyncMock(return_value=mock_result)
+    db.execute = AsyncMock(side_effect=[select_result, delete_result, update_result])
 
     await reenqueue_stalled(db)
 
-    db.execute.assert_called_once()
+    assert db.execute.call_count == 3
 
 
-async def test_reenqueue_stalled_zero_rows_no_error():
-    """reenqueue_stalled must not raise even when no rows match."""
+async def test_reenqueue_stalled_skips_delete_when_no_stale_pages():
+    """
+    When no stale items have a crawl_page_id (or none are stale), the DELETE
+    statement is skipped — execute is called twice: SELECT then UPDATE items.
+    """
+    select_result = MagicMock()
+    select_result.scalars.return_value.all.return_value = []
+
+    update_result = MagicMock()
+    update_result.rowcount = 0
+
     db = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 0
-    db.execute = AsyncMock(return_value=mock_result)
+    db.execute = AsyncMock(side_effect=[select_result, update_result])
 
-    await reenqueue_stalled(db)  # should not raise
+    await reenqueue_stalled(db)  # must not raise
+
+    assert db.execute.call_count == 2
 
 
 # ---------------------------------------------------------------------------
