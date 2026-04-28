@@ -29,6 +29,8 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Phase 2 spec (historical) | `docs/phase2/phase2-engineering-spec-v3.md` |
 | Phase 2 production readiness review | `PRODUCTION_REVIEW.md` |
 | Phase 3 production readiness review | `Phase3_PRODUCTION_REVIEW.md` |
+| Idempotency audit (NATS redelivery) | `Phase3_idempotency_checks.md` — 7 findings; 3 CRITICAL; tackle after remaining review items |
+| Service failure & recovery audit | `Phase3_service_failure_recovery.md` — coordinator C1–C5 + API loop gaps; C1–C3 fixed; C5 + scheduler None-check open |
 
 ---
 
@@ -133,5 +135,9 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 46 | LOW | `import os` at module bottom in `main.py` — already fixed (line 2) | `[x]` done |
 | 47 | LOW | `email.ilike` search has no index — Migration 3.17: `pg_trgm` extension + GIN index `idx_users_email_trgm ON users USING gin (email gin_trgm_ops)`; declared in `User.__table_args__` | `[x]` done |
 | 50 | MEDIUM | `_check_completion` after-dispatch block in `bfs.py` ran in a fresh session with no `FOR UPDATE` — moved `check_completion` + `enqueue_crawl_webhook` to `result_handler.py` (public); called inside `_process_crawl_result` within the same transaction; removed after-dispatch block from `bfs.py`; `bfs.py` imports from `result_handler.py` for safety-net scan | `[x]` done |
+| 51 | MEDIUM | Coordinator restart mid-crawl: `reenqueue_stalled` nulled `crawl_page_id` but left orphaned `CrawlPage` rows — SELECT stale IDs → DELETE pages → then UPDATE queue | `[x]` done |
+| 52 | MEDIUM | `_process_crawl_result` not idempotent on NATS redelivery + `"running"` message could overwrite terminal page status under multi-replica — terminal-status early-return + running-branch terminal check | `[x]` done |
+| 25 | LOW | Stale WHAT comments in `result_consumer.py` and `result_handler.py` — 7 removed across both files; WHY comments (idempotency guard, deferred LLM accounting, dedup early-return, ADR references, crawl-ack note) retained | `[x]` done |
 | 43 | LOW | Content hash re-reads freshly-written MinIO object — deferred; fix requires schema_version 3 worker contract change; bundle with other Phase 4 worker changes | `[ ]` deferred to Phase 4 |
-| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; next up: #51 (coordinator restart mid-crawl: `running` items not reset by `reenqueue_stalled`) |
+| 21 | MEDIUM | `SCHEDULE_MIN_INTERVAL_MINUTES` missing from k8s API manifest — **deferred to DevOps pass with #38** | `[ ]` pending |
+| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; **next up: #26** (verify admin routes cannot be used for cross-tenant writes) |

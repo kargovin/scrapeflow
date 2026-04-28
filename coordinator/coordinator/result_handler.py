@@ -138,7 +138,6 @@ async def _process_crawl_result(db, minio: Minio, data: dict) -> None:
     if page.status in ("completed", "failed"):
         return
 
-    # Terminal result — update crawl_queue item that was linked to this page.
     queue_terminal = "completed" if worker_status == "completed" else "failed"
     await db.execute(
         update(CrawlQueueItem)
@@ -188,7 +187,6 @@ async def _process_crawl_result(db, minio: Minio, data: dict) -> None:
                 log.error("sitemap_discovery_failed", crawl_id=str(crawl_id), error=str(exc))
 
     else:
-        # worker_status == "failed"
         page.status = "failed"
         page.error = error
         page.completed_at = now

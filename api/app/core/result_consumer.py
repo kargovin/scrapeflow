@@ -140,7 +140,6 @@ async def _handle_batch_result(
         return
 
     if worker_status == "completed" and run.status == "running":
-        # Scrape worker finished. Dispatch to LLM if configured, otherwise finalise now.
         if batch.llm_config:
             llm_key = await db.get(UserLLMKey, batch.llm_config["llm_key_id"])
             if llm_key is None:
@@ -215,7 +214,6 @@ async def _handle_batch_result(
                     return  # counters updated when LLM result arrives
 
         else:
-            # No LLM — finalise immediately.
             accounting_ok = True
             if storage_user_id and result_size > 0:
                 accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
@@ -253,7 +251,6 @@ async def _handle_batch_result(
                 ).one()
 
     elif worker_status == "completed" and run.status == "processing":
-        # LLM worker finished for this batch item.
         accounting_ok = True
         if storage_user_id and result_size > 0:
             accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
@@ -414,7 +411,6 @@ async def _handle_scrape_completed(
             }
             await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
     else:
-        # No LLM — finalize immediately with text diff.
         if storage_user_id and result_size > 0:
             if not await _try_increment_storage(db, storage_user_id, result_size):
                 run.status = "failed"
@@ -592,7 +588,6 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
             await msg.ack()
             return
 
-        # Storage quota enforcement: stat the object post-write, delete + fail if over limit.
         storage_user_id: uuid.UUID | None = None
         result_size: int = 0
         if worker_status == "completed" and minio_path:

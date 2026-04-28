@@ -400,14 +400,14 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 25 (orig #5) — Stale comment in `result_consumer.py` near webhook delivery — **LOW**
+#### [x] 25 (orig #5) — Stale comment in `result_consumer.py` near webhook delivery — **LOW**
 
 - **File:** `api/app/core/result_consumer.py` — line shifted after `6e6cc8b` restructure
 - **Fix:** `grep -n "# Stale\|# TODO\|# FIXME" api/app/core/result_consumer.py` and remove outdated comments.
 
 ---
 
-#### [ ] 26 (orig #6) — Verify admin routes cannot be used for cross-tenant writes — **LOW**
+#### [x] 26 (orig #6) — Verify admin routes cannot be used for cross-tenant writes — **LOW**
 
 - **File:** `api/app/routers/admin.py`
 - **Issue:** Admin cancel (`admin_delete_or_cancel_job`) operates on any job regardless of owner. This is correct by design (admin powers), but verify no admin route exposes per-user write operations (PATCH, secret rotation) without owner consent.
