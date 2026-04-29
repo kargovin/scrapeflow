@@ -50,7 +50,14 @@ class LLMJobConfig(BaseModel):
 class _MutableJobFields(BaseModel):
     playwright_options: PlaywrightOptions | None = None
     llm_config: LLMJobConfig | None = None
-    schedule_cron: str | None = None
+    # Phase 4: accept an optional `timezone` field and pass it as the croniter base.
+    schedule_cron: str | None = Field(
+        None,
+        description=(
+            "5-field cron expression evaluated in UTC. "
+            "Example: '0 9 * * *' fires at 09:00 UTC daily."
+        ),
+    )
     webhook_url: AnyHttpUrl | None = None
     respect_robots: bool = False
     proxy_provider: str | None = None

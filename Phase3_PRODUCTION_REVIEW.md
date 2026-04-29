@@ -446,10 +446,10 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 31 (orig #34) — Cron schedule validation assumes server timezone — **LOW**
+#### [x] 31 (orig #34) — Cron schedule validation assumes server timezone — **LOW**
 
-- **File:** `api/app/routers/jobs.py:100-112`
-- **Fix:** Document the UTC assumption in the API response schema. Long-term: accept an optional `timezone` field on `JobCreate`/`JobPatch`.
+- **File:** `api/app/schemas/jobs.py` — `_MutableJobFields.schedule_cron`
+- **Fix:** Added `Field(description=...)` documenting the UTC evaluation assumption; visible in OpenAPI docs and generated SDKs. Long-term timezone field deferred to Phase 4 (new `Job` column, croniter `pytz` base, migration).
 
 ---
 

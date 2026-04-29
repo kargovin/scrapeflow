@@ -72,6 +72,34 @@
 
 ---
 
+### Batch and crawl webhooks have no `webhook_events` filter
+
+**What:** Jobs expose a `webhook_events: list[str] | None` field — users can subscribe selectively to `"job.completed"` or `"job.failed"`. Batches and crawls have no equivalent field. `batch.completed` fires unconditionally when `batch.webhook_url` is set; `crawl.completed` fires unconditionally when `crawl.webhook_url` is set.
+
+**Why deferred:** Both are currently single-event resources — there is only one lifecycle event to subscribe to, so a filter field adds no value today. The gap becomes real if additional events are added (e.g. `batch.partial_failure`, `crawl.page_failed`, `crawl.depth_reached`), because users would have no way to subscribe selectively.
+
+**What Phase 4 needs to decide:**
+- Add `webhook_events TEXT[]` to `batches` and `crawls` with the same null-means-all-events semantics as jobs?
+- Or keep batch/crawl webhooks simple (one event, no filter) and document the intentional asymmetry?
+
+**Source:** Phase 3 production review item #27 audit, 2026-04-28.
+
+---
+
+### Crawl webhooks bypass `create_webhook_delivery` — coordinator writes directly to DB
+
+**What:** Job webhooks go through `create_webhook_delivery` in `api/app/core/webhooks.py`. Crawl webhooks are enqueued by the coordinator — a separate process — via `enqueue_crawl_webhook` in `coordinator/coordinator/result_handler.py`, which inserts into `webhook_deliveries` directly. The HTTP delivery loop (`webhook_loop.py`) picks up and signs both, so the delivery path is shared. But any future validation or instrumentation added to `create_webhook_delivery` will not automatically apply to crawl webhooks.
+
+**Why deferred:** The coordinator cannot import from the API package (different service, different Docker image). Sharing the insertion logic would require extracting it into a shared library or duplicating it — neither is worth the cost for one event type.
+
+**What Phase 4 needs to decide:**
+- Extract `create_webhook_delivery` logic into a shared `scrapeflow-common` package importable by both the API and coordinator?
+- Or accept the duplication and document the coordinator path as a deliberate exception with a test asserting the payload shape?
+
+**Source:** Phase 3 production review item #27 audit, 2026-04-28.
+
+---
+
 ### `api_keys` — `(user_id, name)` uniqueness constraint
 
 **What:** Currently two API keys can share the same name within a user's account. A `UniqueConstraint("user_id", "name")` would prevent this and return 409 on duplicate name.

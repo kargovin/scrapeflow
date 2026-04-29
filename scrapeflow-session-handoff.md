@@ -141,4 +141,5 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 29 | LOW | No test for batch item storage quota exceeded — `test_result_consumer_batch_item_storage_quota_exceeded` added to `test_batch.py`; asserts run + item marked `failed`, `batch.failed == 1`, MinIO object removed | `[x]` done |
 | 43 | LOW | Content hash re-reads freshly-written MinIO object — deferred; fix requires schema_version 3 worker contract change; bundle with other Phase 4 worker changes | `[ ]` deferred to Phase 4 |
 | 21 | MEDIUM | `SCHEDULE_MIN_INTERVAL_MINUTES` missing from k8s API manifest — **deferred to DevOps pass with #38** | `[ ]` pending |
-| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; **next up: #31** (cron schedule validation assumes server timezone — document UTC assumption) |
+| 31 | LOW | Cron schedule validation assumes server timezone — document UTC assumption | `[x]` done (`_MutableJobFields.schedule_cron` now has `Field(description=...)` stating UTC; Phase 4 TODO left on field) |
+| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; **next up: #39 (orig #8)** (`pg_notify` missing for `processing` status — partially addressed, WS jumps `running → completed` skipping `processing`) |
