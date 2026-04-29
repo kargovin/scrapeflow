@@ -13,6 +13,7 @@ from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
 from app.models.user import User
+from app.models.user_quota import UserQuota
 
 
 @pytest.fixture
@@ -489,6 +490,50 @@ async def test_result_consumer_batch_llm_complete_finalises_item():
     assert batch.status == "completed"
     assert item is not None and item.status == "completed"
     assert item.result_path == "scrapeflow-results/history/out.json"
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Batch).where(Batch.id == batch_id))
+        await db.execute(delete(User).where(User.id == user_id))
+        await db.commit()
+
+
+async def test_result_consumer_batch_item_storage_quota_exceeded():
+    """Storage quota exceeded on a batch item fails the run, the item, and increments batch.failed."""
+    batch_id, item_id, run_id, user_id = await _make_batch_run(status="running")
+
+    async with AsyncSessionLocal() as db:
+        # 100-byte limit, 90 already used — a 50-byte object would push to 140.
+        db.add(UserQuota(user_id=user_id, storage_bytes_limit=100, storage_bytes_used=90))
+        await db.commit()
+
+    stat_obj = MagicMock()
+    stat_obj.size = 50
+    mock_minio = AsyncMock()
+    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
+    mock_minio.remove_object = AsyncMock()
+
+    msg = _make_nats_msg(run_id, "completed", minio_path="scrapeflow-results/history/x.html")
+    await _handle_result(msg, AsyncMock(), mock_minio)
+
+    mock_minio.remove_object.assert_called_once()
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        item = await db.get(BatchItem, item_id)
+        batch = await db.get(Batch, batch_id)
+
+    assert run is not None
+    assert run.status == "failed"
+    assert run.error == "storage_quota_exceeded"
+
+    assert item is not None
+    assert item.status == "failed"
+    assert item.error == "storage_quota_exceeded"
+
+    assert batch is not None
+    assert batch.failed == 1
+
+    msg.ack.assert_called_once()
 
     async with AsyncSessionLocal() as db:
         await db.execute(delete(Batch).where(Batch.id == batch_id))

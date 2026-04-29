@@ -415,32 +415,34 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 27 (orig #18) — Audit all `create_webhook_delivery` call sites for correct `event_name` — **LOW**
+#### [x] 27 (orig #18) — Audit all `create_webhook_delivery` call sites for correct `event_name` — **LOW**
 
 - **File:** `api/app/core/result_consumer.py`, `api/app/core/webhooks.py`
 - **Fix:** Grep all call sites; verify each passes a string in `_VALID_WEBHOOK_EVENTS = {"job.completed", "job.failed", "crawl.completed", "batch.completed"}`. Any event added after the filter was introduced without a matching guard would silently bypass filtering.
+- **Result:** All 7 `create_webhook_delivery` call sites in `result_consumer.py` pass `"job.completed"` or `"job.failed"` and are each guarded by the matching `job.webhook_events` check. `create_batch_webhook_delivery` passes `"batch.completed"` (no `webhook_events` filter on `Batch` by design). Coordinator's `enqueue_crawl_webhook` writes directly to DB (separate service) with hardcoded `"crawl.completed"` — bypasses `create_webhook_delivery` intentionally. Two design notes filed in `docs/project/PHASE3_DEFERRED.md`: batch/crawl missing `webhook_events` filter field; coordinator direct-write bypass.
 
 ---
 
-#### [ ] 28 (orig #19) — `_attempt_delivery` does redundant DB round-trip per delivery — **LOW**
+#### [x] 28 (orig #19) — `_attempt_delivery` does redundant DB round-trip per delivery — **LOW**
 
 - **File:** `api/app/core/webhook_loop.py:85`
 - **Issue:** Caller has the `WebhookDelivery` object; `_attempt_delivery` re-fetches by ID. Extra query on every retry.
-- **Fix:** Pass the delivery object directly; remove the inner `db.get(WebhookDelivery, delivery_id)` call.
+- **Result:** Re-fetch is load-bearing — not a cosmetic round-trip. PostgreSQL `FOR UPDATE` locks are transaction-scoped: committing within a single session releases all 50 locks at once, not just the processed row. Any single-session redesign would still need a per-delivery status re-check (`db.refresh`), which is the same round trip count. The existing comment at line 56 already documents the intent. Current design accepted as-is.
 
 ---
 
-#### [ ] 29 (orig #32) — No test for batch item storage quota exceeded — **LOW**
+#### [x] 29 (orig #32) — No test for batch item storage quota exceeded — **LOW**
 
 - **File:** `api/tests/test_batch.py`
-- **Fix:** Add `test_batch_item_storage_quota_exceeded` — mock `check_storage_quota` to return `False`; assert the batch item is marked `failed` with `error="storage_quota_exceeded"`.
+- **Fix:** Added `test_result_consumer_batch_item_storage_quota_exceeded` — mocks `stat_object` to return an oversized object; asserts `run.status == "failed"`, `item.status == "failed"`, `item.error == "storage_quota_exceeded"`, and `batch.failed == 1`. 15 batch tests passing.
 
 ---
 
-#### [ ] 30 (orig #33) — No test for LLM key deleted between dispatch and result — **LOW**
+#### [x] 30 (orig #33) — No test for LLM key deleted between dispatch and result — **LOW**
 
 - **File:** `api/tests/test_jobs.py`
 - **Fix:** Add `test_result_consumer_llm_key_deleted` — dispatch a job with LLM config, delete the key, publish a "completed" result; assert run is `failed` with `error="LLM key not found or deleted"`.
+- **Result:** `test_result_consumer_llm_key_deleted_cleans_minio` already exists at `test_jobs.py:418`; asserts run is `failed` with the expected error message.
 
 ---
 
@@ -457,9 +459,10 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 33 (orig #41) — `result_consumer.py` complexity hotspot — **LOW**
+#### [x] 33 (orig #41) — `result_consumer.py` complexity hotspot — **LOW**
 
 - *(See item #41 in Part 1 — flag for Phase 4 refactor)*
+- **Result:** Part 1 item #41 marked done — `_handle_storage_quota_exceeded` extracted to `quota.py`, MinIO helpers extracted to `storage.py`. Remaining complexity flagged for Phase 4 refactor.
 
 ---
 

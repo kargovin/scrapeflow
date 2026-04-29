@@ -138,6 +138,7 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 51 | MEDIUM | Coordinator restart mid-crawl: `reenqueue_stalled` nulled `crawl_page_id` but left orphaned `CrawlPage` rows — SELECT stale IDs → DELETE pages → then UPDATE queue | `[x]` done |
 | 52 | MEDIUM | `_process_crawl_result` not idempotent on NATS redelivery + `"running"` message could overwrite terminal page status under multi-replica — terminal-status early-return + running-branch terminal check | `[x]` done |
 | 25 | LOW | Stale WHAT comments in `result_consumer.py` and `result_handler.py` — 7 removed across both files; WHY comments (idempotency guard, deferred LLM accounting, dedup early-return, ADR references, crawl-ack note) retained | `[x]` done |
+| 29 | LOW | No test for batch item storage quota exceeded — `test_result_consumer_batch_item_storage_quota_exceeded` added to `test_batch.py`; asserts run + item marked `failed`, `batch.failed == 1`, MinIO object removed | `[x]` done |
 | 43 | LOW | Content hash re-reads freshly-written MinIO object — deferred; fix requires schema_version 3 worker contract change; bundle with other Phase 4 worker changes | `[ ]` deferred to Phase 4 |
 | 21 | MEDIUM | `SCHEDULE_MIN_INTERVAL_MINUTES` missing from k8s API manifest — **deferred to DevOps pass with #38** | `[ ]` pending |
-| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; **next up: #26** (verify admin routes cannot be used for cross-tenant writes) |
+| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; **next up: #31** (cron schedule validation assumes server timezone — document UTC assumption) |
