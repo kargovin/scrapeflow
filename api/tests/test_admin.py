@@ -427,6 +427,7 @@ async def test_admin_list_webhook_deliveries(client, admin_headers, db_user):
         delivery = WebhookDelivery(
             job_id=job.id,
             run_id=run.id,
+            event="job.completed",
             webhook_url="https://hooks.example.com/recv",
             payload={"event": "job.completed"},
             status="pending",
@@ -455,6 +456,7 @@ async def test_admin_list_webhook_deliveries_filter_status(client, admin_headers
         delivery = WebhookDelivery(
             job_id=job.id,
             run_id=run.id,
+            event="job.completed",
             webhook_url="https://hooks.example.com/recv",
             payload={"event": "job.completed"},
             status="exhausted",
@@ -491,6 +493,7 @@ async def test_admin_retry_webhook_delivery(client, admin_headers, db_user):
         delivery = WebhookDelivery(
             job_id=job.id,
             run_id=run.id,
+            event="job.completed",
             webhook_url="https://hooks.example.com/recv",
             payload={"event": "job.completed"},
             status="exhausted",

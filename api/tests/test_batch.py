@@ -250,13 +250,14 @@ async def _make_batch_run(status="pending"):
     return batch.id, item.id, run.id, user.id
 
 
-def _make_nats_msg(run_id, status, minio_path=None, error=None):
+def _make_nats_msg(run_id, status, minio_path=None, error=None, source="scrape"):
     mock_msg = MagicMock()
     mock_msg.data = json.dumps(
         {
             "job_id": None,
             "run_id": str(run_id),
             "status": status,
+            "source": source,
             "minio_path": minio_path,
             "error": error,
         }
@@ -475,7 +476,7 @@ async def test_result_consumer_batch_llm_complete_finalises_item():
 
     # LLM worker result arrives — run is now "processing" in DB
     llm_result = _make_nats_msg(
-        run_id, "completed", minio_path="scrapeflow-results/history/out.json"
+        run_id, "completed", minio_path="scrapeflow-results/history/out.json", source="llm"
     )
     await _handle_result(llm_result, mock_js, mock_minio)
 
@@ -534,6 +535,49 @@ async def test_result_consumer_batch_item_storage_quota_exceeded():
     assert batch.failed == 1
 
     msg.ack.assert_called_once()
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Batch).where(Batch.id == batch_id))
+        await db.execute(delete(User).where(User.id == user_id))
+        await db.commit()
+
+
+async def test_result_consumer_batch_terminal_guard():
+    """Finding 3: a redelivered 'failed' message on an already-completed batch item
+    must not increment batches.failed.
+
+    Simulates NATS redelivery: the item and run are already 'completed',
+    so the second execution is a no-op — batch.failed must stay at 0.
+    """
+    batch_id, item_id, run_id, user_id = await _make_batch_run()
+
+    mock_js = AsyncMock()
+    mock_minio = AsyncMock()
+
+    # First: drive the run to completed via normal messages
+    for status in ("running", "completed"):
+        msg = _make_nats_msg(
+            run_id,
+            status,
+            minio_path="scrapeflow-results/history/x.html" if status == "completed" else None,
+        )
+        await _handle_result(msg, mock_js, mock_minio)
+
+    # Redelivered "failed" message — run is already terminal
+    redelivered = _make_nats_msg(run_id, "failed", error="timeout")
+    await _handle_result(redelivered, mock_js, mock_minio)
+
+    async with AsyncSessionLocal() as db:
+        batch = await db.get(Batch, batch_id)
+        run = await db.get(JobRun, run_id)
+
+    assert (
+        run.status == "completed"
+    ), "terminal guard must not allow 'failed' to overwrite 'completed'"
+    assert (
+        batch.failed == 0
+    ), "batch.failed must not be incremented on a redelivered terminal message"
+    assert batch.completed == 1
 
     async with AsyncSessionLocal() as db:
         await db.execute(delete(Batch).where(Batch.id == batch_id))

@@ -47,6 +47,7 @@ class ResultMessage(BaseModel):
     job_id: str
     run_id: str
     status: str
+    source: str = "scrape"
     minio_path: str | None = None
     nats_stream_seq: int | None = None
     error: str | None = None

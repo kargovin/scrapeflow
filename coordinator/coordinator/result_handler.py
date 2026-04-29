@@ -66,7 +66,7 @@ async def check_completion(db, crawl: Crawl) -> bool:
             CrawlQueueItem.status.not_in(list(_TERMINAL_QUEUE_STATUSES)),
         )
     )
-    if active_count == 0:
+    if active_count == 0 and crawl.status not in ("completed", "cancelled"):
         crawl.status = "completed"
         crawl.completed_at = datetime.now(UTC)
         log.info(

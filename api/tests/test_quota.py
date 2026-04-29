@@ -558,3 +558,36 @@ async def test_result_consumer_storage_increment_failure_fails_run(quota_user):
         assert updated_run.error == "storage_accounting_failed"
 
     msg.ack.assert_called_once()
+
+
+async def test_try_increment_storage_idempotent(db_user):
+    """Finding 5: _try_increment_storage is a no-op when run.storage_accounted_at is already set.
+
+    Belt-and-suspenders guard: even if the terminal-status early-return is somehow
+    bypassed, a run that already has storage_accounted_at set must not increment the
+    quota a second time.
+    """
+    from unittest.mock import patch
+
+    from app.core.result_consumer import _try_increment_storage
+
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        from datetime import UTC, datetime
+
+        run = JobRun(
+            job_id=job.id,
+            status="completed",
+            storage_accounted_at=datetime.now(UTC),
+        )
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+
+        with patch("app.core.result_consumer.increment_storage_bytes") as mock_inc:
+            result = await _try_increment_storage(db, run, db_user.id, size=1024)
+
+        assert result is True, "should return True (accounting already recorded)"
+        mock_inc.assert_not_called()

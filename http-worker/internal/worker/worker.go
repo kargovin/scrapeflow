@@ -69,6 +69,7 @@ type resultMessage struct {
 	JobID         string        `json:"job_id"`
 	RunID         string        `json:"run_id"`
 	Status        string        `json:"status"`
+	Source        string        `json:"source,omitempty"`
 	MinIOPath     string        `json:"minio_path,omitempty"`
 	NATSStreamSeq uint64        `json:"nats_stream_seq,omitempty"`
 	Error         string        `json:"error,omitempty"`
@@ -209,6 +210,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 				JobID:        job.JobID,
 				RunID:        job.RunID,
 				Status:       "failed",
+				Source:       "scrape",
 				Error:        "proxy_decryption_failed",
 				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
@@ -227,6 +229,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 				JobID:        job.JobID,
 				RunID:        job.RunID,
 				Status:       "failed",
+				Source:       "scrape",
 				Error:        "malformed_proxy_url: " + err.Error(),
 				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
@@ -255,6 +258,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 				JobID:        job.JobID,
 				RunID:        job.RunID,
 				Status:       "failed",
+				Source:       "scrape",
 				Error:        "robots_txt_disallowed",
 				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
@@ -275,6 +279,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		JobID:        job.JobID,
 		RunID:        job.RunID,
 		Status:       "running",
+		Source:       "scrape",
 		CrawlContext: job.CrawlContext,
 	}
 	if meta, err := msg.Metadata(); err == nil {
@@ -292,6 +297,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 			JobID:        job.JobID,
 			RunID:        job.RunID,
 			Status:       "failed",
+			Source:       "scrape",
 			Error:        err.Error(),
 			CrawlContext: job.CrawlContext,
 		}); pubErr != nil {
@@ -314,6 +320,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 		JobID:        job.JobID,
 		RunID:        job.RunID,
 		Status:       "completed",
+		Source:       "scrape",
 		MinIOPath:    minioPath,
 		CrawlContext: job.CrawlContext,
 	}); err != nil {

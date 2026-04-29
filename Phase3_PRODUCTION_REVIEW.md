@@ -500,10 +500,9 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [~] 39 (orig #8) — `pg_notify` missing for `processing` status transition — **MEDIUM**
+#### [x] 39 (orig #8) — `pg_notify` missing for `processing` status transition — **MEDIUM**
 
-- **Status:** The `result_consumer` now emits notify for most transitions. `processing` (LLM in-flight) is still not explicitly notified — the WebSocket jumps from `running` to `completed` skipping `processing`.
-- **Fix (optional):** Emit `pg_notify('job_status', f'{job_id}:{run_id}:processing')` in `_handle_scrape_completed` when dispatching to LLM worker.
+- **Status:** Explicit `pg_notify('job_status', f'{job_id}:{run_id}:processing')` added inside `_handle_scrape_completed` immediately after `js.publish()` to the LLM subject. Previously the notify was implicit — the shared bottom-of-function emit in `_handle_job_result` happened to fire with `run.status = "processing"`, but was fragile to refactoring. Now the intent is self-documenting. Note: the batch path (`_handle_batch_result`) already had an explicit notify for this transition.
 
 ---
 

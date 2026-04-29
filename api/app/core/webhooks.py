@@ -10,6 +10,7 @@ The actual HTTP POST is handled by the webhook_delivery_loop (Step 21).
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.diff import DiffResult
@@ -18,7 +19,7 @@ from app.models.job import Job
 from app.models.webhook_delivery import WebhookDelivery
 
 
-def create_webhook_delivery(
+async def create_webhook_delivery(
     db: AsyncSession,
     job: Job,
     run_id: uuid.UUID,
@@ -33,6 +34,9 @@ def create_webhook_delivery(
     minio_path — history/ path of the result; None for failed events
     diff       — DiffResult from compute_text_diff / compute_json_diff; None on first run
     error      — error message; only included in the payload when event="job.failed"
+
+    Uses ON CONFLICT DO NOTHING against idx_webhook_deliveries_dedup so a redelivered
+    NATS message that reaches this call site cannot insert a duplicate delivery row.
     """
     payload: dict = {
         "event": event,
@@ -46,19 +50,25 @@ def create_webhook_delivery(
     if error is not None:
         payload["error"] = error
 
-    db.add(
-        WebhookDelivery(
+    await db.execute(
+        pg_insert(WebhookDelivery)
+        .values(
             job_id=job.id,
             run_id=run_id,
+            event=event,
             webhook_url=job.webhook_url,
             payload=payload,
             status="pending",
             next_attempt_at=datetime.now(UTC),
         )
+        .on_conflict_do_nothing(
+            index_elements=["run_id", "event"],
+            index_where=WebhookDelivery.run_id.isnot(None),
+        )
     )
 
 
-def create_batch_webhook_delivery(
+async def create_batch_webhook_delivery(
     db: AsyncSession,
     batch: Batch,
     run_id: uuid.UUID,
@@ -68,7 +78,8 @@ def create_batch_webhook_delivery(
 
     event — "batch.completed"
     run_id — the triggering item's run; used for the job_runs FK.
-    Batch webhooks carry no HMAC secret — the signature will be empty.
+
+    Uses ON CONFLICT DO NOTHING — same dedup guarantee as create_webhook_delivery.
     """
     payload: dict = {
         "event": event,
@@ -79,13 +90,19 @@ def create_batch_webhook_delivery(
         "status": batch.status,
         "timestamp": datetime.now(UTC).isoformat(),
     }
-    db.add(
-        WebhookDelivery(
+    await db.execute(
+        pg_insert(WebhookDelivery)
+        .values(
             batch_id=batch.id,
             run_id=run_id,
+            event=event,
             webhook_url=batch.webhook_url,
             payload=payload,
             status="pending",
             next_attempt_at=datetime.now(UTC),
+        )
+        .on_conflict_do_nothing(
+            index_elements=["run_id", "event"],
+            index_where=WebhookDelivery.run_id.isnot(None),
         )
     )

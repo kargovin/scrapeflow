@@ -71,11 +71,18 @@ async def _get_user_id_for_run(run: JobRun, db) -> uuid.UUID | None:
     return None
 
 
-async def _try_increment_storage(db, user_id: uuid.UUID, size: int) -> bool:
-    """Increment storage in a savepoint; returns False on failure (outer tx stays clean)."""
+async def _try_increment_storage(db, run: JobRun, user_id: uuid.UUID, size: int) -> bool:
+    """Increment storage in a savepoint; returns False on failure (outer tx stays clean).
+
+    Idempotent: if run.storage_accounted_at is already set, the increment was recorded
+    on a prior delivery and is skipped to prevent double-counting on NATS redelivery.
+    """
+    if run.storage_accounted_at is not None:
+        return True
     try:
         async with db.begin_nested():
             await increment_storage_bytes(user_id, db, size)
+        run.storage_accounted_at = datetime.now(UTC)
         return True
     except Exception:
         logger.error("storage_increment_failed", user_id=str(user_id), size=size)
@@ -94,6 +101,7 @@ async def _handle_batch_result(
     started_at,
     storage_user_id: uuid.UUID | None,
     result_size: int,
+    source: str = "scrape",
 ) -> None:
     """Update batch item + batch counters, notify, and fire batch webhook on completion.
 
@@ -111,6 +119,10 @@ async def _handle_batch_result(
 
     batch = await db.get(Batch, item.batch_id)
     if batch is None:
+        return
+
+    # Idempotency guard: NATS redelivery after commit-before-ack must be a no-op.
+    if run.status in ("completed", "failed"):
         return
 
     now = datetime.now(UTC)
@@ -165,7 +177,9 @@ async def _handle_batch_result(
             else:
                 accounting_ok = True
                 if storage_user_id and result_size > 0:
-                    accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
+                    accounting_ok = await _try_increment_storage(
+                        db, run, storage_user_id, result_size
+                    )
                 if not accounting_ok:
                     run.status = "failed"
                     run.error = "storage_accounting_failed"
@@ -216,7 +230,7 @@ async def _handle_batch_result(
         else:
             accounting_ok = True
             if storage_user_id and result_size > 0:
-                accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
+                accounting_ok = await _try_increment_storage(db, run, storage_user_id, result_size)
             if accounting_ok:
                 run.status = "completed"
                 run.result_path = minio_path
@@ -250,10 +264,10 @@ async def _handle_batch_result(
                     )
                 ).one()
 
-    elif worker_status == "completed" and run.status == "processing":
+    elif worker_status == "completed" and run.status == "processing" and source == "llm":
         accounting_ok = True
         if storage_user_id and result_size > 0:
-            accounting_ok = await _try_increment_storage(db, storage_user_id, result_size)
+            accounting_ok = await _try_increment_storage(db, run, storage_user_id, result_size)
         if accounting_ok:
             run.status = "completed"
             run.result_path = minio_path
@@ -287,8 +301,7 @@ async def _handle_batch_result(
                 )
             ).one()
 
-    else:
-        # worker_status == "failed" (or unexpected — treat as failed)
+    elif worker_status == "failed":
         run.status = "failed"
         run.error = error
         run.completed_at = now
@@ -305,6 +318,10 @@ async def _handle_batch_result(
             )
         ).one()
 
+    else:
+        # Unhandled combination (e.g. redelivered scrape "completed" on a "processing" item) — ignore.
+        return
+
     new_completed, new_failed = counter_row.completed, counter_row.failed
 
     if new_completed + new_failed == batch.total:
@@ -318,7 +335,7 @@ async def _handle_batch_result(
             failed=new_failed,
         )
         if batch.webhook_url:
-            create_batch_webhook_delivery(db, batch, run.id, event="batch.completed")
+            await create_batch_webhook_delivery(db, batch, run.id, event="batch.completed")
 
     await db.execute(
         text("SELECT pg_notify('batch_status', :p)"),
@@ -382,19 +399,19 @@ async def _handle_scrape_completed(
             run.error = "LLM key not found or deleted"
             run.completed_at = datetime.now(UTC)
             if job.webhook_url and (not job.webhook_events or "job.failed" in job.webhook_events):
-                create_webhook_delivery(
+                await create_webhook_delivery(
                     db, job, run_id, event="job.failed", minio_path=None, error=run.error
                 )
         else:
             if storage_user_id and result_size > 0:
-                if not await _try_increment_storage(db, storage_user_id, result_size):
+                if not await _try_increment_storage(db, run, storage_user_id, result_size):
                     run.status = "failed"
                     run.error = "storage_accounting_failed"
                     run.completed_at = datetime.now(UTC)
                     if job.webhook_url and (
                         not job.webhook_events or "job.failed" in job.webhook_events
                     ):
-                        create_webhook_delivery(
+                        await create_webhook_delivery(
                             db, job, run_id, event="job.failed", minio_path=None, error=run.error
                         )
                     return
@@ -410,9 +427,13 @@ async def _handle_scrape_completed(
                 "output_schema": job.llm_config["output_schema"],
             }
             await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
+            await db.execute(
+                text("SELECT pg_notify('job_status', :p)"),
+                {"p": f"{job_id}:{run_id}:processing"},
+            )
     else:
         if storage_user_id and result_size > 0:
-            if not await _try_increment_storage(db, storage_user_id, result_size):
+            if not await _try_increment_storage(db, run, storage_user_id, result_size):
                 run.status = "failed"
                 run.error = "storage_accounting_failed"
                 run.completed_at = datetime.now(UTC)
@@ -421,7 +442,7 @@ async def _handle_scrape_completed(
                     and job.webhook_url
                     and (not job.webhook_events or "job.failed" in job.webhook_events)
                 ):
-                    create_webhook_delivery(
+                    await create_webhook_delivery(
                         db, job, run_id, event="job.failed", minio_path=None, error=run.error
                     )
                 return
@@ -440,7 +461,7 @@ async def _handle_scrape_completed(
             and job.webhook_url
             and (not job.webhook_events or "job.completed" in job.webhook_events)
         ):
-            create_webhook_delivery(
+            await create_webhook_delivery(
                 db, job, run_id, event="job.completed", minio_path=minio_path, diff=diff
             )
 
@@ -457,7 +478,7 @@ async def _handle_llm_completed(
 ) -> None:
     """Handle 'completed' from LLM worker when run was 'processing'."""
     if storage_user_id and result_size > 0:
-        if not await _try_increment_storage(db, storage_user_id, result_size):
+        if not await _try_increment_storage(db, run, storage_user_id, result_size):
             run.status = "failed"
             run.error = "storage_accounting_failed"
             run.completed_at = datetime.now(UTC)
@@ -467,7 +488,7 @@ async def _handle_llm_completed(
                 and job.webhook_url
                 and (not job.webhook_events or "job.failed" in job.webhook_events)
             ):
-                create_webhook_delivery(
+                await create_webhook_delivery(
                     db, job, run_id, event="job.failed", minio_path=None, error=run.error
                 )
             return
@@ -486,7 +507,7 @@ async def _handle_llm_completed(
         and job.webhook_url
         and (not job.webhook_events or "job.completed" in job.webhook_events)
     ):
-        create_webhook_delivery(
+        await create_webhook_delivery(
             db, job, run_id, event="job.completed", minio_path=minio_path, diff=diff
         )
 
@@ -506,12 +527,17 @@ async def _handle_job_result(
     storage_user_id: uuid.UUID | None,
     result_size: int,
     started_at,
+    source: str = "scrape",
 ) -> None:
     """Handle a result message for a regular (non-batch) job run. Caller owns commit.
 
     Emits pg_notify('job_status') for every status transition so WebSocket
     subscribers always see the final run.status regardless of the path taken.
     """
+    # Idempotency guard: NATS redelivery after commit-before-ack must be a no-op.
+    if run.status in ("completed", "failed"):
+        return
+
     if worker_status == "running":
         run.status = "running"
         run.started_at = started_at
@@ -522,13 +548,12 @@ async def _handle_job_result(
             db, run, js, minio, job_id, run_id, minio_path, warnings, storage_user_id, result_size
         )
 
-    elif worker_status == "completed" and run.status == "processing":
+    elif worker_status == "completed" and run.status == "processing" and source == "llm":
         await _handle_llm_completed(
             db, run, minio, job_id, run_id, minio_path, storage_user_id, result_size
         )
 
-    else:
-        # worker_status == "failed" (or unexpected status — treat as failed)
+    elif worker_status == "failed":
         run.status = "failed"
         run.error = error
         run.completed_at = datetime.now(UTC)
@@ -538,9 +563,10 @@ async def _handle_job_result(
             and job.webhook_url
             and (not job.webhook_events or "job.failed" in job.webhook_events)
         ):
-            create_webhook_delivery(
+            await create_webhook_delivery(
                 db, job, run_id, event="job.failed", minio_path=None, error=error
             )
+    # else: unhandled combination (e.g. redelivered scrape "completed" on a "processing" run) — ignore
 
     await db.execute(
         text("SELECT pg_notify('job_status', :p)"),
@@ -559,6 +585,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         error = data.get("error")
         nats_seq = data.get("nats_stream_seq")
         warnings = data.get("warnings")
+        source = data.get("source", "scrape")
     except (KeyError, json.JSONDecodeError) as e:
         logger.error("Malformed result message, discarding", error=str(e), data=msg.data)
         await msg.ack()
@@ -620,6 +647,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                 msg.metadata.timestamp,
                 storage_user_id,
                 result_size,
+                source=source,
             )
         else:
             await _handle_job_result(
@@ -637,6 +665,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                 storage_user_id,
                 result_size,
                 msg.metadata.timestamp,
+                source=source,
             )
 
         await db.commit()

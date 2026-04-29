@@ -29,8 +29,8 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Phase 2 spec (historical) | `docs/phase2/phase2-engineering-spec-v3.md` |
 | Phase 2 production readiness review | `PRODUCTION_REVIEW.md` |
 | Phase 3 production readiness review | `Phase3_PRODUCTION_REVIEW.md` |
-| Idempotency audit (NATS redelivery) | `Phase3_idempotency_checks.md` — 7 findings; 3 CRITICAL; tackle after remaining review items |
-| Service failure & recovery audit | `Phase3_service_failure_recovery.md` — coordinator C1–C5 + API loop gaps; C1–C3 fixed; C5 + scheduler None-check open |
+| Idempotency audit (NATS redelivery) | `Phase3_idempotency_checks.md` — 7 findings; all fixed (Migration 3.18 + source discriminator + terminal guards) |
+| Service failure & recovery audit | `Phase3_service_failure_recovery.md` — all coordinator findings fixed; API consumer findings fixed via idempotency audit; scheduler None-check was already present |
 
 ---
 
@@ -66,7 +66,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
 - **Phase 3 complete — all Steps 1–28 done**
 - **Phase 3 production review in progress** — working through `Phase3_PRODUCTION_REVIEW.md` item by item
-- 233 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
+- 239 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
 - Alembic auto-migration is **temporarily commented out** in `api/app/main.py` (disabled to allow migrations to be developed); re-enable before merging `develop → main`
 
 ### Phase 3 steps done
@@ -142,4 +142,11 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 43 | LOW | Content hash re-reads freshly-written MinIO object — deferred; fix requires schema_version 3 worker contract change; bundle with other Phase 4 worker changes | `[ ]` deferred to Phase 4 |
 | 21 | MEDIUM | `SCHEDULE_MIN_INTERVAL_MINUTES` missing from k8s API manifest — **deferred to DevOps pass with #38** | `[ ]` pending |
 | 31 | LOW | Cron schedule validation assumes server timezone — document UTC assumption | `[x]` done (`_MutableJobFields.schedule_cron` now has `Field(description=...)` stating UTC; Phase 4 TODO left on field) |
-| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | `[ ]` pending; **next up: #39 (orig #8)** (`pg_notify` missing for `processing` status — partially addressed, WS jumps `running → completed` skipping `processing`) |
+| I-1 | CRITICAL | Redelivered scrape "completed" misidentified as LLM completion — `source: "scrape"\|"llm"` discriminator added to all three workers + API consumer gates `_handle_llm_completed` on `source == "llm"` | `[x]` done |
+| I-2 | CRITICAL | Terminal run flipped back to `failed` on redelivery — terminal guard `if run.status in ("completed","failed"): return` at top of `_handle_job_result` | `[x]` done |
+| I-3 | CRITICAL | Batch counters double-incremented on redelivery — same terminal guard at top of `_handle_batch_result` | `[x]` done |
+| I-4 | HIGH | `"running"` message overwrites terminal run — closed as side effect of I-2 terminal guard | `[x]` done |
+| I-5 | HIGH | Storage quota increments non-idempotent — `job_runs.storage_accounted_at` column (Migration 3.18); `_try_increment_storage` skips if already set | `[x]` done |
+| I-6 | HIGH | Duplicate webhook delivery rows on redelivery — `webhook_deliveries.event` column + `idx_webhook_deliveries_dedup UNIQUE (run_id, event) WHERE run_id IS NOT NULL` (Migration 3.18); both helpers use `ON CONFLICT DO NOTHING` | `[x]` done |
+| I-7 | LOW | `check_completion` no terminal guard — `crawl.status not in ("completed","cancelled")` added | `[x]` done |
+| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | all items done or deferred; **all idempotency findings done — Phase 3 review complete** |

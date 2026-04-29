@@ -578,6 +578,126 @@ async def test_result_consumer_failed(db_user):
 
 
 # ---------------------------------------------------------------------------
+# Idempotency guards (NATS redelivery safety)
+# ---------------------------------------------------------------------------
+
+
+async def test_result_consumer_terminal_guard_job_failed(db_user):
+    """Finding 2: a redelivered 'failed' message on an already-completed run is a no-op.
+
+    Simulates NATS redelivery after a crash between db.commit() and msg.ack():
+    the run is already 'completed' in the DB, so the second execution must not
+    flip it back to 'failed' or insert a duplicate webhook delivery.
+    """
+    async with AsyncSessionLocal() as db:
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            webhook_url="https://hook.example.com",
+        )
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="completed")
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+        run_id = run.id
+        job_id = job.id
+
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {"job_id": str(job_id), "run_id": str(run_id), "status": "failed", "error": "timeout"}
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    await _handle_result(msg, AsyncMock(), MagicMock())
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        assert (
+            run.status == "completed"
+        ), "terminal guard must not allow redelivered 'failed' to overwrite 'completed'"
+        delivery_count = await db.scalar(
+            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
+        )
+        assert delivery_count is None, "no duplicate webhook delivery should be inserted"
+
+    msg.ack.assert_called_once()
+
+
+async def test_result_consumer_source_discriminator_scrape_not_llm(db_user):
+    """Finding 1: a redelivered scrape 'completed' (source='scrape') on a run that is
+    already in 'processing' state must NOT be routed to _handle_llm_completed.
+
+    The run should stay in 'processing' — the real LLM result has not arrived yet.
+    """
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        # Simulate a run already advanced to 'processing' (scrape done, LLM dispatched)
+        run = JobRun(job_id=job.id, status="processing")
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+        run_id = run.id
+        job_id = job.id
+
+    msg = MagicMock()
+    msg.data = json.dumps(
+        {
+            "job_id": str(job_id),
+            "run_id": str(run_id),
+            "status": "completed",
+            "source": "scrape",
+            "minio_path": "scrapeflow-results/history/raw.html",
+        }
+    ).encode()
+    msg.metadata = MagicMock()
+    msg.ack = AsyncMock()
+
+    await _handle_result(msg, AsyncMock(), MagicMock())
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(JobRun, run_id)
+        assert (
+            run.status == "processing"
+        ), "source='scrape' on a 'processing' run must not trigger _handle_llm_completed"
+
+    msg.ack.assert_called_once()
+
+
+async def test_result_consumer_webhook_dedup(db_user):
+    """Finding 6: calling create_webhook_delivery twice for the same (run_id, event)
+    inserts only one WebhookDelivery row due to ON CONFLICT DO NOTHING.
+    """
+    from app.core.webhooks import create_webhook_delivery
+
+    async with AsyncSessionLocal() as db:
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com",
+            webhook_url="https://hook.example.com",
+        )
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="completed")
+        db.add(run)
+        await db.commit()
+        await db.refresh(job)
+        await db.refresh(run)
+
+        await create_webhook_delivery(db, job, run.id, event="job.completed", minio_path=None)
+        await create_webhook_delivery(db, job, run.id, event="job.completed", minio_path=None)
+        await db.commit()
+
+        result = await db.execute(select(WebhookDelivery).where(WebhookDelivery.run_id == run.id))
+        rows = result.scalars().all()
+        assert len(rows) == 1, "ON CONFLICT DO NOTHING must prevent duplicate webhook delivery rows"
+
+
+# ---------------------------------------------------------------------------
 # SSRF protection
 # ---------------------------------------------------------------------------
 

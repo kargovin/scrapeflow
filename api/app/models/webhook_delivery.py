@@ -24,6 +24,7 @@ class WebhookDelivery(Base):
     run_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("job_runs.id", ondelete="CASCADE"), nullable=True
     )
+    event: Mapped[str] = mapped_column(VARCHAR(50), nullable=False)
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="pending")

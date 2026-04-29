@@ -72,6 +72,7 @@ async def pending_delivery(job_with_webhook):
         delivery = WebhookDelivery(
             job_id=job_with_webhook.id,
             run_id=run.id,
+            event="job.completed",
             webhook_url=job_with_webhook.webhook_url,
             payload=sample_payload,
             status="pending",
@@ -95,6 +96,7 @@ async def near_exhausted_delivery(job_with_webhook):
         delivery = WebhookDelivery(
             job_id=job_with_webhook.id,
             run_id=run.id,
+            event="job.failed",
             webhook_url=job_with_webhook.webhook_url,
             payload={"event": "job.failed"},
             status="pending",
