@@ -231,6 +231,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 - **File:** `api/app/main.py:42-47`
 - **Issue:** The auto-migration block is commented out. Deploying `develop → main` without re-enabling it means Phase 3 migrations will not run automatically in production. Manual migration would be required before every deploy.
 - **Fix:** Uncomment the migration block. Phase 3 migrations are all finalised.
+- **Done:** Block re-enabled; comment updated to document intent.
 
 ---
 
@@ -370,11 +371,20 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [ ] 21 (orig #11) — `SCHEDULE_MIN_INTERVAL_MINUTES` missing from k8s API manifest — **MEDIUM**
+#### [x] 21 (orig #11) — Phase 3 k8s DevOps pass — **MEDIUM**
 
-- **File:** `govindappa-k8s-config` — `scrapeflow/api.yaml`
-- **Issue:** The env var is set in `docker-compose.yml` but was not carried to the k8s manifest. Without it, the scheduler uses the default (5 minutes), which may not match the production policy.
-- **Fix:** Add `SCHEDULE_MIN_INTERVAL_MINUTES` to the API Deployment's `env` array in the gitops repo.
+- **File:** `govindappa-k8s-config` — `scrapeflow/`
+- **Issue:** Several Phase 3 changes required corresponding k8s manifest updates: `CREDENTIALS_ENCRYPTION_KEY` (new required secret for proxy/cookies encryption) missing from API, http-worker, and playwright-worker Deployments; `CLERK_AUTHORIZED_PARTIES` missing from API Deployment; coordinator service not deployed at all; `RATE_LIMIT_RPM` stale key (Phase 2) not replaced with `RATE_LIMIT_REQUESTS`/`RATE_LIMIT_WINDOW_SECONDS`.
+- **Fix:** Applied in the Phase 3 DevOps pass:
+  - `app/api.yaml` — replaced `RATE_LIMIT_RPM` with `RATE_LIMIT_REQUESTS` + `RATE_LIMIT_WINDOW_SECONDS`; added `CLERK_AUTHORIZED_PARTIES`; added `CREDENTIALS_ENCRYPTION_KEY` from `scrapeflow-app-secrets`
+  - `app/http-worker.yaml` — added `CREDENTIALS_ENCRYPTION_KEY`
+  - `app/playwright-worker.yaml` — added `CREDENTIALS_ENCRYPTION_KEY`
+  - `app/coordinator.yaml` — created new Deployment for crawl coordinator service
+  - `image-automation/image-repositories.yaml` — added `scrapeflow-coordinator-repo` ImageRepository
+  - `image-automation/image-policies.yaml` — added `scrapeflow-coordinator-policy` ImagePolicy
+  - `kustomization.yaml` — added `app/coordinator.yaml` to resources
+  - Note: `SCHEDULE_MIN_INTERVAL_MINUTES` was already present in `api.yaml` — was not missing
+  - Note: `scrapeflow-app-secrets` secret must be recreated on the cluster to add `credentials-encryption-key` literal (imperative step, not in git)
 
 ---
 
@@ -510,7 +520,7 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [?] 40 (orig #1) — Custom robots.txt parsers vs established packages
+#### [ ] 40 (orig #1) — Custom robots.txt parsers vs established packages — **deferred to Phase 4**
 
 - **Go:** `internal/robots` hand-rolled. Reference: `temoto/robotstxt` (Go).
 - **Python:** `worker/robots.py` hand-rolled. Reference: `reppy` or `robotexclusionrulesparser`.
@@ -518,25 +528,25 @@ Items are renumbered into the global list. Original item number shown in parenth
 
 ---
 
-#### [?] 41 (orig #4) — Should `hiredis` be installed for redis-py?
+#### [x] 41 (orig #4) — Should `hiredis` be installed for redis-py?
 
 - `hiredis` is a C extension that speeds up RESP parsing. One-line dependency addition, no API change. Low risk. Recommend adding for production.
 
 ---
 
-#### [?] 42 (orig #9) — `JobNotifier` uses blocking `asyncpg.connect()` at startup?
+#### [x] 42 (orig #9) — `JobNotifier` uses blocking `asyncpg.connect()` at startup?
 
 - `asyncpg.connect()` is `async` — the call is awaited correctly at `job_notifier.start()`. Not a blocking issue. Close this.
 
 ---
 
-#### [?] 43 (orig #13) — Can `_handle_batch_result` receive `worker_status` other than `completed`/`failed`?
+#### [x] 43 (orig #13) — Can `_handle_batch_result` receive `worker_status` other than `completed`/`failed`?
 
 - Only `running`, `completed`, `failed` arrive in practice. The `running` branch returns early. `_handle_batch_result` never sees `processing` (LLM paths). Close this — add an explicit `assert worker_status in {"running", "completed", "failed"}` if defensive coding is preferred.
 
 ---
 
-#### [?] 44 (orig #16) — Should content hash be computed when `schedule_cron` is not set?
+#### [x] 44 (orig #16) — Should content hash be computed when `schedule_cron` is not set?
 
 - Intentional — establishes a baseline for users who add scheduling later via PATCH. Design is correct. Close this.
 

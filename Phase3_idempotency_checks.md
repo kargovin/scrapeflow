@@ -22,11 +22,12 @@ The coordinator's `result_handler.py` already implements the correct defence at 
 
 ---
 
-### Finding 1 — Redelivered scrape "completed" misidentified as LLM completion
+### [x] Finding 1 — Redelivered scrape "completed" misidentified as LLM completion
 
 **Severity:** Critical
 **Patterns:** status overwrite without terminal check + blind counter increment + external side effect
 **File:** `api/app/core/result_consumer.py`
+**Fixed:** commit `a24e71c`
 
 #### What happens
 
@@ -48,13 +49,21 @@ When a job has LLM processing enabled:
 
 Add a `source: "scrape" | "llm"` discriminator to the `ResultMessage` schema so the two completed messages are structurally distinct. Gate `_handle_llm_completed` on `source == "llm"` only.
 
+#### Implemented
+
+- `http-worker/internal/worker/worker.go`: Added `Source string \`json:"source,omitempty"\`` to `resultMessage` struct; all 6 `publishResult` call sites set `Source: "scrape"`.
+- `playwright-worker/worker/models.py`: Added `source: str = "scrape"` to `ResultMessage`.
+- `llm-worker/worker/models.py`: Added `source: str = "llm"` to `ResultMessage`. The default value means all LLM messages carry the discriminator automatically via `model_dump_json` — no worker.py changes needed.
+- `api/app/core/result_consumer.py`: `_handle_result` parses `source = data.get("source", "scrape")` (defaults to "scrape" for backward compatibility with old workers). `_handle_job_result` and `_handle_batch_result` both gate the LLM branch: `elif worker_status == "completed" and run.status == "processing" and source == "llm":`. The old catch-all `else:` was split into explicit `elif worker_status == "failed":` + silent return to prevent an unhandled `source="scrape"` on a `"processing"` run from being mis-routed as a failure.
+
 ---
 
-### Finding 2 — Terminal run flipped back to `failed` on redelivery
+### [x] Finding 2 — Terminal run flipped back to `failed` on redelivery
 
 **Severity:** Critical
 **Pattern:** status overwrite without terminal check
 **File:** `api/app/core/result_consumer.py` — `else` arm of `_handle_job_result`
+**Fixed:** commit `a24e71c`
 
 #### What happens
 
@@ -83,13 +92,18 @@ if run.status in ("completed", "failed", "cancelled"):
     return
 ```
 
+#### Implemented
+
+- `api/app/core/result_consumer.py` `_handle_job_result`: Added `if run.status in ("completed", "failed"): return` at the top of the function body (before the `if worker_status == "running":` branch). The existing `"cancelled"` early-return was already present; the new guard extends it to all terminal states. This single guard also closes Finding 4 (running branch overwrite).
+
 ---
 
-### Finding 3 — Batch counters double-incremented on redelivery
+### [x] Finding 3 — Batch counters double-incremented on redelivery
 
 **Severity:** Critical
 **Patterns:** blind counter increment + status overwrite + external side effect
 **File:** `api/app/core/result_consumer.py` — `_handle_batch_result` else arm
+**Fixed:** commit `a24e71c`
 
 #### What happens
 
@@ -120,13 +134,18 @@ if run.status in ("completed", "failed", "cancelled"):
     return
 ```
 
+#### Implemented
+
+- `api/app/core/result_consumer.py` `_handle_batch_result`: Added `if run.status in ("completed", "failed"): return` after the `batch is None` / `item is None` / `run is None` early-return checks. The `elif worker_status == "failed":` (split from `else:`) + final `else: return` prevent counter corruption for any unhandled combination that reaches the end of the if-chain.
+
 ---
 
-### Finding 4 — `worker_status="running"` can overwrite a terminal run
+### [x] Finding 4 — `worker_status="running"` can overwrite a terminal run
 
 **Severity:** High
 **Pattern:** status overwrite without terminal check
 **File:** `api/app/core/result_consumer.py` — `_handle_job_result` running branch
+**Fixed:** commit `a24e71c` (closed as side effect of Finding 2 terminal guard)
 
 #### What happens
 
@@ -154,9 +173,13 @@ if worker_status == "running" and run.status not in ("completed", "failed", "can
     ...
 ```
 
+#### Implemented
+
+Closed as a side effect of the Finding 2 terminal guard. The `if run.status in ("completed", "failed"): return` at the top of `_handle_job_result` fires before the `if worker_status == "running":` branch is ever reached, so a redelivered "running" message on a terminal run exits immediately.
+
 ---
 
-### Finding 5 — Storage quota increments are non-idempotent
+### [x] Finding 5 — Storage quota increments are non-idempotent
 
 **Severity:** High (compounds with Findings 1–3)
 **Pattern:** blind counter increment
@@ -181,13 +204,20 @@ Users are falsely reported as exceeding their storage quota. Subsequent jobs are
 
 **Belt-and-suspenders:** add a `run.storage_accounted_at` timestamp column set atomically with the first increment; skip the increment if already set.
 
+#### Implemented
+
+- `api/app/models/job_runs.py`: Added `storage_accounted_at: Mapped[datetime | None]` column (Migration 3.18).
+- `api/app/core/result_consumer.py` `_try_increment_storage`: New signature `(db, run: JobRun, user_id, size)`. Early-returns `True` if `run.storage_accounted_at is not None`. On first increment, wraps `increment_storage_bytes` in `db.begin_nested()` then sets `run.storage_accounted_at = datetime.now(UTC)` — the timestamp is committed with the next `db.commit()`. All 6 call sites updated to pass `run` as the second argument.
+- `api/migrations/versions/8f4b6eb47abb_migration_3_18_idempotency_guards.py`: `op.add_column("job_runs", sa.Column("storage_accounted_at", sa.DateTime(timezone=True), nullable=True))`.
+
 ---
 
-### Finding 6 — Webhook delivery rows inserted without idempotency key
+### [x] Finding 6 — Webhook delivery rows inserted without idempotency key
 
 **Severity:** High
 **Patterns:** insert without conflict handling + external side effect
 **Files:** `api/app/core/webhooks.py` — `create_webhook_delivery` and `create_batch_webhook_delivery`
+**Fixed:** commit `a24e71c`
 
 #### What happens
 
@@ -215,13 +245,20 @@ Change the ORM add to `INSERT ... ON CONFLICT DO NOTHING`.
 
 The terminal guards from Findings 1–3 cover the consumer redelivery path. The index is defence-in-depth for any future code path that calls `create_webhook_delivery` without going through the consumer.
 
+#### Implemented
+
+- `api/app/models/webhook_delivery.py`: Added `event: Mapped[str]` column `VARCHAR(50) NOT NULL`.
+- `api/app/core/webhooks.py`: Both `create_webhook_delivery` and `create_batch_webhook_delivery` changed from `def` to `async def`. `db.add(WebhookDelivery(...))` replaced with `await db.execute(pg_insert(WebhookDelivery).values(..., event=event, ...).on_conflict_do_nothing(index_elements=["run_id", "event"], index_where=WebhookDelivery.run_id.isnot(None)))`. All 8 call sites in `result_consumer.py` updated to `await`.
+- `api/migrations/versions/8f4b6eb47abb_migration_3_18_idempotency_guards.py`: Adds `event` column as `nullable=True` → backfills from `payload->>'event'` → `ALTER COLUMN event SET NOT NULL`. Creates partial unique index `idx_webhook_deliveries_dedup ON webhook_deliveries (run_id, event) WHERE run_id IS NOT NULL`. The partial index correctly excludes crawl webhooks (`run_id IS NULL`), whose dedup is handled by the Finding 7 coordinator guard.
+
 ---
 
-### Finding 7 — `check_completion` in the coordinator doesn't guard against already-terminal crawl
+### [x] Finding 7 — `check_completion` in the coordinator doesn't guard against already-terminal crawl
 
 **Severity:** Low (latent / structural risk)
 **Pattern:** status overwrite without terminal check
 **File:** `coordinator/coordinator/result_handler.py` — `check_completion`
+**Fixed:** commit `a24e71c`
 
 #### What happens
 
@@ -243,6 +280,10 @@ if active_count == 0 and crawl.status not in _TERMINAL_QUEUE_STATUSES:
 return False
 ```
 
+#### Implemented
+
+- `coordinator/coordinator/result_handler.py` `check_completion`: Changed `if active_count == 0:` to `if active_count == 0 and crawl.status not in ("completed", "cancelled"):`. The function now returns `False` for an already-terminal crawl instead of re-setting status and re-firing `enqueue_crawl_webhook`.
+
 ---
 
 ## What passes the audit
@@ -257,14 +298,18 @@ return False
 
 ---
 
-## Recommended fix order
+## Fix order — all complete (commit `a24e71c`, 2026-04-29)
 
-| Priority | Finding | Change |
-|---|---|---|
-| 1 | Findings 2, 3, 4, 5 | Add a single terminal-status early-return at the top of `_handle_job_result` and `_handle_batch_result`. One change neutralises four findings. |
-| 2 | Finding 1 | Add `source: "scrape" \| "llm"` discriminator to `ResultMessage`; gate `_handle_llm_completed` on `source == "llm"`. Terminal guard alone cannot fully close this. |
-| 3 | Finding 6 | Add `UNIQUE (run_id, event)` partial index on `webhook_deliveries` + `ON CONFLICT DO NOTHING` in both insert helpers. |
-| 4 | Finding 7 | Harden `check_completion` with terminal-status check. Single-replica deployment makes this low urgency. |
+| Priority | Finding | Change | Status |
+|---|---|---|---|
+| 1 | Findings 2, 3, 4 | Terminal-status early-return at the top of `_handle_job_result` and `_handle_batch_result`; Finding 4 closed as side effect. | `[x]` done |
+| 2 | Finding 1 | `source: "scrape" \| "llm"` discriminator on all `ResultMessage` types; gate on `source == "llm"` in both handlers; `else:` split to explicit `elif worker_status == "failed":`. | `[x]` done |
+| 3 | Finding 5 | `storage_accounted_at` column on `job_runs`; `_try_increment_storage` skips if already set. | `[x]` done |
+| 4 | Finding 6 | `event` column on `webhook_deliveries`; partial unique index; `ON CONFLICT DO NOTHING` in both helpers. | `[x]` done |
+| 5 | Finding 7 | `check_completion` guards on `crawl.status not in ("completed", "cancelled")`. | `[x]` done |
+
+**Migration:** `api/migrations/versions/8f4b6eb47abb_migration_3_18_idempotency_guards.py`
+**Tests added:** 6 new tests across `test_jobs.py`, `test_batch.py`, `test_quota.py` (239 total passing)
 
 ---
 

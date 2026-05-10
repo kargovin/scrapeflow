@@ -180,10 +180,11 @@ No data corruption; one extra worker scrape is wasted.
 
 ---
 
-### [ ] Finding C5 — `check_completion` has no guard against already-terminal crawl
+### [x] Finding C5 — `check_completion` has no guard against already-terminal crawl
 
 **Severity:** Low (latent / structural)
 **File:** `coordinator/coordinator/result_handler.py` — `check_completion`
+**Fixed:** commit `a24e71c`
 
 #### What happens
 
@@ -210,6 +211,10 @@ return False
 ```
 
 Also see: companion document Finding 7 (same root cause, same fix wording).
+
+#### Implemented
+
+`coordinator/coordinator/result_handler.py` `check_completion`: `if active_count == 0:` changed to `if active_count == 0 and crawl.status not in ("completed", "cancelled"):`. Function now returns `False` for an already-terminal crawl without re-firing `enqueue_crawl_webhook`.
 
 ---
 
@@ -292,21 +297,21 @@ The companion document Finding 6 addresses the distinct risk of duplicate
 | Coordinator | Mid-dispatch (after commit) | `CrawlQueueItem = "dispatched"`, `CrawlPage` exists | Yes — reenqueue_stalled + delete (C1 fix) |
 | Coordinator | After result commit, before ack | `CrawlPage = "completed"`, unacked message | Yes — idempotency guard (C2 fix) |
 | Coordinator (multi-replica) | Out-of-order delivery | `CrawlPage` could revert to `"running"` | Yes — running-branch guard (C3 fix) |
-| API result_consumer | After DB commit, before ack | Run terminal, unacked message | No — see companion doc Findings 1–4 |
+| API result_consumer | After DB commit, before ack | Run terminal, unacked message | Yes — terminal guards + source discriminator (companion doc Findings 1–4, commit `a24e71c`) |
 | API scheduler | After js.publish, before commit | Orphaned NATS message | Probably — depends on None check in result_consumer |
 | API webhook_loop | After HTTP send, before row update | Row still `"pending"` | Acceptable — webhook fires twice |
 
 ---
 
-## Fix Order
+## Fix Order — all complete
 
 | Priority | Finding | File | Status |
 |----------|---------|------|--------|
-| 1 | Companion doc Findings 2, 3, 4 — terminal-status guard | `result_consumer.py` | `[ ]` open |
-| 2 | Companion doc Finding 1 — scrape vs LLM source discriminator | `ResultMessage` schema + workers | `[ ]` open |
-| 3 | Companion doc Finding 6 — webhook delivery dedup index | new migration | `[ ]` open |
-| 4 | C5 — `check_completion` terminal-status guard | `result_handler.py` | `[ ]` open |
-| 5 | Verify `result_consumer.py` returns early on `None` `job_run` (scheduler crash path) | `result_consumer.py` | `[ ]` needs audit |
+| 1 | Companion doc Findings 2, 3, 4 — terminal-status guard | `result_consumer.py` | `[x]` done (commit `a24e71c`) |
+| 2 | Companion doc Finding 1 — scrape vs LLM source discriminator | `ResultMessage` schema + workers | `[x]` done (commit `a24e71c`) |
+| 3 | Companion doc Finding 6 — webhook delivery dedup index | Migration 3.18 | `[x]` done (commit `a24e71c`) |
+| 4 | C5 — `check_completion` terminal-status guard | `result_handler.py` | `[x]` done (commit `a24e71c`) |
+| 5 | `result_consumer.py` returns early on `None` `job_run` (scheduler crash path) | `result_consumer.py` | `[x]` already present at line 579–582 — no change needed |
 | — | C1 — orphaned CrawlPage on reenqueue | `dispatcher.py` | `[x]` fixed #51 |
 | — | C2 — commit-before-ack in coordinator | `result_handler.py` | `[x]` fixed #52 |
 | — | C3 — running-branch overwrite multi-replica | `result_handler.py` | `[x]` fixed #52 |

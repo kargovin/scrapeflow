@@ -65,9 +65,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 - Branch: `develop`
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
 - **Phase 3 complete — all Steps 1–28 done**
-- **Phase 3 production review in progress** — working through `Phase3_PRODUCTION_REVIEW.md` item by item
+- **Phase 3 production review complete** — all items done or deferred; only `[?] 40` (robots.txt parsers decision) and item `21` (k8s env var + k8s secret for #38) remain open
 - 239 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
-- Alembic auto-migration is **temporarily commented out** in `api/app/main.py` (disabled to allow migrations to be developed); re-enable before merging `develop → main`
+- Alembic auto-migration **re-enabled** in `api/app/main.py` (was temporarily disabled during Phase 3 migration development)
 
 ### Phase 3 steps done
 
@@ -140,7 +140,7 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | 25 | LOW | Stale WHAT comments in `result_consumer.py` and `result_handler.py` — 7 removed across both files; WHY comments (idempotency guard, deferred LLM accounting, dedup early-return, ADR references, crawl-ack note) retained | `[x]` done |
 | 29 | LOW | No test for batch item storage quota exceeded — `test_result_consumer_batch_item_storage_quota_exceeded` added to `test_batch.py`; asserts run + item marked `failed`, `batch.failed == 1`, MinIO object removed | `[x]` done |
 | 43 | LOW | Content hash re-reads freshly-written MinIO object — deferred; fix requires schema_version 3 worker contract change; bundle with other Phase 4 worker changes | `[ ]` deferred to Phase 4 |
-| 21 | MEDIUM | `SCHEDULE_MIN_INTERVAL_MINUTES` missing from k8s API manifest — **deferred to DevOps pass with #38** | `[ ]` pending |
+| 21 | MEDIUM | `SCHEDULE_MIN_INTERVAL_MINUTES` missing from k8s API manifest + `CREDENTIALS_ENCRYPTION_KEY` (#38) + coordinator deployment — all applied in k8s repo (Phase 3 DevOps pass) | `[x]` done |
 | 31 | LOW | Cron schedule validation assumes server timezone — document UTC assumption | `[x]` done (`_MutableJobFields.schedule_cron` now has `Field(description=...)` stating UTC; Phase 4 TODO left on field) |
 | I-1 | CRITICAL | Redelivered scrape "completed" misidentified as LLM completion — `source: "scrape"\|"llm"` discriminator added to all three workers + API consumer gates `_handle_llm_completed` on `source == "llm"` | `[x]` done |
 | I-2 | CRITICAL | Terminal run flipped back to `failed` on redelivery — terminal guard `if run.status in ("completed","failed"): return` at top of `_handle_job_result` | `[x]` done |
@@ -150,3 +150,8 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | I-6 | HIGH | Duplicate webhook delivery rows on redelivery — `webhook_deliveries.event` column + `idx_webhook_deliveries_dedup UNIQUE (run_id, event) WHERE run_id IS NOT NULL` (Migration 3.18); both helpers use `ON CONFLICT DO NOTHING` | `[x]` done |
 | I-7 | LOW | `check_completion` no terminal guard — `crawl.status not in ("completed","cancelled")` added | `[x]` done |
 | 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | all items done or deferred; **all idempotency findings done — Phase 3 review complete** |
+| [?] 42 | LOW | `JobNotifier` uses blocking `asyncpg.connect()` at startup? — `asyncpg.connect()` is async (awaited at startup); raw connection is intentional (LISTEN requires a dedicated non-pooled connection for its lifetime); `+asyncpg` stripped from URL because asyncpg only accepts plain `postgresql://` | `[x]` closed |
+| [?] 43 | LOW | Can `_handle_batch_result` receive `worker_status` other than `completed`/`failed`? — workers only publish `running`, `completed`, `failed`; `processing` is API-side only; `else: return` at end of function is defensive coverage for redelivery combos, not a gap | `[x]` closed |
+| [?] 44 | LOW | Should content hash be computed when `schedule_cron` is not set? — intentional; establishes baseline for users who add scheduling later via PATCH | `[x]` closed |
+| [?] 40 | LOW | Custom robots.txt parsers (Go + Python) vs established packages — needs explicit decision: evaluate edge cases or document choice to keep hand-rolled | `[ ]` deferred to Phase 4 |
+| [?] 41 | LOW | Should `hiredis` be installed for redis-py? — one-line addition, no API change, low risk; recommended for production | `[x]` done — `redis[hiredis]>=5.0.0` in `pyproject.toml` |

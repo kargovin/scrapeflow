@@ -1,8 +1,8 @@
 # ScrapeFlow — DevOps Deployment Spec
 
 > **For:** DevOps agent deploying ScrapeFlow to the homelab k3s cluster via FluxCD GitOps
-> **Date:** 2026-04-14
-> **Status:** Phase 2 complete, production-reviewed, ready to ship
+> **Date:** 2026-04-14 (Phase 2) / 2026-05-10 (Phase 3 delta appended)
+> **Status:** Phase 3 complete — see §17 for the k8s changes required before merging `develop → main`
 
 ---
 
@@ -482,3 +482,222 @@ Use a simple init container pattern (e.g. `busybox` with `nc -z <host> <port>` l
 - Do not expose PostgreSQL, Redis, NATS, or MinIO via Ingress — internal cluster access only
 - Do not set `replicas > 1` on workers until the resource budget is understood — the playwright worker is the most memory-intensive service
 - Do not skip the `# {"$imagepolicy": ...}` marker comments — without them Flux cannot update image tags
+
+---
+
+## 17. Phase 3 — k8s Delta (apply before merging develop → main)
+
+Phase 2 k8s manifests are live at `govindappa-k8s-config/clusters/k3s-server/scrapeflow/`. Phase 3 adds one new service (coordinator) and three new required env vars across the existing deployments. All gaps below will cause hard startup failures if not applied before the Phase 3 image is deployed.
+
+### 17a. Secret update — `scrapeflow-app-secrets`
+
+A new `credentials-encryption-key` literal must be added to the existing secret. **This must be done before updating any Deployment** — all three workers validate the key at startup and crash-loop if it is missing.
+
+The value must be the same Fernet key used by the API, all three workers, and (if set) the platform-level `DEFAULT_PROXY_URL` fallback. Generate once and share:
+
+```bash
+# Generate the key (Python)
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Recreate the secret with all three keys
+kubectl delete secret scrapeflow-app-secrets --namespace scrapeflow
+kubectl create secret generic scrapeflow-app-secrets \
+  --namespace scrapeflow \
+  --from-literal=clerk-secret-key=sk_live_... \
+  --from-literal=llm-key-encryption-key=<existing-fernet-key> \
+  --from-literal=credentials-encryption-key=<new-fernet-key>
+```
+
+> **Do not reuse `llm-key-encryption-key` as `credentials-encryption-key`.** They are separate keys used for different data (DB-stored LLM keys vs. NATS-message proxy credentials). Mixing them means a key rotation on one invalidates the other.
+
+### 17b. `app/api.yaml` — two new env vars
+
+Add to the `env:` block of the `api` container:
+
+```yaml
+- name: CREDENTIALS_ENCRYPTION_KEY
+  valueFrom:
+    secretKeyRef:
+      name: scrapeflow-app-secrets
+      key: credentials-encryption-key
+- name: CLERK_AUTHORIZED_PARTIES
+  value: "https://scrapeflow.govindappa.com"
+```
+
+**Why `CLERK_AUTHORIZED_PARTIES`:** Production review item #35 — without it, the API accepts JWTs from any Clerk app that shares the same Clerk instance. Setting it to the production domain restricts JWT acceptance to tokens issued for this app.
+
+**Note:** `SCHEDULE_MIN_INTERVAL_MINUTES` is already present in `api.yaml` (line 95) — item #21 from the Phase 3 review is already done.
+
+**Note:** `RATE_LIMIT_RPM: "60"` is a stale key left over from Phase 2. The Phase 3 sliding-window rate limiter reads `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` (both defaulting to 60). The manifest entry has no effect but also causes no harm. Replace with the correct keys on the next manifest edit:
+
+```yaml
+# Replace:
+- name: RATE_LIMIT_RPM
+  value: "60"
+# With:
+- name: RATE_LIMIT_REQUESTS
+  value: "60"
+- name: RATE_LIMIT_WINDOW_SECONDS
+  value: "60"
+```
+
+### 17c. `app/http-worker.yaml` — one new env var
+
+The Go http-worker hard-fails startup if `CREDENTIALS_ENCRYPTION_KEY` is not set (see `http-worker/internal/config/config.go`).
+
+Add to the `env:` block:
+
+```yaml
+- name: CREDENTIALS_ENCRYPTION_KEY
+  valueFrom:
+    secretKeyRef:
+      name: scrapeflow-app-secrets
+      key: credentials-encryption-key
+```
+
+### 17d. `app/playwright-worker.yaml` — one new env var
+
+Same requirement as the Go worker (see `playwright-worker/worker/config.py`).
+
+Add to the `env:` block:
+
+```yaml
+- name: CREDENTIALS_ENCRYPTION_KEY
+  valueFrom:
+    secretKeyRef:
+      name: scrapeflow-app-secrets
+      key: credentials-encryption-key
+```
+
+### 17e. New file: `app/coordinator.yaml`
+
+Phase 3 Step 23 added the crawl coordinator service. Without it, `POST /crawls` creates rows in the DB but nothing ever dispatches them — crawls silently stall.
+
+The coordinator is a stateless long-running Python process. It needs Postgres, NATS, and MinIO but **no ingress and no service** (it makes outbound connections only).
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scrapeflow-coordinator
+  namespace: scrapeflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scrapeflow-coordinator
+  template:
+    metadata:
+      labels:
+        app: scrapeflow-coordinator
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox
+          command: ['sh', '-c', 'until nc -z scrapeflow-postgresql 5432; do echo waiting for postgres; sleep 2; done']
+        - name: wait-for-nats
+          image: busybox
+          command: ['sh', '-c', 'until nc -z scrapeflow-nats 4222; do echo waiting for nats; sleep 2; done']
+        - name: wait-for-minio
+          image: busybox
+          command: ['sh', '-c', 'until nc -z scrapeflow-minio 9000; do echo waiting for minio; sleep 2; done']
+      containers:
+        - name: coordinator
+          image: k4rth/scrapeflow-coordinator:main-0000000000-placeholder # {"$imagepolicy": "flux-system:scrapeflow-coordinator-policy"}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: scrapeflow-db-credentials
+                  key: database-url
+            - name: NATS_URL
+              value: "nats://scrapeflow-nats:4222"
+            - name: MINIO_ENDPOINT
+              value: "scrapeflow-minio:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: scrapeflow-minio-credentials
+                  key: rootUser
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: scrapeflow-minio-credentials
+                  key: rootPassword
+            - name: MINIO_BUCKET
+              value: "scrapeflow-results"
+            - name: MINIO_SECURE
+              value: "false"
+            - name: COORDINATOR_DISPATCH_BATCH_SIZE
+              value: "10"
+            - name: COORDINATOR_DISPATCH_POLL_INTERVAL
+              value: "2"
+            - name: COORDINATOR_STALE_THRESHOLD_MINUTES
+              value: "10"
+```
+
+> **Do not set `replicas > 1`** for the coordinator. The BFS dispatch loop uses `FOR UPDATE SKIP LOCKED` on `crawl_queue` rows, so multiple replicas are safe at the queue level, but running multi-replica against a single-node cluster adds coordination overhead with no throughput benefit at this scale.
+
+### 17f. Image automation — add coordinator
+
+**`image-automation/image-repositories.yaml`** — append:
+
+```yaml
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImageRepository
+metadata:
+  name: scrapeflow-coordinator-repo
+  namespace: flux-system
+spec:
+  image: k4rth/scrapeflow-coordinator
+  interval: 1m
+```
+
+**`image-automation/image-policies.yaml`** — append:
+
+```yaml
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImagePolicy
+metadata:
+  name: scrapeflow-coordinator-policy
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: scrapeflow-coordinator-repo
+  filterTags:
+    pattern: '^main-(?P<ts>[0-9]+)-(?P<sha>[a-f0-9]+)'
+    extract: '$ts'
+  policy:
+    numerical:
+      order: asc
+```
+
+### 17g. `kustomization.yaml` — add coordinator
+
+Add `- app/coordinator.yaml` to the `resources` list.
+
+### 17h. CI/CD — already done
+
+The GitHub Actions workflow at `.github/workflows/build-push.yml` already has the `build-coordinator` job and the `coordinator:` path filter. No changes needed there.
+
+### 17i. Summary checklist
+
+| # | File | Action | Blocking? |
+|---|------|--------|-----------|
+| 1 | cluster (imperative) | Recreate `scrapeflow-app-secrets` with `credentials-encryption-key` literal | Yes — must be first |
+| 2 | `app/api.yaml` | Add `CREDENTIALS_ENCRYPTION_KEY` + `CLERK_AUTHORIZED_PARTIES` env vars; fix `RATE_LIMIT_RPM` → `RATE_LIMIT_REQUESTS`/`RATE_LIMIT_WINDOW_SECONDS` | Yes (CREDENTIALS); Security (CLERK); Low (rate limit) |
+| 3 | `app/http-worker.yaml` | Add `CREDENTIALS_ENCRYPTION_KEY` env var | Yes |
+| 4 | `app/playwright-worker.yaml` | Add `CREDENTIALS_ENCRYPTION_KEY` env var | Yes |
+| 5 | `app/coordinator.yaml` | Create new file (Deployment) | Yes — crawls stall without it |
+| 6 | `image-automation/image-repositories.yaml` | Append coordinator ImageRepository | Yes — Flux needs this to poll |
+| 7 | `image-automation/image-policies.yaml` | Append coordinator ImagePolicy | Yes — needed for tag selection |
+| 8 | `kustomization.yaml` | Add `- app/coordinator.yaml` | Yes |
