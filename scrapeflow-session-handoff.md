@@ -62,12 +62,13 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- Branch: `develop`
+- Branch: `main` (develop is in sync — hotfix applied 2026-05-12)
 - Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
 - **Phase 3 complete — all Steps 1–28 done**
 - **Phase 3 production review complete** — all items done or deferred; only `[?] 40` (robots.txt parsers decision) and item `21` (k8s env var + k8s secret for #38) remain open
 - 239 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
 - Alembic auto-migration **re-enabled** in `api/app/main.py` (was temporarily disabled during Phase 3 migration development)
+- **Smoke test completed 2026-05-12** — core job pipeline confirmed working (example.com, google.com → markdown output)
 
 ### Phase 3 steps done
 
@@ -155,3 +156,20 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | [?] 44 | LOW | Should content hash be computed when `schedule_cron` is not set? — intentional; establishes baseline for users who add scheduling later via PATCH | `[x]` closed |
 | [?] 40 | LOW | Custom robots.txt parsers (Go + Python) vs established packages — needs explicit decision: evaluate edge cases or document choice to keep hand-rolled | `[ ]` deferred to Phase 4 |
 | [?] 41 | LOW | Should `hiredis` be installed for redis-py? — one-line addition, no API change, low risk; recommended for production | `[x]` done — `redis[hiredis]>=5.0.0` in `pyproject.toml` |
+
+---
+
+### Post-deploy fixes applied (2026-05-12)
+
+| Fix | Detail |
+|-----|--------|
+| `http-worker/internal/worker/worker.go` — `sub.Unsubscribe()` → `sub.Drain()` | `Unsubscribe()` sends `CONSUMER.DELETE` to NATS on every pod shutdown (SIGTERM), deleting the durable `go-worker` consumer. With `RollingUpdate`, the new pod creates the consumer first then the old pod deletes it — causing `"nats: consumer deleted"` errors on the new pod. `Drain()` closes the client-side subscription without touching server state; the durable consumer survives restarts. Commit `ef22a17` on `develop` + `main`. |
+| `govindappa-k8s-config` — `strategy: Recreate` on `scrapeflow-http-worker` deployment | Belt-and-suspenders fix: old pod is fully terminated before new pod starts, eliminating the rolling-update overlap window where the old pod's shutdown could delete the consumer the new pod just created. Commit `55d2928` in infra repo. |
+
+### Known open items going into Phase 4
+
+| Item | Detail |
+|------|--------|
+| `[?] 40` | Custom robots.txt parsers (Go + Python) vs established packages — deferred to Phase 4 |
+| `[?] 43` (Phase 4) | Content hash re-reads freshly-written MinIO object — bundle with Phase 4 schema_version 3 worker contract changes |
+| NATS pull consumers | API result consumer uses a push consumer (durable); limits to one replica and requires `Recreate` strategy. Phase 4: migrate to pull consumer model |
