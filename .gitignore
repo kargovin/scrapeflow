@@ -36,6 +36,4 @@ Thumbs.db
 
 # only for my understanding, not to be committed
 secret.txt
-RESEARCH_NOTES.md
-docs/guides/modal-llm-inference.md
-docs/guides/litellm-provider-routing.md
+docs/guides/
