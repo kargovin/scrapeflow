@@ -1,8 +1,8 @@
 # Phase 2 Engineering Spec — Architect Review
 
-**Reviewer:** Senior Software Architect  
-**Spec reviewed:** `phase2-engineering-spec.md` (dated 2026-04-01)  
-**Review date:** 2026-04-01  
+**Reviewer:** Senior Software Architect
+**Spec reviewed:** `phase2-engineering-spec.md` (dated 2026-04-01)
+**Review date:** 2026-04-01
 **Verdict:** **Do not implement as written.** Four issues (P0) will cause startup failure or data corruption and must be resolved before any code is written. Eight additional issues (P1) are silent logic bugs that will produce wrong behavior in production without crashing. Remaining items are spec gaps or hardening concerns.
 
 ---
