@@ -37,6 +37,18 @@ Day-to-day docs that are still actively consulted.
 
 ---
 
+## Process — How We Build ScrapeFlow
+
+Starter prompts for the multi-persona workflow (PM → Architect → Tech Lead → Engineer). Each file onboards a new session into a persona role. Update these when starting a new phase.
+
+| File | Role |
+|------|------|
+| [`process/product-manager.md`](process/product-manager.md) | PM — defines scope, writes PRDs, hands off to Architect |
+| [`process/architect.md`](process/architect.md) | Architect — writes ADRs, system contracts, hands off to Tech Lead |
+| [`process/tech-lead.md`](process/tech-lead.md) | Tech Lead — breaks spec into ordered backlog, hands off to Engineers |
+
+---
+
 ## Archive — Completed Phase History
 
 Completed phase artifacts. Kept as a permanent record of how the project evolved — never deleted.
@@ -74,14 +86,6 @@ Completed phase artifacts. Kept as a permanent record of how the project evolved
 | [`archive/phase3/PHASE3_ADDITIONS.md`](archive/phase3/PHASE3_ADDITIONS.md) | Phase 3 scope additions tracked mid-sprint |
 | [`archive/phase3/PHASE3_DEFERRED.md`](archive/phase3/PHASE3_DEFERRED.md) | Items deferred out of Phase 3 scope |
 | [`archive/phase3/prd/`](archive/phase3/prd/) | Phase 3 PRDs (PRD-001 through PRD-015) — one file per feature |
-
-### Process artifacts (Phase 3)
-
-| File | Contents |
-|------|----------|
-| [`archive/personas/product-manager.md`](archive/personas/product-manager.md) | PM persona — owns PRDs, priorities, success criteria |
-| [`archive/personas/architect.md`](archive/personas/architect.md) | Architect persona — owns ADRs, system contracts, design docs |
-| [`archive/personas/tech-lead.md`](archive/personas/tech-lead.md) | Tech Lead persona — owns backlog breakdown, sequencing |
 
 ### Build log
 
