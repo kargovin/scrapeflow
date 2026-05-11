@@ -27,10 +27,10 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Progress tracker | `docs/project/PROGRESS.md` |
 | ADRs (ADR-004 through ADR-007 are Phase 3) | `docs/adr/` |
 | Phase 2 spec (historical) | `docs/phase2/phase2-engineering-spec-v3.md` |
-| Phase 2 production readiness review | `PRODUCTION_REVIEW.md` |
-| Phase 3 production readiness review | `Phase3_PRODUCTION_REVIEW.md` |
-| Idempotency audit (NATS redelivery) | `Phase3_idempotency_checks.md` — 7 findings; all fixed (Migration 3.18 + source discriminator + terminal guards) |
-| Service failure & recovery audit | `Phase3_service_failure_recovery.md` — all coordinator findings fixed; API consumer findings fixed via idempotency audit; scheduler None-check was already present |
+| Phase 2 production readiness review | `docs/phase2/production-review.md` |
+| Phase 3 production readiness review | `docs/phase3/production-review.md` |
+| Idempotency audit (NATS redelivery) | `docs/phase3/idempotency-checks.md` — 7 findings; all fixed (Migration 3.18 + source discriminator + terminal guards) |
+| Service failure & recovery audit | `docs/phase3/service-failure-recovery.md` — all coordinator findings fixed; API consumer findings fixed via idempotency audit; scheduler None-check was already present |
 
 ---
 
@@ -104,7 +104,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ### Phase 3 complete
 
-All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
+All 28 steps done. Remaining work tracked in `docs/phase3/production-review.md`.
 
 #### Production review progress
 
@@ -150,7 +150,7 @@ All 28 steps done. Remaining work tracked in `Phase3_PRODUCTION_REVIEW.md`.
 | I-5 | HIGH | Storage quota increments non-idempotent — `job_runs.storage_accounted_at` column (Migration 3.18); `_try_increment_storage` skips if already set | `[x]` done |
 | I-6 | HIGH | Duplicate webhook delivery rows on redelivery — `webhook_deliveries.event` column + `idx_webhook_deliveries_dedup UNIQUE (run_id, event) WHERE run_id IS NOT NULL` (Migration 3.18); both helpers use `ON CONFLICT DO NOTHING` | `[x]` done |
 | I-7 | LOW | `check_completion` no terminal guard — `crawl.status not in ("completed","cancelled")` added | `[x]` done |
-| 17+ | MEDIUM–LOW | See `Phase3_PRODUCTION_REVIEW.md` for full list | all items done or deferred; **all idempotency findings done — Phase 3 review complete** |
+| 17+ | MEDIUM–LOW | See `docs/phase3/production-review.md` for full list | all items done or deferred; **all idempotency findings done — Phase 3 review complete** |
 | [?] 42 | LOW | `JobNotifier` uses blocking `asyncpg.connect()` at startup? — `asyncpg.connect()` is async (awaited at startup); raw connection is intentional (LISTEN requires a dedicated non-pooled connection for its lifetime); `+asyncpg` stripped from URL because asyncpg only accepts plain `postgresql://` | `[x]` closed |
 | [?] 43 | LOW | Can `_handle_batch_result` receive `worker_status` other than `completed`/`failed`? — workers only publish `running`, `completed`, `failed`; `processing` is API-side only; `else: return` at end of function is defensive coverage for redelivery combos, not a gap | `[x]` closed |
 | [?] 44 | LOW | Should content hash be computed when `schedule_cron` is not set? — intentional; establishes baseline for users who add scheduling later via PATCH | `[x]` closed |
