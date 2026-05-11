@@ -22,15 +22,19 @@ When the user is ready to build something, they will say so. Until then, guide a
 | What | Where |
 |------|-------|
 | Architecture + key decisions | `CLAUDE.md` |
-| Phase 3 engineering spec | `docs/phase3/phase3-engineering-spec.md` |
-| Phase 3 ordered backlog | `docs/project/PHASE3_BACKLOG.md` |
-| Progress tracker | `docs/project/PROGRESS.md` |
-| ADRs (ADR-004 through ADR-007 are Phase 3) | `docs/adr/` |
-| Phase 2 spec (historical) | `docs/phase2/phase2-engineering-spec-v3.md` |
-| Phase 2 production readiness review | `docs/phase2/production-review.md` |
-| Phase 3 production readiness review | `docs/phase3/production-review.md` |
-| Idempotency audit (NATS redelivery) | `docs/phase3/idempotency-checks.md` — 7 findings; all fixed (Migration 3.18 + source discriminator + terminal guards) |
-| Service failure & recovery audit | `docs/phase3/service-failure-recovery.md` — all coordinator findings fixed; API consumer findings fixed via idempotency audit; scheduler None-check was already present |
+| Docs index (ADRs, reference, archive) | `docs/README.md` |
+| ADRs (ADR-001 through ADR-007) | `docs/adr/` |
+| Operational reference (commands, devops, usages) | `docs/project/` |
+| Multi-persona process starter prompts | `docs/process/` |
+| Phase 3 engineering spec (historical) | `docs/archive/phase3/phase3-engineering-spec.md` |
+| Phase 3 ordered backlog (historical) | `docs/archive/phase3/PHASE3_BACKLOG.md` |
+| Phase 3 deferred items → Phase 4 candidates | `docs/archive/phase3/PHASE3_DEFERRED.md` |
+| Progress tracker (historical) | `docs/archive/PROGRESS.md` |
+| Phase 2 spec (historical) | `docs/archive/phase2/phase2-engineering-spec-v3.md` |
+| Phase 2 production readiness review | `docs/archive/phase2/production-review.md` |
+| Phase 3 production readiness review | `docs/archive/phase3/production-review.md` |
+| Idempotency audit (NATS redelivery) | `docs/archive/phase3/idempotency-checks.md` — 7 findings; all fixed |
+| Service failure & recovery audit | `docs/archive/phase3/service-failure-recovery.md` — all findings fixed |
 
 ---
 
@@ -50,7 +54,7 @@ docker build -t scrapeflow-mcp mcp/
 docker run --rm -e SCRAPEFLOW_API_KEY=test-key scrapeflow-mcp python -m pytest tests/ -v
 ```
 
-**Migrations** (Alembic auto-run is disabled in `main.py` during Phase 3 — re-enable after all migrations are finalised):
+**Migrations** (Alembic auto-run is enabled in `main.py` — runs on API startup):
 ```bash
 # from ./docker
 docker compose exec api uv run alembic upgrade head
@@ -62,13 +66,13 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- Branch: `main` (develop is in sync — hotfix applied 2026-05-12)
-- Phase 1 + Phase 2 complete and production-verified at `scrapeflow.govindappa.com`
-- **Phase 3 complete — all Steps 1–28 done**
-- **Phase 3 production review complete** — all items done or deferred; only `[?] 40` (robots.txt parsers decision) and item `21` (k8s env var + k8s secret for #38) remain open
+- Branch: `main` (develop is in sync)
+- Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
+- **Entering Phase 4** — no spec yet; backlog will be driven by real usage findings
 - 239 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
-- Alembic auto-migration **re-enabled** in `api/app/main.py` (was temporarily disabled during Phase 3 migration development)
-- **Smoke test completed 2026-05-12** — core job pipeline confirmed working (example.com, google.com → markdown output)
+- Alembic auto-migration enabled in `api/app/main.py`
+- **Smoke test completed 2026-05-12** — core job pipeline confirmed working (google.com → markdown output)
+- **Docs reorganised 2026-05-12** — `docs/` now has four sections: `adr/` (decisions), `project/` (reference), `process/` (multi-persona starters), `archive/` (completed phase history)
 
 ### Phase 3 steps done
 
@@ -104,7 +108,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ### Phase 3 complete
 
-All 28 steps done. Remaining work tracked in `docs/phase3/production-review.md`.
+All 28 steps done. Full record in `docs/archive/phase3/production-review.md`.
 
 #### Production review progress
 
@@ -165,6 +169,16 @@ All 28 steps done. Remaining work tracked in `docs/phase3/production-review.md`.
 |-----|--------|
 | `http-worker/internal/worker/worker.go` — `sub.Unsubscribe()` → `sub.Drain()` | `Unsubscribe()` sends `CONSUMER.DELETE` to NATS on every pod shutdown (SIGTERM), deleting the durable `go-worker` consumer. With `RollingUpdate`, the new pod creates the consumer first then the old pod deletes it — causing `"nats: consumer deleted"` errors on the new pod. `Drain()` closes the client-side subscription without touching server state; the durable consumer survives restarts. Commit `ef22a17` on `develop` + `main`. |
 | `govindappa-k8s-config` — `strategy: Recreate` on `scrapeflow-http-worker` deployment | Belt-and-suspenders fix: old pod is fully terminated before new pod starts, eliminating the rolling-update overlap window where the old pod's shutdown could delete the consumer the new pod just created. Commit `55d2928` in infra repo. |
+
+### Phase 4 entry point
+
+Phase 4 scope is **not yet defined** — the backlog will be built from real usage findings after a period of active use in production. When returning:
+
+1. Check `docs/archive/phase3/PHASE3_DEFERRED.md` for items already scoped and deferred
+2. Capture any bugs or friction points from usage before starting the PM persona
+3. Decide whether to run the full PM → Architect → Tech Lead → Engineer process (see `docs/process/`) or a lighter spec approach
+
+---
 
 ### Known open items going into Phase 4
 
