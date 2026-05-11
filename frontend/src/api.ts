@@ -24,6 +24,10 @@ export async function apiPatch<T>(path: string, token: string, body: unknown): P
   return (await apiFetch(path, token, { method: 'PATCH', body: JSON.stringify(body) })).json()
 }
 
+export async function apiPost<T>(path: string, token: string, body: unknown): Promise<T> {
+  return (await apiFetch(path, token, { method: 'POST', body: JSON.stringify(body) })).json()
+}
+
 export async function apiDelete(path: string, token: string): Promise<void> {
   await apiFetch(path, token, { method: 'DELETE' })
 }
@@ -59,6 +63,17 @@ export interface AdminJob {
   created_at: string
   updated_at: string
   run_id: string
+}
+
+export interface ApiKey {
+  id: string
+  name: string
+  created_at: string
+  revoked: boolean
+}
+
+export interface ApiKeyCreated extends ApiKey {
+  key: string
 }
 
 export interface AdminStats {

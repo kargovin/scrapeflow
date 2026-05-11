@@ -147,10 +147,11 @@ app.include_router(batch.router)
 app.include_router(crawls.router)
 app.include_router(admin.router)
 
-# Admin SPA — mounted last so FastAPI routes at /admin/* take precedence.
+# SPA — mounted at /app so it doesn't overlap with any API route prefix.
+# /admin/*, /users/*, /jobs/* etc. are all API routes; /app/* is SPA-only.
 # Conditional: skipped when frontend/dist is absent (local dev, test builds).
 
 if os.path.isdir("frontend/dist"):
     from fastapi.staticfiles import StaticFiles
 
-    app.mount("/admin", StaticFiles(directory="frontend/dist", html=True), name="admin-spa")
+    app.mount("/app", StaticFiles(directory="frontend/dist", html=True), name="spa")

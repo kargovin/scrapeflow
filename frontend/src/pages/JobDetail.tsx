@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { apiGet, apiDelete, API_BASE, type AdminJob } from '../api'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
@@ -14,13 +15,10 @@ const STATUS_COLOURS: Record<string, string> = {
   processing: 'bg-purple-100 text-purple-700',
 }
 
-interface Props {
-  jobId: string
-  onBack: () => void
-}
-
-export default function JobDetail({ jobId, onBack }: Props) {
+export default function JobDetail() {
+  const { jobId } = useParams<{ jobId: string }>()
   const { getToken } = useAuth()
+  const navigate = useNavigate()
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [liveStatus, setLiveStatus] = useState<string | null>(null)
@@ -42,7 +40,7 @@ export default function JobDetail({ jobId, onBack }: Props) {
     mutationFn: () => apiDelete(`/jobs/${jobId}?permanent=true`, token!),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin-jobs'] })
-      onBack()
+      navigate('/app/admin/jobs')
     },
   })
 
@@ -70,6 +68,8 @@ export default function JobDetail({ jobId, onBack }: Props) {
       setWsLive(false)
     }
   }, [token, jobId, job?.status, qc])
+
+  if (!jobId) return null
 
   if (isLoading || !token) {
     return <p className="text-sm text-gray-500">Loading…</p>
@@ -107,7 +107,7 @@ export default function JobDetail({ jobId, onBack }: Props) {
   return (
     <div>
       <button
-        onClick={onBack}
+        onClick={() => navigate('/app/admin/jobs')}
         className="mb-4 text-sm text-indigo-600 hover:underline"
       >
         ← Back to jobs

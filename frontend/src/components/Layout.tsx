@@ -1,36 +1,36 @@
 import { useAuth } from '@clerk/clerk-react'
-import type { Page } from '../App'
+import { useNavigate, useLocation, Outlet } from 'react-router-dom'
 
-const NAV: { id: Page; label: string }[] = [
-  { id: 'users', label: 'Users' },
-  { id: 'jobs', label: 'Jobs' },
-  { id: 'stats', label: 'Usage Stats' },
-]
-
-interface Props {
-  page: Page
-  onNavigate: (p: Page) => void
-  children: React.ReactNode
+interface NavItem {
+  path: string
+  label: string
 }
 
-export default function Layout({ page, onNavigate, children }: Props) {
+interface Props {
+  navItems: NavItem[]
+  title?: string
+}
+
+export default function Layout({ navItems, title = 'ScrapeFlow' }: Props) {
   const { signOut } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
 
   return (
     <div className="min-h-screen flex bg-gray-50">
       {/* Sidebar */}
       <aside className="w-52 bg-white border-r border-gray-200 flex flex-col">
         <div className="px-4 py-5 border-b border-gray-200">
-          <span className="text-sm font-semibold text-indigo-600">ScrapeFlow Admin</span>
+          <span className="text-sm font-semibold text-indigo-600">{title}</span>
         </div>
         <nav className="flex-1 py-4 space-y-1 px-2">
-          {NAV.map(({ id, label }) => (
+          {navItems.map(({ path, label }) => (
             <button
-              key={id}
-              onClick={() => onNavigate(id)}
+              key={path}
+              onClick={() => navigate(path)}
               className={[
                 'w-full text-left px-3 py-2 rounded text-sm font-medium transition-colors',
-                page === id
+                location.pathname.startsWith(path)
                   ? 'bg-indigo-50 text-indigo-700'
                   : 'text-gray-600 hover:bg-gray-100',
               ].join(' ')}
@@ -51,7 +51,7 @@ export default function Layout({ page, onNavigate, children }: Props) {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto p-8">
-        {children}
+        <Outlet />
       </main>
     </div>
   )

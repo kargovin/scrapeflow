@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
+import { useNavigate } from 'react-router-dom'
 import { apiGet, type AdminJob } from '../api'
 import type { Query } from '@tanstack/react-query'
 
@@ -15,12 +16,9 @@ const STATUS_COLOURS: Record<string, string> = {
   processing: 'bg-purple-100 text-purple-700',
 }
 
-interface Props {
-  onSelectJob: (id: string) => void
-}
-
-export default function Jobs({ onSelectJob }: Props) {
+export default function Jobs() {
   const { getToken } = useAuth()
+  const navigate = useNavigate()
   const [offset, setOffset] = useState(0)
   const [statusFilter, setStatusFilter] = useState('')
   const limit = 50
@@ -78,7 +76,7 @@ export default function Jobs({ onSelectJob }: Props) {
                 {jobs?.map(job => (
                   <tr
                     key={job.id}
-                    onClick={() => onSelectJob(job.id)}
+                    onClick={() => navigate(`/app/admin/jobs/${job.id}`)}
                     className="hover:bg-gray-50 cursor-pointer"
                   >
                     <td className="px-4 py-3 text-gray-900 max-w-xs truncate" title={job.url}>
