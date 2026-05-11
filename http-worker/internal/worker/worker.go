@@ -119,7 +119,7 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int, workerPoolSize int) er
 		return fmt.Errorf("subscribing to %s: %w", jobsRunSubject, err)
 	}
 	defer func() {
-		sub.Unsubscribe() //nolint:errcheck // best-effort cleanup on shutdown
+		sub.Drain() //nolint:errcheck // best-effort flush; does not delete the durable consumer
 	}()
 	slog.Info("Worker subscribed", "subject", jobsRunSubject, "pool_size", workerPoolSize)
 
