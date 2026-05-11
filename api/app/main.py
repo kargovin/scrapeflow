@@ -147,11 +147,22 @@ app.include_router(batch.router)
 app.include_router(crawls.router)
 app.include_router(admin.router)
 
-# SPA — mounted at /app so it doesn't overlap with any API route prefix.
+# SPA — served at /app/* so it doesn't overlap with any API route prefix.
 # /admin/*, /users/*, /jobs/* etc. are all API routes; /app/* is SPA-only.
+# StaticFiles(html=True) does NOT catch-all to index.html for unknown paths,
+# so we use a wildcard route: serve real files if they exist, else index.html.
 # Conditional: skipped when frontend/dist is absent (local dev, test builds).
 
 if os.path.isdir("frontend/dist"):
-    from fastapi.staticfiles import StaticFiles
+    from pathlib import Path
 
-    app.mount("/app", StaticFiles(directory="frontend/dist", html=True), name="spa")
+    from fastapi.responses import FileResponse
+
+    _spa_dist = Path("frontend/dist").resolve()
+
+    @app.get("/app/{rest_of_path:path}")
+    async def serve_spa(rest_of_path: str) -> FileResponse:
+        candidate = (_spa_dist / rest_of_path).resolve()
+        if candidate.is_file() and str(candidate).startswith(str(_spa_dist)):
+            return FileResponse(str(candidate))
+        return FileResponse(str(_spa_dist / "index.html"))
