@@ -1,12 +1,10 @@
 # ScrapeFlow - Command Reference
 
-> This file is not committed to git. It's a local reference for commonly used commands.
+> Run all Docker Compose commands from the `docker/` directory.
 
 ---
 
 ## Docker Compose
-
-> Run all commands from the `docker/` directory.
 
 ```bash
 # Start all services (detached)
@@ -72,44 +70,46 @@ docker compose exec redis redis-cli
 
 ## Tests
 
+> The API container uses `uv` to manage its virtualenv — always prefix with `uv run`.
+
 ```bash
 # Run all tests
-docker compose exec api python -m pytest tests/ -v
+docker compose exec api uv run pytest tests/ -v
 
 # Run a specific test file
-docker compose exec api python -m pytest tests/test_health.py -v
+docker compose exec api uv run pytest tests/test_health.py -v
 
 # Run a specific test
-docker compose exec api python -m pytest tests/test_health.py::test_health -v
+docker compose exec api uv run pytest tests/test_health.py::test_health -v
 ```
 
 ---
 
 ## Alembic (Database Migrations)
 
-> Run from the `docker/` directory via `docker compose exec api`.
+> Migrations auto-run on API startup (`main.py`). Manual commands are useful for dev and rollbacks.
 
 ```bash
 # Check current migration state (what's applied to DB)
-docker compose exec api alembic current
+docker compose exec api uv run alembic current
 
 # Auto-generate a new migration from model changes
-docker compose exec api alembic revision --autogenerate -m "describe change here"
+docker compose exec api uv run alembic revision --autogenerate -m "describe change here"
 
 # Apply all pending migrations
-docker compose exec api alembic upgrade head
+docker compose exec api uv run alembic upgrade head
 
 # Roll back one migration
-docker compose exec api alembic downgrade -1
+docker compose exec api uv run alembic downgrade -1
 
 # Roll back all migrations
-docker compose exec api alembic downgrade base
+docker compose exec api uv run alembic downgrade base
 
 # View migration history
-docker compose exec api alembic history
+docker compose exec api uv run alembic history
 
 # Upgrade to a specific revision ID
-docker compose exec api alembic upgrade <revision_id>
+docker compose exec api uv run alembic upgrade <revision_id>
 ```
 
 ---
@@ -141,13 +141,13 @@ docker compose exec postgres psql -U scrapeflow -d scrapeflow -c "\dt"
 docker compose up -d --build api
 
 # 2. Generate migration from model changes
-docker compose exec api alembic revision --autogenerate -m "describe change"
+docker compose exec api uv run alembic revision --autogenerate -m "describe change"
 
 # 3. Copy migration file from container to host (so it gets committed to git)
 docker compose cp api:/app/migrations/versions/. ../api/migrations/versions/
 
 # 4. Review the generated migration file, then apply
-docker compose exec api alembic upgrade head
+docker compose exec api uv run alembic upgrade head
 
 # 5. Verify tables exist
 docker compose exec postgres psql -U scrapeflow -d scrapeflow -c "\dt"
@@ -235,38 +235,29 @@ go test -v ./...
 # Run integration tests (requires Docker Compose services running)
 go test -tags integration ./...
 
-# Run integration tests for a specific package
-go test -tags integration ./internal/storage/...
-
-# Run integration tests with verbose output
-go test -tags integration -v ./...
-
-# Check for compilation errors across all packages (without producing a binary)
+# Check for compilation errors across all packages
 go vet ./...
 
-# Tidy dependencies (add missing, remove unused) — also regenerates go.sum
+# Tidy dependencies
 go mod tidy
-
-# Download all dependencies and generate go.sum from scratch
-# (run this after cloning or if go.sum is missing)
-go mod download
 ```
 
 ---
 
 ## Redis (Rate Limiting)
 
+> Phase 3 uses a sliding-window limiter. Keys are Redis sorted sets at `rate:user:<user_id>`.
+
 ```bash
-# Inspect rate limit counter for a user (replace <user_id> and <window>)
-# window = epoch_seconds // 60  (e.g. for 60s window)
-docker compose exec redis redis-cli GET "scrapeflow:rl:<user_id>:<window>"
+# Inspect a user's rate limit sorted set (member count = requests in current window)
+docker compose exec redis redis-cli ZCARD "rate:user:<user_id>"
 
 # List all rate limit keys
-docker compose exec redis redis-cli KEYS "scrapeflow:rl:*"
+docker compose exec redis redis-cli KEYS "rate:user:*"
 
-# Check TTL remaining on a key
-docker compose exec redis redis-cli TTL "scrapeflow:rl:<user_id>:<window>"
+# View all entries with timestamps (score = epoch ms)
+docker compose exec redis redis-cli ZRANGE "rate:user:<user_id>" 0 -1 WITHSCORES
 
 # Manually clear a user's rate limit (useful in dev/testing)
-docker compose exec redis redis-cli DEL "scrapeflow:rl:<user_id>:<window>"
+docker compose exec redis redis-cli DEL "rate:user:<user_id>"
 ```
