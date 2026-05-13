@@ -14,35 +14,39 @@ No per-seat pricing. No shared compute.
 
 ## Architecture
 
-```
-                        ┌─────────────────────────────────────────┐
-                        │               Traefik ingress            │
-                        └───────────────────┬─────────────────────┘
-                                            │
-                    ┌───────────────────────▼──────────────────────┐
-                    │             FastAPI  (Python)                  │
-                    │  Auth · Jobs · Batches · Crawls · Webhooks    │
-                    │  Rate limiting · Quotas · Admin · WebSocket   │
-                    └───────┬──────────┬─────────────┬─────────────┘
-                            │          │             │
-              ┌─────────────▼─┐  ┌─────▼──────┐  ┌─▼──────────┐
-              │  PostgreSQL   │  │   Redis    │  │   MinIO    │
-              │  (metadata)   │  │ (rate lim) │  │ (content)  │
-              └───────────────┘  └────────────┘  └────────────┘
-                                            │
-                        ┌───────────────────▼───────────────────┐
-                        │          NATS JetStream                │
-                        │   scrapeflow.jobs.run.{http,playwright}│
-                        │   scrapeflow.jobs.result               │
-                        └──────┬──────────┬────────────┬────────┘
-                               │          │            │
-                  ┌────────────▼─┐ ┌──────▼──────┐ ┌──▼──────────┐
-                  │  HTTP Worker │ │  Playwright  │ │ LLM Worker  │
-                  │    (Go)      │ │  Worker (Py) │ │   (Python)  │
-                  └──────────────┘ └─────────────┘ └─────────────┘
+```mermaid
+graph TD
+    Browser([Browser])
+    Agent([LLM Agent])
 
-  Coordinator (Python) ── BFS crawl queue ──▶ NATS dispatch
-  MCP Server    (Python) ── stdio transport ──▶ LLM agents
+    Browser --> Traefik[Traefik\nIngress · TLS]
+    Agent <-->|stdio| MCP[MCP Server\nPython]
+    MCP -->|HTTP| API
+    Traefik --> API
+
+    API["FastAPI\nJobs · Batches · Crawls · Webhooks\nAdmin · WebSocket · Rate Limiting · Quotas"]
+
+    API --> PG[(PostgreSQL\nmetadata)]
+    API --> Redis[(Redis\nrate limits)]
+    API --> MinIO[(MinIO\ncontent)]
+    API -->|publish| NATS[NATS JetStream]
+    NATS -->|consume| API
+
+    NATS -->|run.http| HTTPWorker[HTTP Worker\nGo]
+    NATS -->|run.playwright| PWWorker[Playwright Worker\nPython]
+    NATS -->|llm| LLMWorker[LLM Worker\nPython]
+
+    HTTPWorker -->|result| NATS
+    PWWorker -->|result| NATS
+    LLMWorker -->|result| NATS
+
+    HTTPWorker --> MinIO
+    PWWorker --> MinIO
+    LLMWorker --> MinIO
+
+    Coordinator[BFS Coordinator\nPython] --> PG
+    PG --> Coordinator
+    Coordinator -->|dispatch| NATS
 ```
 
 ---
