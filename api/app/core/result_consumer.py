@@ -128,27 +128,30 @@ async def _handle_batch_result(
     now = datetime.now(UTC)
 
     if worker_status == "running":
-        run.status = "running"
-        run.started_at = started_at
         run.nats_stream_seq = nats_seq
-        if batch.status == "queued":
-            batch.status = "running"
-        await db.execute(
-            text("SELECT pg_notify('batch_status', :p)"),
-            {
-                "p": json.dumps(
-                    {
-                        "batch_id": str(batch.id),
-                        "completed": batch.completed,
-                        "failed": batch.failed,
-                        "total": batch.total,
-                        "status": batch.status,
-                        "item_url": item.url,
-                        "item_status": "running",
-                    }
-                )
-            },
-        )
+        # LLM worker also publishes "running" (source="llm"); accepting it here would
+        # regress "processing" → "running" and re-fire the scrape-completed branch below.
+        if source == "scrape":
+            run.status = "running"
+            run.started_at = started_at
+            if batch.status == "queued":
+                batch.status = "running"
+            await db.execute(
+                text("SELECT pg_notify('batch_status', :p)"),
+                {
+                    "p": json.dumps(
+                        {
+                            "batch_id": str(batch.id),
+                            "completed": batch.completed,
+                            "failed": batch.failed,
+                            "total": batch.total,
+                            "status": batch.status,
+                            "item_url": item.url,
+                            "item_status": "running",
+                        }
+                    )
+                },
+            )
         return
 
     if worker_status == "completed" and run.status == "running":
@@ -539,8 +542,11 @@ async def _handle_job_result(
         return
 
     if worker_status == "running":
-        run.status = "running"
-        run.started_at = started_at
+        # LLM worker also publishes "running" (source="llm"); accepting it here would
+        # regress "processing" → "running" and re-fire the scrape-completed branch below.
+        if source == "scrape":
+            run.status = "running"
+            run.started_at = started_at
         run.nats_stream_seq = nats_seq
 
     elif worker_status == "completed" and run.status == "running":
