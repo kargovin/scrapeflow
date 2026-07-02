@@ -101,9 +101,18 @@ async def handle_message(
 
     # --- Steps 5–12: Render, format, upload ---
     # Build context options — proxy is set at context level so all traffic routes through it.
+    # Chromium silently drops userinfo from proxy URLs; split into server/username/password.
     context_kwargs: dict = {}
     if proxy_url:
-        context_kwargs["proxy"] = {"server": proxy_url}
+        parsed_proxy = urlparse(proxy_url)
+        proxy_config: dict = {
+            "server": f"{parsed_proxy.scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}",
+        }
+        if parsed_proxy.username:
+            proxy_config["username"] = parsed_proxy.username
+        if parsed_proxy.password:
+            proxy_config["password"] = parsed_proxy.password
+        context_kwargs["proxy"] = proxy_config
 
     context = await browser.new_context(**context_kwargs)
     page = await context.new_page()
