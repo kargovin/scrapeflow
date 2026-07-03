@@ -51,9 +51,10 @@ export interface UserQuota {
   updated_at: string
 }
 
-export interface AdminJob {
+export interface Job {
   id: string
   user_id: string
+  // Only populated on admin routes; user routes leave it null.
   user_email?: string | null
   url: string
   output_format: string
@@ -65,6 +66,9 @@ export interface AdminJob {
   updated_at: string
   run_id: string
 }
+
+// Back-compat alias — the same shape is returned by both /admin/jobs and /jobs.
+export type AdminJob = Job
 
 export interface JobResult {
   content: string

@@ -33,16 +33,18 @@ interface Props {
   status: string
   resultPath: string | null
   token: string
+  mode: 'admin' | 'user'
 }
 
-export default function ResultViewer({ jobId, outputFormat, status, resultPath, token }: Props) {
+export default function ResultViewer({ jobId, outputFormat, status, resultPath, token, mode }: Props) {
   const [tab, setTab] = useState<'source' | 'preview'>('source')
   const [copied, setCopied] = useState(false)
 
+  const apiBase = mode === 'admin' ? '/admin/jobs' : '/jobs'
   const enabled = status === 'completed' && !!resultPath && !!token
   const { data, isLoading, isError, error } = useQuery<JobResult>({
-    queryKey: ['admin-job-result', jobId],
-    queryFn: () => apiGet(`/admin/jobs/${jobId}/result`, token),
+    queryKey: ['job-result', mode, jobId],
+    queryFn: () => apiGet(`${apiBase}/${jobId}/result`, token),
     enabled,
   })
 

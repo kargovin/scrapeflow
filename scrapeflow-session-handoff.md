@@ -66,9 +66,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- Branch: `main` (develop is in sync). Latest commit `d8a6ce1` (2026-07-03).
+- Branch: `main` (develop is in sync). Latest commit `d0a64b5` (2026-07-03), plus the user-dashboard work below.
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
-- **In Phase 4 — investigation/triage + small feature work.** No formal spec yet; the backlog is being assembled from real production usage. Open findings cluster around **LLM-worker reliability** (Q5/Q6/Q7) and a **state-machine design flaw** (Q8) that already caused a live incident. First shipped Phase 4 feature: the **admin result viewer + user-email surfacing** (see Post-Phase-3 changes).
+- **In Phase 4 — investigation/triage + small feature work.** No formal spec yet; the backlog is being assembled from real production usage. Open findings cluster around **LLM-worker reliability** (Q5/Q6/Q7) and a **state-machine design flaw** (Q8) that already caused a live incident. Shipped Phase 4 frontend features: the **admin result viewer + user-email surfacing**, then the **user-facing job dashboard** (own jobs list/detail/result + soft-cancel) built by sharing the admin pages via a `mode` prop, plus an admin↔user nav cross-link (see Post-Phase-3 changes).
 - 243 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing.
 - Alembic auto-migration enabled in `api/app/main.py`
 - **Smoke test completed 2026-05-12** — core job pipeline confirmed working (google.com → markdown output)
@@ -83,11 +83,12 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | `4b2d1d6`, `d9e1edb` | Added top-level `README.md`; replaced ASCII architecture diagram with Mermaid; updated `docs/project/COMMANDS.md`. |
 | `70ce8bc` | **Admin result viewer + user email** (first Phase 4 feature). Backend: `user_email` added to `JobResponse` (admin jobs query joins `User`); new `GET /admin/jobs/{id}/result` (admin-scoped, no owner check) via shared `load_completed_result()` helper extracted from `get_job_result`. Frontend: read-only Monaco viewer on Job Detail (Source/Preview toggle — markdown via react-markdown, HTML via sandboxed iframe, JSON pretty-printed), User email row, and a User column + user filter on the Jobs list. Monaco is bundled locally (config in `frontend/src/lib/monaco.ts`) and lazy-loaded so the main admin bundle stays ~93 KB gzip. New deps: `@monaco-editor/react`, `monaco-editor`, `react-markdown`, `remark-gfm`. 4 new admin tests → 243. |
 | `d8a6ce1` | **CI fix** for `70ce8bc`. The frontend's committed `package.json` uses **vite `^8`** (a working-tree bump that rode along in `70ce8bc`), but `@vitejs/plugin-react@4.7.0` only peers vite ≤7 — so the API Docker build's `npm install` failed with ERESOLVE. Bumped `@vitejs/plugin-react` → `^6.0.3` (peers vite `^8`), so the tree resolves with **no `--legacy-peer-deps` needed** locally or in CI. Build output/bundle sizes unchanged. |
+| `d0a64b5` | **Docs** — handoff + CLAUDE.md updated for the admin result viewer; Phase 4 triage docs (`open-questions.md`, `open-bugs.md`, `usage-findings.md`) added. |
+| _(user-dashboard commit)_ | **User-facing job dashboard + admin/user nav cross-link** (frontend-only; no backend/API/schema change — the owner-scoped `/jobs*` routes already existed). New user routes `/app/dashboard/jobs` + `/app/dashboard/jobs/:jobId` (nav item added; `/app/dashboard` now lands on Jobs). The admin `Jobs`, `JobDetail`, and `ResultViewer` are **shared, not duplicated** — each takes a `mode: 'admin' \| 'user'` prop that swaps the API base (`/admin/jobs` ↔ `/jobs`), the route/link base, and the result endpoint. Admin-only bits (User column, user filter which calls `/admin/users`, User detail row) render only in `mode='admin'`; the user Job Detail gets a **soft Cancel** button (`DELETE /jobs/{id}`) in place of the admin permanent-delete Danger Zone. `AdminJob` type renamed to `Job` (back-compat alias kept). Admin-detection extracted from `RequireAdmin` into a shared `lib/useIsAdmin.ts` hook (same `['admin-check']` cache key — no extra request); `Layout` gained a `variant` prop that renders the cross-link ("← My dashboard" in admin; "Admin panel →" in user, only if the user is an admin). **Layout bug fixed**: shell `min-h-screen` → `h-screen` so the sidebar footer (cross-link + Sign out) no longer falls below the fold on tall pages (Jobs/Stats) — `main` scrolls internally instead of the whole page. Bundle unchanged (~93 KB gzip main; Monaco stays a lazy chunk). No new tests (backend untouched; 243 API tests still green). |
 
 ### Uncommitted working tree (not part of handoff scope)
 
-- `scrapeflow-session-handoff.md`, `docs/project/open-bugs.md`, `docs/project/usage-findings.md` — docs from this session's triage + this handoff update (not yet committed)
-- `frontend/tsconfig.tsbuildinfo`, `tmp/architecture.md` — build artifact / scratch, untracked (should not be committed; `tsbuildinfo` is a candidate for `.gitignore`)
+- `frontend/tsconfig.tsbuildinfo`, `tmp/` — build artifact / scratch, untracked (should not be committed; `tsbuildinfo` is a candidate for `.gitignore`)
 
 ### Phase 3 steps done
 

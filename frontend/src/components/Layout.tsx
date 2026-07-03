@@ -1,5 +1,6 @@
 import { useAuth } from '@clerk/clerk-react'
 import { useNavigate, useLocation, Outlet } from 'react-router-dom'
+import { useIsAdmin } from '../lib/useIsAdmin'
 
 interface NavItem {
   path: string
@@ -9,15 +10,28 @@ interface NavItem {
 interface Props {
   navItems: NavItem[]
   title?: string
+  // Which shell this is — drives the cross-link between the admin panel and the
+  // personal dashboard. Omit to render no cross-link.
+  variant?: 'admin' | 'user'
 }
 
-export default function Layout({ navItems, title = 'ScrapeFlow' }: Props) {
+export default function Layout({ navItems, title = 'ScrapeFlow', variant }: Props) {
   const { signOut } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
+  const { data: isAdmin } = useIsAdmin()
+
+  // Admin panel always offers a way back to the personal dashboard. The user
+  // dashboard only reveals the admin panel to users who actually are admins.
+  const crossLink =
+    variant === 'admin'
+      ? { path: '/app/dashboard/jobs', label: '← My dashboard' }
+      : variant === 'user' && isAdmin
+        ? { path: '/app/admin', label: 'Admin panel →' }
+        : null
 
   return (
-    <div className="min-h-screen flex bg-gray-50">
+    <div className="h-screen flex bg-gray-50">
       {/* Sidebar */}
       <aside className="w-52 bg-white border-r border-gray-200 flex flex-col">
         <div className="px-4 py-5 border-b border-gray-200">
@@ -39,6 +53,16 @@ export default function Layout({ navItems, title = 'ScrapeFlow' }: Props) {
             </button>
           ))}
         </nav>
+        {crossLink && (
+          <div className="px-2 py-2 border-t border-gray-200">
+            <button
+              onClick={() => navigate(crossLink.path)}
+              className="w-full text-left px-3 py-2 rounded text-sm font-medium text-gray-500 hover:bg-gray-100"
+            >
+              {crossLink.label}
+            </button>
+          </div>
+        )}
         <div className="px-4 py-4 border-t border-gray-200">
           <button
             onClick={() => signOut()}

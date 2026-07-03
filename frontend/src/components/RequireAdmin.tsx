@@ -1,23 +1,8 @@
-import { useAuth } from '@clerk/clerk-react'
-import { useQuery } from '@tanstack/react-query'
 import { Navigate, Outlet } from 'react-router-dom'
+import { useIsAdmin } from '../lib/useIsAdmin'
 
 export default function RequireAdmin() {
-  const { getToken } = useAuth()
-
-  const { data: isAdmin, isLoading, isError } = useQuery({
-    queryKey: ['admin-check'],
-    queryFn: async () => {
-      const token = await getToken()
-      if (!token) return false
-      const res = await fetch('/admin/users?limit=1', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      return res.ok
-    },
-    retry: false,
-    staleTime: 5 * 60_000,
-  })
+  const { data: isAdmin, isLoading, isError } = useIsAdmin()
 
   if (isLoading) {
     return (

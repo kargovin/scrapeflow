@@ -2,7 +2,7 @@ import { useState, useEffect, lazy, Suspense } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { apiGet, apiDelete, API_BASE, type AdminJob } from '../api'
+import { apiGet, apiDelete, API_BASE, type Job } from '../api'
 
 // Lazy — pulls Monaco + react-markdown into a separate chunk so the rest of the
 // admin panel (Users, Jobs list, Stats) doesn't download the editor.
@@ -19,7 +19,7 @@ const STATUS_COLOURS: Record<string, string> = {
   processing: 'bg-purple-100 text-purple-700',
 }
 
-export default function JobDetail() {
+export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
   const { jobId } = useParams<{ jobId: string }>()
   const { getToken } = useAuth()
   const navigate = useNavigate()
@@ -28,23 +28,37 @@ export default function JobDetail() {
   const [liveStatus, setLiveStatus] = useState<string | null>(null)
   const [wsLive, setWsLive] = useState(false)
 
+  const isAdmin = mode === 'admin'
+  const apiBase = isAdmin ? '/admin/jobs' : '/jobs'
+  const routeBase = isAdmin ? '/app/admin/jobs' : '/app/dashboard/jobs'
+
   const { data: token } = useQuery({
     queryKey: ['token'],
     queryFn: () => getToken() as Promise<string>,
     staleTime: 60_000,
   })
 
-  const { data: job, isLoading, isError } = useQuery<AdminJob>({
-    queryKey: ['admin-job', jobId],
-    queryFn: () => apiGet(`/admin/jobs/${jobId}`, token!),
+  const { data: job, isLoading, isError } = useQuery<Job>({
+    queryKey: ['job', mode, jobId],
+    queryFn: () => apiGet(`${apiBase}/${jobId}`, token!),
     enabled: !!token,
   })
 
+  // Admin: permanent delete (removes MinIO objects + DB row).
   const permanentDelete = useMutation({
     mutationFn: () => apiDelete(`/jobs/${jobId}?permanent=true`, token!),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['admin-jobs'] })
-      navigate('/app/admin/jobs')
+      qc.invalidateQueries({ queryKey: ['jobs'] })
+      navigate(routeBase)
+    },
+  })
+
+  // User: soft cancel of an in-progress job.
+  const cancelJob = useMutation({
+    mutationFn: () => apiDelete(`/jobs/${jobId}`, token!),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['job', mode, jobId] })
+      qc.invalidateQueries({ queryKey: ['jobs'] })
     },
   })
 
@@ -60,7 +74,7 @@ export default function JobDetail() {
       const msg = JSON.parse(evt.data) as { status: string }
       setLiveStatus(msg.status)
       if (TERMINAL.has(msg.status)) {
-        qc.invalidateQueries({ queryKey: ['admin-job', jobId] })
+        qc.invalidateQueries({ queryKey: ['job', mode, jobId] })
         setWsLive(false)
       }
     }
@@ -71,7 +85,7 @@ export default function JobDetail() {
       ws.close()
       setWsLive(false)
     }
-  }, [token, jobId, job?.status, qc])
+  }, [token, jobId, job?.status, qc, mode])
 
   if (!jobId) return null
 
@@ -86,12 +100,15 @@ export default function JobDetail() {
 
   const fields: [string, React.ReactNode][] = [
     ['ID', job.id],
-    ['User', job.user_email ? (
-      <span className="flex flex-col">
-        <span>{job.user_email}</span>
-        <span className="text-xs text-gray-400">{job.user_id}</span>
-      </span>
-    ) : job.user_id],
+    // User row is admin-only — on the user dashboard it's always self (redundant).
+    ...(isAdmin
+      ? [['User', job.user_email ? (
+          <span className="flex flex-col">
+            <span>{job.user_email}</span>
+            <span className="text-xs text-gray-400">{job.user_id}</span>
+          </span>
+        ) : job.user_id] as [string, React.ReactNode]]
+      : []),
     ['URL', job.url],
     ['Output format', job.output_format],
     ['Status', (
@@ -116,7 +133,7 @@ export default function JobDetail() {
   return (
     <div>
       <button
-        onClick={() => navigate('/app/admin/jobs')}
+        onClick={() => navigate(routeBase)}
         className="mb-4 text-sm text-indigo-600 hover:underline"
       >
         ← Back to jobs
@@ -142,42 +159,62 @@ export default function JobDetail() {
           status={status}
           resultPath={job.result_path}
           token={token}
+          mode={mode}
         />
       </Suspense>
 
-      <div className="border border-red-200 rounded-lg p-4 bg-red-50">
-        <h3 className="text-sm font-semibold text-red-800 mb-1">Danger zone</h3>
-        <p className="text-xs text-red-600 mb-3">
-          Permanent delete removes all MinIO objects and the database row. This cannot be undone.
-        </p>
-        {!confirmDelete ? (
+      {isAdmin ? (
+        <div className="border border-red-200 rounded-lg p-4 bg-red-50">
+          <h3 className="text-sm font-semibold text-red-800 mb-1">Danger zone</h3>
+          <p className="text-xs text-red-600 mb-3">
+            Permanent delete removes all MinIO objects and the database row. This cannot be undone.
+          </p>
+          {!confirmDelete ? (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+            >
+              Delete permanently
+            </button>
+          ) : (
+            <div className="flex gap-2">
+              <button
+                onClick={() => permanentDelete.mutate()}
+                disabled={permanentDelete.isPending}
+                className="px-3 py-1.5 text-sm bg-red-700 text-white rounded hover:bg-red-800 disabled:opacity-50"
+              >
+                {permanentDelete.isPending ? 'Deleting…' : 'Confirm delete'}
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {permanentDelete.isError && (
+            <p className="mt-2 text-xs text-red-700">{String(permanentDelete.error)}</p>
+          )}
+        </div>
+      ) : !TERMINAL.has(status) ? (
+        <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">Cancel job</h3>
+          <p className="text-xs text-gray-600 mb-3">
+            Stop this job. Any output already stored is kept; the job will be marked cancelled.
+          </p>
           <button
-            onClick={() => setConfirmDelete(true)}
-            className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+            onClick={() => cancelJob.mutate()}
+            disabled={cancelJob.isPending}
+            className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
           >
-            Delete permanently
+            {cancelJob.isPending ? 'Cancelling…' : 'Cancel job'}
           </button>
-        ) : (
-          <div className="flex gap-2">
-            <button
-              onClick={() => permanentDelete.mutate()}
-              disabled={permanentDelete.isPending}
-              className="px-3 py-1.5 text-sm bg-red-700 text-white rounded hover:bg-red-800 disabled:opacity-50"
-            >
-              {permanentDelete.isPending ? 'Deleting…' : 'Confirm delete'}
-            </button>
-            <button
-              onClick={() => setConfirmDelete(false)}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-        {permanentDelete.isError && (
-          <p className="mt-2 text-xs text-red-700">{String(permanentDelete.error)}</p>
-        )}
-      </div>
+          {cancelJob.isError && (
+            <p className="mt-2 text-xs text-red-700">{String(cancelJob.error)}</p>
+          )}
+        </div>
+      ) : null}
     </div>
   )
 }
