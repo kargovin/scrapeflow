@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
 import { useNavigate } from 'react-router-dom'
-import { apiGet, type AdminJob } from '../api'
+import { apiGet, type AdminJob, type AdminUser } from '../api'
 import type { Query } from '@tanstack/react-query'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
@@ -21,6 +21,7 @@ export default function Jobs() {
   const navigate = useNavigate()
   const [offset, setOffset] = useState(0)
   const [statusFilter, setStatusFilter] = useState('')
+  const [userFilter, setUserFilter] = useState('')
   const limit = 50
 
   const { data: token } = useQuery({
@@ -29,11 +30,19 @@ export default function Jobs() {
     staleTime: 60_000,
   })
 
+  const { data: users } = useQuery<AdminUser[]>({
+    queryKey: ['admin-users'],
+    queryFn: () => apiGet('/admin/users?limit=200', token!),
+    enabled: !!token,
+    staleTime: 60_000,
+  })
+
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
   if (statusFilter) params.set('status', statusFilter)
+  if (userFilter) params.set('user_id', userFilter)
 
   const { data: jobs, isLoading, isError } = useQuery<AdminJob[]>({
-    queryKey: ['admin-jobs', offset, statusFilter],
+    queryKey: ['admin-jobs', offset, statusFilter, userFilter],
     queryFn: () => apiGet(`/admin/jobs?${params}`, token!),
     enabled: !!token,
     refetchInterval: (query: Query<AdminJob[]>) =>
@@ -44,16 +53,28 @@ export default function Jobs() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-gray-900">Jobs</h2>
-        <select
-          value={statusFilter}
-          onChange={e => { setStatusFilter(e.target.value); setOffset(0) }}
-          className="text-sm border border-gray-300 rounded px-2 py-1"
-        >
-          <option value="">All statuses</option>
-          {['pending', 'running', 'completed', 'failed', 'cancelled', 'processing'].map(s => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <select
+            value={userFilter}
+            onChange={e => { setUserFilter(e.target.value); setOffset(0) }}
+            className="text-sm border border-gray-300 rounded px-2 py-1 max-w-[16rem]"
+          >
+            <option value="">All users</option>
+            {users?.map(u => (
+              <option key={u.id} value={u.id}>{u.email}</option>
+            ))}
+          </select>
+          <select
+            value={statusFilter}
+            onChange={e => { setStatusFilter(e.target.value); setOffset(0) }}
+            className="text-sm border border-gray-300 rounded px-2 py-1"
+          >
+            <option value="">All statuses</option>
+            {['pending', 'running', 'completed', 'failed', 'cancelled', 'processing'].map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {isLoading || !token ? (
@@ -67,6 +88,7 @@ export default function Jobs() {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">URL</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Engine</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
@@ -81,6 +103,12 @@ export default function Jobs() {
                   >
                     <td className="px-4 py-3 text-gray-900 max-w-xs truncate" title={job.url}>
                       {job.url}
+                    </td>
+                    <td
+                      className="px-4 py-3 text-gray-500 max-w-[12rem] truncate"
+                      title={job.user_email ?? job.user_id}
+                    >
+                      {job.user_email ?? job.user_id}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex px-2 py-0.5 text-xs rounded-full ${STATUS_COLOURS[job.status] ?? 'bg-gray-100 text-gray-600'}`}>

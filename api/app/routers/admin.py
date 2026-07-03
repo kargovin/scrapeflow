@@ -23,6 +23,7 @@ from app.models.job_runs import JobRun
 from app.models.user import User
 from app.models.user_quota import UserQuota
 from app.models.webhook_delivery import WebhookDelivery
+from app.routers.jobs import load_completed_result
 from app.schemas.admin import (
     AdminStatsResponse,
     AdminUserDetailResponse,
@@ -34,7 +35,7 @@ from app.schemas.admin import (
     UserQuotaPatch,
     UserQuotaResponse,
 )
-from app.schemas.jobs import CancelJobResponse, JobResponse
+from app.schemas.jobs import CancelJobResponse, JobResponse, JobResultResponse
 from app.settings import settings
 
 MINIO_STORAGE_CACHE_KEY = "scrapeflow:cache:minio_storage"
@@ -69,7 +70,13 @@ def _admin_jobs_with_latest_run_stmt(
         .lateral()
     )
     latest_run = aliased(JobRun, latest_run_sq)
-    stmt = select(Job, latest_run).join(latest_run, true()).order_by(Job.created_at.desc())
+    stmt = (
+        select(Job, latest_run, User.email)
+        .select_from(Job)
+        .join(User, Job.user_id == User.id)
+        .join(latest_run, true())
+        .order_by(Job.created_at.desc())
+    )
     if user_id is not None:
         stmt = stmt.where(Job.user_id == user_id)
     if job_id is not None:
@@ -242,6 +249,7 @@ async def admin_list_jobs(
         JobResponse(
             id=job.id,
             user_id=job.user_id,
+            user_email=user_email,
             url=job.url,
             output_format=job.output_format,
             created_at=job.created_at,
@@ -253,7 +261,7 @@ async def admin_list_jobs(
             error=run.error,
             completed_at=run.completed_at,
         )
-        for job, run in result.all()
+        for job, run, user_email in result.all()
     ]
 
 
@@ -268,10 +276,11 @@ async def admin_get_job(
     row = result.one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    job, run = row
+    job, run, user_email = row
     return JobResponse(
         id=job.id,
         user_id=job.user_id,
+        user_email=user_email,
         url=job.url,
         output_format=job.output_format,
         created_at=job.created_at,
@@ -283,6 +292,21 @@ async def admin_get_job(
         error=run.error,
         completed_at=run.completed_at,
     )
+
+
+@router.get("/jobs/{job_id}/result", response_model=JobResultResponse)
+async def admin_get_job_result(
+    job_id: uuid.UUID,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
+) -> JobResultResponse:
+    """Return the scraped result content for any job (admin — no owner check)."""
+    job = await db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    return await load_completed_result(job, db, minio_client)
 
 
 @router.delete("/jobs/{job_id}", response_model=CancelJobResponse)

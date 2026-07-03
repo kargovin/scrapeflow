@@ -18,7 +18,7 @@ from app.core.minio import get_minio
 from app.core.redis import get_redis
 from app.main import app
 from app.models.api_key import ApiKey
-from app.models.job import Job
+from app.models.job import Job, OutputFormat
 from app.models.job_runs import JobRun
 from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
@@ -84,6 +84,7 @@ async def test_admin_routes_403_for_non_admin(client, db_api_key):
         ("DELETE", f"/admin/users/{fake_id}"),
         ("GET", "/admin/jobs"),
         ("GET", f"/admin/jobs/{fake_id}"),
+        ("GET", f"/admin/jobs/{fake_id}/result"),
         ("DELETE", f"/admin/jobs/{fake_id}"),
         ("GET", "/admin/webhooks/deliveries"),
         ("POST", f"/admin/webhooks/deliveries/{fake_id}/retry"),
@@ -323,6 +324,98 @@ async def test_admin_get_job_cross_tenant(client, admin_headers, db_user):
 
 async def test_admin_get_job_404(client, admin_headers):
     resp = await client.get(f"/admin/jobs/{uuid.uuid4()}", headers=admin_headers)
+    assert resp.status_code == 404
+
+
+async def test_admin_job_response_includes_user_email(client, admin_headers, db_user):
+    """Admin job list and detail expose the owning user's email, not just user_id."""
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://email-field.example.com")
+        db.add(job)
+        await db.flush()
+        db.add(JobRun(job_id=job.id, status="completed"))
+        await db.commit()
+        job_id = job.id
+
+    detail = await client.get(f"/admin/jobs/{job_id}", headers=admin_headers)
+    assert detail.status_code == 200
+    assert detail.json()["user_email"] == db_user.email
+
+    listing = await client.get(
+        "/admin/jobs", headers=admin_headers, params={"user_id": str(db_user.id)}
+    )
+    assert listing.status_code == 200
+    match = next(j for j in listing.json() if j["id"] == str(job_id))
+    assert match["user_email"] == db_user.email
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/jobs/{id}/result
+# ---------------------------------------------------------------------------
+
+
+def _mock_minio_get_object(content: bytes):
+    """Mock get_minio so get_object returns a response yielding `content`."""
+    response = MagicMock()
+    response.read = AsyncMock(return_value=content)
+    response.close = MagicMock()
+    mock_minio = MagicMock()
+    mock_minio.get_object = AsyncMock(return_value=response)
+    return mock_minio
+
+
+async def test_admin_get_job_result_cross_tenant(client, admin_headers, db_user):
+    """Admin reads another user's scraped result content and its output format."""
+    async with AsyncSessionLocal() as db:
+        job = Job(
+            user_id=db_user.id,
+            url="https://result-ct.example.com",
+            output_format=OutputFormat.markdown,
+        )
+        db.add(job)
+        await db.flush()
+        db.add(
+            JobRun(
+                job_id=job.id,
+                status="completed",
+                result_path=f"scrapeflow-results/history/{job.id}/123.md",
+                completed_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        job_id = job.id
+
+    mock_minio = _mock_minio_get_object(b"# Scraped\n\nHello world")
+    app.dependency_overrides[get_minio] = lambda: mock_minio
+    try:
+        resp = await client.get(f"/admin/jobs/{job_id}/result", headers=admin_headers)
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["content"] == "# Scraped\n\nHello world"
+    assert body["output_format"] == "markdown"
+    assert body["result_path"] == f"scrapeflow-results/history/{job_id}/123.md"
+    mock_minio.get_object.assert_awaited_once_with("scrapeflow-results", f"history/{job_id}/123.md")
+
+
+async def test_admin_get_job_result_404_no_completed_run(client, admin_headers, db_user):
+    """A job with no completed run returns 404 (nothing to read)."""
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://result-nocompleted.example.com")
+        db.add(job)
+        await db.flush()
+        db.add(JobRun(job_id=job.id, status="failed"))
+        await db.commit()
+        job_id = job.id
+
+    resp = await client.get(f"/admin/jobs/{job_id}/result", headers=admin_headers)
+    assert resp.status_code == 404
+
+
+async def test_admin_get_job_result_404_missing_job(client, admin_headers):
+    resp = await client.get(f"/admin/jobs/{uuid.uuid4()}/result", headers=admin_headers)
     assert resp.status_code == 404
 
 

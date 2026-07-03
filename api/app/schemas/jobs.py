@@ -128,6 +128,7 @@ class JobCreate(_MutableJobFields):
 class JobResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
+    user_email: str | None = None
     url: str
     status: str
     output_format: OutputFormat

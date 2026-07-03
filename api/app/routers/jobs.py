@@ -632,20 +632,21 @@ async def rotate_webhook_secrets(
     return RotateWebhookSecretResponse(webhook_secret=webhook_secret_plain)
 
 
-@router.get("/{job_id}/result", response_model=JobResultResponse)
-async def get_job_result(
-    job_id: uuid.UUID,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    minio_client: Minio = Depends(get_minio),
+async def load_completed_result(
+    job: Job,
+    db: AsyncSession,
+    minio_client: Minio,
 ) -> JobResultResponse:
-    job = await db.get(Job, job_id)
-    if job is None or job.user_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    """Load the latest completed run's stored content for a job from MinIO.
 
+    Shared by the user-scoped GET /jobs/{id}/result and the admin
+    GET /admin/jobs/{id}/result. Caller is responsible for authorization
+    (owner check for the user route; admin dependency for the admin route).
+    Raises 404 if there is no completed run with a stored result.
+    """
     result = await db.execute(
         select(JobRun)
-        .where(JobRun.job_id == job_id, JobRun.status == "completed")
+        .where(JobRun.job_id == job.id, JobRun.status == "completed")
         .order_by(JobRun.completed_at.desc())
         .limit(1)
     )
@@ -666,6 +667,20 @@ async def get_job_result(
         result_path=run.result_path,
         warnings=run.warnings,
     )
+
+
+@router.get("/{job_id}/result", response_model=JobResultResponse)
+async def get_job_result(
+    job_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
+) -> JobResultResponse:
+    job = await db.get(Job, job_id)
+    if job is None or job.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    return await load_completed_result(job, db, minio_client)
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})

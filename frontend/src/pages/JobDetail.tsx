@@ -1,8 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, lazy, Suspense } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { apiGet, apiDelete, API_BASE, type AdminJob } from '../api'
+
+// Lazy — pulls Monaco + react-markdown into a separate chunk so the rest of the
+// admin panel (Users, Jobs list, Stats) doesn't download the editor.
+const ResultViewer = lazy(() => import('../components/ResultViewer'))
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 
@@ -82,9 +86,14 @@ export default function JobDetail() {
 
   const fields: [string, React.ReactNode][] = [
     ['ID', job.id],
-    ['User ID', job.user_id],
+    ['User', job.user_email ? (
+      <span className="flex flex-col">
+        <span>{job.user_email}</span>
+        <span className="text-xs text-gray-400">{job.user_id}</span>
+      </span>
+    ) : job.user_id],
     ['URL', job.url],
-    ['Engine', job.output_format],
+    ['Output format', job.output_format],
     ['Status', (
       <span className="flex items-center gap-2">
         <span className={`inline-flex px-2 py-0.5 text-xs rounded-full ${STATUS_COLOURS[status] ?? 'bg-gray-100 text-gray-600'}`}>
@@ -125,6 +134,16 @@ export default function JobDetail() {
           ))}
         </dl>
       </div>
+
+      <Suspense fallback={<p className="mb-6 text-sm text-gray-500">Loading result viewer…</p>}>
+        <ResultViewer
+          jobId={job.id}
+          outputFormat={job.output_format}
+          status={status}
+          resultPath={job.result_path}
+          token={token}
+        />
+      </Suspense>
 
       <div className="border border-red-200 rounded-lg p-4 bg-red-50">
         <h3 className="text-sm font-semibold text-red-800 mb-1">Danger zone</h3>

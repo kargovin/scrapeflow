@@ -54,6 +54,7 @@ export interface UserQuota {
 export interface AdminJob {
   id: string
   user_id: string
+  user_email?: string | null
   url: string
   output_format: string
   engine?: string
@@ -63,6 +64,13 @@ export interface AdminJob {
   created_at: string
   updated_at: string
   run_id: string
+}
+
+export interface JobResult {
+  content: string
+  output_format: string
+  result_path: string
+  warnings: string[] | null
 }
 
 export interface ApiKey {
