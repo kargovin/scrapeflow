@@ -32,6 +32,7 @@ When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 - **Production**: k3s cluster — namespace `scrapeflow`, domain `scrapeflow.govindappa.com`
   - Traefik ingress, ExternalDNS (Cloudflare), cert-manager (letsencrypt-prod)
   - GitOps via FluxCD — infra repo at `/home/karthik/Documents/govindappa/govindappa-k8s-config`
+  - **Auth = Clerk PRODUCTION instance** (not dev). Frontend API custom domain `clerk.scrapeflow.govindappa.com`; its DNS CNAMEs were added **manually in Cloudflare (grey-cloud, DNS-only)** — ExternalDNS only manages `ingress`/`service`-derived records, so it can't (and won't touch) these. Production requires **own Google/GitHub OAuth credentials** (Clerk's shared demo OAuth app is dev-only — a prod login attempt without them fails with Google `Error 400: invalid_request, Missing required parameter: client_id`). Key split, do not confuse: backend **`sk_live`** lives in k8s secret `scrapeflow-app-secrets/clerk-secret-key`; frontend **`pk_live`** is baked into the api image at build time via GH Actions secret `VITE_CLERK_PUBLISHABLE_KEY`. `pk_live` and `sk_live` must be from the **same instance** or every request 401s; a `pk_live` mistakenly placed in the `sk` slot surfaces as `TokenVerificationErrorReason.JWK_FAILED_TO_LOAD`. Rotation/cutover flow: infra repo `clusters/k3s-server/scrapeflow/README.md` → "Rotating the Clerk secret".
 
 ---
 
