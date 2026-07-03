@@ -66,13 +66,28 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- Branch: `main` (develop is in sync)
+- Branch: `main` (develop is in sync). Latest commit `d8a6ce1` (2026-07-03).
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
-- **Entering Phase 4** — no spec yet; backlog will be driven by real usage findings
-- 239 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing
+- **In Phase 4 — investigation/triage + small feature work.** No formal spec yet; the backlog is being assembled from real production usage. Open findings cluster around **LLM-worker reliability** (Q5/Q6/Q7) and a **state-machine design flaw** (Q8) that already caused a live incident. First shipped Phase 4 feature: the **admin result viewer + user-email surfacing** (see Post-Phase-3 changes).
+- 243 API tests passing (deterministic — first-run clean); 69 playwright-worker tests passing; 14 MCP tests passing.
 - Alembic auto-migration enabled in `api/app/main.py`
 - **Smoke test completed 2026-05-12** — core job pipeline confirmed working (google.com → markdown output)
 - **Docs reorganised 2026-05-12** — `docs/` now has four sections: `adr/` (decisions), `project/` (reference), `process/` (multi-persona starters), `archive/` (completed phase history)
+
+### Post-Phase-3 changes (since handoff, 2026-05-13 → 2026-07-03)
+
+| Commit | Change |
+|--------|--------|
+| `5cb8c7f` | **Incident fix** — LLM dispatch loop. The regular + batch result handlers had un-source-guarded `if worker_status == "running"` branches; the LLM stage's `running` clobbered `run.status` from `processing` back to `running`, so the next `completed` re-matched the scrape-completed branch and re-dispatched to `scrapeflow.jobs.llm` — a tight feedback loop that burned ~200 LLM API calls in ~5 min before the worker was stopped. Fix: `if source == "scrape":` guards on the `running` transition in both `_handle_job_result` and `_handle_batch_result`. Root cause + permanent fix tracked as **Q8** (status-value overloading — needs a total state machine, not more guards). |
+| `63b2dfc` | playwright-worker: split proxy URL userinfo into `server`/`username`/`password` for `browser.new_context(proxy=…)` (Playwright rejects credentials embedded in the URL). |
+| `4b2d1d6`, `d9e1edb` | Added top-level `README.md`; replaced ASCII architecture diagram with Mermaid; updated `docs/project/COMMANDS.md`. |
+| `70ce8bc` | **Admin result viewer + user email** (first Phase 4 feature). Backend: `user_email` added to `JobResponse` (admin jobs query joins `User`); new `GET /admin/jobs/{id}/result` (admin-scoped, no owner check) via shared `load_completed_result()` helper extracted from `get_job_result`. Frontend: read-only Monaco viewer on Job Detail (Source/Preview toggle — markdown via react-markdown, HTML via sandboxed iframe, JSON pretty-printed), User email row, and a User column + user filter on the Jobs list. Monaco is bundled locally (config in `frontend/src/lib/monaco.ts`) and lazy-loaded so the main admin bundle stays ~93 KB gzip. New deps: `@monaco-editor/react`, `monaco-editor`, `react-markdown`, `remark-gfm`. 4 new admin tests → 243. |
+| `d8a6ce1` | **CI fix** for `70ce8bc`. The frontend's committed `package.json` uses **vite `^8`** (a working-tree bump that rode along in `70ce8bc`), but `@vitejs/plugin-react@4.7.0` only peers vite ≤7 — so the API Docker build's `npm install` failed with ERESOLVE. Bumped `@vitejs/plugin-react` → `^6.0.3` (peers vite `^8`), so the tree resolves with **no `--legacy-peer-deps` needed** locally or in CI. Build output/bundle sizes unchanged. |
+
+### Uncommitted working tree (not part of handoff scope)
+
+- `scrapeflow-session-handoff.md`, `docs/project/open-bugs.md`, `docs/project/usage-findings.md` — docs from this session's triage + this handoff update (not yet committed)
+- `frontend/tsconfig.tsbuildinfo`, `tmp/architecture.md` — build artifact / scratch, untracked (should not be committed; `tsbuildinfo` is a candidate for `.gitignore`)
 
 ### Phase 3 steps done
 
@@ -172,18 +187,46 @@ All 28 steps done. Full record in `docs/archive/phase3/production-review.md`.
 
 ### Phase 4 entry point
 
-Phase 4 scope is **not yet defined** — the backlog will be built from real usage findings after a period of active use in production. When returning:
+Phase 4 scope is **still not formally specced**, but real production usage has surfaced a concrete triage list (below). When returning:
 
-1. Check `docs/archive/phase3/PHASE3_DEFERRED.md` for items already scoped and deferred
-2. Capture any bugs or friction points from usage before starting the PM persona
-3. Decide whether to run the full PM → Architect → Tech Lead → Engineer process (see `docs/process/`) or a lighter spec approach
+1. Read the **Phase 4 triage** table below — these are captured findings, not yet a backlog
+2. Read the source docs in full before acting: `docs/project/open-questions.md` (Q5–Q8 have detailed options + recommendations), `docs/project/open-bugs.md`, `docs/project/usage-findings.md`
+3. Check `docs/archive/phase3/PHASE3_DEFERRED.md` for items already scoped and deferred
+4. Decide whether to run the full PM → Architect → Tech Lead → Engineer process (see `docs/process/`) or a lighter spec approach. The LLM-worker cluster (Q5/Q6/Q7) is tightly coupled and should be designed together, not piecemeal.
 
 ---
 
-### Known open items going into Phase 4
+### Phase 4 triage — captured findings (what bugs we still have)
+
+The dominant theme is **LLM-worker reliability**: Q5, Q6, Q7 are three faces of the same problem and their recommendations explicitly say they resolve together. Q8 is the design flaw behind the incident already fixed in `5cb8c7f`.
+
+**Open questions needing a decision** (`docs/project/open-questions.md`):
+
+| # | Severity | Summary | State |
+|---|----------|---------|-------|
+| Q5 | High | LLM worker can't survive scale-to-zero cold starts (90–120s). `LLM_REQUEST_TIMEOUT_SECONDS=60` → `httpx.ReadTimeout`; worker acks-on-failure so NATS never retries → job permanently `failed`. Recommend A+B (bump timeout + classify exceptions, nak transient). | Needs decision |
+| Q6 | High (latent) | No `ack_wait` on LLM consumer → default 30s. Any LLM call >30s → NATS silently redelivers → **user billed twice**, double MinIO upload. Recommend C (static `ack_wait` floor + `msg.in_progress()` heartbeat). Requires recreating the durable consumer (operational). | Needs decision; audit invoices vs run-counts first |
+| Q7 | Medium | No worker-level retry on transient LLM failures (instance death mid-call, 503, conn reset). Only SDK default `max_retries=2`, invisible + doesn't cover conn errors. Recommend B (SDK + worker retry with an explicit exception-classification table). | Needs decision; blocked on Q5/Q6 |
+| Q8 | Medium (root cause of the incident) | `job_runs.status` values overloaded across pipeline stages — `running`/`completed` mean different things for scrape vs LLM, disambiguated only by `source`. Caused the `5cb8c7f` dispatch loop. Source-guards are a patch; recommend **Option B** (distinct per-stage status values → total state machine) as a Phase 4 refactor. Should land *after* Q5/Q6/Q7 so retry logic isn't rebuilt twice. | Needs decision |
+| Q1–Q4 | — | Phase 1/2 questions — Q1 (api_keys uniqueness) already resolved in Phase 3; Q2–Q4 largely superseded. Re-confirm and close out. | Mostly stale |
+
+**Open bugs** (`docs/project/open-bugs.md`):
+
+| # | Severity | Summary | Fix |
+|---|----------|---------|-----|
+| BUG-001 | Low (noisy, harmless) | Scheduler `_recover_stale_pending` selects batch runs (`job_id IS NULL`) → `db.get(Job, None)` emits `SELECT ... WHERE jobs.id IS NULL` every 60s per stuck batch run, flooding logs. No data corruption. | Add `JobRun.job_id.is_not(None)` to the stale-pending query. One-liner. |
+
+**Usage findings** (`docs/project/usage-findings.md`):
+
+| # | Summary |
+|---|---------|
+| UF-001 | `/health/ready` checks DB/Redis/NATS but **not MinIO** — endpoint reports `200 ok` while every job silently fails to store output if MinIO is down. Add a MinIO ping to the degraded check. |
+| UF-002 | `DEFAULT_PROXY_URL` is a single platform-wide proxy — one user's behaviour can get the shared IP banned for everyone. Decision: per-user proxy model (`user_proxies` table, provider-side rotation, no platform default). Larger change: schema + secrets + dispatch + frontend UI. |
+
+**Deferred from Phase 3** (already scoped):
 
 | Item | Detail |
 |------|--------|
 | `[?] 40` | Custom robots.txt parsers (Go + Python) vs established packages — deferred to Phase 4 |
-| `[?] 43` (Phase 4) | Content hash re-reads freshly-written MinIO object — bundle with Phase 4 schema_version 3 worker contract changes |
-| NATS pull consumers | API result consumer uses a push consumer (durable); limits to one replica and requires `Recreate` strategy. Phase 4: migrate to pull consumer model |
+| `[?] 43` | Content hash re-reads freshly-written MinIO object — bundle with Phase 4 schema_version 3 worker contract changes |
+| NATS pull consumers | API result consumer uses a push consumer (durable); limits to one replica and requires `Recreate` strategy. Phase 4: migrate to pull consumer model. (Note: overlaps with Q6 — both touch JetStream consumer config.) |

@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phase 2 complete. Phase 3 complete — all Steps 1–28 done.**
+> **Status: Phase 2 complete. Phase 3 complete — all Steps 1–28 done. Phase 4 in progress (usage-driven; see `scrapeflow-session-handoff.md` and `docs/project/`).**
 
 ## Goal
 
@@ -108,6 +108,8 @@ Each persona operates with only the outputs from the persona before them — the
 | Action warnings persistence | Worker publishes warnings in NATS `ResultMessage`; result consumer persists to `job_runs.warnings JSONB`; `GET /jobs/{id}/result` reads from DB column | Warnings are not stored in MinIO content — they live in the result message and are captured by the consumer |
 | Webhook event filter | `jobs.webhook_events TEXT[]` (null = all events); filter checked at every `create_webhook_delivery` call site in `result_consumer.py` | Null means no filter (backward compatible); validated against known event set at API boundary |
 | Content deduplication | `job_runs.content_hash VARCHAR(16)` — xxh64 of raw MinIO bytes, truncated to 16 hex chars; checked in result consumer before LLM/diff dispatch; on match: `diff_detected=False`, history/ object deleted, no LLM, no webhook | Only on regular job path (not batch, not crawl); hash stored even when no previous run exists (first-run baseline); fail-open — hash error skips dedup silently |
+| Admin result content | Admins read another user's scraped output via a dedicated `GET /admin/jobs/{id}/result`; the user-facing `GET /jobs/{id}/result` stays owner-scoped (404 for others). Both share `load_completed_result()` in `routers/jobs.py` | Owner check can't be relaxed on the user route; admin needs its own endpoint. `user_email` also joined into admin `JobResponse` (list + detail) — the `User` model has `email` only, no `name` |
+| Frontend asset bundling | Admin SPA is served from `/app/` with no external-CDN dependency — all assets bundled locally by Vite. Monaco (result viewer) is configured in `frontend/src/lib/monaco.ts` to load from bundled workers, not jsdelivr, and is lazy-loaded so it stays out of the initial bundle | A CDN-loaded dependency would break offline / under CSP; future frontend deps must bundle locally too. Frontend is on **vite 8 + `@vitejs/plugin-react` 6** (4.x peers only vite ≤7) |
 
 ---
 
