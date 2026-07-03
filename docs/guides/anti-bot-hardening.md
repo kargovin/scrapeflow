@@ -260,6 +260,28 @@ pre-creates it (`mkdir -p /tmp/.X11-unix && chmod 1777`) while still root.
 to run the worker by hand inside the pod — `kubectl exec ... -- xvfb-run -a python -m
 worker.main` — which surfaced the real Chrome/X error immediately.
 
+### Second gotcha: the NATS redelivery loop (Q6)
+
+Once the worker ran, one job **looped forever** — re-scraping the same URL every ~20s, each
+run writing a fresh MinIO object. Root cause is the latent **Q6** bug, *triggered* by this
+change: the pull consumer had **no explicit `ack_wait`**, so it used the JetStream default
+of **30s** — but a headed-Chrome scrape of a heavy page takes ~37s. NATS redelivered the
+message mid-scrape, the worker's `msg.ack()` after finishing was a no-op (deadline passed),
+and with `max_deliver: -1` (unlimited) it never stopped. Headless Chromium had been fast
+enough to stay under 30s, which is why this never fired before.
+
+Fixes:
+- **Immediate:** purge the stuck subject and raise the live consumer's `ack_wait` (via
+  `add_consumer` with the modified config — this nats-py build has no `update_consumer`).
+- **Permanent (code):** `pull_subscribe(config=ConsumerConfig(ack_wait=…))` (default 120s) +
+  an `msg.in_progress()` heartbeat every 30s while a job runs, so even jobs longer than
+  `ack_wait` never expire. See `worker/config.py` (`playwright_ack_wait_seconds`,
+  `playwright_heartbeat_seconds`).
+
+> **Operational caveat:** JetStream does **not** apply a new `ack_wait` to an
+> already-existing durable consumer. Changing it requires updating/recreating the consumer
+> out-of-band (as done above) — a fresh deploy alone won't change it.
+
 ---
 
 ## Part 7 — Known limitations

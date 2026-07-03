@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     playwright_max_workers: int = 3
     playwright_default_timeout_seconds: int = 60
     credentials_encryption_key: str = ""
+    # NATS pull-consumer ack window (seconds). The default JetStream ack_wait is 30s,
+    # which is *shorter than a headed-Chrome scrape of a heavy page* — so NATS redelivered
+    # the message mid-scrape, the late ack was a no-op, and the job looped forever
+    # (max_deliver is unlimited). This sets an explicit floor; the in-progress heartbeat
+    # below additionally resets the timer mid-job so even jobs longer than this never expire.
+    playwright_ack_wait_seconds: int = 120
+    # How often to send msg.in_progress() while a job runs (must be < ack_wait).
+    playwright_heartbeat_seconds: int = 30
     # Stealth launch config (Patchright). Verified against BrowserScan bot-detection.
     # channel="chrome" uses real Google Chrome (installed in the image via
     # `patchright install chrome`) so the UA reports a genuine "Chrome". Set to ""

@@ -17,6 +17,7 @@ import nats
 import nats.errors
 import structlog
 from miniopy_async import Minio
+from nats.js.api import ConsumerConfig
 
 # Patchright is a drop-in Playwright fork: it patches the CDP Runtime.enable leak
 # and removes navigator.webdriver, which are the automation tells that were failing
@@ -96,16 +97,22 @@ async def run() -> None:
     )
 
     # ── Pull subscription ─────────────────────────────────────────────────────────
+    # Explicit ack_wait: the JetStream default (30s) is shorter than a headed-Chrome
+    # scrape, so messages were redelivered mid-job and looped forever (see config.py).
+    # NOTE: JetStream does not update ack_wait on an already-existing durable consumer,
+    # so changing this value requires updating/recreating the consumer out-of-band.
     psub = await js.pull_subscribe(
         PLAYWRIGHT_SUBJECT,
         durable=DURABLE_NAME,
         stream=STREAM_NAME,
+        config=ConsumerConfig(ack_wait=settings.playwright_ack_wait_seconds),
     )
     log.info(
         "subscribed",
         subject=PLAYWRIGHT_SUBJECT,
         durable=DURABLE_NAME,
         max_workers=settings.playwright_max_workers,
+        ack_wait=settings.playwright_ack_wait_seconds,
     )
 
     # ── Worker loop ───────────────────────────────────────────────────────────────
@@ -115,15 +122,37 @@ async def run() -> None:
     # causing spurious NATS redeliveries before the job even starts.
     sem = asyncio.Semaphore(settings.playwright_max_workers)
 
+    async def _heartbeat(msg):
+        # Reset the NATS ack timer while the job runs so a scrape longer than
+        # ack_wait never triggers redelivery. Errors (e.g. msg already acked) are
+        # ignored; the task is cancelled when the job finishes.
+        try:
+            while True:
+                await asyncio.sleep(settings.playwright_heartbeat_seconds)
+                try:
+                    await msg.in_progress()
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
     async def handle_with_sem(msg):
         async with sem:
-            await handle_message(
-                msg,
-                js,
-                minio,
-                browser,
-                settings.playwright_default_timeout_seconds,
-            )
+            hb = asyncio.create_task(_heartbeat(msg))
+            try:
+                await handle_message(
+                    msg,
+                    js,
+                    minio,
+                    browser,
+                    settings.playwright_default_timeout_seconds,
+                )
+            finally:
+                hb.cancel()
+                try:
+                    await hb
+                except asyncio.CancelledError:
+                    pass
 
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()
