@@ -5,7 +5,7 @@ Startup sequence (spec §4.2):
   1. Load config from env vars
   2. Connect to NATS, verify SCRAPEFLOW stream exists
   3. Connect to MinIO, verify bucket exists
-  4. Launch Chromium browser (headless)
+  4. Launch Chrome via Patchright (headed under Xvfb by default — stealth config)
   5. Create pull consumer on scrapeflow.jobs.run.playwright
   6. Run worker loop (concurrency capped by PLAYWRIGHT_MAX_WORKERS)
 """
@@ -17,7 +17,11 @@ import nats
 import nats.errors
 import structlog
 from miniopy_async import Minio
-from playwright.async_api import async_playwright
+
+# Patchright is a drop-in Playwright fork: it patches the CDP Runtime.enable leak
+# and removes navigator.webdriver, which are the automation tells that were failing
+# bot detection. The async API is import-compatible with playwright.async_api.
+from patchright.async_api import async_playwright
 
 from .config import settings
 from .worker import handle_message
@@ -70,9 +74,26 @@ async def run() -> None:
     log.info("minio_connected", bucket=settings.minio_bucket)
 
     # ── Playwright browser ────────────────────────────────────────────────────────
+    launch_args: list[str] = []
+    if settings.playwright_no_sandbox:
+        launch_args.append("--no-sandbox")
+    if settings.playwright_disable_dev_shm:
+        launch_args.append("--disable-dev-shm-usage")
+    if settings.playwright_disable_automation:
+        launch_args.append("--disable-blink-features=AutomationControlled")
+
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=True)
-    log.info("browser_launched")
+    browser = await pw.chromium.launch(
+        channel=settings.playwright_channel or None,
+        headless=settings.playwright_headless,
+        args=launch_args,
+    )
+    log.info(
+        "browser_launched",
+        channel=settings.playwright_channel,
+        headless=settings.playwright_headless,
+        args=launch_args,
+    )
 
     # ── Pull subscription ─────────────────────────────────────────────────────────
     psub = await js.pull_subscribe(

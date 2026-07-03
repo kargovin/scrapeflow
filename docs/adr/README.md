@@ -29,6 +29,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-005](ADR-005-site-crawl-bfs-coordinator.md) | Site Crawl BFS Coordinator | **Accepted** | 2026-04-15 | — | — |
 | [ADR-006](ADR-006-batch-scraping-data-model.md) | Batch Scraping Data Model | **Accepted** | 2026-04-15 | — | — |
 | [ADR-007](ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** | 2026-04-15 | — | — |
+| [ADR-008](ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** | 2026-07-03 | — | — |
 
 ---
 

@@ -17,6 +17,7 @@ ADRs are the primary record of *why* the system is built the way it is. They are
 | [`adr/ADR-005`](adr/ADR-005-site-crawl-bfs-coordinator.md) | Site Crawl BFS Coordinator | **Accepted** |
 | [`adr/ADR-006`](adr/ADR-006-batch-scraping-data-model.md) | Batch Scraping Data Model | **Accepted** |
 | [`adr/ADR-007`](adr/ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** |
+| [`adr/ADR-008`](adr/ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** — Patchright + headed Chrome under Xvfb |
 
 See [`adr/README.md`](adr/README.md) for full ADR index, status definitions, and how to write a new ADR.
 
@@ -34,6 +35,20 @@ Day-to-day docs that are still actively consulted.
 | [`project/DEVOPS_SPEC.md`](project/DEVOPS_SPEC.md) | k3s deployment spec — namespaces, Flux, ingress, sealed secrets |
 | [`project/open-questions.md`](project/open-questions.md) | Open design questions carried across phases |
 | [`project/usages.md`](project/usages.md) | Quick reference — how Redis and MinIO are used in the project |
+
+---
+
+## Guides — Deep-Dives & Implementation Notes
+
+Long-form guides on specific subsystems — the *how* and *why* behind a piece of the build.
+
+| File | Contents |
+|------|----------|
+| [`guides/anti-bot-hardening.md`](guides/anti-bot-hardening.md) | Playwright worker stealth — the BrowserScan diagnosis, the config matrix, and the runbook (companion to ADR-008) |
+| [`guides/playwright-primer.md`](guides/playwright-primer.md) | Playwright fundamentals and how the Playwright worker uses them |
+| [`guides/litellm-provider-routing.md`](guides/litellm-provider-routing.md) | LiteLLM provider routing notes |
+| [`guides/modal-llm-inference.md`](guides/modal-llm-inference.md) | Modal LLM inference notes |
+| [`guides/competitor-research.md`](guides/competitor-research.md) | Competitor/landscape research |
 
 ---
 

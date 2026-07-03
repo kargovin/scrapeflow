@@ -20,6 +20,25 @@ class Settings(BaseSettings):
     playwright_max_workers: int = 3
     playwright_default_timeout_seconds: int = 60
     credentials_encryption_key: str = ""
+    # Stealth launch config (Patchright). Verified against BrowserScan bot-detection.
+    # channel="chrome" uses real Google Chrome (installed in the image via
+    # `patchright install chrome`) so the UA reports a genuine "Chrome". Set to ""
+    # to fall back to Patchright's bundled Chromium.
+    playwright_channel: str = "chrome"
+    # headless=False runs Chrome *truly headed* under Xvfb (see Dockerfile CMD).
+    # This is the only mode that yields a clean UA: every headless mode — including
+    # the new `--headless=new` — still emits the "HeadlessChrome" UA token, which
+    # bot detectors flag. Headed also matters because headless is itself a signal.
+    playwright_headless: bool = False
+    # --disable-blink-features=AutomationControlled removes navigator.webdriver
+    # (Patchright's driver patches alone don't clear it in launch() mode).
+    playwright_disable_automation: bool = True
+    # Chrome needs --no-sandbox to launch as a non-root user inside the container.
+    playwright_no_sandbox: bool = True
+    # --disable-dev-shm-usage: k8s pods default to a 64 MB /dev/shm, which headed
+    # Chrome exhausts and crashes on. Routes shared memory to /tmp instead. Neither
+    # this nor --no-sandbox is JS-detectable (both are process-level flags).
+    playwright_disable_dev_shm: bool = True
 
     @field_validator("credentials_encryption_key")
     def validate_fernet_key(cls, v):

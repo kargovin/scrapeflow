@@ -310,7 +310,8 @@ async def test_respect_robots_false_skips_check():
 async def test_proxy_passed_to_new_context():
     """
     When credentials.encrypted_proxy_url is set, browser.new_context must be called
-    with proxy={"server": proxy_url} after decryption.
+    with the proxy split into server/username/password (Chromium drops userinfo
+    embedded in the URL), alongside no_viewport=True.
     """
     proxy_url = "http://user:pass@proxy.example.com:8080"
     msg = make_nats_msg(
@@ -322,11 +323,18 @@ async def test_proxy_passed_to_new_context():
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
-    browser.new_context.assert_called_once_with(proxy={"server": proxy_url})
+    browser.new_context.assert_called_once_with(
+        no_viewport=True,
+        proxy={
+            "server": "http://proxy.example.com:8080",
+            "username": "user",
+            "password": "pass",
+        },
+    )
 
 
 async def test_no_proxy_calls_new_context_without_proxy():
-    """When no credentials are set, new_context must be called with no arguments."""
+    """When no credentials are set, new_context is called with only no_viewport=True."""
     msg = make_nats_msg()
     browser, _, _ = make_browser()
 
@@ -334,7 +342,7 @@ async def test_no_proxy_calls_new_context_without_proxy():
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
-    browser.new_context.assert_called_once_with()
+    browser.new_context.assert_called_once_with(no_viewport=True)
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,10 @@ name = "playwright-worker"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "playwright==1.44.0",
+    # Patchright is a drop-in Playwright fork with the CDP Runtime.enable leak
+    # patched and navigator.webdriver removed — see docs/adr for the stealth
+    # rationale. It vendors a compatible Playwright, so we no longer pin it here.
+    "patchright>=1.44.0",
     "nats-py>=2.7.0",
     "miniopy-async>=1.21.0",
     "pydantic>=2.0.0",

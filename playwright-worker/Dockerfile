@@ -18,7 +18,17 @@ COPY worker/ ./worker/
 COPY tests/ ./tests/
 COPY pyproject.toml .
 
-RUN useradd --no-create-home --uid 1001 appuser
+# Install real Google Chrome for Patchright's channel="chrome" (stealth): the UA
+# then reports a genuine Chrome instead of bundled Chromium. Run as root, before
+# dropping privileges, so the binary lands in a world-readable system path.
+RUN patchright install chrome
+
+# --create-home: headed Chrome writes its profile/cache under $HOME, so the
+# runtime user needs a writable home directory.
+RUN useradd --create-home --uid 1001 appuser
+ENV HOME=/home/appuser
 USER appuser
 
-CMD ["python", "-m", "worker.main"]
+# Run under Xvfb: Chrome must be truly headed (not --headless) to report a clean,
+# non-"HeadlessChrome" UA, which requires a virtual display in a container.
+CMD ["xvfb-run", "-a", "--server-args=-screen 0 1920x1080x24", "python", "-m", "worker.main"]

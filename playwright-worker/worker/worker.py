@@ -102,7 +102,13 @@ async def handle_message(
     # --- Steps 5–12: Render, format, upload ---
     # Build context options — proxy is set at context level so all traffic routes through it.
     # Chromium silently drops userinfo from proxy URLs; split into server/username/password.
-    context_kwargs: dict = {}
+    #
+    # no_viewport=True lets the page use the real browser window size instead of a
+    # forced viewport. A forced viewport goes through CDP Emulation.setDeviceMetricsOverride,
+    # which is itself a bot-detection signal; deferring to the window (Xvfb screen size)
+    # avoids that tell. Deliberately NOT setting user_agent — with channel="chrome" the
+    # UA is already a genuine Chrome, and Patchright advises against overriding it.
+    context_kwargs: dict = {"no_viewport": True}
     if proxy_url:
         parsed_proxy = urlparse(proxy_url)
         proxy_config: dict = {
