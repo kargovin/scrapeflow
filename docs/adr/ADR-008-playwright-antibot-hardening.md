@@ -99,7 +99,12 @@ exhausts and crashes on). Neither is JavaScript-detectable — both are process-
   lands in a world-readable system path).
 - Runtime user switched to `--create-home` with `ENV HOME=/home/appuser` — headed Chrome
   writes its profile/cache under `$HOME`.
-- `CMD` wrapped in `xvfb-run -a --server-args="-screen 0 1920x1080x24"`.
+- `ENV PYTHONUNBUFFERED=1` so worker logs/crashes reach `kubectl logs`.
+- `/tmp/.X11-unix` pre-created `1777` (Xvfb won't create it as non-root).
+- `CMD ["/app/entrypoint.sh"]` — starts Xvfb, waits for its socket, then `exec`s the
+  worker as pid 1. (Superseded the initial `xvfb-run` CMD, which masked worker crashes
+  from k8s and raced Chrome against Xvfb on cold start — see the guide's "Deployment
+  gotcha" and the Consequences below.)
 
 ---
 

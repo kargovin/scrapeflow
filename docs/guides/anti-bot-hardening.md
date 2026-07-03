@@ -154,8 +154,18 @@ RUN useradd --create-home --uid 1001 appuser
 ENV HOME=/home/appuser
 USER appuser
 
-# Truly-headed Chrome needs a virtual display in a container.
-CMD ["xvfb-run", "-a", "--server-args=-screen 0 1920x1080x24", "python", "-m", "worker.main"]
+# entrypoint.sh starts Xvfb, waits for it, then exec's the worker as pid 1.
+CMD ["/app/entrypoint.sh"]
+```
+
+`entrypoint.sh` (not `xvfb-run` — see "Deployment gotcha" below):
+
+```sh
+Xvfb ":99" -screen 0 1920x1080x24 -nolisten tcp &
+export DISPLAY=":99"
+# wait for the X socket before launching Chrome (fixes the cold-start race)
+while [ ! -S /tmp/.X11-unix/X99 ]; do sleep 0.1; ...timeout at 10s... ; done
+exec python -m worker.main   # exec => worker is pid 1, so a crash reaches k8s
 ```
 
 ---
@@ -226,7 +236,33 @@ must be re-confirmed against BrowserScan from the deployed worker (see below).
 
 ---
 
-## Part 6 — Known limitations
+## Part 6 — Deployment gotcha (why `xvfb-run` was replaced)
+
+The first deploy of this change **looked healthy but did nothing**: the pod was
+`1/1 Running` with `0` restarts, yet `kubectl logs` was empty and no scrapes ran. Three
+compounding problems, all fixed in the entrypoint:
+
+1. **`xvfb-run` as pid 1 masks crashes.** `xvfb-run` starts Xvfb *and stays alive as the
+   container's main process*. When the Python worker died, xvfb-run kept running, so the
+   container never exited → k8s saw it as healthy and **never restarted it**. Fix: the
+   entrypoint `exec python`, making the worker pid 1, so a crash exits the container and
+   surfaces as `CrashLoopBackOff`.
+2. **Cold-start race.** On a fresh (cold) pod, Chrome launched before Xvfb was ready and
+   failed with `Missing X server or $DISPLAY / platform failed to initialize`. Warm manual
+   runs never reproduced it. Fix: the entrypoint **waits for the X socket** before `exec`.
+3. **Invisible logs.** `PYTHONUNBUFFERED` was unset, so buffered stdout was lost when the
+   process died — hence the empty `kubectl logs`. Fix: `ENV PYTHONUNBUFFERED=1`.
+
+Also: Xvfb refuses to create `/tmp/.X11-unix` as a non-root user, so the Dockerfile
+pre-creates it (`mkdir -p /tmp/.X11-unix && chmod 1777`) while still root.
+
+**Debugging tip:** because the old entrypoint masked the failure, the fastest diagnosis was
+to run the worker by hand inside the pod — `kubectl exec ... -- xvfb-run -a python -m
+worker.main` — which surfaced the real Chrome/X error immediately.
+
+---
+
+## Part 7 — Known limitations
 
 - **Fingerprint-level only.** This does not touch TLS/JA3 or behavioral analysis.
 - **`page.route` on action jobs** (CSP injection / `block_images`) uses the CDP `Fetch`
