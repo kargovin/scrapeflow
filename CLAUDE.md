@@ -1,6 +1,6 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phase 2 complete. Phase 3 complete — all Steps 1–28 done. Phase 4 in progress (usage-driven; see `scrapeflow-session-handoff.md` and `docs/project/`).**
+> **Status: Phases 1–3 complete. Phase 4 in progress — see `scrapeflow-session-handoff.md` and `docs/project/`.**
 
 ## Goal
 
@@ -12,13 +12,13 @@ A self-hosted, multi-tenant web scraping platform. Primary use case: structured 
 
 ### Core stack
 - **API**: FastAPI (Python)
-- **Workers**: Go (background scrape workers)
+- **Workers**: Go **http-worker**; Python **Playwright** + **LLM** workers; Python **crawl coordinator**
 - **Queue**: NATS JetStream
 - **DB**: PostgreSQL (metadata), MinIO (object storage / raw output)
 - **Cache / rate limiting**: Redis
 - **Gateway**: Traefik
 - **Auth**: Clerk (OAuth — Google, GitHub; JWT issued by Clerk, verified by API)
-- **[LATER] MCP server**: LLM-callable interface (scrape_url, get_result, list_jobs)
+- **MCP server**: LLM-callable interface (scrape_url, get_result, list_jobs)
 
 ### Worker contract
 See `docs/adr/README.md` for the full ADR index and current status of each decision record.
@@ -38,7 +38,7 @@ When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 
 ## Components
 
-### Phase 1 — MVP (building now)
+### Phase 1 — MVP [COMPLETE]
 - **Auth**: Clerk OAuth login/signup, JWT verification middleware, user sync to local DB, API key management
 - **Job CRUD**: create scrape job (URL + options), get status, list jobs, cancel job
 - **HTTP scraper worker**: plain HTTP requests, returns raw HTML / cleaned Markdown / JSON
@@ -53,13 +53,21 @@ When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 - **Webhook delivery**: configurable webhooks with exponential backoff retry
 - **Admin panel API**: manage users, view all jobs, usage stats
 
-### Phase 3 — Production hardening [IN PROGRESS]
+### Phase 3 — Production hardening [COMPLETE]
 - **Proxy rotation**: pluggable proxy provider config (Bright Data, Oxylabs, etc.)
 - **robots.txt compliance**: respect/ignore toggle per job
 - **Billing/quotas**: per-user job limits, usage tracking
 - **Admin SPA**: React dashboard for user and job management
 - **MCP server**: expose scrape_url, get_result, list_jobs as LLM-callable tools
 - **K8s manifests**: production deployment manifests for k3s, added to infra repo
+
+### Phase 4 — Durable Workflows [PLANNED]
+Direction for Phase 4 (exploratory — not yet committed to build). A new **Workflows** layer on a
+durable-execution engine, built *alongside* the existing NATS job path (nothing ripped out).
+- **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
+- **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).
+- **Rollout:** one product, two engines — route new work to v2 (Temporal), drain + cut v1 (NATS) per-flow when proven; reversible each step. End state retires `result_consumer`/`scheduler`/`webhook_loop`/`advisory`/`coordinator` + NATS, and makes the API thin/horizontally scalable.
+- **Docs:** `docs/project/workflows-scoping.md` (feature + engine comparison), `docs/project/temporal-full-migration.md` (complete change inventory + migration sequence). Next artifacts: PRD + engine ADR (ADR-009).
 
 ### Phase 3 — Build Process
 Phase 3 simulates how a larger engineering organization works by dividing the build process across distinct Claude personas. Each persona owns a specific part of the process and produces defined outputs before handing off to the next.
@@ -83,7 +91,7 @@ Each persona operates with only the outputs from the persona before them — the
 | Tenancy | Multi-tenant | Each user has isolated jobs/data |
 | Scraping engine | HTTP first, Playwright opt-in later | Most structured data sites are server-rendered |
 | LLM output | User provides own API key + schema | Avoids shared LLM cost; users control their models |
-| Proxy rotation | Skip for MVP | Not needed for MVP scale; add as pluggable provider in Phase 3 |
+| Proxy rotation | Skip for MVP (done — Phase 3) | Not needed for MVP scale; added as pluggable provider in Phase 3 (PRD-005) |
 | Change detection | Yes, Phase 2 | Key feature for ML data pipeline use cases |
 | Output formats | Raw HTML, cleaned Markdown, JSON | Feed directly into ML pipelines |
 | Worker design | Light worker — NATS + MinIO only, no DB access | Keeps worker DB-ignorant; all business logic in API |
@@ -93,7 +101,7 @@ Each persona operates with only the outputs from the persona before them — the
 | NATS stream creation | Outside API/worker (init container / infra); API asserts stream exists at startup | API has no infra concerns |
 | Cross-tenant access | 404 (not 403) for jobs belonging to other users | 403 leaks resource existence; 404 is safer for multi-tenant |
 | NATS subject constants | `app/constants.py` (not `settings.py`) | Subject names are part of the worker contract, not env-configurable |
-| Rate limiting | Fixed window counter (Redis `INCR` + `EXPIRE`) per user; sliding window planned for Phase 2 | Simple, 2–3 Redis ops; adequate for MVP quotas |
+| Rate limiting | Fixed window counter (Redis `INCR` + `EXPIRE`) per user; sliding window planned for Phase 2 **[superseded — see Phase 3 sliding-window row below]** | Simple, 2–3 Redis ops; adequate for MVP quotas |
 | Cancellation (Phase 2) | Cancel active `job_runs` rows (not `jobs.status`); result consumer discards by checking `run.status == "cancelled"` | `jobs` no longer has a `status` column after migration 2.4 |
 | MinIO path convention | Dual write: `latest/{job_id}.{ext}` (overwritten) + `history/{job_id}/{unix_ts}.{ext}` (immutable); `job_runs.result_path` always stores the `history/` path | history path enables per-run diff; latest path for convenience access |
 | Worker routing (Phase 2) | Subject-based: `scrapeflow.jobs.run.http` for Go worker, `scrapeflow.jobs.run.playwright` for Playwright worker | Workers subscribe to their own subject; wrong engine never receives the message |
