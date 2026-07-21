@@ -1,5 +1,7 @@
 # ScrapeFlow — Phase 3 Deferred Items
 
+> **Still-open items are tracked in the consolidated Phase 4 view: [`../../project/phase4-backlog.md`](../../project/phase4-backlog.md)** (§4 — "Survives Temporal").
+
 > **Purpose:** Living dump of everything explicitly deferred out of Phase 2 into Phase 3.
 > This doc is intentionally messy — it's a tracking list, not a spec. Items get promoted to
 > PRDs/ADRs/backlog steps when Phase 3 planning begins.

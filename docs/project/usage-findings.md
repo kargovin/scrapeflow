@@ -1,5 +1,7 @@
 # Usage Findings
 
+> **Consolidated Phase 4 view: [`phase4-backlog.md`](./phase4-backlog.md).**
+
 Things noticed while using the app that are worth fixing or considering.
 Captured here before being formalised into Phase 4 backlog items.
 

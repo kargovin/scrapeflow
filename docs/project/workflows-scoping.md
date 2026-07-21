@@ -1,5 +1,7 @@
 # ScrapeFlow — Durable Workflows scoping
 
+> **Consolidated Phase 4 view: [`phase4-backlog.md`](./phase4-backlog.md)** (item **WF**).
+
 > Exploratory scoping for a new capability layer: user-defined, durable, multi-step
 > **Workflows**, powered by a workflow-orchestration engine (Temporal or similar).
 > This doc frames the feature, ranks the options, compares engines, and recommends a

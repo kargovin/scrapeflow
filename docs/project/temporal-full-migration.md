@@ -1,5 +1,7 @@
 # ScrapeFlow — Complete Temporal migration (change inventory)
 
+> **Consolidated Phase 4 view: [`phase4-backlog.md`](./phase4-backlog.md)** (item **WF**).
+
 > Companion to `workflows-scoping.md`. That doc scoped a *new* Workflows layer coexisting
 > with the NATS path and compared engines. **This doc assumes the decision is made — Temporal —
 > and inventories every change if we go *all the way*: all orchestration on Temporal, the
