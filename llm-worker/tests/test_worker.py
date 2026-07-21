@@ -22,8 +22,16 @@ Lifecycle summary:
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import openai
+
 from tests.conftest import make_nats_msg
+from worker.config import settings
+from worker.errors import WarmupTimeout
 from worker.worker import RESULT_SUBJECT, handle_message
+
+# Minimal request object for constructing provider SDK errors in tests.
+_REQ = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
 
 _FAKE_MINIO_PATH = "scrapeflow-results/history/job-aaa/1234567890.json"
 _FAKE_CONTENT = "<html><body>Product: Alice, price $9.99</body></html>"
@@ -194,15 +202,19 @@ async def test_llm_failure_publishes_failed():
     data = json.loads(payload_bytes)
 
     assert data["status"] == "failed"
-    assert data["error"] == "rate limit exceeded"
+    # describe() prefixes the exception type — several provider/httpx errors have
+    # an empty str(), which used to produce a blank error field in the UI.
+    assert data["error"] == "Exception: rate limit exceeded"
     assert "minio_path" not in data
 
 
-async def test_ack_called_on_failure():
+async def test_ack_called_on_terminal_failure():
     """
-    msg.ack() must be called even when call_llm raises.
-    The API already knows the run failed via the result event — re-delivery
-    won't recover a bad LLM key or a provider outage.
+    msg.ack() must be called for a *terminal* failure. Redelivery won't recover
+    a bad LLM key or a malformed schema, and retrying bills the user again.
+
+    Unclassified exceptions default to terminal (worker/errors.py), so a bare
+    Exception takes this path.
     """
     msg = make_nats_msg()
 
@@ -212,7 +224,100 @@ async def test_ack_called_on_failure():
         "worker.worker.call_llm", new_callable=AsyncMock
     ) as mock_llm, patch("worker.worker.upload", new_callable=AsyncMock):
         mock_fetch.return_value = _FAKE_CONTENT
-        mock_llm.side_effect = Exception("timeout")
+        mock_llm.side_effect = Exception("bad api key")
         await handle_message(msg, AsyncMock(), AsyncMock())
+
+    msg.ack.assert_awaited_once()
+    msg.nak.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Q5 option B — transient failures are retried, not permanently failed
+# ---------------------------------------------------------------------------
+
+
+async def _run_failing(exc, num_delivered=1, js=None):
+    """Run handle_message with call_llm raising `exc`. Returns (msg, js)."""
+    msg = make_nats_msg(num_delivered=num_delivered)
+    js = js or AsyncMock()
+    with patch(
+        "worker.worker.fetch_content", new_callable=AsyncMock
+    ) as mock_fetch, patch(
+        "worker.worker.call_llm", new_callable=AsyncMock
+    ) as mock_llm, patch("worker.worker.upload", new_callable=AsyncMock):
+        mock_fetch.return_value = _FAKE_CONTENT
+        mock_llm.side_effect = exc
+        await handle_message(msg, js, AsyncMock())
+    return msg, js
+
+
+def _published_statuses(js):
+    return [json.loads(c.args[1])["status"] for c in js.publish.call_args_list]
+
+
+async def test_transient_failure_is_naked_not_acked():
+    """A cold-start read timeout must go back to JetStream for redelivery."""
+    msg, _ = await _run_failing(httpx.ReadTimeout("timed out"))
+
+    msg.nak.assert_awaited_once()
+    msg.ack.assert_not_awaited()
+
+
+async def test_transient_failure_publishes_no_failed_status():
+    """
+    The retry must not publish 'failed'. The API's terminal-status guard would
+    lock the run as failed and then discard the successful retry's 'completed'.
+    """
+    _, js = await _run_failing(httpx.ReadTimeout("timed out"))
+
+    assert _published_statuses(js) == ["running"]
+
+
+async def test_transient_failure_backs_off_exponentially():
+    """nak delay doubles per delivery attempt."""
+    msg1, _ = await _run_failing(httpx.ConnectError("refused"), num_delivered=1)
+    msg2, _ = await _run_failing(httpx.ConnectError("refused"), num_delivered=2)
+
+    assert msg1.nak.await_args.kwargs["delay"] == 5.0
+    assert msg2.nak.await_args.kwargs["delay"] == 10.0
+
+
+async def test_transient_failure_gives_up_on_final_attempt():
+    """
+    On the last allowed delivery the worker stops retrying and reports a terminal
+    failure itself, so the run never dangles in 'processing' forever.
+    """
+    msg, js = await _run_failing(
+        httpx.ReadTimeout("timed out"),
+        num_delivered=settings.llm_max_delivery_attempts,
+    )
+
+    msg.ack.assert_awaited_once()
+    msg.nak.assert_not_awaited()
+
+    data = json.loads(js.publish.call_args_list[-1].args[1])
+    assert data["status"] == "failed"
+    assert "gave up after 3 attempts" in data["error"]
+
+
+async def test_warmup_timeout_is_transient():
+    """A cold endpoint that never woke is worth retrying, not failing outright."""
+    msg, _ = await _run_failing(WarmupTimeout("never became ready"))
+
+    msg.nak.assert_awaited_once()
+    msg.ack.assert_not_awaited()
+
+
+async def test_auth_error_is_never_retried():
+    """A bad API key must fail immediately — retrying re-bills the user."""
+    msg, js = await _run_failing(
+        openai.AuthenticationError(
+            "invalid key", response=httpx.Response(401, request=_REQ), body=None
+        )
+    )
+
+    msg.ack.assert_awaited_once()
+    msg.nak.assert_not_awaited()
+    assert _published_statuses(js)[-1] == "failed"
 
     msg.ack.assert_called_once()

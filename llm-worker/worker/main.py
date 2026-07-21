@@ -77,7 +77,15 @@ async def run() -> None:
         LLM_SUBJECT,
         durable=DURABLE_NAME,
         stream=STREAM_NAME,
-        config=ConsumerConfig(ack_wait=settings.llm_ack_wait_seconds),
+        config=ConsumerConfig(
+            ack_wait=settings.llm_ack_wait_seconds,
+            # Backstop for the worker-side attempt cap (Q5 option B). worker.py
+            # normally stops retrying itself and publishes a terminal "failed" on
+            # attempt N, so this limit is only reached when the worker dies before
+            # acking. Without it, max_deliver defaults to unlimited and such a
+            # message is redelivered forever.
+            max_deliver=settings.llm_max_delivery_attempts,
+        ),
     )
     log.info(
         "subscribed",
@@ -85,6 +93,8 @@ async def run() -> None:
         durable=DURABLE_NAME,
         max_workers=settings.llm_max_workers,
         ack_wait=settings.llm_ack_wait_seconds,
+        max_deliver=settings.llm_max_delivery_attempts,
+        warmup=settings.llm_warmup_enabled,
     )
 
     # ── Worker loop ───────────────────────────────────────────────────────────────

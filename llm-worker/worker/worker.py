@@ -12,6 +12,7 @@ import structlog
 from miniopy_async import Minio
 
 from .config import settings
+from .errors import TRANSIENT, classify, describe, retry_delay
 from .llm import call_llm
 from .models import JobMessage, ResultMessage
 from .storage import upload
@@ -98,16 +99,54 @@ async def handle_message(msg: Any, js: Any, minio: Minio) -> None:
         log.info("job_completed", job_id=job.job_id, run_id=job.run_id, path=minio_path)
 
     except Exception as exc:
-        log.error("job_failed", job_id=job.job_id, run_id=job.run_id, error=str(exc))
+        # Q5 option B. This branch used to ack unconditionally, which made every
+        # failure permanent — a cold-start timeout or a 5xx was treated exactly
+        # like a bad API key. Now transient failures are naked back to JetStream
+        # for redelivery, and only the final outcome is published.
+        kind = classify(exc)
+        attempt = msg.metadata.num_delivered
+        detail = describe(exc)
+
+        if kind == TRANSIENT and attempt < settings.llm_max_delivery_attempts:
+            delay = retry_delay(
+                attempt,
+                settings.llm_retry_base_delay_seconds,
+                settings.llm_retry_max_delay_seconds,
+            )
+            log.warning(
+                "job_transient_failure",
+                job_id=job.job_id,
+                run_id=job.run_id,
+                error=detail,
+                attempt=attempt,
+                max_attempts=settings.llm_max_delivery_attempts,
+                retry_in=delay,
+            )
+            # Deliberately no "failed" publish: the API's terminal-status guard
+            # would lock the run as failed and then discard the retry's
+            # "completed". Only the final attempt reports an outcome.
+            await msg.nak(delay=delay)
+            return
+
+        # Terminal, or the last attempt of a transient failure. Report and ack —
+        # redelivery cannot recover a bad key, and we are out of retries.
+        if kind == TRANSIENT:
+            detail = f"{detail} (gave up after {attempt} attempts)"
+        log.error(
+            "job_failed",
+            job_id=job.job_id,
+            run_id=job.run_id,
+            error=detail,
+            kind=kind,
+            attempt=attempt,
+        )
         await publish_result(
             js,
             ResultMessage(
                 job_id=job.job_id,
                 run_id=job.run_id,
                 status="failed",
-                error=str(exc),
+                error=detail,
             ),
         )
-        # Ack even on failure — the API already knows it failed via the result event.
-        # Re-delivery won't recover a bad LLM key or a missing MinIO object.
         await msg.ack()

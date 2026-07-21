@@ -36,10 +36,14 @@ def make_nats_msg(
     model: str = "claude-3-5-sonnet-20241022",
     output_schema: dict | None = None,
     stream_seq: int = 42,
+    num_delivered: int = 1,
 ) -> MagicMock:
     """
     Build a mock NATS message whose .data is a valid LLM JobMessage JSON payload.
-    msg.ack is an AsyncMock so tests can assert it was called.
+    msg.ack and msg.nak are AsyncMocks so tests can assert which one was called.
+
+    num_delivered mirrors JetStream's delivery counter (1 on first delivery) and
+    drives the Q5 option-B retry cap in worker.handle_message.
 
     encrypted_api_key is a placeholder string — tests that exercise actual
     decryption (test_llm.py) generate a real Fernet key+ciphertext pair inline.
@@ -64,5 +68,7 @@ def make_nats_msg(
     msg.metadata = MagicMock()
     msg.metadata.sequence = MagicMock()
     msg.metadata.sequence.stream = stream_seq
+    msg.metadata.num_delivered = num_delivered
     msg.ack = AsyncMock()
+    msg.nak = AsyncMock()
     return msg
