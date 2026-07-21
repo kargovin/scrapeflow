@@ -33,7 +33,11 @@ async def _call_anthropic(
     content: str,
     output_schema: dict[str, Any],
 ) -> dict[str, Any]:
-    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=_make_timeout())
+    client = anthropic.AsyncAnthropic(
+        api_key=api_key,
+        timeout=_make_timeout(),
+        max_retries=settings.llm_max_retries,
+    )
     response = await client.messages.create(
         model=model,
         max_tokens=4096,
@@ -56,6 +60,7 @@ async def _call_openai_compatible(
         api_key=api_key,
         base_url=base_url or None,
         timeout=_make_timeout(),
+        max_retries=settings.llm_max_retries,
     )
     response = await client.chat.completions.create(
         model=model,

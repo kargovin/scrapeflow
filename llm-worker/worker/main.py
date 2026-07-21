@@ -16,6 +16,7 @@ import nats
 import nats.errors
 import structlog
 from miniopy_async import Minio
+from nats.js.api import ConsumerConfig
 
 from .config import settings
 from .worker import handle_message
@@ -65,24 +66,56 @@ async def run() -> None:
     log.info("minio_connected", bucket=settings.minio_bucket)
 
     # ── Pull subscription ─────────────────────────────────────────────────────────
+    # Explicit ack_wait: the JetStream default (30s) is shorter than a single LLM
+    # request timeout (60s), so slow calls were redelivered mid-flight, the late ack
+    # was a no-op, and with max_deliver unlimited the job re-billed the user's own API
+    # key in a loop. ack_wait is the orphan-recovery window, not a job-duration budget —
+    # the in-progress heartbeat below is what covers long calls (see config.py).
+    # NOTE: JetStream does not update ack_wait on an already-existing durable consumer,
+    # so changing this value requires updating/recreating the consumer out-of-band.
     psub = await js.pull_subscribe(
         LLM_SUBJECT,
         durable=DURABLE_NAME,
         stream=STREAM_NAME,
+        config=ConsumerConfig(ack_wait=settings.llm_ack_wait_seconds),
     )
     log.info(
         "subscribed",
         subject=LLM_SUBJECT,
         durable=DURABLE_NAME,
         max_workers=settings.llm_max_workers,
+        ack_wait=settings.llm_ack_wait_seconds,
     )
 
     # ── Worker loop ───────────────────────────────────────────────────────────────
     sem = asyncio.Semaphore(settings.llm_max_workers)
 
+    async def _heartbeat(msg):
+        # Reset the NATS ack timer while the job runs so an LLM call longer than
+        # ack_wait never triggers redelivery — which would bill the user's API key
+        # a second time. Errors (e.g. msg already acked) are ignored; the task is
+        # cancelled when the job finishes.
+        try:
+            while True:
+                await asyncio.sleep(settings.llm_heartbeat_seconds)
+                try:
+                    await msg.in_progress()
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
     async def handle_with_sem(msg):
         async with sem:
-            await handle_message(msg, js, minio)
+            hb = asyncio.create_task(_heartbeat(msg))
+            try:
+                await handle_message(msg, js, minio)
+            finally:
+                hb.cancel()
+                try:
+                    await hb
+                except asyncio.CancelledError:
+                    pass
 
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()

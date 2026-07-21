@@ -235,3 +235,55 @@ async def test_call_openai_compatible_passes_base_url():
 
     _, kwargs = mock_cls.call_args
     assert kwargs["base_url"] == custom_url
+
+
+# ---------------------------------------------------------------------------
+# SDK retry pin (Q6) — both provider clients default to max_retries=2, which
+# would make one call_llm() up to three *billable* attempts against the user's
+# own API key, invisibly, and triple the wall-clock ceiling the NATS ack_wait
+# is sized against. Retry must live in exactly one visible layer.
+# ---------------------------------------------------------------------------
+
+
+async def test_call_anthropic_pins_max_retries():
+    """AsyncAnthropic must be constructed with our explicit max_retries, not the SDK default of 2."""
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(input={"ok": True})]
+
+    mock_client = AsyncMock()
+    mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+    with patch.object(settings, "llm_max_retries", 0):
+        with patch(
+            "worker.llm.anthropic.AsyncAnthropic", return_value=mock_client
+        ) as mock_cls:
+            await _call_anthropic(
+                api_key="sk-ant-test",
+                model="claude-3-5-sonnet-20241022",
+                content="some content",
+                output_schema={},
+            )
+
+    _, kwargs = mock_cls.call_args
+    assert kwargs["max_retries"] == 0
+
+
+async def test_call_openai_compatible_pins_max_retries():
+    """AsyncOpenAI must be constructed with our explicit max_retries, not the SDK default of 2."""
+    mock_client = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock(message=MagicMock(content='{"ok": true}'))]
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    with patch.object(settings, "llm_max_retries", 0):
+        with patch("worker.llm.AsyncOpenAI", return_value=mock_client) as mock_cls:
+            await _call_openai_compatible(
+                api_key="sk-test",
+                base_url=None,
+                model="gpt-4o",
+                content="some content",
+                output_schema={},
+            )
+
+    _, kwargs = mock_cls.call_args
+    assert kwargs["max_retries"] == 0

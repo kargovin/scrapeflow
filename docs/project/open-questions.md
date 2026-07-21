@@ -1,5 +1,7 @@
 # ScrapeFlow — Open Questions
 
+> **Consolidated Phase 4 view: [`phase4-backlog.md`](./phase4-backlog.md).** This doc holds the full context, options, and recommendations for Q1–Q8.
+
 > Items raised during implementation that need a decision before code is written.
 > Each entry includes the context, the options, and a recommendation so the discussion starts with something concrete.
 
@@ -162,6 +164,32 @@ Open concerns to think through before committing:
 
 ## Q6 — NATS `ack_wait` is not configured on the LLM worker consumer
 
+> **STATUS: RESOLVED (code) — 2026-07-21.** Option **C** implemented, matching the
+> playwright fix (`67ba983`): `ConsumerConfig(ack_wait=120)` + `msg.in_progress()`
+> heartbeat every 30s, plus `max_retries` pinned on both provider SDK clients.
+> Two things below are now **superseded by what the fix uncovered**:
+>
+> 1. **`ack_wait` is NOT sized to the worst-case call duration.** The Options table
+>    frames A as "pick a value comfortably above the worst-case LLM call." That's
+>    unachievable here — see (2) — and unnecessary once heartbeats exist. `ack_wait`
+>    is now explicitly the **orphan-recovery window** (how long a dead worker's
+>    message sits before redelivery); the heartbeat is what covers long calls.
+> 2. **The worst case was ~3× larger than this doc assumed.** Both SDKs default to
+>    `max_retries=2`, so one `call_llm()` could make three attempts, each with a
+>    *fresh* httpx read timeout — ≈ 3 × (10s connect + 60s read) ≈ **210s**, not 60s.
+>    Any `ack_wait` chosen against the 60s figure would have been wrong by 3×.
+>    Pinning `llm_max_retries=0` drops the real ceiling back to ~70s.
+>
+> **Still outstanding (operational):** the live `python-llm-worker` durable was created
+> with the default 30s `ack_wait`, and **JetStream will not update it on deploy** —
+> it needs an out-of-band `add_consumer` with the modified config (this nats-py has no
+> `update_consumer`), exactly as done during the playwright incident. The pre-fix audit
+> below (LLM invoices vs run counts) is also still worth doing — it tells you whether
+> this has been silently double-billing users or stayed latent.
+>
+> **See also:** the retry pin has a trade-off that touches **Q7** — read that note before
+> changing `llm_max_retries`.
+
 **Raised during:** Phase 4 — investigating Q5 cold-start handling (2026-05-15)
 **File:** `llm-worker/worker/main.py`
 
@@ -226,6 +254,22 @@ Open concerns to think through before committing:
 ---
 
 ## Q7 — LLM worker has no retry on transient call failures
+
+> **STATUS: CHANGED by the Q6 fix — 2026-07-21.** The "little retry, in places we can't
+> see" described below is **now off by default**: `llm_max_retries` (default `0`) is
+> passed to both SDK constructors. This doc's analysis was right; the fix acted on it.
+>
+> **This is a deliberate trade, and it cuts both ways.** Removing the SDK's invisible
+> `max_retries=2` also removes its automatic 429 / 5xx recovery — and nothing replaces
+> it until Temporal's `RetryPolicy` lands. Since the worker acks on failure, a transient
+> 429 that used to be silently absorbed now surfaces as a permanently `failed` job.
+> Net: fewer duplicate charges, more visible transient failures.
+>
+> **It is a one-value change either way** (`LLM_MAX_RETRIES` env / `llm_max_retries`).
+> If transient-failure rate turns out to hurt more than invisible retries did, set it
+> back to `2` — the heartbeat from the Q6 fix already covers the resulting ~210s
+> wall-clock, so restoring it is safe from a redelivery standpoint. That is precisely
+> why the Q6 fix did **not** depend on the pin.
 
 **Raised during:** Phase 4 — discussion of Modal vLLM instance death failure mode (2026-05-18)
 **Files:** `llm-worker/worker/llm.py`, `llm-worker/worker/worker.py`
