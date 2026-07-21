@@ -66,12 +66,14 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- Branch: `main` (develop is in sync). Latest commit `ba8fb8a`.
+- Branch: **`develop` is ahead of `main` and unpushed** — last session ended with `35fb89f` (docs consolidation), `6fb5b9c` (LLM-worker Q6 fix) and `d740dd1` (this doc update) landed on `develop` only. Verify with `git log --oneline main..develop`, then fast-forward `main` and push.
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
-- **In Phase 4 — investigation/triage + small feature work.** No formal spec yet; the backlog is being assembled from real production usage. Open findings cluster around **LLM-worker reliability** (Q5/Q6/Q7) and a **state-machine design flaw** (Q8) that already caused a live incident. Shipped Phase 4 work: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)** — Patchright + real headed Chrome under Xvfb, verified passing BrowserScan in prod (see Post-Phase-3 changes + ADR-008).
-- **⚠ Q6 (`ack_wait` redelivery loop) is now CONFIRMED, not just latent** — it fired in prod on the playwright worker (headed Chrome is slower than the old headless Chromium, so scrapes cross the default 30s). Fixed there (`67ba983`). **The LLM worker's consumer almost certainly has the same bug — audit its `ack_wait` next (see Phase 4 triage Q6).**
-- 243 API tests passing (deterministic — first-run clean); **70** playwright-worker tests passing; 14 MCP tests passing.
+- **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
+- **✅ Q6 is fixed in code on both workers** — playwright (`67ba983`) and LLM worker (`6fb5b9c`). **⚠ But the LLM fix is NOT live in prod:** JetStream will not apply the new `ack_wait` to the existing `python-llm-worker` durable, so the live consumer still needs an out-of-band `add_consumer` with the modified config (this nats-py has no `update_consumer`) — same manual step taken during the playwright incident. **A deploy alone changes nothing.** This is the single most important outstanding action.
+- 243 API tests passing (deterministic — first-run clean); **70** playwright-worker tests passing; **29** llm-worker tests passing; 14 MCP tests passing.
+  - llm-worker tests aren't wired into a compose service (the image is production-only and doesn't COPY `tests/`). Run them by mounting the source over the built image:
+    `docker run --rm -v "$PWD/llm-worker:/app" -w /app docker-llm-worker python -m pytest -q`
 - Alembic auto-migration enabled in `api/app/main.py`
 
 ### Post-Phase-3 changes (since handoff, 2026-05-13 → 2026-07-03)
@@ -88,6 +90,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | `92df7ea` | **Playwright anti-bot hardening (ADR-008 + `docs/guides/anti-bot-hardening.md`).** Scrapes were blocked despite residential proxies; BrowserScan diagnosed 3 fingerprint fails (`navigator.webdriver`, `HeadlessChrome` UA, CDP `Runtime.enable` leak). Fix: swap Playwright → **Patchright**; run **real Google Chrome** (`channel="chrome"`) **truly headed under Xvfb** (only mode with a clean UA — even `--headless=new` leaks `HeadlessChrome`); `--disable-blink-features=AutomationControlled` (clears `webdriver`; Patchright alone didn't) + `--no-sandbox`/`--disable-dev-shm-usage`; `new_context(no_viewport=True)`; no UA spoofing. All env-tunable in `worker/config.py`. k8s: `patchright install chrome` in image; playwright-worker Deployment resources bumped (infra repo `538fba5`). 70 playwright-worker tests. **Verified in prod: BrowserScan now `Normal`, 0 Robot / 18 checks.** |
 | `4257183` | **Entrypoint fix** — first stealth deploy looked healthy (pod 1/1, 0 restarts) but ran nothing. `xvfb-run` as pid 1 masked worker crashes (container never exited → k8s never restarted), a cold-start race killed Chrome before Xvfb was ready, and `PYTHONUNBUFFERED` unset hid the logs. Replaced with `playwright-worker/entrypoint.sh` (start Xvfb → wait for its socket → `exec python` as pid 1) + `PYTHONUNBUFFERED=1` + pre-create `/tmp/.X11-unix 1777`. Now: python is pid 1, logs flow, crashes surface as CrashLoopBackOff. |
 | `67ba983` | **NATS `ack_wait` + heartbeat (Q6 — now CONFIRMED & FIXED for playwright worker).** A headed-Chrome scrape (~37s) exceeded the pull consumer's default 30s `ack_wait`, so NATS redelivered mid-scrape; the late `ack()` was a no-op and, with `max_deliver=-1`, the job **looped forever** (re-scrape + re-upload every ~20s). Live incident mitigated by purging the subject + raising the live consumer to `ack_wait=120` (via `add_consumer` — this nats-py has no `update_consumer`). Permanent fix: `pull_subscribe(config=ConsumerConfig(ack_wait=120))` + `msg.in_progress()` heartbeat every 30s (covers jobs longer than `ack_wait`). **Caveat: JetStream won't apply a new `ack_wait` to an existing durable consumer — must update/recreate out-of-band.** |
+| `ba8fb8a`, `9cddce0` | **Docs** — recorded the anti-bot/entrypoint/Q6 fixes; scoped the Temporal migration (`workflows-scoping.md`, `temporal-full-migration.md`); flagged the LLM-worker Q6 audit + Dependabot. |
+| `35fb89f` | **Phase 4 backlog consolidated** into `docs/project/phase4-backlog.md` — Phase 4 items had accreted across seven docs. Structured by the Temporal decision, including a **§3 "dissolved by Temporal — do NOT fix"** table recording *which deleted code* removes each bug so they don't get re-raised. Pointers added from each source doc. |
+| `6fb5b9c` | **LLM worker Q6 fix.** Same bare `pull_subscribe` as playwright, but worse: `llm_request_timeout_seconds` (60) is **2× the 30s default `ack_wait`**, so redelivery fired on ordinary slow calls, and each redelivery re-bills the **user's own** provider key, unbounded (`max_deliver` unset → `-1`). **The playwright numbers did not transfer:** both SDKs default to `max_retries=2`, so one `call_llm()` could make 3 attempts each with a fresh httpx read timeout ≈ **210s** — well past a 120s `ack_wait`. Fix: `ConsumerConfig(ack_wait=120)` + `in_progress()` heartbeat every 30s + **`max_retries` pinned** (`llm_max_retries`, default `0`) on both SDK clients. Here **`ack_wait` is the orphan-recovery window, not a job-duration budget** — the heartbeat is what covers long calls. 29 llm-worker tests. **⚠ Prod consumer still needs the out-of-band recreate.** |
 
 ### Clerk production cutover (2026-07-03)
 
@@ -111,12 +116,22 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 
 ### Phase 4 entry point
 
-Phase 4 scope is **still not formally specced**, but real production usage has surfaced a concrete triage list (below). When returning:
+**Start at `docs/project/phase4-backlog.md`** — the single source of truth for Phase 4 scope. When returning:
 
-1. Read the **Phase 4 triage** table below — these are captured findings, not yet a backlog
-2. Read the source docs in full before acting: `docs/project/open-questions.md` (Q5–Q8 have detailed options + recommendations), `docs/project/open-bugs.md`, `docs/project/usage-findings.md`
-3. Check `docs/archive/phase3/PHASE3_DEFERRED.md` for items already scoped and deferred
-4. Decide whether to run the full PM → Architect → Tech Lead → Engineer process (see `docs/process/`) or a lighter spec approach. The LLM-worker cluster (Q5/Q6/Q7) is tightly coupled and should be designed together, not piecemeal.
+1. Read **`docs/project/phase4-backlog.md`** first. It is an index; each item points to its source doc for full context/options/recommendation.
+2. **Check §3 ("Dissolved by Temporal — do NOT fix") before writing any bug fix.** The migration deletes the code containing those bugs, so fixing them is wasted work. This is the most common way to waste a session here.
+3. Only then open the source docs for depth: `docs/project/open-questions.md` (Q5–Q8 options + recommendations), `open-bugs.md`, `usage-findings.md`, `PHASE3_DEFERRED.md`.
+4. Decide whether to run the full PM → Architect → Tech Lead → Engineer process (see `docs/process/`) or a lighter spec approach.
+
+**Pre-Phase 4 queue** (§1 of the backlog), in cost-of-delay order — the first two get *worse* the longer they sit, the rest are flat-cost:
+
+| | Item | State |
+|---|---|---|
+| 1 | Q6 — LLM worker `ack_wait` | ✅ code done (`6fb5b9c`); **⚠ prod consumer recreate still outstanding** |
+| 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | **next up** — compounding: each bot wall stored as success also becomes a dedup baseline, so worth checking whether prod `content_hash` baselines are already poisoned. Stopping the bleeding does not heal it. |
+| 3 | UF-001 — MinIO missing from `/health/ready` | open |
+| 4 | Q1–Q4 close-out (bookkeeping) | open |
+| 5 | BUG-002 — Dependabot critical + highs only | open |
 
 ---
 
@@ -167,39 +182,25 @@ of bug disappears with NATS.
 
 ---
 
-### Phase 4 triage — captured findings (what bugs we still have)
+### Phase 4 triage — moved
 
-The dominant theme is **LLM-worker reliability**: Q5, Q6, Q7 are three faces of the same problem and their recommendations explicitly say they resolve together. Q8 is the design flaw behind the incident already fixed in `5cb8c7f`.
+The triage tables that used to live here (Q1–Q8, BUG-001→003, UF-001/002, deferred-from-Phase-3)
+were **duplicated** into `docs/project/phase4-backlog.md` and have been removed from this handoff
+to stop the two copies drifting apart.
 
-**Open questions needing a decision** (`docs/project/open-questions.md`):
+**They are not lost** — every item is in the backlog, now sorted by whether the Temporal migration
+dissolves it. Two things the flat triage list could not express, which are worth knowing before you
+open it:
 
-| # | Severity | Summary | State |
-|---|----------|---------|-------|
-| Q5 | High | LLM worker can't survive scale-to-zero cold starts (90–120s). `LLM_REQUEST_TIMEOUT_SECONDS=60` → `httpx.ReadTimeout`; worker acks-on-failure so NATS never retries → job permanently `failed`. Recommend A+B (bump timeout + classify exceptions, nak transient). | Needs decision |
-| Q6 | High (**CONFIRMED in prod**) | No `ack_wait` on consumer → default 30s. Any job >30s → NATS silently redelivers → duplicate processing / **double MinIO upload** / (for LLM) double billing. **Fired live on the playwright worker** on 2026-07-03 (headed Chrome scrapes cross 30s) — infinite loop, `max_deliver=-1`. **FIXED on the playwright worker** (`67ba983`): `ConsumerConfig(ack_wait=120)` + `msg.in_progress()` heartbeat every 30s; live consumer updated out-of-band. **TODO: the LLM worker's pull consumer has the same default — audit + apply the same fix (ack_wait floor above `LLM_REQUEST_TIMEOUT_SECONDS` + heartbeat).** Caveat learned: JetStream won't change `ack_wait` on an existing durable consumer — update/recreate it out-of-band (this nats-py has no `update_consumer`; use `add_consumer` with the modified config). | **Playwright done; LLM worker pending** |
-| Q7 | Medium | No worker-level retry on transient LLM failures (instance death mid-call, 503, conn reset). Only SDK default `max_retries=2`, invisible + doesn't cover conn errors. Recommend B (SDK + worker retry with an explicit exception-classification table). | Needs decision; blocked on Q5/Q6 |
-| Q8 | Medium (root cause of the incident) | `job_runs.status` values overloaded across pipeline stages — `running`/`completed` mean different things for scrape vs LLM, disambiguated only by `source`. Caused the `5cb8c7f` dispatch loop. Source-guards are a patch; recommend **Option B** (distinct per-stage status values → total state machine) as a Phase 4 refactor. Should land *after* Q5/Q6/Q7 so retry logic isn't rebuilt twice. | Needs decision |
-| Q1–Q4 | — | Phase 1/2 questions — Q1 (api_keys uniqueness) already resolved in Phase 3; Q2–Q4 largely superseded. Re-confirm and close out. | Mostly stale |
+- **Roughly half the triage list is now "do not fix."** Q6, Q7, Q8, BUG-001, the NATS pull-consumer
+  item, the crawl-webhook bypass and the scheduled-crawl gap are all deleted outright by the
+  migration. The old list gave no way to see that, so each of them read as work.
+- **Q5 only *half* dissolves.** The ack-on-failure behaviour goes away with NATS, but the
+  cold-start requirement (timeout sizing + an `ensure_ready()` warm-up probe) is *business* logic —
+  Temporal has no idea a scale-to-zero endpoint is cold. **Carry it into the activity design**, or
+  it will be rediscovered the first time a Modal-backed activity times out.
 
-**Open bugs** (`docs/project/open-bugs.md`):
-
-| # | Severity | Summary | Fix |
-|---|----------|---------|-----|
-| BUG-001 | Low (noisy, harmless) | Scheduler `_recover_stale_pending` selects batch runs (`job_id IS NULL`) → `db.get(Job, None)` emits `SELECT ... WHERE jobs.id IS NULL` every 60s per stuck batch run, flooding logs. No data corruption. | Add `JobRun.job_id.is_not(None)` to the stale-pending query. One-liner. |
-| BUG-002 | Mixed (1 critical, 11 high, 41 moderate, 20 low) | **73 GitHub Dependabot vulnerability alerts** on `kargovin/scrapeflow` default branch (surfaced 2026-07-03 on push). Not yet triaged — unknown which are in prod paths vs transitive/dev-only. | Review at https://github.com/kargovin/scrapeflow/security/dependabot ; triage the critical + highs first (likely a mix of Python/`api`, Go/workers, and frontend/npm). Bump or accept per-advisory. |
-| BUG-003 | High (silent data corruption) | **Bot-block / interstitial pages stored as successful output.** A 200-status bot wall (seen live on Amazon — the "Continue shopping" page) passes `page.goto()` without throwing, so the playwright worker uploads the interstitial and marks the run `completed`. Only failure signal today is "did the browser throw." Different layer from ADR-008 (fingerprint clean, but commercial bot managers still 200-wall). Poisons dedup baselines; no vendor observability. | Add a block-detection stage after `worker.py:183` (status / final-URL / vendor-cookie / content signals). **Minimum fix (ship first):** publish `status="failed"` (`error="blocked"`) instead of `completed`. Retry-on-fresh-IP + unblocker-provider tiers deferred (interacts with Q8 + UF-002). Full writeup: `docs/project/open-bugs.md` BUG-003. |
-
-**Usage findings** (`docs/project/usage-findings.md`):
-
-| # | Summary |
-|---|---------|
-| UF-001 | `/health/ready` checks DB/Redis/NATS but **not MinIO** — endpoint reports `200 ok` while every job silently fails to store output if MinIO is down. Add a MinIO ping to the degraded check. |
-| UF-002 | `DEFAULT_PROXY_URL` is a single platform-wide proxy — one user's behaviour can get the shared IP banned for everyone. Decision: per-user proxy model (`user_proxies` table, provider-side rotation, no platform default). Larger change: schema + secrets + dispatch + frontend UI. |
-
-**Deferred from Phase 3** (already scoped):
-
-| Item | Detail |
-|------|--------|
-| `[?] 40` | Custom robots.txt parsers (Go + Python) vs established packages — deferred to Phase 4 |
-| `[?] 43` | Content hash re-reads freshly-written MinIO object — bundle with Phase 4 schema_version 3 worker contract changes |
-| NATS pull consumers | API result consumer uses a push consumer (durable); limits to one replica and requires `Recreate` strategy. Phase 4: migrate to pull consumer model. (Note: overlaps with Q6 — both touch JetStream consumer config.) |
+The **LLM-worker cluster (Q5/Q6/Q7)** framing from the old handoff still holds: they are three faces
+of one problem and their recommendations resolve together. Q6 is now fixed on both workers; the
+Q6 fix's `max_retries` pin deliberately changed Q7's baseline (see the status note at the top of
+Q7 in `open-questions.md` — it is a reversible one-value trade, not a settled decision).

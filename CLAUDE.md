@@ -1,6 +1,8 @@
 # ScrapeFlow - Apify Clone
 
-> **Status: Phases 1–3 complete. Phase 4 in progress — see `scrapeflow-session-handoff.md` and `docs/project/`.**
+> **Status: Phases 1–3 complete. Phase 4 in progress — Phase 4 *is* the Temporal durable-workflows migration.**
+> **All Phase 4 scope lives in `docs/project/phase4-backlog.md` (single source of truth). Read it before starting any Phase 4 work — in particular §3, which lists bugs the migration deletes and that must therefore NOT be fixed.**
+> Session context: `scrapeflow-session-handoff.md`.
 
 ## Goal
 
@@ -61,9 +63,16 @@ When ADR-001 and ADR-002 conflict, **ADR-002 takes precedence**.
 - **MCP server**: expose scrape_url, get_result, list_jobs as LLM-callable tools
 - **K8s manifests**: production deployment manifests for k3s, added to infra repo
 
-### Phase 4 — Durable Workflows [PLANNED]
-Direction for Phase 4 (exploratory — not yet committed to build). A new **Workflows** layer on a
-durable-execution engine, built *alongside* the existing NATS job path (nothing ripped out).
+### Phase 4 — Durable Workflows [IN PROGRESS]
+A new **Workflows** layer on a durable-execution engine, built *alongside* the existing NATS job
+path (nothing ripped out).
+
+- **Backlog:** `docs/project/phase4-backlog.md` — **single source of truth.** Four sections:
+  Pre-Phase 4 → the migration → **dissolved by Temporal (do NOT fix)** → survives-Temporal.
+  §3 exists because roughly half the Phase 3→4 triage list is deleted outright by the migration;
+  check it before fixing any orchestration bug.
+- **Pre-Phase 4 queue:** Q6 LLM `ack_wait` ✅ (`6fb5b9c`; **prod consumer recreate still pending**)
+  → BUG-003 bot walls → UF-001 MinIO health check → Q1–Q4 close-out → BUG-002 Dependabot crit+highs.
 - **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
 - **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).
 - **Rollout:** one product, two engines — route new work to v2 (Temporal), drain + cut v1 (NATS) per-flow when proven; reversible each step. End state retires `result_consumer`/`scheduler`/`webhook_loop`/`advisory`/`coordinator` + NATS, and makes the API thin/horizontally scalable.
