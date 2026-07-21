@@ -66,12 +66,31 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- Branch: **`develop` is ahead of `main` and unpushed** — last session ended with `35fb89f` (docs consolidation), `6fb5b9c` (LLM-worker Q6 fix) and `d740dd1` (this doc update) landed on `develop` only. Verify with `git log --oneline main..develop`, then fast-forward `main` and push.
+- ## ⚠ START HERE (2026-07-21) — one commit is built but not shipped
+  **`e1fde0d` (Q5 options B + C) is committed on `develop` and NOT pushed.** Everything
+  else from the last session is pushed and live. To resume:
+
+  1. `git push origin develop` → `git checkout main && git merge --ff-only develop && git push origin main`
+     (CI only builds images from `main`-prefixed tags; pushing `develop` alone does nothing.)
+  2. Wait for the image, confirm the pod is running it.
+  3. **Recreate the NATS consumer** — `e1fde0d` adds `max_deliver`, a new consumer
+     setting, and JetStream will not apply it to an existing durable. Without this
+     the attempt cap silently stays *unlimited*, which is the failure mode the commit
+     exists to prevent. Exact procedure: Q6 status block in `open-questions.md`.
+     Short version: delete the consumer **then** `rollout restart` (never scale to 0 —
+     Flux reconciles `replicas: 1` straight back).
+  4. Verify with `nats consumer info SCRAPEFLOW python-llm-worker` — expect
+     `Ack Wait: 2m0s` and `Max Deliver: 3`.
+
+  **Do not trust the worker's `subscribed` log line to verify any of this** — it prints
+  values from config, not from the live consumer. It logged `ack_wait=120` for weeks
+  while JetStream was actually running `30`. Only `nats consumer info` is honest.
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
-- **✅ Q6 is fixed in code on both workers** — playwright (`67ba983`) and LLM worker (`6fb5b9c`). **⚠ But the LLM fix is NOT live in prod:** JetStream will not apply the new `ack_wait` to the existing `python-llm-worker` durable, so the live consumer still needs an out-of-band `add_consumer` with the modified config (this nats-py has no `update_consumer`) — same manual step taken during the playwright incident. **A deploy alone changes nothing.** This is the single most important outstanding action.
-- 243 API tests passing (deterministic — first-run clean); **70** playwright-worker tests passing; **29** llm-worker tests passing; 14 MCP tests passing.
+- **✅ Q6 is CLOSED — code and production.** Playwright (`67ba983`) and LLM worker (`6fb5b9c`); the live `python-llm-worker` consumer was recreated on 2026-07-21 and verified at `Ack Wait: 2m0s` (was `30.00s`). The reusable recreate procedure is in the Q6 status block in `open-questions.md`.
+- **✅ Q5 is resolved in code** (options A + B + C). A is live; B + C are in the unpushed `e1fde0d` — see START HERE above.
+- 243 API tests passing (deterministic — first-run clean); **70** playwright-worker tests passing; **87** llm-worker tests passing (was 29); 14 MCP tests passing.
   - llm-worker tests aren't wired into a compose service (the image is production-only and doesn't COPY `tests/`). Run them by mounting the source over the built image:
     `docker run --rm -v "$PWD/llm-worker:/app" -w /app docker-llm-worker python -m pytest -q`
 - Alembic auto-migration enabled in `api/app/main.py`
@@ -92,6 +111,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | `67ba983` | **NATS `ack_wait` + heartbeat (Q6 — now CONFIRMED & FIXED for playwright worker).** A headed-Chrome scrape (~37s) exceeded the pull consumer's default 30s `ack_wait`, so NATS redelivered mid-scrape; the late `ack()` was a no-op and, with `max_deliver=-1`, the job **looped forever** (re-scrape + re-upload every ~20s). Live incident mitigated by purging the subject + raising the live consumer to `ack_wait=120` (via `add_consumer` — this nats-py has no `update_consumer`). Permanent fix: `pull_subscribe(config=ConsumerConfig(ack_wait=120))` + `msg.in_progress()` heartbeat every 30s (covers jobs longer than `ack_wait`). **Caveat: JetStream won't apply a new `ack_wait` to an existing durable consumer — must update/recreate out-of-band.** |
 | `ba8fb8a`, `9cddce0` | **Docs** — recorded the anti-bot/entrypoint/Q6 fixes; scoped the Temporal migration (`workflows-scoping.md`, `temporal-full-migration.md`); flagged the LLM-worker Q6 audit + Dependabot. |
 | `35fb89f` | **Phase 4 backlog consolidated** into `docs/project/phase4-backlog.md` — Phase 4 items had accreted across seven docs. Structured by the Temporal decision, including a **§3 "dissolved by Temporal — do NOT fix"** table recording *which deleted code* removes each bug so they don't get re-raised. Pointers added from each source doc. |
+| `df44f95` (infra) | **Q5 option A — LLM request timeout 60 → 180s** (env-only change in `govindappa-k8s-config`, `llm-worker.yaml`). Modal's scale-to-zero endpoint cold-starts in **90–110s**, which exceeded the 60s httpx read timeout. **This was urgent, not cosmetic:** the Q6 fix's `max_retries=0` pin removed an *accidental* cold-start mitigation — the SDK default of `max_retries=2` meant attempt 2 or 3 landed after Modal had booted, so cold starts silently succeeded. Pinned to 0, every cold start became a hard failure. The two commits are safe together and **unsafe apart**. Note `ack_wait` stays 120s: the 30s heartbeat resets the ack timer during the call, so a 180s request is never redelivered. |
+| _(operational)_ | **Q6 consumer recreate — done.** Live `python-llm-worker` durable went `Ack Wait: 30.00s` → **`2m0s`**. Procedure (reusable, recorded in `open-questions.md`): deploy image → confirm pod → `nats consumer rm` → `kubectl rollout restart` → verify with `nats consumer info`. **Delete before restart** (the worker only subscribes at startup, so deleting under a running pod leaves it holding a dead subscription); **never scale to 0** (Flux reconciles `replicas: 1` back up). Safe because the stream is `--retention work` — acked messages are deleted, so a fresh consumer cannot replay completed jobs. |
+| `e1fde0d` ⚠️ **unpushed** | **Q5 options B + C.** **B:** new `llm-worker/worker/errors.py` classifies exceptions transient vs terminal; `handle_message` now `nak`s transient failures with exponential backoff (5/10/20s, capped) instead of acking everything. Critically it publishes **no** `failed` on a retry — the API's terminal-status guard (`result_consumer.py:125`) would lock the run failed and then discard the retry's `completed`. The worker caps attempts itself via `metadata.num_delivered` and publishes a real terminal `failed` on the last one, so a run can't dangle in `processing`. Classification **fails closed** (unknown → terminal): a wrong "transient" guess retries against the user's own API key. **C:** `llm.ensure_ready()` polls the OpenAI-compatible `/models` endpoint (spec'd; `/health` isn't) with a short per-probe timeout + long overall budget, so the real call runs against a warm endpoint. Only for `openai_compatible` **with** a `base_url`; 60s process-local warm cache; any HTTP response (incl. 401/404) counts as awake. Also resolves **Q7**. 29 → **87** tests. **Error strings changed format** — they now carry the exception type, because several httpx/provider errors stringify to `""` and showed as blank in the UI. |
 | `6fb5b9c` | **LLM worker Q6 fix.** Same bare `pull_subscribe` as playwright, but worse: `llm_request_timeout_seconds` (60) is **2× the 30s default `ack_wait`**, so redelivery fired on ordinary slow calls, and each redelivery re-bills the **user's own** provider key, unbounded (`max_deliver` unset → `-1`). **The playwright numbers did not transfer:** both SDKs default to `max_retries=2`, so one `call_llm()` could make 3 attempts each with a fresh httpx read timeout ≈ **210s** — well past a 120s `ack_wait`. Fix: `ConsumerConfig(ack_wait=120)` + `in_progress()` heartbeat every 30s + **`max_retries` pinned** (`llm_max_retries`, default `0`) on both SDK clients. Here **`ack_wait` is the orphan-recovery window, not a job-duration budget** — the heartbeat is what covers long calls. 29 llm-worker tests. **⚠ Prod consumer still needs the out-of-band recreate.** |
 
 ### Clerk production cutover (2026-07-03)
@@ -127,11 +149,12 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 
 | | Item | State |
 |---|---|---|
-| 1 | Q6 — LLM worker `ack_wait` | ✅ code done (`6fb5b9c`); **⚠ prod consumer recreate still outstanding** |
-| 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | **next up** — compounding: each bot wall stored as success also becomes a dedup baseline, so worth checking whether prod `content_hash` baselines are already poisoned. Stopping the bleeding does not heal it. |
+| 1 | Q6 — LLM worker `ack_wait` | ✅ **done, verified in prod** (`6fb5b9c` + consumer recreate) |
+| 1b | Q5 — cold starts + transient retry | ✅ A live (`df44f95`); B + C committed `e1fde0d` — **⚠ unpushed, and needs a consumer recreate for `max_deliver`.** See START HERE. |
+| 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | **next feature work** — compounding: each bot wall stored as success also becomes a dedup baseline, so worth checking whether prod `content_hash` baselines are already poisoned. Stopping the bleeding does not heal it. |
 | 3 | UF-001 — MinIO missing from `/health/ready` | open |
 | 4 | Q1–Q4 close-out (bookkeeping) | open |
-| 5 | BUG-002 — Dependabot critical + highs only | open |
+| 5 | BUG-002 — Dependabot critical + highs only | open — **now 8 critical / 13 high** (was 1 crit / 11 high); the count is drifting up |
 
 ---
 
@@ -195,12 +218,24 @@ open it:
 - **Roughly half the triage list is now "do not fix."** Q6, Q7, Q8, BUG-001, the NATS pull-consumer
   item, the crawl-webhook bypass and the scheduled-crawl gap are all deleted outright by the
   migration. The old list gave no way to see that, so each of them read as work.
-- **Q5 only *half* dissolves.** The ack-on-failure behaviour goes away with NATS, but the
-  cold-start requirement (timeout sizing + an `ensure_ready()` warm-up probe) is *business* logic —
-  Temporal has no idea a scale-to-zero endpoint is cold. **Carry it into the activity design**, or
-  it will be rediscovered the first time a Modal-backed activity times out.
+- **Q5 only *half* dissolves — and as of 2026-07-21 the surviving half is real code.** The
+  ack-on-failure behaviour goes away with NATS, but the cold-start handling
+  (`llm_request_timeout_seconds=180` + `llm.ensure_ready()`) is *business* logic — Temporal has
+  no idea a scale-to-zero endpoint is cold and would just retry a timing-out activity.
+  **Port `ensure_ready()` into the LLM activity**; don't let it be deleted with the NATS
+  plumbing around it.
 
-The **LLM-worker cluster (Q5/Q6/Q7)** framing from the old handoff still holds: they are three faces
-of one problem and their recommendations resolve together. Q6 is now fixed on both workers; the
-Q6 fix's `max_retries` pin deliberately changed Q7's baseline (see the status note at the top of
-Q7 in `open-questions.md` — it is a reversible one-value trade, not a settled decision).
+The **LLM-worker cluster (Q5/Q6/Q7)** framing holds, and it played out exactly that way — all three
+resolved together in one session:
+
+- **Q6** ✅ fixed on both workers **and** closed in production.
+- **Q5** ✅ A live; B + C in the unpushed `e1fde0d`.
+- **Q7** ✅ resolved *by* the Q5 option-B fix — the NATS-level nak retry replaces the SDK retry the
+  Q6 pin removed. The status note at the top of Q7 in `open-questions.md` is now settled, and its
+  advice **reverses**: do **not** restore `llm_max_retries=2`. With NATS-level retry in place an
+  SDK retry multiplies *underneath* it (3 × 3 = 9 billable calls). Retry stays in one visible layer.
+
+The through-line worth carrying into Phase 4: **every bug in this cluster was a retry hidden in a
+layer nobody was looking at** — the SDK's `max_retries`, JetStream's redelivery, Modal's cold boot.
+Temporal's value here is making retry declarative and visible in one place; the cost is that
+anything left retrying underneath it multiplies silently.

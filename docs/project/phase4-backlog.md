@@ -10,7 +10,7 @@
 > *orchestration* bugs that the migration deletes outright. Those are recorded in
 > §3 as **do-not-fix**, with the reason, so they don't get re-raised.
 >
-> **Last restructured:** 2026-07-17
+> **Last restructured:** 2026-07-17 · **Last updated:** 2026-07-21 (Q6 closed in prod; Q5 A live, B+C committed unpushed)
 
 ---
 
@@ -34,7 +34,8 @@ Selection rule: **survives Temporal** (the migration won't fix it) **and** stand
 
 | # | Item | Why now | Size |
 |---|------|---------|------|
-| **P1** ✅ | **Q6 — LLM worker `ack_wait`** — **code done 2026-07-21**; ⚠️ **live consumer still needs the out-of-band `add_consumer` recreate — the deploy alone does not fix prod.** | ⚠️ **Exception to the rule: this one *does* dissolve under Temporal, but it is actively firing in production.** No `ack_wait` → default 30s → NATS redelivers mid-call → **duplicate LLM calls billed to users**. The same bug caused an infinite re-scrape loop on the playwright worker. Fix is already written and proven (`67ba983`): `ConsumerConfig(ack_wait=…)` above `LLM_REQUEST_TIMEOUT_SECONDS` + `msg.in_progress()` heartbeat. NATS deletion is step 6 of a multi-month migration — too long to leave a money-burning bug live. **Caveat:** JetStream won't change `ack_wait` on an existing durable consumer — recreate out-of-band (`add_consumer`; this nats-py has no `update_consumer`). | S |
+| **P1** ✅ **DONE** | **Q6 — LLM worker `ack_wait`** — **closed in production 2026-07-21.** Code `6fb5b9c`; live consumer recreated and verified at `Ack Wait: 2m0s` (was `30.00s`). Recreate procedure is recorded in the Q6 status block in `open-questions.md` — reuse it verbatim for P1b. | ⚠️ **Exception to the rule: this one *does* dissolve under Temporal, but it was actively firing in production.** No `ack_wait` → default 30s → NATS redelivers mid-call → **duplicate LLM calls billed to users**. Same bug caused an infinite re-scrape loop on the playwright worker. **Still worth doing:** the invoice-vs-run-count audit, to learn whether this double-billed users or stayed latent. | S |
+| **P1b** ⚠️ **NEXT** | **Q5 — cold starts + transient-failure retry.** A ✅ live (`df44f95`, timeout 60→180). B + C ✅ committed `e1fde0d` on `develop` — **not pushed, not deployed.** | **Resume here.** Deploying `e1fde0d` needs: push `develop` → ff `main` → wait for CI → **delete + recreate the `python-llm-worker` consumer** (`max_deliver` is a new consumer setting; JetStream will not apply it to an existing durable, so the attempt cap silently stays unlimited without this). Full detail in the Q5 status block in `open-questions.md`. | S |
 | **P2** | **UF-001 — MinIO missing from `/health/ready`** | Endpoint reports `200 ok` while every job silently fails to store output if MinIO is down. Health checks are API-side and untouched by the migration. Same silent-failure class that has already bitten this project three times. | S |
 | **P3** | **BUG-003 — bot-block pages stored as `completed`** (minimum fix only) | Silent data corruption; poisons dedup baselines. **Temporal cannot fix this** — it can't tell a 200-status bot wall from real content. Minimum fix: publish `status="failed"` (`error="blocked"`) instead of `completed`. Uses the *existing* `failed` status, so it adds no new state values and doesn't conflict with the migration. Middle/full tiers (retry-on-fresh-IP, unblocker providers) stay deferred — they depend on UF-002. | S |
 | **P4** | **BUG-002 — Dependabot alerts** (critical + high only) | 73 alerts on the default branch, untriaged. Dependency CVEs are orthogonal to orchestration — the migration neither fixes nor worsens them. Triage the 1 critical + 11 high; defer the 41 moderate / 20 low. | M |
@@ -84,14 +85,14 @@ don't get re-raised.
 
 | Item | Dissolves because |
 |------|-------------------|
-| **Q6 — `ack_wait` / redelivery** | NATS is removed entirely; the whole bug class goes with it. *(Being fixed pre-migration anyway as **P1** — live billing bug, see §1.)* |
-| **Q7 — no worker-level retry on transient LLM failures** | Activity `RetryPolicy` makes retry declarative config with backoff. The hand-rolled retry loop + exception-classification table is never written. |
+| **Q6 — `ack_wait` / redelivery** | NATS is removed entirely; the whole bug class goes with it. *(Fixed pre-migration anyway as **P1** — was a live billing bug. ✅ closed in prod 2026-07-21.)* |
+| **Q7 — no worker-level retry on transient LLM failures** | Activity `RetryPolicy` makes retry declarative config with backoff. ⚠️ **Written after all** — the Q5 option-B fix (`e1fde0d`) added exactly the hand-rolled retry + exception-classification table this row predicted we'd never need, because Q5 forced the issue years ahead of Temporal. **`llm-worker/worker/errors.py` and the nak branch in `handle_message` are deleted by the migration** — but port the *classification itself* into the activity's `RetryPolicy` `non_retryable_error_types`. The transient/terminal split is domain knowledge (paid-for, learned from a live incident), not NATS plumbing. |
 | **Q8 — `job_runs.status` overloaded across stages** | Temporal owns the state machine; `result_consumer.py` is deleted. The proposed per-stage status refactor becomes moot. |
 | **BUG-001 — scheduler stale-pending log spam** | `scheduler.py` is deleted — `_recover_stale_pending` ceases to exist. Harmless log noise until then; not worth a commit. |
 | **NATS pull consumers** (P3 deferred) | Moot with NATS gone. The API single-replica / `Recreate` constraint it caused lifts as a migration payoff. |
 | **Crawl webhooks bypass `create_webhook_delivery`** (P3 deferred) | The `coordinator/` service is deleted; webhook delivery collapses to a single `deliver_webhook` activity, so the duplicate insertion path disappears. |
 | **Scheduled-crawl gap** (`crawls.schedule_cron` accepted but never dispatched) | Absorbed by Monitors (B) / Temporal Schedules — a scheduled crawl becomes a monitor whose pipeline is "crawl the site." |
-| **Q5 — LLM cold-start handling** *(partial)* | ⚠️ **Only half dissolves.** The "worker acks on failure so NATS never retries" half goes away (Temporal retries). The **cold-start logic itself survives** — timeout tuning and an `ensure_ready()` warm-up probe are activity *business* logic; Temporal won't know a scale-to-zero endpoint is cold. **Carry the cold-start requirement into the activity design.** |
+| **Q5 — LLM cold-start handling** *(partial)* | ⚠️ **Only half dissolves — and the surviving half is now real code, not a requirement.** The "worker acks on failure so NATS never retries" half goes away (Temporal retries). What survives: **`llm.ensure_ready()` and `llm_request_timeout_seconds=180`** — activity *business* logic, because Temporal has no idea a scale-to-zero endpoint is cold and would just retry a timing-out activity. **Port `ensure_ready()` into the LLM activity**; do not let it be deleted along with the NATS plumbing around it. |
 
 ---
 

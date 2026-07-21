@@ -107,6 +107,55 @@ Decide before Step 20 (scheduler loop). **Option A** is simplest — a boolean f
 
 ## Q5 — LLM worker timeout vs scale-to-zero cold starts
 
+> **STATUS: RESOLVED — 2026-07-21.** All three of A, B and C shipped. The
+> recommendation below (A+B, with C as a follow-up) was implemented in one pass
+> because A alone proved actively unsafe — see the regression note.
+>
+> - **A — timeout bump.** `LLM_REQUEST_TIMEOUT_SECONDS` 60 → **180**, as an env
+>   change in the infra repo (`df44f95`). **Live in production.**
+> - **B — transient/terminal classification.** New `llm-worker/worker/errors.py`;
+>   `handle_message` naks transient failures with exponential backoff instead of
+>   acking them. Commit `e1fde0d`. **Not deployed** — see below.
+> - **C — warm-up probe.** `llm.ensure_ready()` polls the OpenAI-compatible
+>   `/models` endpoint before the real call. Same commit.
+>
+> **Regression this uncovered.** The Q6 fix pinned `llm_max_retries=0`, which
+> removed an *accidental* cold-start mitigation: the SDK default of
+> `max_retries=2` meant attempt 2 or 3 landed after Modal had finished booting,
+> so cold starts silently succeeded. With the pin, every cold start became a hard
+> failure. The two fixes are safe together but were **not** safe apart — deploying
+> the Q6 commit without the timeout bump would have made cold starts worse.
+>
+> **Decisions that differ from the options table below:**
+>
+> - **Probe exhaustion is transient, not terminal.** The "possible solution" section
+>   proposed treating a `WarmupTimeout` as a real outage and failing. It is instead
+>   classified transient and retried with backoff — an endpoint that is down now may
+>   be up in 20s, and the attempt cap bounds the cost either way.
+> - **Any HTTP response counts as awake, including 401/404.** A response proves a
+>   server is listening, which is all a cold-start probe needs. Auth and routing
+>   errors are the real call's business, where they are correctly terminal;
+>   retrying them in the probe would loop on something that can never succeed.
+> - **`/models`, not `/health`.** `/health` is not standardised; `/models` is part
+>   of the OpenAI spec and implemented by vLLM/Modal.
+> - **Classification fails closed.** An unrecognised exception is terminal. The
+>   asymmetry is the reason: a wrong "transient" guess retries against the user's
+>   own API key (the Q6 failure mode), a wrong "terminal" guess fails one job.
+> - The **warm-path cost** concern in the options table is handled by the 60s
+>   process-local warm cache, as suggested.
+>
+> **Not addressed — carried into the Temporal migration.** Retry state lives in
+> JetStream's delivery counter, so backoff progression resets if the worker restarts
+> mid-retry. Durable retry state is Temporal `RetryPolicy`'s job; building it twice
+> is waste. **This is the half of Q5 that does *not* dissolve** — a Temporal activity
+> has no idea an endpoint is cold, so `ensure_ready()` (or an equivalent) must be
+> carried into the activity design.
+>
+> **⚠ Outstanding (operational):** `max_deliver` is a **new consumer setting** in
+> `e1fde0d`, and JetStream does not apply it to an existing durable — the
+> `python-llm-worker` consumer needs the same out-of-band delete + worker restart
+> used for `ack_wait`, or the attempt cap silently stays unlimited.
+
 **Raised during:** Phase 4 — evaluating self-hosted LLM cloud providers (2026-05-15)
 **Files:** `llm-worker/worker/config.py`, `llm-worker/worker/llm.py`, `llm-worker/worker/worker.py`
 
@@ -180,12 +229,34 @@ Open concerns to think through before committing:
 >    Any `ack_wait` chosen against the 60s figure would have been wrong by 3×.
 >    Pinning `llm_max_retries=0` drops the real ceiling back to ~70s.
 >
-> **Still outstanding (operational):** the live `python-llm-worker` durable was created
-> with the default 30s `ack_wait`, and **JetStream will not update it on deploy** —
-> it needs an out-of-band `add_consumer` with the modified config (this nats-py has no
-> `update_consumer`), exactly as done during the playwright incident. The pre-fix audit
-> below (LLM invoices vs run counts) is also still worth doing — it tells you whether
-> this has been silently double-billing users or stayed latent.
+> **STATUS: FULLY RESOLVED (code + production) — 2026-07-21.** The live consumer
+> was recreated and verified: `nats consumer info SCRAPEFLOW python-llm-worker`
+> now reports **`Ack Wait: 2m0s`** (was `30.00s`).
+>
+> **The procedure that worked** — for the next time a consumer setting changes:
+>
+> 1. Deploy the image first, and confirm the pod is running it.
+> 2. `nats consumer rm SCRAPEFLOW python-llm-worker -f`
+> 3. `kubectl rollout restart deploy/scrapeflow-llm-worker` — the worker recreates
+>    the consumer from `ConsumerConfig` in code, so **code stays the source of truth**
+>    and there is no hand-applied setting to forget.
+> 4. Verify with `nats consumer info`.
+>
+> Order matters: the delete must come **before** the restart. The worker only calls
+> `pull_subscribe` at startup, so deleting the consumer under a running pod leaves it
+> holding a subscription it will not rebuild. Do **not** scale to 0 first — the
+> Deployment declares `replicas: 1`, so Flux reconciles it straight back up.
+>
+> Safe because the stream is `--retention work`: acked messages are removed, so a
+> fresh consumer cannot replay completed jobs. Consumer was idle (0 outstanding,
+> 0 unprocessed) at the time.
+>
+> **Trap:** the worker's `subscribed` log line prints `ack_wait` from **config**, not
+> from the live consumer — it happily logged `120` while JetStream ran `30`. Only
+> `nats consumer info` is honest.
+>
+> **Still worth doing:** the pre-fix audit below (LLM invoices vs run counts) — it
+> tells you whether this silently double-billed users or stayed latent.
 >
 > **See also:** the retry pin has a trade-off that touches **Q7** — read that note before
 > changing `llm_max_retries`.
@@ -270,6 +341,17 @@ Open concerns to think through before committing:
 > back to `2` — the heartbeat from the Q6 fix already covers the resulting ~210s
 > wall-clock, so restoring it is safe from a redelivery standpoint. That is precisely
 > why the Q6 fix did **not** depend on the pin.
+>
+> **UPDATE — RESOLVED by the Q5 option-B fix (`e1fde0d`, 2026-07-21).** The gap this
+> status note described is now closed: the retry the SDK used to do invisibly is done
+> visibly, one layer up. A transient 429/5xx is `nak`'d back to JetStream and
+> redelivered with exponential backoff instead of failing the job.
+>
+> **Do not raise `llm_max_retries` back to 2 now.** The reason the pin existed still
+> holds, and it is stronger: with NATS-level retry in place, an SDK-level retry
+> multiplies underneath it (3 SDK attempts × 3 deliveries = 9 billable calls). Retry
+> belongs in exactly one visible layer — today NATS, in Phase 4 Temporal's
+> `RetryPolicy`.
 
 **Raised during:** Phase 4 — discussion of Modal vLLM instance death failure mode (2026-05-18)
 **Files:** `llm-worker/worker/llm.py`, `llm-worker/worker/worker.py`
