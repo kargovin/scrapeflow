@@ -66,28 +66,27 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ✅ START HERE (2026-07-22) — nothing is in flight; pick up the pre-Phase-4 queue
-  **The LLM-worker cluster (Q5/Q6/Q7) is fully closed, code *and* production.** There
-  is no unshipped commit and no pending operational step. `develop` and `main` are both
-  at `fbcf254`, and the running image is
-  `k4rth/scrapeflow-llm-worker:main-1784711895-fbcf254b…`.
+- ## ⚠️ START HERE (2026-07-22) — one thing is in flight: BUG-003 is merged but NOT deployed
+  **`develop` and `main` are both at `8168760`** (BUG-003 bot-wall detection). The code is
+  merged and pushed; **the playwright-worker image has not been built/rolled out**, so the
+  fix is not yet live in production.
 
-  **Next work: the pre-Phase-4 queue in `docs/project/phase4-backlog.md` §1**, which now
-  starts at **P2 (UF-001, MinIO missing from `/health/ready`)** and **P3 (BUG-003, bot
-  walls stored as `completed`)**.
+  **Finish this first:** build + roll out `playwright-worker`. **No NATS consumer recreate
+  is needed** this time — the change touches no `ConsumerConfig`, so it is a plain image
+  build + `kubectl rollout restart`. Until it lands, prod keeps storing bot walls as
+  `completed` **and re-poisons the dedup baselines that were just cleaned** (6 rows nulled
+  and verified on 2026-07-22 — that cleanup has a shelf life).
 
-  ⚠ **Ordering conflict to resolve first** (it predates this session, and both docs are
-  still internally consistent — they just disagree with each other): the backlog orders
-  these **UF-001 → BUG-003**, while the queue table further down *this* file orders them
-  **BUG-003 → UF-001**. The argument for BUG-003 first is that it is the only
-  *compounding* item left — every bot wall stored as a success also becomes a dedup
-  `content_hash` baseline, so the damage accretes while it waits. Pick one, then make
-  the other doc match.
+  **On first deploy, watch the `block_detected` log lines.** If `blocked:unknown` starts
+  dominating, that means Tier 1 is missing a vendor fingerprint — which is exactly what the
+  `unknown` token exists to surface. Add the fingerprint from the logged `signals`.
 
-  **Before fixing BUG-003, check whether prod baselines are already poisoned.** The
-  minimum fix (publish `failed`/`blocked` instead of `completed`) stops the bleeding but
-  does **not** heal it — existing poisoned `content_hash` rows will keep suppressing real
-  change detection for those jobs indefinitely.
+  **Then: the pre-Phase-4 queue in `docs/project/phase4-backlog.md` §1**, which now starts
+  at **P3 (UF-001, MinIO missing from `/health/ready`)**.
+
+  ✅ **The old UF-001 vs BUG-003 ordering conflict is resolved** — BUG-003 ran first (it was
+  the only *compounding* item: every wall stored as success also became a dedup baseline),
+  and both docs now agree.
 
   **Verification habit worth keeping** (it has now caught the same class of bug twice):
   never verify NATS consumer state from the worker's `subscribed` log line — it prints
@@ -100,7 +99,11 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
 - **✅ Q6 is CLOSED — code and production.** Playwright (`67ba983`) and LLM worker (`6fb5b9c`); the live `python-llm-worker` consumer was recreated on 2026-07-21 and verified at `Ack Wait: 2m0s` (was `30.00s`). The reusable recreate procedure is in the Q6 status block in `open-questions.md`.
 - **✅ Q5 is CLOSED — code and production** (options A + B + C). A live via `df44f95`; B + C shipped as `e1fde0d` → pushed/ff-merged as `fbcf254` on 2026-07-22, image deployed, and the `python-llm-worker` consumer recreated. Verified on the live consumer: `ack_wait 2m0s`, `max_deliver: 3` (was `-1`). **Q7 is closed with it** — the Q5 option-B nak retry *is* the worker-level retry Q7 asked for.
-- 243 API tests passing (deterministic — first-run clean); **70** playwright-worker tests passing; **87** llm-worker tests passing (was 29); 14 MCP tests passing.
+- 243 API tests passing (deterministic — first-run clean); **131** playwright-worker tests passing (was 70); **87** llm-worker tests passing (was 29); 14 MCP tests passing.
+  - playwright-worker tests aren't wired into a compose service either. Same mount trick, but the
+    `docker-playwright-worker` image on disk is **stale** (predates the credentials feature — no
+    `cryptography`, so `test_main.py` fails to import). Use a newer tag:
+    `docker run --rm -v "$PWD/playwright-worker/worker:/app/worker:ro" -v "$PWD/playwright-worker/tests:/app/tests:ro" -w /app --entrypoint python scrapeflow-playwright:ackfix -m pytest tests/ -q -p no:cacheprovider`
   - llm-worker tests aren't wired into a compose service (the image is production-only and doesn't COPY `tests/`). Run them by mounting the source over the built image:
     `docker run --rm -v "$PWD/llm-worker:/app" -w /app docker-llm-worker python -m pytest -q`
 - Alembic auto-migration enabled in `api/app/main.py`
@@ -124,6 +127,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | `df44f95` (infra) | **Q5 option A — LLM request timeout 60 → 180s** (env-only change in `govindappa-k8s-config`, `llm-worker.yaml`). Modal's scale-to-zero endpoint cold-starts in **90–110s**, which exceeded the 60s httpx read timeout. **This was urgent, not cosmetic:** the Q6 fix's `max_retries=0` pin removed an *accidental* cold-start mitigation — the SDK default of `max_retries=2` meant attempt 2 or 3 landed after Modal had booted, so cold starts silently succeeded. Pinned to 0, every cold start became a hard failure. The two commits are safe together and **unsafe apart**. Note `ack_wait` stays 120s: the 30s heartbeat resets the ack timer during the call, so a 180s request is never redelivered. |
 | _(operational)_ | **Q6 consumer recreate — done.** Live `python-llm-worker` durable went `Ack Wait: 30.00s` → **`2m0s`**. Procedure (reusable, recorded in `open-questions.md`): deploy image → confirm pod → `nats consumer rm` → `kubectl rollout restart` → verify with `nats consumer info`. **Delete before restart** (the worker only subscribes at startup, so deleting under a running pod leaves it holding a dead subscription); **never scale to 0** (Flux reconciles `replicas: 1` back up). Safe because the stream is `--retention work` — acked messages are deleted, so a fresh consumer cannot replay completed jobs. |
 | `e1fde0d` (shipped as `fbcf254`) | **Q5 options B + C.** **B:** new `llm-worker/worker/errors.py` classifies exceptions transient vs terminal; `handle_message` now `nak`s transient failures with exponential backoff (5/10/20s, capped) instead of acking everything. Critically it publishes **no** `failed` on a retry — the API's terminal-status guard (`result_consumer.py:125`) would lock the run failed and then discard the retry's `completed`. The worker caps attempts itself via `metadata.num_delivered` and publishes a real terminal `failed` on the last one, so a run can't dangle in `processing`. Classification **fails closed** (unknown → terminal): a wrong "transient" guess retries against the user's own API key. **C:** `llm.ensure_ready()` polls the OpenAI-compatible `/models` endpoint (spec'd; `/health` isn't) with a short per-probe timeout + long overall budget, so the real call runs against a warm endpoint. Only for `openai_compatible` **with** a `base_url`; 60s process-local warm cache; any HTTP response (incl. 401/404) counts as awake. Also resolves **Q7**. 29 → **87** tests. **Error strings changed format** — they now carry the exception type, because several httpx/provider errors stringify to `""` and showed as blank in the UI. |
+| `8168760` | **BUG-003 — bot-wall detection (minimum tier).** A bot wall returns **HTTP 200 with valid HTML**, so `page.goto()` succeeded, nothing threw, and the interstitial flowed straight to `publish_result(status="completed")` — the user got a CAPTCHA page as their result, and its hash became a **dedup baseline** silently suppressing future change detection. **Prod audit: 6 of 15 completed runs (40%) were walls**, across three vendors — Amazon in-house (5.4 KiB "Continue shopping"), Akamai/`errors.edgesuite.net` on myntra (411 B), PerimeterX "Robot or human?" on walmart ×3 (464 B); genuine pages ran 291 KiB–4.1 MiB. All six `engine=playwright` (the Go worker's `fetcher.go:72` non-2xx check already covers hard walls), so Playwright only. New `playwright-worker/worker/blocking.py`: **Tier 1** vendor challenge harnesses (Akamai, Cloudflare, PerimeterX, DataDome, Imperva, Sucuri, Kasada, Amazon) decisive alone at any size; **Tier 2** generic challenge language gated to **< 20 KB** (the false-positive guard — those phrases are legitimate content at full page size); **Tier 3** structural integrity deliberately unimplemented. Patterns adapted from **Crawl4AI** (Apache-2.0 + custom attribution clause → `README.md`); **Amazon is our own addition**, their list has none. Worker keeps the `page.goto()` `Response` (was discarded), detects **after `final_url`, before `format_output`** (markdown strips every HTML signal), publishes `failed` + `error="blocked:<vendor>"`, logs `block_detected` with vendor/tier/signals. **Two signal corrections vs the original writeup:** `final_url` is *not* a tell (Amazon serves the wall *at* the requested URL; `/errors/validateCaptcha` is only a form action), and body size is the crispest separator (3 orders of magnitude). **Tests caught a real false positive** — the empty-body rule fired on a genuine tiny 404; now gated on status 200. **Prod: 6 poisoned `content_hash` baselines nulled + verified** (statuses left `completed` — rewriting history would misrepresent what the system did). 61 new tests → **131** playwright-worker tests. ⚠️ **Image not yet deployed.** Also filed **BUG-004**. |
 | `6fb5b9c` | **LLM worker Q6 fix.** Same bare `pull_subscribe` as playwright, but worse: `llm_request_timeout_seconds` (60) is **2× the 30s default `ack_wait`**, so redelivery fired on ordinary slow calls, and each redelivery re-bills the **user's own** provider key, unbounded (`max_deliver` unset → `-1`). **The playwright numbers did not transfer:** both SDKs default to `max_retries=2`, so one `call_llm()` could make 3 attempts each with a fresh httpx read timeout ≈ **210s** — well past a 120s `ack_wait`. Fix: `ConsumerConfig(ack_wait=120)` + `in_progress()` heartbeat every 30s + **`max_retries` pinned** (`llm_max_retries`, default `0`) on both SDK clients. Here **`ack_wait` is the orphan-recovery window, not a job-duration budget** — the heartbeat is what covers long calls. 29 llm-worker tests. **✅ Prod consumer recreated 2026-07-21 (`ack_wait`) and again 2026-07-22 (`max_deliver`).** |
 
 ### Clerk production cutover (2026-07-03)
@@ -161,10 +165,11 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 |---|---|---|
 | 1 | Q6 — LLM worker `ack_wait` | ✅ **done, verified in prod** (`6fb5b9c` + consumer recreate) |
 | 1b | Q5 — cold starts + transient retry | ✅ **done, verified in prod** (`fbcf254` + consumer recreate; `max_deliver: 3`) |
-| 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | **open — next feature work.** Compounding: each bot wall stored as success also becomes a dedup baseline, so check whether prod `content_hash` baselines are already poisoned. Stopping the bleeding does not heal it. ⚠ The backlog ranks UF-001 ahead of this — reconcile the two (see START HERE). |
-| 3 | UF-001 — MinIO missing from `/health/ready` | open — ranked **P2, ahead of BUG-003**, in `phase4-backlog.md` §1 |
+| 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | ✅ **code merged** (`8168760`) + **prod baselines cleaned** (6 rows nulled, verified) — ⚠️ **image not yet deployed** |
+| 3 | UF-001 — MinIO missing from `/health/ready` | **open — next feature work** (now P3 in `phase4-backlog.md` §1) |
 | 4 | Q1–Q4 close-out (bookkeeping) | open |
 | 5 | BUG-002 — Dependabot critical + highs only | open — **now 8 critical / 13 high** (was 1 crit / 11 high); the count is drifting up |
+| — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---
 

@@ -250,7 +250,7 @@ Workers are deployed as separate k3s Deployments. The HTTP worker uses `strategy
 
 | Document | Purpose |
 |----------|---------|
-| [`docs/adr/`](docs/adr/) | Architecture Decision Records (ADR-001 → ADR-007) |
+| [`docs/adr/`](docs/adr/) | Architecture Decision Records (ADR-001 → ADR-008) |
 | [`docs/project/COMMANDS.md`](docs/project/COMMANDS.md) | Dev and ops command reference |
 | [`docs/project/DEVOPS_SPEC.md`](docs/project/DEVOPS_SPEC.md) | k3s deployment spec |
 | [`docs/archive/phase3/production-review.md`](docs/archive/phase3/production-review.md) | Phase 3 hardening review (52 findings, all resolved) |

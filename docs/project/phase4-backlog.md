@@ -10,7 +10,7 @@
 > *orchestration* bugs that the migration deletes outright. Those are recorded in
 > §3 as **do-not-fix**, with the reason, so they don't get re-raised.
 >
-> **Last restructured:** 2026-07-17 · **Last updated:** 2026-07-22 (Q5 + Q6 both closed in production; §1 now starts at P2)
+> **Last restructured:** 2026-07-17 · **Last updated:** 2026-07-22 (BUG-003 minimum fix merged `8168760` + prod baselines cleaned; §1 now starts at P3 / UF-001. BUG-004 filed to §4.)
 
 ---
 
@@ -19,7 +19,7 @@
 | Doc | Covers |
 |-----|--------|
 | `docs/project/open-questions.md` | Q1–Q8 — full context, options, recommendations |
-| `docs/project/open-bugs.md` | BUG-001 → BUG-003 |
+| `docs/project/open-bugs.md` | BUG-001 → BUG-004 |
 | `docs/project/usage-findings.md` | UF-001, UF-002 |
 | `docs/project/workflows-scoping.md` | Temporal Workflows feature scoping + engine comparison |
 | `docs/project/temporal-full-migration.md` | Complete change inventory + strangler-fig sequence |
@@ -36,8 +36,8 @@ Selection rule: **survives Temporal** (the migration won't fix it) **and** stand
 |---|------|---------|------|
 | **P1** ✅ **DONE** | **Q6 — LLM worker `ack_wait`** — **closed in production 2026-07-21.** Code `6fb5b9c`; live consumer recreated and verified at `Ack Wait: 2m0s` (was `30.00s`). Recreate procedure is recorded in the Q6 status block in `open-questions.md` — reuse it verbatim for P1b. | ⚠️ **Exception to the rule: this one *does* dissolve under Temporal, but it was actively firing in production.** No `ack_wait` → default 30s → NATS redelivers mid-call → **duplicate LLM calls billed to users**. Same bug caused an infinite re-scrape loop on the playwright worker. **Still worth doing:** the invoice-vs-run-count audit, to learn whether this double-billed users or stayed latent. | S |
 | **P1b** ✅ **DONE** | **Q5 — cold starts + transient-failure retry** — **closed in production 2026-07-22.** A live (`df44f95`, timeout 60→180); B + C shipped (`e1fde0d`, pushed + ff-merged as `fbcf254`, image `main-1784711895-fbcf254b…`). Consumer recreated; verified on the live consumer via `--json`: `ack_wait 2m0s`, **`max_deliver: 3`** (was `-1`). | Closed. Two carry-forwards in the Q5 status block in `open-questions.md`: (1) `nats consumer info` **omits `Max Deliver` when it is `-1`** — use `--json`, the table output can't distinguish "capped" from "uncapped"; (2) the surviving half of Q5 — `ensure_ready()` + the 180s timeout — is **business logic that must be ported into the Temporal LLM activity**, not deleted with the NATS plumbing (see §3). | S |
-| **P2** ⚠️ **NEXT** | **UF-001 — MinIO missing from `/health/ready`** | Endpoint reports `200 ok` while every job silently fails to store output if MinIO is down. Health checks are API-side and untouched by the migration. Same silent-failure class that has already bitten this project three times. | S |
-| **P3** | **BUG-003 — bot-block pages stored as `completed`** (minimum fix only) | Silent data corruption; poisons dedup baselines. **Temporal cannot fix this** — it can't tell a 200-status bot wall from real content. Minimum fix: publish `status="failed"` (`error="blocked"`) instead of `completed`. Uses the *existing* `failed` status, so it adds no new state values and doesn't conflict with the migration. Middle/full tiers (retry-on-fresh-IP, unblocker providers) stay deferred — they depend on UF-002. | S |
+| **P2** ✅ **CODE DONE** ⚠️ **NOT DEPLOYED** | **BUG-003 — bot-block pages stored as `completed`** (minimum fix). Merged as `8168760` (develop + main). `playwright-worker/worker/blocking.py`, tiered classifier, 9 Tier-1 vendors; 61 new tests, 131 passing. **Prod data cleaned:** the 6 poisoned `content_hash` baselines nulled + verified. **Remaining: build the playwright-worker image and roll it out** — no NATS consumer recreate needed (no `ConsumerConfig` change). Until deployed, prod keeps storing walls as `completed` and re-poisoning the cleared baselines. | **Ordering conflict resolved** — this ran *ahead* of UF-001 because it was the only compounding item: every wall stored as success also became a dedup baseline. Full prod audit, signal corrections and the scope/vendor decisions are in `open-bugs.md`. Middle/full tiers (getting *past* walls) stay deferred to §4, gated on UF-002. | S |
+| **P3** ⚠️ **NEXT** | **UF-001 — MinIO missing from `/health/ready`** | Endpoint reports `200 ok` while every job silently fails to store output if MinIO is down. Health checks are API-side and untouched by the migration. Same silent-failure class that has already bitten this project three times. | S |
 | **P4** | **BUG-002 — Dependabot alerts** (critical + high only) | **86** alerts on the default branch, untriaged — **8 critical / 13 high** / 45 moderate / 20 low as of 2026-07-22 (was 73: 1 crit / 11 high). Dependency CVEs are orthogonal to orchestration — the migration neither fixes nor worsens them. Triage crit + high; defer moderate / low. **The count is drifting up, and the critical count has gone 1 → 8 in ~2 months** — this is the one flat-cost item that isn't actually flat. | M |
 | **P5** | **Q1–Q4 — formally close out** | All four are effectively resolved already (Q1 api_keys uniqueness shipped in Phase 3; Q2 `jobs.updated_at` resolved via DB trigger; Q3 `webhook_url` → `Text` housekeeping; Q4 schedule-disable resolved via `schedule_status`). Pure bookkeeping — clears noise before the migration starts. | XS |
 
