@@ -104,6 +104,7 @@ Real work, untouched by the migration, but not blocking it. Revisit after Phase 
 |------|------|
 | **UF-002 — per-user proxy pool** | Replace the shared platform-wide `DEFAULT_PROXY_URL` (one user's behaviour can ban the shared IP for everyone). New `user_proxies` table, provider-side rotation, secrets + dispatch + frontend UI. Also gates BUG-003's middle/full tiers. |
 | **BUG-003 middle/full tiers** | Retry-on-fresh-IP and pluggable unblocker providers (Bright Data Web Unlocker, Oxylabs, ZenRows). Depends on UF-002's proxy model. |
+| **BUG-004 — screenshots written to MinIO then dropped** | The worker uploads screenshot PNGs and publishes `screenshot_paths`; the API result consumer never reads the field. They are never persisted, surfaced, quota-counted, or deleted — an unbounded leak plus a storage-quota bypass. Latent today (`screenshots/` is empty in prod — nobody has used the action). Facet 1 is a **product call**: wire them through, or drop the action type. Shipping an action whose output is unreachable is the current state. Survives Temporal. |
 | **BUG-002 moderate/low alerts** | The remaining 41 moderate + 20 low Dependabot advisories. |
 | **`execute_js` sandboxing / removal** | Only Playwright action executing arbitrary caller code. CSP tightening was the short-term fix. Options: drop / isolated-context sandbox / allowlist-only actions. PM → Architect decision. |
 | **`[?] 40` — robots.txt parsers** | Custom Go + Python parsers vs established packages. |

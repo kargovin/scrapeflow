@@ -14,6 +14,7 @@ from cryptography.fernet import Fernet
 from miniopy_async import Minio
 
 from .actions import execute_actions
+from .blocking import detect_block
 from .config import settings
 from .formatter import format_output
 from .models import JobMessage, ResultMessage
@@ -168,7 +169,9 @@ async def handle_message(
             await page.route("**", _inject_csp)
 
         # --- Step 7: Navigate ---
-        await page.goto(job.url, timeout=timeout_ms)
+        # Keep the Response: its status is a block signal (BUG-003). It is None
+        # for same-document navigations, which is not itself evidence.
+        response = await page.goto(job.url, timeout=timeout_ms)
         await page.wait_for_load_state(wait_state)
 
         # --- Step 8: Execute actions (partial failures collected as warnings) ---
@@ -181,6 +184,48 @@ async def handle_message(
 
         html = await page.content()
         final_url = page.url
+
+        # --- Step 9: Bot-wall detection (BUG-003) ---
+        # Must run on the raw HTML, before format_output: markdown conversion
+        # strips every HTML-level signal (scripts, meta, link tags).
+        #
+        # A wall is a *failed* scrape, not a successful one — storing it as
+        # `completed` both hands the user garbage and seeds a dedup baseline
+        # that silently suppresses future change detection for that job.
+        #
+        # We deliberately do NOT upload the wall: the result consumer's
+        # `failed` branch does not persist `minio_path`, so the object would be
+        # orphaned. The `signals` on the log line carry the debugging value.
+        detection = detect_block(
+            html,
+            status=response.status if response else None,
+            final_url=final_url,
+        )
+        if detection.blocked:
+            log.warning(
+                "block_detected",
+                job_id=job.job_id,
+                run_id=job.run_id,
+                url=job.url,
+                final_url=final_url,
+                vendor=detection.vendor,
+                tier=detection.tier,
+                signals=detection.signals,
+                body_bytes=len(html.encode()),
+                status=response.status if response else None,
+            )
+            await publish_result(
+                js,
+                ResultMessage(
+                    job_id=job.job_id,
+                    run_id=job.run_id,
+                    status="failed",
+                    error=detection.error,
+                    crawl_context=job.crawl_context,
+                ),
+            )
+            await msg.ack()
+            return
 
         content, ext = format_output(html, job.output_format, final_url)
         minio_path = await upload(minio, job.job_id, ext, content)

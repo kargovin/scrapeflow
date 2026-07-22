@@ -257,6 +257,16 @@ Workers are deployed as separate k3s Deployments. The HTTP worker uses `strategy
 
 ---
 
+## Acknowledgements
+
+The bot-wall detection patterns in `playwright-worker/worker/blocking.py` (tiers 1 and 2) are
+adapted from Crawl4AI's `antibot_detector.py`, used under the Apache License 2.0.
+
+> This product includes software developed by UncleCode (https://x.com/unclecode) as part of the
+> Crawl4AI project (https://github.com/unclecode/crawl4ai).
+
+---
+
 ## License
 
 MIT
