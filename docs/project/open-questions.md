@@ -115,9 +115,9 @@ Decide before Step 20 (scheduler loop). **Option A** is simplest — a boolean f
 >   change in the infra repo (`df44f95`). **Live in production.**
 > - **B — transient/terminal classification.** New `llm-worker/worker/errors.py`;
 >   `handle_message` naks transient failures with exponential backoff instead of
->   acking them. Commit `e1fde0d`. **Not deployed** — see below.
+>   acking them. Commit `e1fde0d`. **Live in production** as of 2026-07-22.
 > - **C — warm-up probe.** `llm.ensure_ready()` polls the OpenAI-compatible
->   `/models` endpoint before the real call. Same commit.
+>   `/models` endpoint before the real call. Same commit. **Live in production.**
 >
 > **Regression this uncovered.** The Q6 fix pinned `llm_max_retries=0`, which
 > removed an *accidental* cold-start mitigation: the SDK default of
@@ -151,10 +151,25 @@ Decide before Step 20 (scheduler loop). **Option A** is simplest — a boolean f
 > has no idea an endpoint is cold, so `ensure_ready()` (or an equivalent) must be
 > carried into the activity design.
 >
-> **⚠ Outstanding (operational):** `max_deliver` is a **new consumer setting** in
-> `e1fde0d`, and JetStream does not apply it to an existing durable — the
-> `python-llm-worker` consumer needs the same out-of-band delete + worker restart
-> used for `ack_wait`, or the attempt cap silently stays unlimited.
+> **✅ Operational close-out — 2026-07-22.** `e1fde0d` + `fbcf254` pushed to
+> `develop` → ff-merged to `main` → CI image
+> `main-1784711895-fbcf254b…` deployed. The `python-llm-worker` consumer was then
+> deleted and recreated by the restarted worker. Verified on the **live consumer**
+> (`nats consumer info --json`): `ack_wait 120000000000` (2m0s), **`max_deliver: 3`**
+> (was `-1`).
+>
+> Two things this run taught, worth carrying:
+>
+> - **`nats consumer info` hides `max_deliver` when it is unlimited.** The table
+>   output prints no `Max Deliver` row at all for `-1`, so the pretty output looked
+>   correct while the cap was absent. Only `--json` is honest. This is a second
+>   instance of the Q6 verification trap: the worker log line *also* printed
+>   `max_deliver=3` (from config) while JetStream ran `-1`.
+> - **The unlimited cap was not, in practice, unbounded.** `e1fde0d` enforces the
+>   attempt cap in-worker via `metadata.num_delivered`, so the deployed worker
+>   already stopped at 3 regardless of the consumer. What was missing was the
+>   consumer-side *backstop* — which still matters, because it is what holds if the
+>   worker crashes before it evaluates `num_delivered`.
 
 **Raised during:** Phase 4 — evaluating self-hosted LLM cloud providers (2026-05-15)
 **Files:** `llm-worker/worker/config.py`, `llm-worker/worker/llm.py`, `llm-worker/worker/worker.py`
@@ -240,7 +255,7 @@ Open concerns to think through before committing:
 > 3. `kubectl rollout restart deploy/scrapeflow-llm-worker` — the worker recreates
 >    the consumer from `ConsumerConfig` in code, so **code stays the source of truth**
 >    and there is no hand-applied setting to forget.
-> 4. Verify with `nats consumer info`.
+> 4. Verify with `nats consumer info --json` (see the trap below — use `--json`).
 >
 > Order matters: the delete must come **before** the restart. The worker only calls
 > `pull_subscribe` at startup, so deleting the consumer under a running pod leaves it
@@ -251,9 +266,27 @@ Open concerns to think through before committing:
 > fresh consumer cannot replay completed jobs. Consumer was idle (0 outstanding,
 > 0 unprocessed) at the time.
 >
+> **What the old pod does between delete and restart** — observed on the 2026-07-22
+> run, and the reason the "drained first" pre-check matters beyond replay safety:
+>
+> ```
+> 09:23:14 fetch_error backoff=2   nats: ServiceUnavailableError
+> 09:23:16 fetch_error backoff=4
+> 09:23:20 fetch_error backoff=8
+> 09:23:28 fetch_error backoff=16
+> 09:23:44 shutting_down
+> ```
+>
+> It degrades well — bounded exponential backoff, then a clean self-shutdown rather
+> than a crash loop. But for ~30s the old pod is **up, `1/1 Running`, healthy to k8s,
+> and consuming nothing.** A job dispatched in that window sits unfetched until the
+> new pod subscribes. Harmless when the queue is verified empty first.
+>
 > **Trap:** the worker's `subscribed` log line prints `ack_wait` from **config**, not
 > from the live consumer — it happily logged `120` while JetStream ran `30`. Only
-> `nats consumer info` is honest.
+> `nats consumer info` is honest — and for `max_deliver`, only `nats consumer info
+> --json`: the table output **omits the `Max Deliver` row entirely when it is `-1`**,
+> so an absent cap and a correct one look identical in the pretty output.
 >
 > **Still worth doing:** the pre-fix audit below (LLM invoices vs run counts) — it
 > tells you whether this silently double-billed users or stayed latent.
