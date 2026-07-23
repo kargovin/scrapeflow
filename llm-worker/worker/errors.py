@@ -18,6 +18,7 @@ mode of a wrong "transient" guess is an unbounded spend loop against the user's
 own API key, which is exactly the class of incident Q6 was.
 """
 
+import aiohttp
 import anthropic
 import httpx
 import openai
@@ -32,6 +33,14 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # Network / socket level (also covers httpx.ReadTimeout, ConnectTimeout,
     # ConnectError, RemoteProtocolError — all TransportError subclasses).
     httpx.TransportError,
+    # MinIO's HTTP backend is aiohttp, not httpx: when MinIO is *unreachable*
+    # (pod down, connection refused) or drops the connection mid-request,
+    # miniopy-async raises aiohttp.ClientConnectionError — which is NOT an S3Error,
+    # so the _TRANSIENT_S3_CODES path below never sees it. Without these two lines
+    # the literal "MinIO down" case falls through to TERMINAL and the job fails
+    # permanently (UF-003 3a). ServerTimeoutError covers MinIO reachable-but-slow.
+    aiohttp.ClientConnectionError,
+    aiohttp.ServerTimeoutError,
     # Provider SDK wrappers around the above.
     anthropic.APITimeoutError,
     anthropic.APIConnectionError,

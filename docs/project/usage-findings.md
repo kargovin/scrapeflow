@@ -113,17 +113,16 @@ out of three, so the migration would carry over only a third of it. Propagating 
 all three workers pre-migration both fixes a live ack-on-failure bug and consolidates
 the knowledge into one place before it gets ported once.
 
-> **Latent gap in the LLM worker's own classifier (found during the playwright port,
-> not yet fixed).** `llm-worker/worker/errors.py` matches MinIO faults **only** via
-> `S3Error.code` (`_TRANSIENT_S3_CODES`). But that only fires when MinIO is *reachable
-> and returns a 5xx code* (overload). When MinIO is *unreachable* — pod down, connection
-> refused — miniopy-async raises `aiohttp.ClientConnectionError`, which is not an
-> `S3Error` and has no `.code`, so `classify()` falls through to TERMINAL and the LLM
-> job fails permanently. The literal "MinIO down" case is therefore **not** retried on
-> the LLM worker today. The playwright port fixes this class by adding
-> `aiohttp.ClientConnectionError`/`ServerTimeoutError` to its transient types; the same
-> two lines should be added to the LLM worker's `_TRANSIENT_TYPES`. Small, isolated,
-> not yet done — folded into the Go-worker follow-up under P3b.
+> **Latent gap in the LLM worker's own classifier — ✅ fixed 2026-07-23.**
+> `llm-worker/worker/errors.py` matched MinIO faults **only** via `S3Error.code`
+> (`_TRANSIENT_S3_CODES`), which only fires when MinIO is *reachable and returns a 5xx
+> code* (overload). When MinIO is *unreachable* — pod down, connection refused —
+> miniopy-async raises `aiohttp.ClientConnectionError`, which is not an `S3Error` and has
+> no `.code`, so `classify()` fell through to TERMINAL and the LLM job failed
+> permanently. The literal "MinIO down" case was therefore **not** retried on the LLM
+> worker. Fixed by adding `aiohttp.ClientConnectionError`/`ServerTimeoutError` to
+> `_TRANSIENT_TYPES` (mirrors the playwright classifier) + `aiohttp` declared in
+> `pyproject`. 3 new tests → 90 llm-worker tests.
 
 ### 3b — result consumer swallows MinIO errors with no log line
 

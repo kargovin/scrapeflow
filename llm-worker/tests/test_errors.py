@@ -12,6 +12,7 @@ So the default is terminal, and anything claimed transient is asserted here
 explicitly rather than inferred from a base class.
 """
 
+import aiohttp
 import httpx
 import openai
 import pytest
@@ -99,6 +100,21 @@ def test_minio_backend_faults_are_transient(code):
             self.code = c
 
     assert classify(S3Error(code)) == TRANSIENT
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        aiohttp.ClientConnectionError("connection refused"),
+        aiohttp.ServerDisconnectedError("closed"),
+        aiohttp.ServerTimeoutError("slow"),
+    ],
+)
+def test_minio_unreachable_is_transient(exc):
+    """MinIO *down* (connection refused / dropped) raises aiohttp errors, NOT an
+    S3Error — so this is a distinct path from the backend-fault codes above. Without
+    it the literal 'MinIO down' case would fall through to TERMINAL (UF-003 3a)."""
+    assert classify(exc) == TRANSIENT
 
 
 # ---------------------------------------------------------------------------
