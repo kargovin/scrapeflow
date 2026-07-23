@@ -192,6 +192,33 @@ docker compose exec nats nats consumer info SCRAPEFLOW api-result-consumer --ser
 
 ---
 
+## Health / dependency checks
+
+Two endpoints, deliberately different questions. Both are unauthenticated.
+
+```bash
+# Liveness — process is up
+curl http://localhost:8000/health
+
+# Serving readiness — DB / Redis / NATS only. This is the k8s readinessProbe:
+# a 503 here pulls the pod out of the Service.
+curl -i http://localhost:8000/health/ready
+
+# Full dependency report — the above plus MinIO. Diagnostics only; nothing routes
+# on it. First thing to check when jobs run but results don't appear.
+curl -s http://localhost:8000/health/deps | jq
+
+# In production
+curl -s https://scrapeflow.govindappa.com/health/deps | jq
+```
+
+MinIO is on `/deps` and **not** on `/ready` on purpose: it is needed to store and
+fetch scrape output, not to serve `/jobs`, auth, or the admin panel. Gating the
+probe on it would turn a partial outage into a total one — including the dashboard
+you would use to diagnose it.
+
+---
+
 ## Job API
 
 > Requires auth — pass `X-API-Key: <key>` or `Authorization: Bearer <jwt>` on all requests.
