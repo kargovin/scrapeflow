@@ -67,6 +67,24 @@ distinct behaviours, none of them right, split across the workers and the consum
 
 ### 3a — playwright + Go workers ack on a MinIO write failure (the Q5 bug, unfixed on two of three workers)
 
+> **Status: playwright ✅ fixed (2026-07-23); Go worker still open.** New
+> `playwright-worker/worker/errors.py` (ported from the LLM worker) classifies the
+> exception; `worker.py`'s general `except` now naks transient MinIO faults with
+> exponential backoff (5/10/20s) up to `playwright_max_delivery_attempts` (3) and only
+> publishes a terminal `failed` on the last attempt, with `max_deliver` on the consumer
+> as the backstop. **Key correction found during the port:** "MinIO down" (connection
+> refused) raises `aiohttp.ClientConnectionError`, **not** an `S3Error`, so the LLM
+> worker's `_TRANSIENT_S3_CODES`-only match would have missed the literal down case —
+> the playwright classifier adds `aiohttp.ClientConnectionError`/`ServerTimeoutError`.
+> **This means the LLM worker has the same latent gap** (it retries MinIO *5xx codes*
+> but not MinIO *unreachable*) — see the note at the end of this section. Playwright
+> navigation failures stay terminal by design (a dead site is its own answer; a
+> re-scrape costs a headed-Chrome render). Error strings now carry the exception type
+> (`describe()`), same UI-visibility reason as the LLM worker. 24 new tests → 155.
+> **Operational:** the live consumer keeps `max_deliver=-1` until recreated out-of-band
+> (`nats consumer rm` + rollout restart) — the worker's own `num_delivered` cap means it
+> won't loop regardless, so the recreate is a backstop, not urgent.
+
 `playwright-worker/worker/worker.py:250` catches every exception from the render/upload
 block → logs `job_failed` → publishes `failed` → **acks**. The Go worker has the same
 shape: `Upload()` errors propagate to the same terminal path
@@ -94,6 +112,18 @@ same knowledge §3 of the backlog already says must port into the activity's
 out of three, so the migration would carry over only a third of it. Propagating it to
 all three workers pre-migration both fixes a live ack-on-failure bug and consolidates
 the knowledge into one place before it gets ported once.
+
+> **Latent gap in the LLM worker's own classifier (found during the playwright port,
+> not yet fixed).** `llm-worker/worker/errors.py` matches MinIO faults **only** via
+> `S3Error.code` (`_TRANSIENT_S3_CODES`). But that only fires when MinIO is *reachable
+> and returns a 5xx code* (overload). When MinIO is *unreachable* — pod down, connection
+> refused — miniopy-async raises `aiohttp.ClientConnectionError`, which is not an
+> `S3Error` and has no `.code`, so `classify()` falls through to TERMINAL and the LLM
+> job fails permanently. The literal "MinIO down" case is therefore **not** retried on
+> the LLM worker today. The playwright port fixes this class by adding
+> `aiohttp.ClientConnectionError`/`ServerTimeoutError` to its transient types; the same
+> two lines should be added to the LLM worker's `_TRANSIENT_TYPES`. Small, isolated,
+> not yet done — folded into the Go-worker follow-up under P3b.
 
 ### 3b — result consumer swallows MinIO errors with no log line
 

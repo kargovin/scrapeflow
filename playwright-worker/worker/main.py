@@ -101,11 +101,20 @@ async def run() -> None:
     # scrape, so messages were redelivered mid-job and looped forever (see config.py).
     # NOTE: JetStream does not update ack_wait on an already-existing durable consumer,
     # so changing this value requires updating/recreating the consumer out-of-band.
+    # max_deliver caps redelivery as the consumer-side backstop to the worker's own
+    # attempt cap (metadata.num_delivered in worker.py). It matters only if the worker
+    # dies before acking; in the normal path the worker publishes a terminal "failed"
+    # and acks on the last attempt. NOTE: like ack_wait, JetStream will NOT apply a
+    # changed max_deliver to an existing durable — the live consumer stays at its old
+    # value (unlimited) until recreated out-of-band (nats consumer rm + rollout restart).
     psub = await js.pull_subscribe(
         PLAYWRIGHT_SUBJECT,
         durable=DURABLE_NAME,
         stream=STREAM_NAME,
-        config=ConsumerConfig(ack_wait=settings.playwright_ack_wait_seconds),
+        config=ConsumerConfig(
+            ack_wait=settings.playwright_ack_wait_seconds,
+            max_deliver=settings.playwright_max_delivery_attempts,
+        ),
     )
     log.info(
         "subscribed",

@@ -9,6 +9,9 @@ dependencies = [
     "patchright>=1.44.0",
     "nats-py>=2.7.0",
     "miniopy-async>=1.21.0",
+    # aiohttp is miniopy-async's HTTP backend; declared explicitly because
+    # worker/errors.py matches its connection-error types (UF-003 3a).
+    "aiohttp>=3.9.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.3.0",
     "markdownify>=0.12.0",

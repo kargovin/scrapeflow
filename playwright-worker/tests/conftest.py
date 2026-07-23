@@ -36,6 +36,7 @@ def make_nats_msg(
     output_format: str = "html",
     playwright_options: dict | None = None,
     stream_seq: int = 42,
+    num_delivered: int = 1,
     # Schema version 2 sub-objects (omitted from payload when None)
     credentials: dict | None = None,
     options: dict | None = None,
@@ -43,7 +44,8 @@ def make_nats_msg(
 ) -> MagicMock:
     """
     Build a mock NATS message whose .data is a valid JobMessage JSON payload.
-    msg.ack is an AsyncMock so tests can assert it was called.
+    msg.ack and msg.nak are AsyncMocks so tests can assert which was called.
+    num_delivered drives the transient-retry attempt cap (UF-003 3a).
     """
     payload: dict = {
         "job_id": job_id,
@@ -65,7 +67,9 @@ def make_nats_msg(
     msg.metadata = MagicMock()
     msg.metadata.sequence = MagicMock()
     msg.metadata.sequence.stream = stream_seq
+    msg.metadata.num_delivered = num_delivered
     msg.ack = AsyncMock()
+    msg.nak = AsyncMock()
     return msg
 
 

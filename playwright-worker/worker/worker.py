@@ -16,6 +16,7 @@ from miniopy_async import Minio
 from .actions import execute_actions
 from .blocking import detect_block
 from .config import settings
+from .errors import TRANSIENT, classify, describe, retry_delay
 from .formatter import format_output
 from .models import JobMessage, ResultMessage
 from .robots import is_disallowed
@@ -248,14 +249,57 @@ async def handle_message(
         log.info("job_completed", job_id=job.job_id, run_id=job.run_id, path=minio_path)
 
     except Exception as exc:
-        log.error("job_failed", job_id=job.job_id, run_id=job.run_id, error=str(exc))
+        # UF-003 3a. This branch used to ack unconditionally, which made every
+        # failure permanent — a MinIO write fault (object store momentarily down)
+        # was treated exactly like a genuine site failure, after the expensive
+        # headed-Chrome render had already succeeded. Now transient infra failures
+        # are naked back to JetStream for redelivery; only the final outcome is
+        # published. Same posture as the LLM worker; see worker/errors.py.
+        kind = classify(exc)
+        attempt = msg.metadata.num_delivered
+        detail = describe(exc)
+
+        if kind == TRANSIENT and attempt < settings.playwright_max_delivery_attempts:
+            delay = retry_delay(
+                attempt,
+                settings.playwright_retry_base_delay_seconds,
+                settings.playwright_retry_max_delay_seconds,
+            )
+            log.warning(
+                "job_transient_failure",
+                job_id=job.job_id,
+                run_id=job.run_id,
+                error=detail,
+                attempt=attempt,
+                max_attempts=settings.playwright_max_delivery_attempts,
+                retry_in=delay,
+            )
+            # Deliberately no "failed" publish: the API's terminal-status guard
+            # would lock the run as failed and then discard the retry's
+            # "completed". Only the final attempt reports an outcome. Redelivery
+            # re-runs the whole scrape (there is no partial-progress checkpoint).
+            await msg.nak(delay=delay)
+            return
+
+        # Terminal, or the last attempt of a transient failure. Report and ack —
+        # redelivery cannot recover a bad key or a dead site, and we are out of retries.
+        if kind == TRANSIENT:
+            detail = f"{detail} (gave up after {attempt} attempts)"
+        log.error(
+            "job_failed",
+            job_id=job.job_id,
+            run_id=job.run_id,
+            error=detail,
+            kind=kind,
+            attempt=attempt,
+        )
         await publish_result(
             js,
             ResultMessage(
                 job_id=job.job_id,
                 run_id=job.run_id,
                 status="failed",
-                error=str(exc),
+                error=detail,
                 crawl_context=job.crawl_context,
             ),
         )

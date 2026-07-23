@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     playwright_ack_wait_seconds: int = 120
     # How often to send msg.in_progress() while a job runs (must be < ack_wait).
     playwright_heartbeat_seconds: int = 30
+    # ── UF-003 3a — transient-failure redelivery (ported from the LLM worker) ──
+    # Total deliveries of one message before the worker gives up and publishes a
+    # terminal "failed". The worker enforces this itself via metadata.num_delivered
+    # (so the API always gets exactly one failed event); max_deliver on the consumer
+    # is the matching backstop for the case where the worker dies before acking.
+    # NOTE: like ack_wait, max_deliver does not apply to an existing durable —
+    # changing this needs the same out-of-band consumer recreate.
+    playwright_max_delivery_attempts: int = 3
+    # Backoff applied to msg.nak(delay=...) between redeliveries: base * 2^(n-1),
+    # capped. Keeps a struggling MinIO from being hammered while it recovers.
+    playwright_retry_base_delay_seconds: float = 5.0
+    playwright_retry_max_delay_seconds: float = 60.0
     # Stealth launch config (Patchright). Verified against BrowserScan bot-detection.
     # channel="chrome" uses real Google Chrome (installed in the image via
     # `patchright install chrome`) so the UA reports a genuine "Chrome". Set to ""

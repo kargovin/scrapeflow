@@ -27,6 +27,8 @@ Lifecycle summary being tested:
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
+
 from tests.conftest import encrypt_credential, make_browser, make_nats_msg
 from worker.worker import RESULT_SUBJECT, handle_message
 
@@ -161,7 +163,9 @@ async def test_page_goto_failure_publishes_failed():
     _, payload_bytes = last_call.args
     data = json.loads(payload_bytes)
     assert data["status"] == "failed"
-    assert data["error"] == "connection timeout"
+    # describe() prefixes the exception type (UF-003 3a) — mirrors the LLM worker,
+    # so errors that stringify to blank are not invisible in the UI.
+    assert data["error"] == "Exception: connection timeout"
     assert "minio_path" not in data
 
 
@@ -515,3 +519,88 @@ async def test_execute_actions_called_after_goto():
             )
 
     assert call_order.index("goto") < call_order.index("actions")
+
+
+# ---------------------------------------------------------------------------
+# Transient MinIO write failure — nak + redelivery (UF-003 3a)
+# ---------------------------------------------------------------------------
+#
+# The bug: the worker acked on *every* exception, so a momentary MinIO outage
+# (upload raises) permanently failed a job whose expensive headed-Chrome render
+# had already succeeded. Now a transient infra failure is naked back to JetStream
+# for a bounded number of redeliveries, and only the final attempt reports.
+
+
+async def test_minio_down_naks_and_does_not_ack():
+    """A MinIO connection failure on upload → nak (retry), not ack (permanent fail)."""
+    msg = make_nats_msg(num_delivered=1)
+    js = AsyncMock()
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.side_effect = aiohttp.ClientConnectionError("connection refused")
+        await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    msg.nak.assert_called_once()
+    msg.ack.assert_not_called()
+    # No "failed" is published on a retry — the API's terminal-status guard would
+    # lock the run failed and discard the eventual "completed".
+    statuses = [json.loads(c.args[1])["status"] for c in js.publish.call_args_list]
+    assert "failed" not in statuses
+    assert statuses == ["running"]
+
+
+async def test_minio_down_nak_uses_exponential_backoff():
+    """Second delivery backs off to base * 2^(2-1) = 10s."""
+    msg = make_nats_msg(num_delivered=2)
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.side_effect = aiohttp.ClientConnectionError("refused")
+        await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    _, kwargs = msg.nak.call_args
+    assert kwargs["delay"] == 10.0
+
+
+async def test_minio_down_final_attempt_publishes_failed_and_acks():
+    """On the last allowed delivery the worker gives up: publish failed + ack, no nak."""
+    # default playwright_max_delivery_attempts is 3, so attempt 3 is terminal.
+    msg = make_nats_msg(num_delivered=3)
+    js = AsyncMock()
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.side_effect = aiohttp.ClientConnectionError("refused")
+        await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    msg.nak.assert_not_called()
+    msg.ack.assert_called_once()
+    last = json.loads(js.publish.call_args_list[-1].args[1])
+    assert last["status"] == "failed"
+    assert "gave up after 3 attempts" in last["error"]
+
+
+async def test_context_closed_on_transient_nak():
+    """The finally block still closes the context when we nak-and-return."""
+    msg = make_nats_msg(num_delivered=1)
+    browser, context, _ = make_browser()
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.side_effect = aiohttp.ClientConnectionError("refused")
+        await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    context.close.assert_called_once()
+
+
+async def test_terminal_failure_does_not_nak():
+    """A genuine site failure (goto timeout) is terminal — ack, never nak, even on
+    the first delivery."""
+    msg = make_nats_msg(num_delivered=1)
+    browser, _, page = make_browser()
+    page.goto = AsyncMock(side_effect=Exception("net::ERR_NAME_NOT_RESOLVED"))
+
+    await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    msg.nak.assert_not_called()
+    msg.ack.assert_called_once()
