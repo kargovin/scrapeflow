@@ -10,7 +10,7 @@
 > *orchestration* bugs that the migration deletes outright. Those are recorded in
 > §3 as **do-not-fix**, with the reason, so they don't get re-raised.
 >
-> **Last restructured:** 2026-07-17 · **Last updated:** 2026-07-23 (UF-001 closed — shipped as a `/health/ready` vs new `/health/deps` split, not as a probe change. Closing it surfaced **UF-003** (inconsistent MinIO write-path failure handling — the Q5 ack-on-failure bug is unfixed on 2 of 3 workers); filed as **P3b**, now §1's next item.)
+> **Last restructured:** 2026-07-17 · **Last updated:** 2026-07-23 (UF-001 closed via the `/health/deps` split. **P3b / UF-003 in progress:** playwright 3a (`2432be7`) + LLM aiohttp-unreachable gap (`6ad95e3`) done; **remaining = Go worker 3a → 3b `result_consumer` log lines.** All P3/P3b commits are on `develop`, unpushed.)
 
 ---
 

@@ -48,7 +48,13 @@ Batch runs stuck in `pending` are not recoverable via this path anyway — their
 
 **Severity:** High (silent data corruption — jobs report `completed` with useless content)
 **Discovered:** 2026-07-04
-**Status:** Open
+**Status:** ✅ **Minimum tier CLOSED in production 2026-07-22** (`8168760`, image
+`main-1784742943-8168760c…`). Middle/full tiers — getting *past* walls — remain deferred to
+post-Phase-4, gated on UF-002. Deployed classifier verified inside the pod against real MinIO
+artifacts: Amazon → `blocked:amazon` (`tier1:amazon_opfcaptcha`), Myntra → `blocked:akamai`
+(`tier1:akamai_reference_id`); CNN 4.1 MB, Times of India 319 KB and **browserscan.net/bot-detection
+450 KB** all correctly passed — that last one is the real false-positive test, being a page *about*
+bot detection full of the matching vocabulary. The Tier 2 size gate held.
 
 ### What happens
 

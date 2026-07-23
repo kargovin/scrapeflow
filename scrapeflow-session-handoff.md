@@ -66,40 +66,63 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ⚠️ START HERE (2026-07-22) — one thing is in flight: BUG-003 is merged but NOT deployed
-  **`develop` and `main` are both at `8168760`** (BUG-003 bot-wall detection). The code is
-  merged and pushed; **the playwright-worker image has not been built/rolled out**, so the
-  fix is not yet live in production.
+- ## ✅ START HERE (2026-07-23) — mid-P3b: two of four parts done, Go worker is next
+  **You are partway through P3b (UF-003 — inconsistent MinIO write-path failure handling).**
+  Two of the four parts are done and committed; pick up at the **Go worker**.
 
-  **Finish this first:** build + roll out `playwright-worker`. **No NATS consumer recreate
-  is needed** this time — the change touches no `ConsumerConfig`, so it is a plain image
-  build + `kubectl rollout restart`. Until it lands, prod keeps storing bot walls as
-  `completed` **and re-poisons the dedup baselines that were just cleaned** (6 rows nulled
-  and verified on 2026-07-22 — that cleanup has a shelf life).
+  **⚠️ `develop` is 4 commits ahead of `main` and NOT pushed.** Nothing is deployed yet —
+  these are local commits only. In order:
+  | Commit | What |
+  |--------|------|
+  | `98b25ec` | UF-001 — `/health/deps` endpoint (MinIO check split out of the `/health/ready` probe) |
+  | `d5709dd` | docs — filed UF-003 as P3b |
+  | `2432be7` | UF-003 3a — **playwright worker** naks transient MinIO faults instead of acking |
+  | `6ad95e3` | UF-003 3a — **LLM worker** aiohttp-unreachable gap (retried MinIO 5xx but not MinIO *down*) |
 
-  **On first deploy, watch the `block_detected` log lines.** If `blocked:unknown` starts
-  dominating, that means Tier 1 is missing a vendor fingerprint — which is exactly what the
-  `unknown` token exists to surface. Add the fingerprint from the logged `signals`.
+  **P3b remaining (do these next, in order):**
+  1. **Go worker (3a)** — same fix as playwright/LLM, in Go. `http-worker/internal/worker/worker.go:356`
+     acks on every `Upload()` error → a transient MinIO fault permanently fails the job. Port the
+     transient/terminal split: classify the `minio-go` error (connection refused / `SlowDown` /
+     `ServiceUnavailable` / 5xx), and **`Nak` with backoff** instead of `Ack` on transient, up to an
+     attempt cap (`msg.Metadata().NumDelivered`), publishing terminal `failed` only on the last try.
+     Mirror `playwright-worker/worker/errors.py`. **Go's minio client is `minio-go`, not aiohttp** —
+     its "connection refused" surfaces as a `*net.OpError`/`net.Error` or `net/url.Error`, NOT an
+     S3 `ErrorResponse` with a `.Code`; classify **both** (the same reachable-vs-unreachable split
+     that bit the LLM worker). Check whether the Go pull consumer sets a `MaxDeliver` backstop.
+  2. **3b — `result_consumer` log lines** (XS). `stat_minio_size` (`api/app/core/storage.py:18`) and
+     `_compute_content_hash` (`api/app/core/result_consumer.py:48`) swallow MinIO errors with no log.
+     Add a bare `logger.warning` to each — **ceiling is one line each**; `result_consumer.py` is
+     deleted by the Temporal migration, so don't invest more. The `stat_minio_size` line is the one
+     that matters (silent permanent quota under-count).
 
-  **Then: the pre-Phase-4 queue in `docs/project/phase4-backlog.md` §1**, which now starts
-  at **P3 (UF-001, MinIO missing from `/health/ready`)**.
+  **Then P3b is closed → next is P4 (BUG-002 Dependabot, 8 crit / 13 high, drifting up).**
 
-  ✅ **The old UF-001 vs BUG-003 ordering conflict is resolved** — BUG-003 ran first (it was
-  the only *compounding* item: every wall stored as success also became a dedup baseline),
-  and both docs now agree.
+  **The pattern across 3a** (worth carrying into the Go work): the ack-on-failure bug was
+  latent on all three workers; Q5 only ever fixed the LLM one. The non-obvious part is that
+  **"MinIO down" (connection refused) is a different exception class from "MinIO returned a
+  5xx"** — matching only the S3 error code misses the literal down case. This bit the LLM
+  worker (`6ad95e3`) and will bite the Go port too if you only classify `minio.ErrorResponse`.
 
-  **Verification habit worth keeping** (it has now caught the same class of bug twice):
-  never verify NATS consumer state from the worker's `subscribed` log line — it prints
-  **config**, not the live consumer. It logged `ack_wait=120` for weeks while JetStream
-  ran `30`, and `max_deliver=3` while JetStream ran `-1`. Use `nats consumer info
-  **--json**` — the table output omits the `Max Deliver` row entirely when the value is
-  `-1`, so uncapped and correctly-capped look identical in the pretty output.
+  **Design decisions already made (don't relitigate):** playwright/Go navigation+fetch
+  failures against a *dead site* stay **terminal** — a re-scrape costs a headed-Chrome render
+  / proxy bandwidth, and a dead site is its own answer. Only *infra* (MinIO) faults are
+  transient. Fail-closed default (unknown → terminal), same as the LLM worker.
+
+  **Test counts now:** 249 API · **155** playwright-worker · **90** llm-worker · 14 MCP.
+
+  **Verification habit worth keeping** (unchanged, still true): never verify NATS consumer
+  state from the worker's `subscribed` log line — it prints **config**, not the live consumer.
+  Use `nats consumer info **--json**`; the table output omits `Max Deliver` when it is `-1`.
+  Note both the playwright (`2432be7`) and LLM `max_deliver` changes need the out-of-band
+  consumer recreate to take effect on the **live** durable — but the worker's own
+  `num_delivered` cap means neither loops regardless, so the recreate is a **non-urgent
+  backstop**, not a live-incident step. It only matters once these are deployed (they aren't).
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
 - **✅ Q6 is CLOSED — code and production.** Playwright (`67ba983`) and LLM worker (`6fb5b9c`); the live `python-llm-worker` consumer was recreated on 2026-07-21 and verified at `Ack Wait: 2m0s` (was `30.00s`). The reusable recreate procedure is in the Q6 status block in `open-questions.md`.
 - **✅ Q5 is CLOSED — code and production** (options A + B + C). A live via `df44f95`; B + C shipped as `e1fde0d` → pushed/ff-merged as `fbcf254` on 2026-07-22, image deployed, and the `python-llm-worker` consumer recreated. Verified on the live consumer: `ack_wait 2m0s`, `max_deliver: 3` (was `-1`). **Q7 is closed with it** — the Q5 option-B nak retry *is* the worker-level retry Q7 asked for.
-- 243 API tests passing (deterministic — first-run clean); **131** playwright-worker tests passing (was 70); **87** llm-worker tests passing (was 29); 14 MCP tests passing.
+- **249** API tests passing (deterministic — first-run clean); **155** playwright-worker tests passing (was 70); **90** llm-worker tests passing (was 29); 14 MCP tests passing.
   - playwright-worker tests aren't wired into a compose service either. Same mount trick, but the
     `docker-playwright-worker` image on disk is **stale** (predates the credentials feature — no
     `cryptography`, so `test_main.py` fails to import). Use a newer tag:
@@ -127,8 +150,11 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | `df44f95` (infra) | **Q5 option A — LLM request timeout 60 → 180s** (env-only change in `govindappa-k8s-config`, `llm-worker.yaml`). Modal's scale-to-zero endpoint cold-starts in **90–110s**, which exceeded the 60s httpx read timeout. **This was urgent, not cosmetic:** the Q6 fix's `max_retries=0` pin removed an *accidental* cold-start mitigation — the SDK default of `max_retries=2` meant attempt 2 or 3 landed after Modal had booted, so cold starts silently succeeded. Pinned to 0, every cold start became a hard failure. The two commits are safe together and **unsafe apart**. Note `ack_wait` stays 120s: the 30s heartbeat resets the ack timer during the call, so a 180s request is never redelivered. |
 | _(operational)_ | **Q6 consumer recreate — done.** Live `python-llm-worker` durable went `Ack Wait: 30.00s` → **`2m0s`**. Procedure (reusable, recorded in `open-questions.md`): deploy image → confirm pod → `nats consumer rm` → `kubectl rollout restart` → verify with `nats consumer info`. **Delete before restart** (the worker only subscribes at startup, so deleting under a running pod leaves it holding a dead subscription); **never scale to 0** (Flux reconciles `replicas: 1` back up). Safe because the stream is `--retention work` — acked messages are deleted, so a fresh consumer cannot replay completed jobs. |
 | `e1fde0d` (shipped as `fbcf254`) | **Q5 options B + C.** **B:** new `llm-worker/worker/errors.py` classifies exceptions transient vs terminal; `handle_message` now `nak`s transient failures with exponential backoff (5/10/20s, capped) instead of acking everything. Critically it publishes **no** `failed` on a retry — the API's terminal-status guard (`result_consumer.py:125`) would lock the run failed and then discard the retry's `completed`. The worker caps attempts itself via `metadata.num_delivered` and publishes a real terminal `failed` on the last one, so a run can't dangle in `processing`. Classification **fails closed** (unknown → terminal): a wrong "transient" guess retries against the user's own API key. **C:** `llm.ensure_ready()` polls the OpenAI-compatible `/models` endpoint (spec'd; `/health` isn't) with a short per-probe timeout + long overall budget, so the real call runs against a warm endpoint. Only for `openai_compatible` **with** a `base_url`; 60s process-local warm cache; any HTTP response (incl. 401/404) counts as awake. Also resolves **Q7**. 29 → **87** tests. **Error strings changed format** — they now carry the exception type, because several httpx/provider errors stringify to `""` and showed as blank in the UI. |
-| `8168760` | **BUG-003 — bot-wall detection (minimum tier).** A bot wall returns **HTTP 200 with valid HTML**, so `page.goto()` succeeded, nothing threw, and the interstitial flowed straight to `publish_result(status="completed")` — the user got a CAPTCHA page as their result, and its hash became a **dedup baseline** silently suppressing future change detection. **Prod audit: 6 of 15 completed runs (40%) were walls**, across three vendors — Amazon in-house (5.4 KiB "Continue shopping"), Akamai/`errors.edgesuite.net` on myntra (411 B), PerimeterX "Robot or human?" on walmart ×3 (464 B); genuine pages ran 291 KiB–4.1 MiB. All six `engine=playwright` (the Go worker's `fetcher.go:72` non-2xx check already covers hard walls), so Playwright only. New `playwright-worker/worker/blocking.py`: **Tier 1** vendor challenge harnesses (Akamai, Cloudflare, PerimeterX, DataDome, Imperva, Sucuri, Kasada, Amazon) decisive alone at any size; **Tier 2** generic challenge language gated to **< 20 KB** (the false-positive guard — those phrases are legitimate content at full page size); **Tier 3** structural integrity deliberately unimplemented. Patterns adapted from **Crawl4AI** (Apache-2.0 + custom attribution clause → `README.md`); **Amazon is our own addition**, their list has none. Worker keeps the `page.goto()` `Response` (was discarded), detects **after `final_url`, before `format_output`** (markdown strips every HTML signal), publishes `failed` + `error="blocked:<vendor>"`, logs `block_detected` with vendor/tier/signals. **Two signal corrections vs the original writeup:** `final_url` is *not* a tell (Amazon serves the wall *at* the requested URL; `/errors/validateCaptcha` is only a form action), and body size is the crispest separator (3 orders of magnitude). **Tests caught a real false positive** — the empty-body rule fired on a genuine tiny 404; now gated on status 200. **Prod: 6 poisoned `content_hash` baselines nulled + verified** (statuses left `completed` — rewriting history would misrepresent what the system did). 61 new tests → **131** playwright-worker tests. ⚠️ **Image not yet deployed.** Also filed **BUG-004**. |
+| `8168760` | **BUG-003 — bot-wall detection (minimum tier).** A bot wall returns **HTTP 200 with valid HTML**, so `page.goto()` succeeded, nothing threw, and the interstitial flowed straight to `publish_result(status="completed")` — the user got a CAPTCHA page as their result, and its hash became a **dedup baseline** silently suppressing future change detection. **Prod audit: 6 of 15 completed runs (40%) were walls**, across three vendors — Amazon in-house (5.4 KiB "Continue shopping"), Akamai/`errors.edgesuite.net` on myntra (411 B), PerimeterX "Robot or human?" on walmart ×3 (464 B); genuine pages ran 291 KiB–4.1 MiB. All six `engine=playwright` (the Go worker's `fetcher.go:72` non-2xx check already covers hard walls), so Playwright only. New `playwright-worker/worker/blocking.py`: **Tier 1** vendor challenge harnesses (Akamai, Cloudflare, PerimeterX, DataDome, Imperva, Sucuri, Kasada, Amazon) decisive alone at any size; **Tier 2** generic challenge language gated to **< 20 KB** (the false-positive guard — those phrases are legitimate content at full page size); **Tier 3** structural integrity deliberately unimplemented. Patterns adapted from **Crawl4AI** (Apache-2.0 + custom attribution clause → `README.md`); **Amazon is our own addition**, their list has none. Worker keeps the `page.goto()` `Response` (was discarded), detects **after `final_url`, before `format_output`** (markdown strips every HTML signal), publishes `failed` + `error="blocked:<vendor>"`, logs `block_detected` with vendor/tier/signals. **Two signal corrections vs the original writeup:** `final_url` is *not* a tell (Amazon serves the wall *at* the requested URL; `/errors/validateCaptcha` is only a form action), and body size is the crispest separator (3 orders of magnitude). **Tests caught a real false positive** — the empty-body rule fired on a genuine tiny 404; now gated on status 200. **Prod: 6 poisoned `content_hash` baselines nulled + verified** (statuses left `completed` — rewriting history would misrepresent what the system did). 61 new tests → **131** playwright-worker tests. **✅ Deployed + verified in prod 2026-07-22** — image `main-1784742943-8168760c…`; the deployed classifier was run inside the pod against real MinIO artifacts: Amazon → `blocked:amazon`, Myntra → `blocked:akamai`, while CNN (4.1 MB), Times of India (319 KB) and **browserscan.net/bot-detection (450 KB)** all correctly passed. No consumer recreate was needed (no `ConsumerConfig` change). Also filed **BUG-004**. |
 | `6fb5b9c` | **LLM worker Q6 fix.** Same bare `pull_subscribe` as playwright, but worse: `llm_request_timeout_seconds` (60) is **2× the 30s default `ack_wait`**, so redelivery fired on ordinary slow calls, and each redelivery re-bills the **user's own** provider key, unbounded (`max_deliver` unset → `-1`). **The playwright numbers did not transfer:** both SDKs default to `max_retries=2`, so one `call_llm()` could make 3 attempts each with a fresh httpx read timeout ≈ **210s** — well past a 120s `ack_wait`. Fix: `ConsumerConfig(ack_wait=120)` + `in_progress()` heartbeat every 30s + **`max_retries` pinned** (`llm_max_retries`, default `0`) on both SDK clients. Here **`ack_wait` is the orphan-recovery window, not a job-duration budget** — the heartbeat is what covers long calls. 29 llm-worker tests. **✅ Prod consumer recreated 2026-07-21 (`ack_wait`) and again 2026-07-22 (`max_deliver`).** |
+| `98b25ec` ⚠️ **unpushed** | **UF-001 — `/health/deps` (P3 closed).** `/health/ready` checked DB/Redis/NATS but not MinIO, so it reported `200 ok` while every job silently failed to store output. The obvious fix (add MinIO to the readiness set) would have been wrong: `/health/ready` is the k8s readinessProbe on a **single-replica** API, so a MinIO blip would 503 the whole API (`/jobs`, auth, admin panel) — a partial outage escalated to a total one. **Split the two questions instead:** `/health/ready` stays serving-deps-only (unchanged, still the probe); new **`GET /health/deps`** adds MinIO (`bucket_exists` + 3s `asyncio.wait_for`), 503s when degraded, nothing routes on it. Per-dep checks factored into shared helpers. No infra change (`api.yaml` still probes `/health/ready`). Curl recipes in `COMMANDS.md`. 6 tests → **249**. |
+| `2432be7` ⚠️ **unpushed** | **UF-003 3a — playwright worker naks transient MinIO faults.** The general `except` acked on **every** exception, so a momentary MinIO outage on the result upload permanently failed a job whose expensive headed-Chrome render had already succeeded (the ack preempts JetStream redelivery). Same ack-on-failure mode as Q5, only ever fixed on the LLM worker. New `playwright-worker/worker/errors.py` (ported from the LLM worker): `classify()` → transient/terminal, `retry_delay()` backoff, `describe()`. `worker.py`'s except now `nak`s transient faults with backoff (5/10/20s) up to `playwright_max_delivery_attempts` (3), publishing terminal `failed` only on the last attempt; `max_deliver` added to the consumer config as a backstop. **Correction vs a naive copy:** "MinIO down" (connection refused) raises `aiohttp.ClientConnectionError`, **not** an `S3Error`, so the LLM worker's `_TRANSIENT_S3_CODES`-only match would have missed the literal down case — the classifier adds `aiohttp.ClientConnectionError`/`ServerTimeoutError`. Navigation failures against a dead site stay **terminal** by design. Error strings now carry the exception type (`describe()`). 24 tests → **155**. **Live consumer keeps `max_deliver=-1` until recreated out-of-band — non-urgent (the worker's `num_delivered` cap prevents looping), and moot until deployed.** |
+| `6ad95e3` ⚠️ **unpushed** | **UF-003 3a — LLM worker aiohttp gap.** The playwright port surfaced that the LLM classifier matched MinIO faults **only** via `S3Error.code` — which fires when MinIO returns a 5xx (overload) but **not** when MinIO is *unreachable* (pod down → `aiohttp.ClientConnectionError`, no `.code`), so the literal "MinIO down" case fell through to TERMINAL and failed permanently. Added `aiohttp.ClientConnectionError`/`ServerTimeoutError` to `_TRANSIENT_TYPES` (mirrors playwright) + declared `aiohttp` in `pyproject`. 3 tests → **90**. |
 
 ### Clerk production cutover (2026-07-03)
 
@@ -165,8 +191,9 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 |---|---|---|
 | 1 | Q6 — LLM worker `ack_wait` | ✅ **done, verified in prod** (`6fb5b9c` + consumer recreate) |
 | 1b | Q5 — cold starts + transient retry | ✅ **done, verified in prod** (`fbcf254` + consumer recreate; `max_deliver: 3`) |
-| 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | ✅ **code merged** (`8168760`) + **prod baselines cleaned** (6 rows nulled, verified) — ⚠️ **image not yet deployed** |
-| 3 | UF-001 — MinIO missing from `/health/ready` | **open — next feature work** (now P3 in `phase4-backlog.md` §1) |
+| 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | ✅ **done, verified in prod** (`8168760`; image deployed, classifier verified against real MinIO artifacts; 6 poisoned baselines nulled) |
+| 3 | UF-001 — MinIO missing from `/health/ready` | ✅ **done (unpushed)** (`98b25ec`; shipped as the `/health/deps` split, not a probe change) |
+| 3b | UF-003 — inconsistent MinIO write-path failure handling | ⏳ **in progress (unpushed).** playwright 3a ✅ `2432be7`, LLM aiohttp gap ✅ `6ad95e3`. **Remaining: Go worker 3a → 3b `result_consumer` log lines.** ← **START HERE** |
 | 4 | Q1–Q4 close-out (bookkeeping) | open |
 | 5 | BUG-002 — Dependabot critical + highs only | open — **now 8 critical / 13 high** (was 1 crit / 11 high); the count is drifting up |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
