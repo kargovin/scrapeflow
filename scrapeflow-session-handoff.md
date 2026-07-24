@@ -66,57 +66,52 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ✅ START HERE (2026-07-23) — mid-P3b: two of four parts done, Go worker is next
-  **You are partway through P3b (UF-003 — inconsistent MinIO write-path failure handling).**
-  Two of the four parts are done and committed; pick up at the **Go worker**.
+- ## ✅ START HERE (2026-07-24) — P3b CLOSED; next is P4 (BUG-002 Dependabot)
+  **P3b (UF-003 — inconsistent MinIO write-path failure handling) is DONE — all four parts.**
+  Next queue item is **P4 (BUG-002 Dependabot, 8 crit / 13 high, drifting up)**, then P5 (Q1–Q4
+  close-out). See `docs/project/phase4-backlog.md` §1.
 
-  **⚠️ `develop` is 4 commits ahead of `main` and NOT pushed.** Nothing is deployed yet —
-  these are local commits only. In order:
+  **⚠️ `develop` is 7 commits ahead of `main` and NOT pushed. Nothing is deployed** — all local.
+  In order:
   | Commit | What |
   |--------|------|
   | `98b25ec` | UF-001 — `/health/deps` endpoint (MinIO check split out of the `/health/ready` probe) |
   | `d5709dd` | docs — filed UF-003 as P3b |
   | `2432be7` | UF-003 3a — **playwright worker** naks transient MinIO faults instead of acking |
   | `6ad95e3` | UF-003 3a — **LLM worker** aiohttp-unreachable gap (retried MinIO 5xx but not MinIO *down*) |
+  | `bbc18d7` | docs — mid-P3b handoff (superseded by this block) |
+  | `fbce01f` | UF-003 3a — **Go worker** naks transient MinIO faults (new `errors.go` + 16 tests) |
+  | `7c339a2` | UF-003 3b — `result_consumer` log lines (`minio_stat_failed` + `content_hash_failed`) |
 
-  **P3b remaining (do these next, in order):**
-  1. **Go worker (3a)** — same fix as playwright/LLM, in Go. `http-worker/internal/worker/worker.go:356`
-     acks on every `Upload()` error → a transient MinIO fault permanently fails the job. Port the
-     transient/terminal split: classify the `minio-go` error (connection refused / `SlowDown` /
-     `ServiceUnavailable` / 5xx), and **`Nak` with backoff** instead of `Ack` on transient, up to an
-     attempt cap (`msg.Metadata().NumDelivered`), publishing terminal `failed` only on the last try.
-     Mirror `playwright-worker/worker/errors.py`. **Go's minio client is `minio-go`, not aiohttp** —
-     its "connection refused" surfaces as a `*net.OpError`/`net.Error` or `net/url.Error`, NOT an
-     S3 `ErrorResponse` with a `.Code`; classify **both** (the same reachable-vs-unreachable split
-     that bit the LLM worker). Check whether the Go pull consumer sets a `MaxDeliver` backstop.
-  2. **3b — `result_consumer` log lines** (XS). `stat_minio_size` (`api/app/core/storage.py:18`) and
-     `_compute_content_hash` (`api/app/core/result_consumer.py:48`) swallow MinIO errors with no log.
-     Add a bare `logger.warning` to each — **ceiling is one line each**; `result_consumer.py` is
-     deleted by the Temporal migration, so don't invest more. The `stat_minio_size` line is the one
-     that matters (silent permanent quota under-count).
+  **What the Go worker fix did (`fbce01f`) — the one non-obvious part worth keeping:**
+  `handleMessage` used to publish `failed` + `Ack` on every `processJob` error. Now a transient
+  MinIO write fault is `Nak`ed with backoff (5s→60s) up to the consumer's `NATS_MAX_DELIVER` (3,
+  **already set** on the Go consumer — unlike the Python workers, which had it `-1`), publishing
+  terminal `failed` only on the last attempt. **Go-specific divergence from the Python port:** in
+  Python a connection error can only come from MinIO, so type-based classification is safe; in Go
+  both the `net/http` fetcher and `minio-go` use the net stack, so a dead *site* and a dead *MinIO*
+  both raise `*net.OpError`/`*url.Error` — a bare `net.Error` is ambiguous. So transient-eligibility
+  is scoped to the **upload step** via a typed `*uploadError` wrapper (`processJob` wraps the
+  `Upload()` error); only inside that does `classifyMinIO` apply net.Error→transient /
+  `minio.ErrorResponse.Code`→5xx. `TestClassify_NonUploadErrorsAreTerminal` pins this: the same
+  connection-refused error is transient from the upload but terminal from the fetcher.
 
-  **Then P3b is closed → next is P4 (BUG-002 Dependabot, 8 crit / 13 high, drifting up).**
+  **Design decisions (settled, don't relitigate):** navigation/fetch failures against a *dead site*
+  stay **terminal** — a re-scrape costs a headed-Chrome render / proxy bandwidth, and a dead site is
+  its own answer. Only *infra* (MinIO) faults are transient. Fail-closed default (unknown →
+  terminal). The transient/terminal S3 split is **domain knowledge** that ports into the Temporal
+  activity `RetryPolicy` (backlog §3) — do not let it be deleted with the NATS plumbing.
 
-  **The pattern across 3a** (worth carrying into the Go work): the ack-on-failure bug was
-  latent on all three workers; Q5 only ever fixed the LLM one. The non-obvious part is that
-  **"MinIO down" (connection refused) is a different exception class from "MinIO returned a
-  5xx"** — matching only the S3 error code misses the literal down case. This bit the LLM
-  worker (`6ad95e3`) and will bite the Go port too if you only classify `minio.ErrorResponse`.
+  **Test counts now:** 249 API · **155** playwright-worker · **90** llm-worker · 14 MCP ·
+  http-worker Go tests green (`go test ./...`, non-integration).
 
-  **Design decisions already made (don't relitigate):** playwright/Go navigation+fetch
-  failures against a *dead site* stay **terminal** — a re-scrape costs a headed-Chrome render
-  / proxy bandwidth, and a dead site is its own answer. Only *infra* (MinIO) faults are
-  transient. Fail-closed default (unknown → terminal), same as the LLM worker.
-
-  **Test counts now:** 249 API · **155** playwright-worker · **90** llm-worker · 14 MCP.
-
-  **Verification habit worth keeping** (unchanged, still true): never verify NATS consumer
-  state from the worker's `subscribed` log line — it prints **config**, not the live consumer.
-  Use `nats consumer info **--json**`; the table output omits `Max Deliver` when it is `-1`.
-  Note both the playwright (`2432be7`) and LLM `max_deliver` changes need the out-of-band
-  consumer recreate to take effect on the **live** durable — but the worker's own
-  `num_delivered` cap means neither loops regardless, so the recreate is a **non-urgent
-  backstop**, not a live-incident step. It only matters once these are deployed (they aren't).
+  **Consumer-recreate note (deploy-time, non-urgent):** the playwright (`2432be7`) `max_deliver`
+  change needs the out-of-band consumer recreate to take on the **live** durable. The Go worker's
+  `max_deliver` is **already 3** on its consumer, so no recreate is needed for it. Either way each
+  worker's own `num_delivered` cap prevents looping, so recreates are a **non-urgent backstop** — and
+  moot until these commits are pushed + deployed (they aren't). Verify NATS consumer state only via
+  `nats consumer info **--json**` (the table omits `Max Deliver` when `-1`), never the worker's
+  `subscribed` log line (prints config, not the live consumer).
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
@@ -155,6 +150,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | `98b25ec` ⚠️ **unpushed** | **UF-001 — `/health/deps` (P3 closed).** `/health/ready` checked DB/Redis/NATS but not MinIO, so it reported `200 ok` while every job silently failed to store output. The obvious fix (add MinIO to the readiness set) would have been wrong: `/health/ready` is the k8s readinessProbe on a **single-replica** API, so a MinIO blip would 503 the whole API (`/jobs`, auth, admin panel) — a partial outage escalated to a total one. **Split the two questions instead:** `/health/ready` stays serving-deps-only (unchanged, still the probe); new **`GET /health/deps`** adds MinIO (`bucket_exists` + 3s `asyncio.wait_for`), 503s when degraded, nothing routes on it. Per-dep checks factored into shared helpers. No infra change (`api.yaml` still probes `/health/ready`). Curl recipes in `COMMANDS.md`. 6 tests → **249**. |
 | `2432be7` ⚠️ **unpushed** | **UF-003 3a — playwright worker naks transient MinIO faults.** The general `except` acked on **every** exception, so a momentary MinIO outage on the result upload permanently failed a job whose expensive headed-Chrome render had already succeeded (the ack preempts JetStream redelivery). Same ack-on-failure mode as Q5, only ever fixed on the LLM worker. New `playwright-worker/worker/errors.py` (ported from the LLM worker): `classify()` → transient/terminal, `retry_delay()` backoff, `describe()`. `worker.py`'s except now `nak`s transient faults with backoff (5/10/20s) up to `playwright_max_delivery_attempts` (3), publishing terminal `failed` only on the last attempt; `max_deliver` added to the consumer config as a backstop. **Correction vs a naive copy:** "MinIO down" (connection refused) raises `aiohttp.ClientConnectionError`, **not** an `S3Error`, so the LLM worker's `_TRANSIENT_S3_CODES`-only match would have missed the literal down case — the classifier adds `aiohttp.ClientConnectionError`/`ServerTimeoutError`. Navigation failures against a dead site stay **terminal** by design. Error strings now carry the exception type (`describe()`). 24 tests → **155**. **Live consumer keeps `max_deliver=-1` until recreated out-of-band — non-urgent (the worker's `num_delivered` cap prevents looping), and moot until deployed.** |
 | `6ad95e3` ⚠️ **unpushed** | **UF-003 3a — LLM worker aiohttp gap.** The playwright port surfaced that the LLM classifier matched MinIO faults **only** via `S3Error.code` — which fires when MinIO returns a 5xx (overload) but **not** when MinIO is *unreachable* (pod down → `aiohttp.ClientConnectionError`, no `.code`), so the literal "MinIO down" case fell through to TERMINAL and failed permanently. Added `aiohttp.ClientConnectionError`/`ServerTimeoutError` to `_TRANSIENT_TYPES` (mirrors playwright) + declared `aiohttp` in `pyproject`. 3 tests → **90**. |
+| `fbce01f` ⚠️ **unpushed** | **UF-003 3a — Go http-worker naks transient MinIO faults.** `handleMessage` published `failed` + `Ack` on **every** `processJob` error, so a momentary MinIO write fault permanently failed a job whose fetch + format had already succeeded — same ack-on-failure mode as playwright/LLM, latent on the Go worker. New `http-worker/internal/worker/errors.go`: `classify()` (transient/terminal), `classifyMinIO()`, `retryDelay()` (5s→60s cap). `processJob` wraps the `Upload()` error in a typed `*uploadError`; `handleMessage` naks transient faults with backoff up to the consumer's `NATS_MAX_DELIVER` (3 — **already set** on the Go consumer, unlike the Python workers' `-1`), publishing terminal `failed` only on the last attempt (no `failed` on a retry, or the API terminal-status guard would discard the retry's `completed`). **Go-specific correction vs a naive copy:** a `net.Error` in Go is ambiguous — both the `net/http` fetcher and `minio-go` use the net stack, so a dead *site* and a dead *MinIO* both raise `*net.OpError`/`*url.Error`. Transient-eligibility is therefore scoped to the upload step via the `*uploadError` wrapper; a fetcher net error stays terminal. `classifyMinIO` splits unreachable (`net.Error`, no code) from 5xx (`minio.ErrorResponse.Code`). New `errors_test.go` — 16 subtests incl. the scoping guard. `go test ./...` green; `go vet`/`gofmt` clean. **No consumer recreate needed** (max_deliver already 3; no `ConsumerConfig` change). |
+| `7c339a2` ⚠️ **unpushed** | **UF-003 3b — API log lines for swallowed MinIO errors.** `stat_minio_size` (`api/app/core/storage.py`) and `_compute_content_hash` (`api/app/core/result_consumer.py`) both caught `Exception` and returned a fallback (0 / None) with **no log**. The stat one is money-adjacent: a silent stat→0 permanently under-counts the user's storage quota. Added one `logger.warning` each (`minio_stat_failed`, `content_hash_failed`); best-effort by design so control flow is unchanged. Kept to one line each — `result_consumer.py` is deleted by the Temporal migration. `ruff`/`ruff-format` clean. **Closes UF-003 (P3b).** |
 
 ### Clerk production cutover (2026-07-03)
 
@@ -193,9 +190,9 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 | 1b | Q5 — cold starts + transient retry | ✅ **done, verified in prod** (`fbcf254` + consumer recreate; `max_deliver: 3`) |
 | 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | ✅ **done, verified in prod** (`8168760`; image deployed, classifier verified against real MinIO artifacts; 6 poisoned baselines nulled) |
 | 3 | UF-001 — MinIO missing from `/health/ready` | ✅ **done (unpushed)** (`98b25ec`; shipped as the `/health/deps` split, not a probe change) |
-| 3b | UF-003 — inconsistent MinIO write-path failure handling | ⏳ **in progress (unpushed).** playwright 3a ✅ `2432be7`, LLM aiohttp gap ✅ `6ad95e3`. **Remaining: Go worker 3a → 3b `result_consumer` log lines.** ← **START HERE** |
-| 4 | Q1–Q4 close-out (bookkeeping) | open |
-| 5 | BUG-002 — Dependabot critical + highs only | open — **now 8 critical / 13 high** (was 1 crit / 11 high); the count is drifting up |
+| 3b | UF-003 — inconsistent MinIO write-path failure handling | ✅ **done (unpushed).** playwright 3a `2432be7`, LLM aiohttp gap `6ad95e3`, Go worker 3a `fbce01f`, 3b log lines `7c339a2`. All four parts closed 2026-07-24. |
+| 4 | BUG-002 — Dependabot critical + highs only | open — **now 8 critical / 13 high** (was 1 crit / 11 high); the count is drifting up ← **START HERE** |
+| 5 | Q1–Q4 close-out (bookkeeping) | open |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---
