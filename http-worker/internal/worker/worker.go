@@ -166,7 +166,7 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int, workerPoolSize int) er
 			sem <- struct{}{} // Acquire a slot
 			go func(m *nats.Msg) {
 				defer func() { <-sem }() // Release slot when the job finishes
-				w.handleMessage(ctx, m)
+				w.handleMessage(ctx, m, maxDeliver)
 			}(msg)
 		}
 	}
@@ -182,7 +182,7 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int, workerPoolSize int) er
 //  7. Upload to MinIO (latest/ + history/)
 //  8. Publish "completed" or "failed" result event
 //  9. Ack the NATS message (only after MinIO write succeeds)
-func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
+func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver int) {
 	// --- Step 1: Parse the incoming job message (schema_version 2) ---
 	var job ScrapeMessage
 	if err := json.Unmarshal(msg.Data, &job); err != nil {
@@ -292,13 +292,47 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 	// --- Steps 5–7: Fetch, format, upload ---
 	minioPath, err := w.processJob(ctx, &job, f)
 	if err != nil {
-		slog.Error("Job failed", "job_id", job.JobID, "run_id", job.RunID, "error", err)
+		// UF-003 3a. This branch used to publish "failed" + Ack on *every* error,
+		// which made a transient MinIO write fault as permanent as a dead site —
+		// the Ack preempts JetStream redelivery, so the queue never retried, even
+		// though the fetch + format had already succeeded. Now a transient infra
+		// fault is naked back for a bounded redelivery; only the final outcome is
+		// published. Same posture as the playwright/LLM workers (see errors.go).
+		attempt := 1
+		if meta, merr := msg.Metadata(); merr == nil {
+			attempt = int(meta.NumDelivered)
+		}
+		kind := classify(err)
+
+		if kind == transient && attempt < maxDeliver {
+			delay := retryDelay(attempt, transientBaseDelay, transientMaxDelay)
+			slog.Warn("Transient failure, naking for redelivery",
+				"job_id", job.JobID, "run_id", job.RunID,
+				"attempt", attempt, "max_attempts", maxDeliver, "retry_in", delay, "error", err)
+			// Deliberately no "failed" publish: the API's terminal-status guard
+			// would lock the run as failed and then discard the retry's "completed".
+			// Only the final attempt reports an outcome. Redelivery re-runs the whole
+			// scrape — there is no partial-progress checkpoint.
+			if nakErr := msg.NakWithDelay(delay); nakErr != nil {
+				slog.Error("Failed to nak after transient failure", "job_id", job.JobID, "error", nakErr)
+			}
+			return
+		}
+
+		// Terminal, or the last attempt of a transient failure. Report and ack —
+		// redelivery cannot recover a dead site or a bad key, and we are out of retries.
+		errText := err.Error()
+		if kind == transient {
+			errText = fmt.Sprintf("%s (gave up after %d attempts)", errText, attempt)
+		}
+		slog.Error("Job failed", "job_id", job.JobID, "run_id", job.RunID,
+			"kind", kind, "attempt", attempt, "error", errText)
 		if pubErr := w.publishResult(resultMessage{
 			JobID:        job.JobID,
 			RunID:        job.RunID,
 			Status:       "failed",
 			Source:       "scrape",
-			Error:        err.Error(),
+			Error:        errText,
 			CrawlContext: job.CrawlContext,
 		}); pubErr != nil {
 			slog.Error("Failed to publish 'failed' result", "job_id", job.JobID, "run_id", job.RunID, "error", pubErr)
@@ -307,8 +341,6 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg) {
 			}
 			return
 		}
-		// Ack even on failure — the result event already told the API it failed.
-		// Not acking would redeliver, but the scrape already failed (e.g. site down).
 		if ackErr := msg.Ack(); ackErr != nil {
 			slog.Error("Failed to ack message after failed job", "job_id", job.JobID, "error", ackErr)
 		}
@@ -355,7 +387,10 @@ func (w *Worker) processJob(ctx context.Context, job *ScrapeMessage, f *fetcher.
 
 	minioPath, err := w.storage.Upload(ctx, job.JobID, ext, formatted)
 	if err != nil {
-		return "", fmt.Errorf("upload failed: %w", err)
+		// Wrap in *uploadError so handleMessage can tell a MinIO write fault (a
+		// transient-retry candidate) apart from a net error raised by the fetcher
+		// against a dead site (terminal). See errors.go.
+		return "", &uploadError{err: fmt.Errorf("upload failed: %w", err)}
 	}
 
 	return minioPath, nil

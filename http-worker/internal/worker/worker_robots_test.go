@@ -77,7 +77,7 @@ func TestHandleMessage_RobotsDisallowed(t *testing.T) {
 		Options:       &Options{RespectRobots: true},
 	})
 
-	w.handleMessage(context.Background(), msg)
+	w.handleMessage(context.Background(), msg, 3)
 
 	// Exactly one publish: the "failed" result.  No "running" event because
 	// the robots check fires before the running publish (ADR-004 ordering).
@@ -115,7 +115,7 @@ func TestHandleMessage_RobotsAllowed_Proceeds(t *testing.T) {
 		Options:       &Options{RespectRobots: true},
 	})
 
-	w.handleMessage(context.Background(), msg)
+	w.handleMessage(context.Background(), msg, 3)
 
 	// Regardless of how processJob fails, the first publish must be "running"
 	// (not "robots_txt_disallowed"), proving the robots gate let it through.
@@ -148,7 +148,7 @@ func TestHandleMessage_RespectRobotsFalse_SkipsCheck(t *testing.T) {
 		// Options nil (respect_robots defaults to false)
 	})
 
-	w.handleMessage(context.Background(), msg)
+	w.handleMessage(context.Background(), msg, 3)
 
 	if js.publishCalls == 0 {
 		t.Fatal("expected at least one publish, got 0")
@@ -191,7 +191,7 @@ func TestHandleMessage_MalformedProxyURL_FailsWithoutRetry(t *testing.T) {
 		Credentials:   &Credentials{EncryptedProxyURL: string(token)},
 	})
 
-	w.handleMessage(context.Background(), msg)
+	w.handleMessage(context.Background(), msg, 3)
 
 	if js.publishCalls != 1 {
 		t.Fatalf("expected 1 publish (failed), got %d", js.publishCalls)
