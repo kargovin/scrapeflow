@@ -22,5 +22,6 @@ async def stat_minio_size(minio: Minio, path: str) -> int:
         stat = await minio.stat_object(bucket, key)
         size = stat.size
         return int(size) if isinstance(size, int) else 0
-    except Exception:
+    except Exception as exc:
+        logger.warning("minio_stat_failed", path=path, error=str(exc))
         return 0

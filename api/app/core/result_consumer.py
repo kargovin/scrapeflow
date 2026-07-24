@@ -54,7 +54,8 @@ async def _compute_content_hash(minio_path: str, minio: Minio) -> str | None:
         data = await response.read()
         response.close()
         return xxhash.xxh64(data).hexdigest()[:16]
-    except Exception:
+    except Exception as exc:
+        logger.warning("content_hash_failed", minio_path=minio_path, error=str(exc))
         return None
 
 
