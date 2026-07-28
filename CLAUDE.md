@@ -77,10 +77,13 @@ path (nothing ripped out).
   new `/health/deps` endpoint, split from the `/health/ready` probe) → **UF-003 (P3b) ✅ done,
   unpushed** inconsistent MinIO write-path failure handling: playwright 3a `2432be7` + LLM aiohttp
   gap `6ad95e3` + Go worker 3a `fbce01f` (new `http-worker/internal/worker/errors.go`) + 3b
-  `result_consumer` log lines `7c339a2` → **BUG-002 Dependabot crit+highs (8 crit / 13 high,
-  drifting up)** ← **resume here** → Q1–Q4 close-out. New: **BUG-004** (screenshots orphaned on
-  every path) filed to §4. **⚠️ `develop` is 7 commits ahead of `main`, all unpushed and
-  undeployed.**
+  `result_consumer` log lines `7c339a2` → **BUG-002 Dependabot crit+highs ✅ closed in prod
+  2026-07-28** (was 8 crit / 13 high → now **0 crit / 0 high**; `b9c8a1a` Go x/crypto, `e8726bf`
+  Python incl. forced clerk 5→6, `b110591` frontend js-cookie override + postcss/vite; login
+  smoke-tested on deploy) → **Q1–Q4 close-out ← resume here** (bookkeeping). New: **BUG-004**
+  (screenshots orphaned on every path) filed to §4. Remaining Dependabot = **47 medium/low only**
+  (aiohttp ×21 + dompurify ×17 dominate — both transitive, low-reach), out of BUG-002 scope.
+  **`develop` and `main` are level and deployed.**
 - **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
 - **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).
 - **Rollout:** one product, two engines — route new work to v2 (Temporal), drain + cut v1 (NATS) per-flow when proven; reversible each step. End state retires `result_consumer`/`scheduler`/`webhook_loop`/`advisory`/`coordinator` + NATS, and makes the API thin/horizontally scalable.

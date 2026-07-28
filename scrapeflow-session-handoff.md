@@ -66,12 +66,32 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ✅ START HERE (2026-07-24) — P3b CLOSED; next is P4 (BUG-002 Dependabot)
-  **P3b (UF-003 — inconsistent MinIO write-path failure handling) is DONE — all four parts.**
-  Next queue item is **P4 (BUG-002 Dependabot, 8 crit / 13 high, drifting up)**, then P5 (Q1–Q4
-  close-out). See `docs/project/phase4-backlog.md` §1.
+- ## ✅ START HERE (2026-07-28) — BUG-002 CLOSED in prod; next is P5 (Q1–Q4 close-out)
+  **P4 (BUG-002 — Dependabot critical + highs) is DONE and DEPLOYED.** Went **8 crit / 13 high →
+  0 crit / 0 high**. Three commits, one per ecosystem, all on `main` and deployed; **login
+  smoke-tested on the deploy 2026-07-28** (the clerk 5→6 gate — see below). Next queue item is
+  **P5 (Q1–Q4 close-out, bookkeeping)**. See `docs/project/phase4-backlog.md` §1.
 
-  **⚠️ `develop` is 7 commits ahead of `main` and NOT pushed. Nothing is deployed** — all local.
+  | Commit | What |
+  |--------|------|
+  | `b9c8a1a` | Go http-worker: `golang.org/x/crypto` 0.23→0.52 — clears **11 alerts (all 8 crit + 3 high)**, all SSH-only (not reachable; http-worker runs no SSH). Forced `go` directive → 1.25 (x/crypto v0.52 requires it); Dockerfile builder `golang:1.22`→`1.25`. Also fixed a latent wrong import in `worker_test.go` (behind `//go:build integration`, so it never built in CI). |
+  | `e8726bf` | API: python-multipart 0.0.22→0.0.32, cryptography 46→48, starlette 1.0→1.3.1, pyjwt 2.12→2.13, Mako 1.3.10→1.3.12 — **8 high**. **clerk-backend-api 5.0.6→6.0.1 was REQUIRED, not scope creep:** clerk 5.x hard-pins `cryptography<47`, and every cryptography <48.0.1 is vulnerable, so the crypto fix is unreachable on clerk 5. Verified clerk 6's API surface vs our code (`is_signed_in` is now a *property* not a field, but works; `authenticate_request`/`AuthenticateRequestOptions`/`users.get()`/`email_addresses` all intact) — no code change. `uv.lock` diff is large because the committed lock was **stale** (missing croniter/xxhash/hiredis/pre-commit); regenerating reconciled it. 249 API tests green. |
+  | `b110591` | Frontend: js-cookie 3.0.5→3.0.7, postcss 8.5.14→8.5.24, vite 8.0.12→8.1.5 — **3 high**. js-cookie is pinned exactly by `@clerk/shared`, so forced via an npm `overrides` entry. postcss/vite are dev/build-time + Windows-only, not reachable in prod (Linux, pre-built static) — bumped for completeness. Prod build passes, bundle unchanged (~94 KB gzip). |
+
+  **Remaining Dependabot = 47 medium/low, deliberately out of BUG-002 scope.** Dominated by two
+  noisy transitive deps: **aiohttp ×21** (fix 3.14.1) and **dompurify ×17** (fix 3.4.12). Also
+  x/net ×1 (go, direct, fix 0.55.0), react-router ×3 + react-router-dom ×1 (npm), and
+  Pygments/idna/pydantic-settings/pytest ×1 each (pip). These are a future clean-up, not urgent.
+
+  **Consumer-recreate note:** none needed for BUG-002 (no `ConsumerConfig` change). The pre-existing
+  playwright `2432be7` recreate backstop (from P3b) still applies whenever those changes are
+  reconciled — non-urgent (per-worker `num_delivered` cap prevents looping).
+
+  **✅ `develop` and `main` are level at `b110591` and deployed.**
+
+  <details><summary>Prior START HERE (2026-07-24) — P3b/UF-003 detail, now closed</summary>
+
+  **P3b (UF-003 — inconsistent MinIO write-path failure handling) is DONE — all four parts.**
   In order:
   | Commit | What |
   |--------|------|
@@ -112,6 +132,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   moot until these commits are pushed + deployed (they aren't). Verify NATS consumer state only via
   `nats consumer info **--json**` (the table omits `Max Deliver` when `-1`), never the worker's
   `subscribed` log line (prints config, not the live consumer).
+
+  </details>
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
@@ -152,6 +174,10 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 | `6ad95e3` ⚠️ **unpushed** | **UF-003 3a — LLM worker aiohttp gap.** The playwright port surfaced that the LLM classifier matched MinIO faults **only** via `S3Error.code` — which fires when MinIO returns a 5xx (overload) but **not** when MinIO is *unreachable* (pod down → `aiohttp.ClientConnectionError`, no `.code`), so the literal "MinIO down" case fell through to TERMINAL and failed permanently. Added `aiohttp.ClientConnectionError`/`ServerTimeoutError` to `_TRANSIENT_TYPES` (mirrors playwright) + declared `aiohttp` in `pyproject`. 3 tests → **90**. |
 | `fbce01f` ⚠️ **unpushed** | **UF-003 3a — Go http-worker naks transient MinIO faults.** `handleMessage` published `failed` + `Ack` on **every** `processJob` error, so a momentary MinIO write fault permanently failed a job whose fetch + format had already succeeded — same ack-on-failure mode as playwright/LLM, latent on the Go worker. New `http-worker/internal/worker/errors.go`: `classify()` (transient/terminal), `classifyMinIO()`, `retryDelay()` (5s→60s cap). `processJob` wraps the `Upload()` error in a typed `*uploadError`; `handleMessage` naks transient faults with backoff up to the consumer's `NATS_MAX_DELIVER` (3 — **already set** on the Go consumer, unlike the Python workers' `-1`), publishing terminal `failed` only on the last attempt (no `failed` on a retry, or the API terminal-status guard would discard the retry's `completed`). **Go-specific correction vs a naive copy:** a `net.Error` in Go is ambiguous — both the `net/http` fetcher and `minio-go` use the net stack, so a dead *site* and a dead *MinIO* both raise `*net.OpError`/`*url.Error`. Transient-eligibility is therefore scoped to the upload step via the `*uploadError` wrapper; a fetcher net error stays terminal. `classifyMinIO` splits unreachable (`net.Error`, no code) from 5xx (`minio.ErrorResponse.Code`). New `errors_test.go` — 16 subtests incl. the scoping guard. `go test ./...` green; `go vet`/`gofmt` clean. **No consumer recreate needed** (max_deliver already 3; no `ConsumerConfig` change). |
 | `7c339a2` ⚠️ **unpushed** | **UF-003 3b — API log lines for swallowed MinIO errors.** `stat_minio_size` (`api/app/core/storage.py`) and `_compute_content_hash` (`api/app/core/result_consumer.py`) both caught `Exception` and returned a fallback (0 / None) with **no log**. The stat one is money-adjacent: a silent stat→0 permanently under-counts the user's storage quota. Added one `logger.warning` each (`minio_stat_failed`, `content_hash_failed`); best-effort by design so control flow is unchanged. Kept to one line each — `result_consumer.py` is deleted by the Temporal migration. `ruff`/`ruff-format` clean. **Closes UF-003 (P3b).** |
+| `9a73b70` | **docs (BUG-003 note).** Recorded the cross-worker bot-wall **error-string divergence** as a later-phase cleanup, not a bug: the Go worker reports a wall as `non-2xx: 403` (hard block, caught by the status guard at `fetcher.go:72`), while playwright reports `blocked:akamai` (soft-block 200, caught by body regex). The server serves each worker a *different* response because they present differently on the wire — the same reason BUG-003 only existed on playwright. Deferred to the Temporal activity layer / post-Phase-4 block-handling tiers (gated on UF-002), where a shared `blocked:<vendor>` taxonomy has a natural home. |
+| `b9c8a1a` | **BUG-002 (1/3) — Go http-worker `golang.org/x/crypto` 0.23.0 → 0.52.0.** Clears **11 Dependabot alerts (all 8 critical + 3 high)** — every one SSH-related (`PublicKeyCallback` bypass, agent key forwarding, FIDO/U2F, KEX DoS), **not reachable** (http-worker runs no SSH client/server) but transitive and zero-risk. x/crypto v0.52 requires **go 1.25**, so `go mod tidy` bumped the `go` directive; bumped the Dockerfile builder `golang:1.22`→`1.25` to match. Also fixed a **pre-existing wrong import path** in `worker_test.go` (`scrapeflow/worker/internal` → `scrapeflow/http-worker/internal`) that only compiled before because the file is behind `//go:build integration` and never built in CI. `go build`/`vet`/`test` green. |
+| `e8726bf` | **BUG-002 (2/3) — API python deps, 8 high.** python-multipart 0.0.22→0.0.32 (direct; floor raised ≥0.0.30), cryptography 46.0.5→48.0.1 (direct; floor ≥48.0.1), starlette 1.0.0→1.3.1, pyjwt 2.12.1→2.13.0, Mako 1.3.10→1.3.12 (transitive). **clerk-backend-api 5.0.6→6.0.1 was mandatory, not scope creep** — clerk 5.x pins `cryptography<47` and every cryptography <48.0.1 is vulnerable, so the crypto CVE is unfixable on clerk 5. Verified clerk 6's surface against our code (`jwt.py`/`dependencies.py`/`user_sync.py`): `Clerk(bearer_auth=)`, `authenticate_request`, `AuthenticateRequestOptions`, `RequestState.is_signed_in` (now a **property**, not a dataclass field, but works) / `.payload` / `.reason`, `users.get().email_addresses[0].email_address` — all intact, **no code change**. The `uv.lock` diff is large because the committed lock was **stale** (missing declared croniter/xxhash/hiredis + dev pre-commit); regenerating reconciled it. **249 API tests green** on the rebuilt image; login smoke-tested on deploy. |
+| `b110591` | **BUG-002 (3/3) — frontend, 3 high.** js-cookie 3.0.5→3.0.7 (runtime; prototype-hijack cookie injection) — pinned **exactly** by `@clerk/shared`, so forced via an npm `overrides` entry (3.0.5→3.0.7 is an API-compatible patch). postcss 8.5.14→8.5.24 and vite 8.0.12→8.1.5 (dev/build-time; both **Windows-/dev-only**, not reachable in our Linux prod serving pre-built static). Prod build passes (`tsc -b && vite build`), main bundle unchanged (~94 KB gzip), Monaco still a lazy chunk, `@vitejs/plugin-react` 6 peer holds against vite 8.1.5. |
 
 ### Clerk production cutover (2026-07-03)
 
@@ -189,10 +215,10 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 | 1 | Q6 — LLM worker `ack_wait` | ✅ **done, verified in prod** (`6fb5b9c` + consumer recreate) |
 | 1b | Q5 — cold starts + transient retry | ✅ **done, verified in prod** (`fbcf254` + consumer recreate; `max_deliver: 3`) |
 | 2 | BUG-003 — bot walls stored as `completed` (minimum fix) | ✅ **done, verified in prod** (`8168760`; image deployed, classifier verified against real MinIO artifacts; 6 poisoned baselines nulled) |
-| 3 | UF-001 — MinIO missing from `/health/ready` | ✅ **done (unpushed)** (`98b25ec`; shipped as the `/health/deps` split, not a probe change) |
-| 3b | UF-003 — inconsistent MinIO write-path failure handling | ✅ **done (unpushed).** playwright 3a `2432be7`, LLM aiohttp gap `6ad95e3`, Go worker 3a `fbce01f`, 3b log lines `7c339a2`. All four parts closed 2026-07-24. |
-| 4 | BUG-002 — Dependabot critical + highs only | open — **now 8 critical / 13 high** (was 1 crit / 11 high); the count is drifting up ← **START HERE** |
-| 5 | Q1–Q4 close-out (bookkeeping) | open |
+| 3 | UF-001 — MinIO missing from `/health/ready` | ✅ **done, deployed** (`98b25ec`; shipped as the `/health/deps` split, not a probe change) |
+| 3b | UF-003 — inconsistent MinIO write-path failure handling | ✅ **done, deployed.** playwright 3a `2432be7`, LLM aiohttp gap `6ad95e3`, Go worker 3a `fbce01f`, 3b log lines `7c339a2`. All four parts closed 2026-07-24. |
+| 4 | BUG-002 — Dependabot critical + highs only | ✅ **done, deployed 2026-07-28** (`b9c8a1a` Go x/crypto + `e8726bf` Python incl. forced clerk 5→6 + `b110591` frontend). **8 crit / 13 high → 0 crit / 0 high**; login smoke-tested on deploy. 47 medium/low left, out of scope. |
+| 5 | Q1–Q4 close-out (bookkeeping) | open ← **START HERE** |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---
