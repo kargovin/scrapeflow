@@ -66,11 +66,28 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ✅ START HERE (2026-07-28) — Pre-Phase 4 queue is EMPTY; next is the Workflows PRD → ADR-009
-  **P5 (Q1–Q4 close-out) is DONE, and with it the entire §1 pre-migration queue.** Nothing blocks
-  the Temporal migration any more. The next work is **Phase 4 proper: the Workflows PRD (PM
-  template in `docs/process/`), then engine ADR-009** recording the Temporal decision + the v1/v2
-  coexistence contract. See `docs/project/phase4-backlog.md` §2.
+- ## ✅ START HERE (2026-07-28) — queue empty + PRD-016 written; next is **ADR-009 (Architect)**
+  **P5 (Q1–Q4 close-out) is DONE, and with it the entire §1 pre-migration queue** — nothing
+  blocks the Temporal migration. **PRD-016 (Workflows: Pipelines) is written and ready for the
+  Architect:** `docs/project/phase4-prd/PRD-016-workflows-pipelines.md`. The next artifact is
+  **engine ADR-009** (Temporal decision + v1/v2 coexistence contract), which is also where
+  PRD-016's open questions get answered. See `docs/project/phase4-backlog.md` §2.
+
+  **PRD-016 scope call:** it covers **layer A (Pipelines) only** — Delivery sinks (C) and
+  Monitors (B) get their own PRDs, so the Architect isn't designing against a moving target.
+  Three things in it worth not re-deriving:
+  - **R6 is the acceptance gate.** Reproduce *today's* `scrape → LLM → webhook` recipe as a
+    pipeline with equivalent output **before** designing any new block type. If the model can't
+    express what already works, it's wrong.
+  - **R4 makes "retry lives in exactly one visible layer" a hard requirement**, not a
+    preference — that's the Q5/Q6/Q7 cluster's whole lesson written into the spec.
+  - **OQ-6 is the do-not-delete list.** LLM cold-start handling (`ensure_ready()` + 180s
+    timeout) and the transient/terminal storage-fault classifier are **block requirements**,
+    not NATS artifacts. They read as plumbing and will be deleted with it if nobody says so.
+
+  The two OQs most likely to produce a subtle correctness bug: **OQ-2** (editing a pipeline
+  while a run from the previous version is in flight — pin or adopt?) and **OQ-3**
+  (what *structurally* prevents a unit of work running on both lanes).
 
   **What P5 actually found (it was not pure bookkeeping).** All four were verified against live
   code rather than taken on trust, and **two had landed on a different option than the one

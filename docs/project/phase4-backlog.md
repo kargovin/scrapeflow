@@ -76,6 +76,13 @@ becomes thin and horizontally scalable (drops the single-replica / `Recreate` co
 **Next artifacts:** PRD (PM template) → engine **ADR-009** recording the Temporal decision and
 the v1/v2 coexistence contract.
 
+| Artifact | State |
+|---|---|
+| **[PRD-016 — Workflows: Pipelines](./phase4-prd/PRD-016-workflows-pipelines.md)** | ✅ **written 2026-07-28 — ready for Architect.** Covers layer **A only**; C and B get their own PRDs so the Architect isn't designing against a moving target. Acceptance gate is **R6**: reproduce today's `scrape → LLM → webhook` recipe as a pipeline with equivalent output *before* any new block type is designed. 9 open questions for the Architect — **OQ-2** (editing a pipeline with runs in flight) and **OQ-3** (structurally enforcing one-lane-only) are the two most likely to produce a subtle correctness bug. **OQ-6** is the do-not-delete list: LLM cold-start handling + the transient/terminal storage classifier are *block requirements*, not NATS artifacts. |
+| PRD-017 — Delivery sinks (C) | not started — write after A ships |
+| PRD-018 — Monitors (B) | not started — absorbs the dormant scheduled-crawl gap |
+| **ADR-009 — engine decision + coexistence contract** | not started — Architect's first artifact, answers PRD-016's OQs |
+
 **Cutover gotchas to handle at migration time (not deferred):**
 1. A job must run on **exactly one lane** — never both (double-scrape / double-LLM-bill risk).
 2. Moving a recurring job to a Temporal Schedule requires **disabling it in v1**

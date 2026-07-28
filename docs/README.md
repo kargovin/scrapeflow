@@ -33,8 +33,19 @@ Day-to-day docs that are still actively consulted.
 |------|----------|
 | [`project/COMMANDS.md`](project/COMMANDS.md) | All runnable commands — Docker Compose, tests, Alembic, NATS, Redis, API curl |
 | [`project/DEVOPS_SPEC.md`](project/DEVOPS_SPEC.md) | k3s deployment spec — namespaces, Flux, ingress, sealed secrets |
-| [`project/open-questions.md`](project/open-questions.md) | Open design questions carried across phases |
+| [`project/open-questions.md`](project/open-questions.md) | Q1–Q8 design questions — **all closed** (Q1–Q7 resolved, Q8 do-not-fix); kept for the reasoning trail |
 | [`project/usages.md`](project/usages.md) | Quick reference — how Redis and MinIO are used in the project |
+
+### Phase 4 — Temporal durable-workflows migration
+
+| File | Contents |
+|------|----------|
+| **[`project/phase4-backlog.md`](project/phase4-backlog.md)** | **Single source of truth for Phase 4 — start here.** §3 lists bugs the migration *deletes*; check it before fixing any orchestration bug |
+| [`project/phase4-prd/`](project/phase4-prd/) | Phase 4 PRDs (PRD-016 →) — one file per feature layer |
+| [`project/workflows-scoping.md`](project/workflows-scoping.md) | The Workflows feature scoping + engine comparison |
+| [`project/temporal-full-migration.md`](project/temporal-full-migration.md) | Complete change inventory + strangler-fig migration sequence |
+| [`project/open-bugs.md`](project/open-bugs.md) | BUG-001 → BUG-004 |
+| [`project/usage-findings.md`](project/usage-findings.md) | UF-001 → UF-003 — findings from running the platform |
 
 ---
 
