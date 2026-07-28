@@ -175,6 +175,31 @@ are NOT blocks** — a human hits the same page, and reporting them as failures 
 - **Content-dedup (PRD-015):** ensure a block page's hash is never stored as a baseline.
 - **UF-002 (per-user proxy):** the middle/full tiers depend on proxy rotation the current single-proxy model can't provide.
 
+### Cross-worker error-string divergence (noted 2026-07-28 — NOT a bug, a later-phase cleanup)
+
+The two workers report the *same* wall with *different* error strings, because the server serves
+each of them a **different response** (they present differently on the wire):
+
+- **Go http-worker** (plain HTTP client → obvious bot) gets a **hard `403`**. Caught by the generic
+  non-2xx guard at `fetcher/fetcher.go:72`, at fetch time, on status alone — the body is never
+  inspected. Error string: `non-2xx response from <url>: 403`. **No vendor**, does not join the
+  `blocked:<vendor>` contract.
+- **Playwright worker** (headed real Chrome, ADR-008 stealth → passes as human) gets a **`200` + JS
+  challenge**. A 200 sails past any status check, so the only tell is the body — `detect_block()`'s
+  Tier-1 regex → `blocked:akamai`.
+
+This asymmetry is **inherent, not a defect**: it is the same reason BUG-003 existed only on the
+Playwright worker (a soft-block 200 is exactly what a status check cannot catch, per the CLAUDE.md
+decision record). Both workers correctly *fail* the job — the divergence is cosmetic/observability
+only, and unifying it would mean teaching the Go worker to body-sniff non-2xx responses.
+
+**Deliberately deferred, not fixed now.** The clean home for a single "blocked" outcome with a
+shared vendor taxonomy is the **Temporal activity layer** (fetch + block become activities with one
+failure model), so doing it today is effort the migration partly redoes. It also naturally belongs
+with the **middle/full block-handling tiers** (getting *past* walls), which are already deferred
+post-Phase-4, gated on UF-002 — if we build vendor-conditional routing then, the Go worker will
+need a vendor too, and that is the moment to unify the string. Until then: known, intentional.
+
 ---
 
 ## BUG-004 — Screenshots are written to MinIO and then dropped on the floor
