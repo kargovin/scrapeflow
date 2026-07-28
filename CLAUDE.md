@@ -80,10 +80,13 @@ path (nothing ripped out).
   `result_consumer` log lines `7c339a2` → **BUG-002 Dependabot crit+highs ✅ closed in prod
   2026-07-28** (was 8 crit / 13 high → now **0 crit / 0 high**; `b9c8a1a` Go x/crypto, `e8726bf`
   Python incl. forced clerk 5→6, `b110591` frontend js-cookie override + postcss/vite; login
-  smoke-tested on deploy) → **Q1–Q4 close-out ← resume here** (bookkeeping). New: **BUG-004**
-  (screenshots orphaned on every path) filed to §4. Remaining Dependabot = **47 medium/low only**
-  (aiohttp ×21 + dompurify ×17 dominate — both transitive, low-reach), out of BUG-002 scope.
-  **`develop` and `main` are level and deployed.**
+  smoke-tested on deploy) → **Q1–Q4 close-out ✅ done 2026-07-28** (Q2 landed as Option **C**, a
+  Postgres `BEFORE UPDATE` trigger, and Q4 as Option **B**, `PATCH schedule_status` — both differ
+  from the option the doc recommended; **Q8 closed alongside as do-not-fix**). **§1 pre-migration
+  queue is now EMPTY — resume at Phase 4 proper: the Workflows PRD → engine ADR-009** (backlog §2).
+  Deferred, not blocking: **BUG-004** (screenshots orphaned on every path) in §4, and the remaining
+  Dependabot = **47 medium/low only** (aiohttp ×21 + dompurify ×17 dominate — both transitive,
+  low-reach), out of BUG-002 scope. **`develop` and `main` are level and deployed.**
 - **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
 - **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).
 - **Rollout:** one product, two engines — route new work to v2 (Temporal), drain + cut v1 (NATS) per-flow when proven; reversible each step. End state retires `result_consumer`/`scheduler`/`webhook_loop`/`advisory`/`coordinator` + NATS, and makes the API thin/horizontally scalable.
@@ -133,6 +136,7 @@ Each persona operates with only the outputs from the persona before them — the
 | `jobs.updated_at` | Postgres BEFORE UPDATE trigger, not SQLAlchemy `onupdate` | `onupdate` silently skips `db.execute(update(...))` paths (scheduler, cancel route); trigger fires on every UPDATE regardless of path |
 | Batch `job_runs` routing | `job_runs.batch_item_id` FK set; `job_id = NULL` for batch runs; result consumer routes by checking which FK is set | ADR-006 — workers are unchanged, result consumer gains a routing branch |
 | API keys uniqueness | `UniqueConstraint(user_id, name)` on `api_keys`; `POST /users/api-keys` returns 409 on duplicate | Revoked keys still hold their name — names are identifiers, not recycled |
+| Disabling a scheduled job (Q4) | Its **own operation**, not a side effect of `DELETE`: `PATCH /jobs/{id}` `{"schedule_status": "paused"}`. `jobs.schedule_status` is **tri-state** — nullable, `CHECK IN ('active','paused')`, where `NULL` = not a scheduled job at all. The scheduler selects only `schedule_status = 'active'` (`scheduler.py`), backed by a partial index. `DELETE /jobs/{id}` keeps soft-cancel (active `job_runs` only, **never** touches `schedule_status`); hard delete is the explicit `?permanent=true` mode | Cancelling a run and retiring a schedule are different intents — folding them into `DELETE` would make a one-off cancel silently permanent for a recurring job. Splitting them is what lets one route back both the user-facing soft **Cancel** and the admin permanent-delete. A bare `is_active` boolean (the originally recommended option) could not express "not scheduled at all". **Migration-critical:** this flag is how cutover gotcha #2 is enforced — a job moved to a Temporal Schedule must be paused in v1 or it fires on **both** lanes |
 | Page actions field naming | Schema field `actions` maps to model column `playwright_actions`; popped from PATCH updates dict and set explicitly (same pattern as `proxy_url`/`cookies`) | Consistent with `playwright_options` naming convention on the model |
 | Action warnings persistence | Worker publishes warnings in NATS `ResultMessage`; result consumer persists to `job_runs.warnings JSONB`; `GET /jobs/{id}/result` reads from DB column | Warnings are not stored in MinIO content — they live in the result message and are captured by the consumer |
 | Webhook event filter | `jobs.webhook_events TEXT[]` (null = all events); filter checked at every `create_webhook_delivery` call site in `result_consumer.py` | Null means no filter (backward compatible); validated against known event set at API boundary |

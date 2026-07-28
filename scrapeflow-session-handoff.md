@@ -66,11 +66,48 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ✅ START HERE (2026-07-28) — BUG-002 CLOSED in prod; next is P5 (Q1–Q4 close-out)
+- ## ✅ START HERE (2026-07-28) — Pre-Phase 4 queue is EMPTY; next is the Workflows PRD → ADR-009
+  **P5 (Q1–Q4 close-out) is DONE, and with it the entire §1 pre-migration queue.** Nothing blocks
+  the Temporal migration any more. The next work is **Phase 4 proper: the Workflows PRD (PM
+  template in `docs/process/`), then engine ADR-009** recording the Temporal decision + the v1/v2
+  coexistence contract. See `docs/project/phase4-backlog.md` §2.
+
+  **What P5 actually found (it was not pure bookkeeping).** All four were verified against live
+  code rather than taken on trust, and **two had landed on a different option than the one
+  originally recommended** — so the doc was actively misleading before this pass:
+  - **Q2** shipped as Option **C (Postgres `BEFORE UPDATE` trigger)**, not the recommended B. The
+    question asked "do some paths bypass ORM assignment?" — they do: the scheduler and cancel
+    route write via `db.execute(update(...))`, which silently skips SQLAlchemy `onupdate`. General
+    lesson: **ORM `onupdate` is a convention; a trigger is an invariant.**
+  - **Q4** shipped as Option **B**, not the recommended A. Disable is its own operation
+    (`PATCH /jobs/{id}` `{"schedule_status":"paused"}`); `DELETE` keeps soft-cancel, with Option C
+    available as `?permanent=true`. The flag is deliberately **tri-state** (`NULL` = not a
+    scheduled job at all), which a bare `is_active` boolean could not express. **This matters for
+    the migration:** `schedule_status` is the switch cutover gotcha #2 depends on — a job moved to
+    a Temporal Schedule must be paused in v1 or it fires on both lanes.
+  - Q1 (Option A — `uq_api_keys_user_name` + `IntegrityError`→409) and Q3 (`webhook_url` → `Text`)
+    shipped exactly as written.
+
+  **Q8 was closed in the same pass as do-not-fix**, so no question in `open-questions.md` is left
+  without a STATUS block. Its Option B refactor targets `result_consumer.py`, which the migration
+  deletes; the `5cb8c7f` source guards stay as the live defence until then. **The Q8 incident is
+  the empirical grounding for ADR-009** — carry the argument, not the code.
+
+  `open-questions.md` now opens with an outcome table and the rule that **where a STATUS block
+  contradicts the discussion beneath it, the STATUS block wins** (Q2, Q4, and Q7 all diverge; Q7's
+  advice outright reverses).
+
+  **Still open, deliberately deferred (both in backlog §4, neither blocking):** **BUG-004**
+  (screenshots orphaned on every path — latent; facet 1 is a *product call*, not a bug fix) and
+  the **47 medium/low Dependabot alerts** (aiohttp ×21 + dompurify ×17 dominate, both transitive).
+
+  **✅ `develop` and `main` are level and deployed** (code at `b110591`; docs commits on top).
+
+  <details><summary>Prior START HERE (2026-07-28) — P4/BUG-002 detail, now closed</summary>
+
   **P4 (BUG-002 — Dependabot critical + highs) is DONE and DEPLOYED.** Went **8 crit / 13 high →
   0 crit / 0 high**. Three commits, one per ecosystem, all on `main` and deployed; **login
-  smoke-tested on the deploy 2026-07-28** (the clerk 5→6 gate — see below). Next queue item is
-  **P5 (Q1–Q4 close-out, bookkeeping)**. See `docs/project/phase4-backlog.md` §1.
+  smoke-tested on the deploy 2026-07-28** (the clerk 5→6 gate — see below).
 
   | Commit | What |
   |--------|------|
@@ -132,6 +169,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   moot until these commits are pushed + deployed (they aren't). Verify NATS consumer state only via
   `nats consumer info **--json**` (the table omits `Max Deliver` when `-1`), never the worker's
   `subscribed` log line (prints config, not the live consumer).
+
+  </details>
 
   </details>
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
@@ -218,7 +257,8 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 | 3 | UF-001 — MinIO missing from `/health/ready` | ✅ **done, deployed** (`98b25ec`; shipped as the `/health/deps` split, not a probe change) |
 | 3b | UF-003 — inconsistent MinIO write-path failure handling | ✅ **done, deployed.** playwright 3a `2432be7`, LLM aiohttp gap `6ad95e3`, Go worker 3a `fbce01f`, 3b log lines `7c339a2`. All four parts closed 2026-07-24. |
 | 4 | BUG-002 — Dependabot critical + highs only | ✅ **done, deployed 2026-07-28** (`b9c8a1a` Go x/crypto + `e8726bf` Python incl. forced clerk 5→6 + `b110591` frontend). **8 crit / 13 high → 0 crit / 0 high**; login smoke-tested on deploy. 47 medium/low left, out of scope. |
-| 5 | Q1–Q4 close-out (bookkeeping) | open ← **START HERE** |
+| 5 | Q1–Q4 close-out | ✅ **done 2026-07-28.** Verified against live code, not taken on trust — **Q2 landed as Option C (Postgres trigger), Q4 as Option B (`PATCH schedule_status`)**, both differing from the doc's recommendation. **Q8 closed alongside as do-not-fix**, so `open-questions.md` has no entry without a STATUS block |
+| — | **§1 queue is EMPTY** | **Next: Phase 4 proper — Workflows PRD → engine ADR-009** (backlog §2) |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---

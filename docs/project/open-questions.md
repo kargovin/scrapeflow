@@ -5,9 +5,42 @@
 > Items raised during implementation that need a decision before code is written.
 > Each entry includes the context, the options, and a recommendation so the discussion starts with something concrete.
 
+> **No open questions remain (as of 2026-07-28).** Every entry now carries a STATUS
+> block at the top of its section. Q1–Q7 are **resolved and shipped**; Q8 is closed as
+> **do-not-fix** (dissolved by the Temporal migration). The sections below are kept for
+> the reasoning trail — read the STATUS block first, then the original context only if
+> you need the *why*. **Where a STATUS block contradicts the discussion beneath it, the
+> STATUS block wins** — several questions landed on a different option than the one
+> originally recommended (Q2 → C not B; Q4 → B not A; Q7's advice outright reversed).
+
+| | Question | Outcome |
+|---|---|---|
+| **Q1** | `(user_id, name)` unique on `api_keys` | ✅ Option **A** — constraint + 409 |
+| **Q2** | `jobs.updated_at` never updated | ✅ Option **C** — Postgres trigger (*not* the recommended B) |
+| **Q3** | `jobs.webhook_url` should be `Text` | ✅ Done as written |
+| **Q4** | `DELETE` doesn't disable scheduled jobs | ✅ Option **B** — `PATCH schedule_status`, + C as `?permanent=true` |
+| **Q5** | LLM timeout vs cold starts | ✅ A + B + C, live in prod. **Half survives Temporal** — port `ensure_ready()` |
+| **Q6** | NATS `ack_wait` on LLM consumer | ✅ Fixed + consumer recreated in prod |
+| **Q7** | No retry on transient LLM failures | ✅ Resolved *by* Q5's option B. **Advice reversed** — do not restore `llm_max_retries=2` |
+| **Q8** | `job_runs.status` overloaded | ⛔ **Do not fix** — deleted by the migration; feeds ADR-009 |
+
 ---
 
 ## Q1 — Should `(user_id, name)` be unique on `api_keys`?
+
+> **STATUS: RESOLVED — shipped in Phase 3, closed out 2026-07-28.** **Option A** as
+> recommended, implemented exactly as the "what needs to happen" list below.
+>
+> - `UniqueConstraint("user_id", "name", name="uq_api_keys_user_name")` on
+>   `ApiKey.__table_args__` — `api/app/models/api_key.py:13`
+> - Migration `f050c65b689a` (migration 3.10)
+> - `POST /users/api-keys` catches `IntegrityError` → **409 Conflict**
+>   ("API key name already exists") — `api/app/routers/users.py:54`
+>
+> **Option C (uniqueness only on non-revoked keys) was not taken, and that is the
+> live behaviour:** a revoked key still holds its name, so the name cannot be
+> reused. Names are identifiers, not recycled. Revisit only if a user actually
+> asks to reuse a retired key's name.
 
 **Raised during:** Phase 1 — `POST /api-keys` implementation
 **File:** `api/app/routers/users.py`, `api/app/models/api_key.py`
@@ -43,6 +76,23 @@ If there is a use case for reusing names after revocation, revisit with Option C
 
 ## Q2 — `jobs.updated_at` exists but is never updated
 
+> **STATUS: RESOLVED — shipped in Phase 3, closed out 2026-07-28.** Landed as
+> **Option C (Postgres trigger)**, not the recommended Option B.
+>
+> - Migration `ebbcc72c1472` (migration 3.9) creates `set_jobs_updated_at()` +
+>   `trg_jobs_updated_at`, a `BEFORE UPDATE ... FOR EACH ROW` trigger on `jobs`
+> - The model's SQLAlchemy `onupdate` was **removed** — `updated_at` is now
+>   maintained entirely by the database (`api/app/models/job.py:57`)
+>
+> **Why C beat the recommendation.** The question's own framing ("are there paths
+> that bypass ORM assignment?") turned out to answer itself: yes — the scheduler
+> and the cancel route both mutate jobs via `db.execute(update(...))`, which
+> **silently skips `onupdate`**. Option B would have required every current *and
+> future* write path to remember to touch a field; the trigger fires on every
+> `UPDATE` regardless of how it was issued. This is the general lesson worth
+> keeping: *ORM-level `onupdate` is a convention, a trigger is an invariant.*
+> Recorded in `CLAUDE.md` (key decisions table).
+
 **Raised during:** Phase 2 Step 5 — reviewing `job.py` model additions
 **File:** `api/app/models/job.py`
 
@@ -66,6 +116,17 @@ If there is a use case for reusing names after revocation, revisit with Option C
 
 ## Q3 — `jobs.webhook_url` column type should be `Text`
 
+> **STATUS: RESOLVED — shipped in Phase 3, closed out 2026-07-28.** Done exactly as
+> written, no deviation.
+>
+> - `webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)` —
+>   `api/app/models/job.py:76`
+> - Migration `53a03ff4c7a1` (migration 3.3) — `ALTER COLUMN webhook_url TYPE TEXT`,
+>   with a `TEXT → VARCHAR` downgrade
+>
+> Pure type-annotation housekeeping; `VARCHAR` and `TEXT` are functionally
+> equivalent in Postgres, so there was no data or behaviour change.
+
 **Raised during:** Phase 2 Step 10 — testing webhook URL creation
 **File:** `api/app/models/job.py`
 
@@ -82,6 +143,36 @@ If there is a use case for reusing names after revocation, revisit with Option C
 ---
 
 ## Q4 — `DELETE /jobs/{id}` does not disable scheduled jobs
+
+> **STATUS: RESOLVED — shipped in Phase 3, closed out 2026-07-28.** Landed as
+> **Option B**, with Option C added as a separate opt-in mode. Option A
+> (`is_active` boolean) was not used.
+>
+> - **Disable is its own operation:** `PATCH /jobs/{id}` with
+>   `{"schedule_status": "paused"}` (`JobPatch.schedule_status`,
+>   `api/app/schemas/jobs.py:114`; route at `api/app/routers/jobs.py:467`)
+> - **The flag is tri-state, not boolean:** `jobs.schedule_status` is nullable with
+>   `CHECK (schedule_status IN ('active','paused'))` — `NULL` means *not a
+>   scheduled job at all*, which a bare `is_active` boolean could not express
+> - **The scheduler is the enforcement point:** it selects only
+>   `schedule_status == "active"` (`api/app/core/scheduler.py:57`), backed by a
+>   partial index on `schedule_cron IS NOT NULL AND schedule_status = 'active'`
+>   (`api/app/models/job.py:96`)
+> - **`DELETE /jobs/{id}` keeps its soft-cancel semantics** — it cancels active
+>   `job_runs` only and deliberately does **not** touch `schedule_status`.
+>   Option C is available explicitly as `DELETE /jobs/{id}?permanent=true`
+>   (removes MinIO objects, refunds the storage quota, then deletes the row)
+>
+> **Why B over the "simplest" A.** Cancelling a run and retiring a schedule are
+> different user intents, and collapsing them into `DELETE` would have made a
+> one-off cancel silently permanent for a recurring job. Keeping them separate is
+> also what let the frontend expose a soft **Cancel** on the user job-detail page
+> and a permanent-delete Danger Zone on the admin one, from the same route.
+>
+> **Carry-forward into Phase 4.** `schedule_status` is the switch the Temporal
+> cutover depends on: moving a recurring job to a Temporal Schedule **requires**
+> pausing it in v1, or it fires on both lanes (cutover gotcha #2 in
+> `phase4-backlog.md` §2).
 
 **Raised during:** Phase 2 Step 11 — implementing Phase 2 cancellation
 
@@ -469,6 +560,20 @@ Open concerns to think through before committing:
 ---
 
 ## Q8 — `job_runs.status` values are overloaded across pipeline stages
+
+> **STATUS: CLOSED AS "DO NOT FIX" — 2026-07-28.** Not resolved by a fix; **dissolved
+> by the Temporal migration** (`phase4-backlog.md` §3). The recommended Option B
+> (per-stage status values) would refactor a state machine that the migration
+> **deletes**: Temporal owns run state, and `result_consumer.py` — the file holding
+> both the overloading and the loop bug — goes away entirely.
+>
+> **The source guards (`5cb8c7f`) stay in place** and remain the live defence until
+> that code is retired. Do not build Option B on top of them.
+>
+> **What must survive the deletion:** the *lesson*, not the code. Q8 is the empirical
+> grounding for choosing a durable-execution engine at all — a hand-rolled state
+> machine where one missed discriminator check burned ~200 billable LLM calls in five
+> minutes. That argument belongs in **ADR-009**.
 
 **Raised during:** post-Phase-3 usage — traced an infinite-loop bug in `result_consumer.py`
 **File:** `api/app/core/result_consumer.py`, `api/app/models/job_run.py`
