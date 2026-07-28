@@ -407,6 +407,35 @@ Carry all of these into Phase 4.
 
 ## 9. What Phase 4 Will Require From You
 
+> **⚠️ Addendum 2026-07-28 — Phase 4 has started, and one PRD is waiting for you.**
+>
+> **Your next artifact is [ADR-009](../adr/README.md)** — the workflow-engine decision and the
+> v1/v2 coexistence contract. Inputs, in order:
+> 1. **`docs/project/phase4-backlog.md`** — single source of truth for Phase 4 scope. **Read §3
+>    ("dissolved by Temporal — do NOT fix") first:** it lists bugs whose containing code the
+>    migration deletes, so designing fixes for them is wasted work.
+> 2. **[PRD-016 — Workflows: Pipelines](../project/phase4-prd/PRD-016-workflows-pipelines.md)** —
+>    the PM spec, layer A only. It ends with **nine open questions addressed to you**; ADR-009 is
+>    where they get answered. **OQ-2** (a pipeline edited while a run from the previous version is
+>    in flight) and **OQ-3** (what *structurally* prevents a unit of work executing on both lanes)
+>    are the two that produce correctness bugs rather than design disagreements.
+> 3. `workflows-scoping.md` §7 (engine comparison — note its DBOS-first *recommendation* is
+>    superseded; the decision is Temporal) and `temporal-full-migration.md` (change inventory +
+>    strangler-fig sequence).
+>
+> **The engine choice is already made — Temporal.** ADR-009 records and justifies it; it does not
+> re-open it.
+>
+> **Two corrections to the guidance below, which Phase 4 invalidates:**
+> - *"The coordinator service is the template for any future multi-step coordination"* — **no
+>   longer true.** `coordinator/` is on the deletion list; Temporal workflows are the new template.
+> - *"Deleted" is not always deletion.* Two pieces of business logic live inside plumbing the
+>   migration removes and must be **ported into activities**, not dropped: the LLM cold-start
+>   handling (`ensure_ready()` + 180s timeout) and the transient/terminal storage-fault classifier
+>   across all three workers. See PRD-016 **OQ-6**.
+>
+> The deferred-items table below is still live and still yours — none of it has been done.
+
 Phase 3 design is complete. The Tech Lead has the engineering spec and all ADRs. You have no outstanding Phase 3 design work.
 
 **Known open items deferred explicitly to Phase 4:**

@@ -8,7 +8,12 @@
 
 **Severity:** Low (harmless, but noisy)
 **Discovered:** 2026-05-12
-**Status:** Open
+**Status:** ⛔ **CLOSED as do-not-fix (2026-07-28)** — dissolved by the Temporal migration
+(`phase4-backlog.md` §3). `_recover_stale_pending` exists only because the hand-rolled
+scheduler has to detect its own stalled dispatches; Temporal's activity timeouts and retry
+policy make the whole recovery loop unnecessary, and `scheduler.py` is deleted. Fixing the
+query would be work on code scheduled for removal. It is log noise, not a correctness
+problem, so it costs nothing to leave until then.
 
 ### What happens
 

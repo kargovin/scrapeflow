@@ -8,7 +8,15 @@
 > hand-rolled loops retired, NATS removed.** It describes the **end state** and the deltas to
 > reach it. It is a design doc, not a commitment; it feeds a future engine ADR.
 
-**Status:** Draft — for discussion
+> **Status update — 2026-07-28.** No longer hypothetical: **Phase 4 *is* this migration**, and
+> the §1 pre-migration queue is closed (tagged `prephase4`). The change inventory below is the
+> reference for what gets deleted/kept; **[PRD-016](./phase4-prd/PRD-016-workflows-pipelines.md)**
+> is the product spec for the first layer, and **ADR-009** is the next artifact. One correction to
+> carry: the deletions here are not all *pure* deletions — the LLM cold-start handling and the
+> transient/terminal storage-fault classifier live inside code marked for removal but are
+> **business logic that must be ported into the activities** (backlog §3, PRD-016 OQ-6).
+
+**Status:** Draft — for discussion (see status update above)
 **Date:** 2026-07-14
 **Author:** @karthik
 **Decision:** Temporal (chosen over DBOS/Restate for portfolio value + first-class Python **and** Go SDKs)

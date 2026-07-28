@@ -30,6 +30,18 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-006](ADR-006-batch-scraping-data-model.md) | Batch Scraping Data Model | **Accepted** | 2026-04-15 | — | — |
 | [ADR-007](ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** | 2026-04-15 | — | — |
 | [ADR-008](ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** | 2026-07-03 | — | — |
+| ADR-009 *(not written)* | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Next artifact** | — | — | — |
+
+**ADR-009 is the next ADR to write.** It records the Phase 4 engine decision (Temporal, already
+made — see `docs/project/phase4-backlog.md` §2) and the coexistence contract between the existing
+NATS path and the Temporal path. Its inputs: **[PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md)**
+(nine open questions addressed to the Architect), `workflows-scoping.md` §7 (the engine
+comparison), and `temporal-full-migration.md` (change inventory + strangler-fig sequence).
+
+It will eventually **supersede parts of ADR-001/002/004** — the NATS subjects, fat-message schema,
+and worker result contract are all deleted at the migration's end state. Record that in the
+Supersedes column when it lands, not before: those contracts stay authoritative for as long as v1
+serves traffic.
 
 ---
 

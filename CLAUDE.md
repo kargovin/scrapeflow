@@ -71,26 +71,21 @@ path (nothing ripped out).
   Pre-Phase 4 → the migration → **dissolved by Temporal (do NOT fix)** → survives-Temporal.
   §3 exists because roughly half the Phase 3→4 triage list is deleted outright by the migration;
   check it before fixing any orchestration bug.
-- **Pre-Phase 4 queue:** Q6 LLM `ack_wait` ✅ **closed in prod** → Q5 cold starts ✅ **closed in
-  prod** (`fbcf254`; consumer recreated, `max_deliver: 3` verified) → BUG-003 bot walls ✅ **closed
-  in prod** (`8168760`) → UF-001 MinIO health check ✅ **done, unpushed** (`98b25ec`; shipped as a
-  new `/health/deps` endpoint, split from the `/health/ready` probe) → **UF-003 (P3b) ✅ done,
-  unpushed** inconsistent MinIO write-path failure handling: playwright 3a `2432be7` + LLM aiohttp
-  gap `6ad95e3` + Go worker 3a `fbce01f` (new `http-worker/internal/worker/errors.go`) + 3b
-  `result_consumer` log lines `7c339a2` → **BUG-002 Dependabot crit+highs ✅ closed in prod
-  2026-07-28** (was 8 crit / 13 high → now **0 crit / 0 high**; `b9c8a1a` Go x/crypto, `e8726bf`
-  Python incl. forced clerk 5→6, `b110591` frontend js-cookie override + postcss/vite; login
-  smoke-tested on deploy) → **Q1–Q4 close-out ✅ done 2026-07-28** (Q2 landed as Option **C**, a
-  Postgres `BEFORE UPDATE` trigger, and Q4 as Option **B**, `PATCH schedule_status` — both differ
-  from the option the doc recommended; **Q8 closed alongside as do-not-fix**). **§1 pre-migration
-  queue is now EMPTY — resume at Phase 4 proper: the Workflows PRD → engine ADR-009** (backlog §2).
-  Deferred, not blocking: **BUG-004** (screenshots orphaned on every path) in §4, and the remaining
-  Dependabot = **47 medium/low only** (aiohttp ×21 + dompurify ×17 dominate — both transitive,
-  low-reach), out of BUG-002 scope. **`develop` and `main` are level and deployed.**
+- **Pre-Phase 4 queue: ✅ EMPTY as of 2026-07-28** — Q6, Q5/Q7, BUG-003, UF-001, UF-003, BUG-002
+  and Q1–Q4 all closed; everything except the last is verified in production. Tagged
+  **`prephase4`** (`1965953`). Per-item detail lives in `phase4-backlog.md` §1 — it is history now,
+  not a queue. Two carry-forwards that are **not** history, because they are business logic living
+  inside plumbing the migration deletes (backlog §3, PRD-016 OQ-6): the **LLM cold-start handling**
+  (`ensure_ready()` + 180s timeout) and the **transient/terminal storage-fault classifier** on all
+  three workers. Both must be **ported into the Temporal activities, not deleted with NATS.**
+  Deferred and not blocking: **BUG-004** (screenshots orphaned on every path) and **47 medium/low**
+  Dependabot alerts (aiohttp ×21 + dompurify ×17 dominate — both transitive, low-reach).
+  **`develop` and `main` are level and deployed.**
 - **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
 - **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).
 - **Rollout:** one product, two engines — route new work to v2 (Temporal), drain + cut v1 (NATS) per-flow when proven; reversible each step. End state retires `result_consumer`/`scheduler`/`webhook_loop`/`advisory`/`coordinator` + NATS, and makes the API thin/horizontally scalable.
-- **Docs:** `docs/project/workflows-scoping.md` (feature + engine comparison), `docs/project/temporal-full-migration.md` (complete change inventory + migration sequence). Next artifacts: PRD + engine ADR (ADR-009).
+- **Docs:** `docs/project/workflows-scoping.md` (feature + engine comparison — §7's "prototype on DBOS first" is **superseded**, the engine is settled), `docs/project/temporal-full-migration.md` (complete change inventory + migration sequence), `docs/project/phase4-prd/` (PRDs).
+- **PRD-016 — Workflows: Pipelines ✅ written, ready for Architect** (`docs/project/phase4-prd/PRD-016-workflows-pipelines.md`). Covers layer **A only**; Delivery (C) and Monitors (B) get their own PRDs. **R6 is the acceptance gate:** reproduce today's `scrape → LLM → webhook` recipe as a pipeline with equivalent output *before* designing any new block type. **R4 makes "retry lives in exactly one visible layer" a hard requirement** — that is the Q5/Q6/Q7 lesson written into the spec. **Next artifact: engine ADR-009**, which also answers PRD-016's 9 open questions.
 
 ### Phase 3 — Build Process
 Phase 3 simulates how a larger engineering organization works by dividing the build process across distinct Claude personas. Each persona owns a specific part of the process and produces defined outputs before handing off to the next.

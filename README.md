@@ -250,10 +250,21 @@ Workers are deployed as separate k3s Deployments. The HTTP worker uses `strategy
 
 | Document | Purpose |
 |----------|---------|
+| [`docs/README.md`](docs/README.md) | Documentation index — start here |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records (ADR-001 → ADR-008) |
+| [`docs/project/phase4-backlog.md`](docs/project/phase4-backlog.md) | Phase 4 scope — the Temporal durable-workflows migration |
 | [`docs/project/COMMANDS.md`](docs/project/COMMANDS.md) | Dev and ops command reference |
 | [`docs/project/DEVOPS_SPEC.md`](docs/project/DEVOPS_SPEC.md) | k3s deployment spec |
 | [`docs/archive/phase3/production-review.md`](docs/archive/phase3/production-review.md) | Phase 3 hardening review (52 findings, all resolved) |
+
+### Release tags
+
+| Tag | Marks |
+|-----|-------|
+| `v1.0.0` | Phase 1 — MVP |
+| `v2.0.0` | Phase 2 — core features |
+| `v3.0.0` | Phase 3 — production hardening |
+| `prephase4` | Pre-Phase 4 queue closed; last commit before the Temporal migration begins |
 
 ---
 

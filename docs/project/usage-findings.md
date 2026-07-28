@@ -59,7 +59,20 @@ proxy management UI. Phase 4 candidate.
 
 ---
 
-## UF-003 — MinIO failures are handled inconsistently across the write path
+## UF-003 — MinIO failures are handled inconsistently across the write path ✅ FIXED (2026-07-24)
+
+> **CLOSED — all parts, deployed.** 3a on all three workers: playwright `2432be7`,
+> LLM aiohttp gap `6ad95e3`, Go worker `fbce01f` (new
+> `http-worker/internal/worker/errors.go` + 16 tests). 3b log lines `7c339a2`.
+> **Go-specific divergence from the Python port, worth keeping:** a `net.Error` in Go is
+> ambiguous — both the `net/http` fetcher and `minio-go` use the net stack, so a dead
+> *site* and a dead *MinIO* both raise `*net.OpError`/`*url.Error`. Transient-eligibility
+> is therefore scoped to the **upload step** via a typed `*uploadError` wrapper; a fetcher
+> net error stays terminal. In Python that scoping is unnecessary (a connection error can
+> only come from MinIO), which is why type-based classification was safe there.
+> **The transient/terminal split survives Temporal as domain knowledge** — it is a
+> requirement of the activities that replace these workers (backlog §3, PRD-016 OQ-6),
+> not an artifact of NATS. Do not let it be deleted with the plumbing.
 
 Surfaced while closing UF-001. UF-001 was about *observing* a MinIO outage from
 outside; this is about how the system *reacts* to one on the actual job path. Three
@@ -67,7 +80,10 @@ distinct behaviours, none of them right, split across the workers and the consum
 
 ### 3a — playwright + Go workers ack on a MinIO write failure (the Q5 bug, unfixed on two of three workers)
 
-> **Status: playwright ✅ fixed (2026-07-23); Go worker still open.** New
+> **Status: ✅ ALL THREE WORKERS FIXED.** playwright 2026-07-23 (`2432be7`), LLM
+> aiohttp gap 2026-07-23 (`6ad95e3`), Go worker 2026-07-24 (`fbce01f`). The
+> playwright writeup below is preserved as the template the other two were ported
+> from. New
 > `playwright-worker/worker/errors.py` (ported from the LLM worker) classifies the
 > exception; `worker.py`'s general `except` now naks transient MinIO faults with
 > exponential backoff (5/10/20s) up to `playwright_max_delivery_attempts` (3) and only
@@ -149,3 +165,9 @@ under-count is money-adjacent state, so its log line is the one worth adding reg
 than P4 (Dependabot) — it fixes a live ack-on-failure bug *and* consolidates the S3
 classification the migration needs. 3b is a cheap log-line pass with a deliberately low
 ceiling given the deletion. Added to backlog §1 as **P3b**.
+
+> **Outcome (2026-07-24):** done as recommended, and the ordering call held up — porting
+> 3a to the remaining two workers surfaced a **second** latent gap (the LLM worker's
+> `S3Error.code`-only match missing MinIO-*unreachable*) that would not have been found
+> by fixing playwright alone. Consolidating the classification into all three workers
+> *before* the migration means it gets ported once, not a third of it.

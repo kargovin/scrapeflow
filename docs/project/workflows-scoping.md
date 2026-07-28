@@ -8,7 +8,25 @@
 > starting point. It does **not** commit to a build — it is meant to start the discussion
 > with something concrete, and can later spawn a PRD + ADR.
 
-**Status:** Draft — for discussion
+> **⚠️ STATUS UPDATE — 2026-07-28. The exploratory framing below is settled; two parts of
+> this doc are superseded, and one is load-bearing.**
+>
+> - **Superseded — §7's recommendation.** "Prototype Phase 0/1 on DBOS, treat Temporal as a
+>   later step" is **not** what was decided. The engine is **Temporal**, chosen for portfolio
+>   value + first-class Python *and* Go SDKs. The comparison table itself is still the honest
+>   record of *why*, and feeds **ADR-009** — but do not act on the DBOS-first suggestion.
+> - **Superseded — §1's "not a rip-out" non-goal.** True of the *feature*, no longer true of
+>   the *phase*. Phase 4 **is** the full migration: `result_consumer` / `scheduler` /
+>   `webhook_loop` / `advisory` / `coordinator` and NATS all retire at the end state. The
+>   strangler-fig sequence in `temporal-full-migration.md` §9 is how, and coexistence is still
+>   real at every intermediate step — but the end state is a replacement, not an addition.
+> - **Still load-bearing — §4 and §6.** The three nested layers (Pipelines → Delivery →
+>   Monitors) and the state-ownership split (engine owns execution state, thin Postgres mirror
+>   backs the UI) are the shape **PRD-016** was written against.
+> - **§10's next step is done:** PRD-016 exists at
+>   `phase4-prd/PRD-016-workflows-pipelines.md`, scoped to layer **A** only. ADR-009 is next.
+
+**Status:** Draft — for discussion (see status update above)
 **Date:** 2026-07-14
 **Author:** @karthik
 **Source:** exploratory (came across Temporal in a job description)
@@ -225,6 +243,11 @@ k3s homelab, Python-heavy services + one Go worker, single-operator maintenance)
 | **Windmill** | Scripts/flows platform + UI | Medium | Python/TS/Go scripts | Partial — great built-in UI/flows; less a pure durable-exec model | Medium | Low | Product-y, less systems signal |
 | **Extend NATS+Postgres** (status quo) | Keep hand-rolling | **Zero new infra** | N/A | We'd rebuild each by hand (the very thing that caused Q8) | Zero infra / **high code** | N/A (we know it) | Low — "reinvented a workflow engine" |
 
+> **⚠️ The recommendation in the next two paragraphs is SUPERSEDED — see the status update at
+> the top.** The engine decision is **Temporal**, made outright; the DBOS-first prototype path
+> was not taken. The table above stands as the comparison that justifies the choice and is the
+> raw material for **ADR-009**.
+
 **Recommendation:** if the goals include a strong **learning/portfolio outcome** *and* we
 accept the operational weight, **Temporal** — it's the name in the JD, has first-class Python
 **and** Go SDKs (fits both our service languages), and its durable-timer + signal + saga
@@ -284,11 +307,10 @@ shipped, and unlocks Delivery (C) and Monitors (B) as additive layers.
 
 If this direction is approved, the house-style next artifacts are:
 
-1. A **PRD** (PM template — see `docs/archive/phase3/prd/PRD-002-sliding-window-rate-limit.md`)
-   for the Workflows feature: Problem → Goals → Non-goals → User stories → Requirements →
-   Success criteria.
-2. An **ADR** (next number after ADR-008; template in `docs/adr/README.md`) recording the
-   **engine decision** and the coexistence contract with the NATS path.
+1. ✅ **Done — [PRD-016](./phase4-prd/PRD-016-workflows-pipelines.md)** (2026-07-28), scoped to
+   layer **A (Pipelines)** only so C and B don't move the target under the Architect.
+2. ⏭ **Next — ADR-009**, recording the **engine decision** and the v1/v2 coexistence contract.
+   It also answers PRD-016's nine open questions.
 
 ---
 

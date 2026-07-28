@@ -89,6 +89,31 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   while a run from the previous version is in flight — pin or adopt?) and **OQ-3**
   (what *structurally* prevents a unit of work running on both lanes).
 
+  **Tags** (annotated; the older `v1.0.0`/`v2.0.0` are lightweight):
+  | Tag | Commit | Marks |
+  |---|---|---|
+  | `v3.0.0` | `d9e1edb` (2026-05-13) | End of Phase 3 — last commit before the post-Phase-3 change log opens |
+  | `prephase4` | `1965953` (2026-07-28) | Pre-Phase 4 queue closed, immediately before PRD-016. Its message records what the system *is* at that point (NATS + the five hand-rolled loops) — the thing the migration replaces |
+
+  **Doc sweep done in the same pass** (2026-07-28) — several docs still asserted stale state:
+  - `CLAUDE.md` — the pre-Phase-4 queue was still listed item-by-item with two entries marked
+    "unpushed" (long since deployed). Compressed to a closed-summary + pointer, since it loads
+    every session; the two **must-port carry-forwards** are what remain in full.
+  - `open-bugs.md` — **BUG-001 was still "Open"**; now closed as do-not-fix (§3 dissolves it:
+    `_recover_stale_pending` exists only to police the hand-rolled scheduler). BUG-004 stays
+    genuinely open.
+  - `usage-findings.md` — UF-003 3a still said "Go worker still open" (fixed in `fbce01f`).
+  - `workflows-scoping.md` — **actively contradicted the decision**: §7 recommended prototyping
+    on DBOS first, and §1's "not a rip-out" non-goal is no longer true of the *phase*. Both
+    marked superseded in place; §4/§6 (the three layers, state-ownership split) still stand and
+    are what PRD-016 was written against.
+  - `docs/process/architect.md` — added the ADR-009 hand-off, and corrected "the coordinator is
+    the template for future multi-step coordination" (`coordinator/` is on the deletion list).
+  - `docs/process/product-manager.md` — Phase 4 addendum (PRDs now in `phase4-prd/`, engine
+    choice is not a PM question, read backlog §3 before speccing anything).
+  - `docs/adr/README.md`, `docs/README.md`, root `README.md` — ADR-009 row + inputs, a Phase 4
+    section (the index had none — the backlog and PRDs were unreachable from it), release tags.
+
   **What P5 actually found (it was not pure bookkeeping).** All four were verified against live
   code rather than taken on trust, and **two had landed on a different option than the one
   originally recommended** — so the doc was actively misleading before this pass:

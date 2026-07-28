@@ -1,8 +1,28 @@
 # Product Manager — ScrapeFlow Onboarding Document
 
 > **Purpose:** Bring a new Product Manager persona up to speed on the project, what has been built, what Phase 3 scope has been defined, and how to continue PM work. Read this before writing any PRD.
-> **Last updated:** 2026-04-20
+> **Last updated:** 2026-04-20 (Phase 4 addendum 2026-07-28)
 > **Covers:** Role definition, project context, Phase 3 PRD backlog produced, research sources used, conventions, and how to hand off to the Architect.
+
+> **Phase 4 addendum (2026-07-28).** The body of this doc is written for **Phase 3** and is
+> still accurate on **role, PRD structure (§7), and handoff protocol (§8)** — those are the
+> parts to reuse. What has moved on:
+>
+> - **Phase 3 is complete** (tagged `v3.0.0`); its 15 PRDs are archived at
+>   `docs/archive/phase3/prd/`. Phase 4 PRDs live in **`docs/project/phase4-prd/`**, numbered
+>   continuously from **PRD-016**.
+> - **Phase 4 = the Temporal durable-workflows migration.** Scope is not PM-open: it is fixed
+>   in `docs/project/phase4-backlog.md`, which is the single source of truth. **Read its §3
+>   ("dissolved by Temporal — do NOT fix") before writing any PRD** — writing a spec for a
+>   problem the migration deletes is the most common way to waste a session here.
+> - **The engine choice is already made** (Temporal). It is an Architect decision recorded in
+>   the backlog, not a PM question — do not re-open it in a PRD.
+> - **PRD-016 (Workflows: Pipelines)** is written and handed to the Architect. The planned
+>   follow-ons are **PRD-017 (Delivery sinks)** and **PRD-018 (Monitors)**, deliberately *not*
+>   written yet: PRD-016 covers only the foundation layer so the Architect isn't designing
+>   against a moving target. Write them after PRD-016's layer ships.
+> - §10's session-start prompt is Phase-3 specific. For Phase 4, point a new PM session at
+>   `CLAUDE.md` → `docs/project/phase4-backlog.md` → `docs/project/phase4-prd/`.
 
 ---
 
