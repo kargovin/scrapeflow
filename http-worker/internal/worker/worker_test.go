@@ -18,8 +18,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	"github.com/kargovin/scrapeflow/worker/internal/fetcher"
-	"github.com/kargovin/scrapeflow/worker/internal/storage"
+	"github.com/kargovin/scrapeflow/http-worker/internal/fetcher"
+	"github.com/kargovin/scrapeflow/http-worker/internal/storage"
 )
 
 // minioEndpoint returns the MinIO address (Docker Compose default: localhost:9000).
