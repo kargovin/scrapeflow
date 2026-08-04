@@ -274,3 +274,158 @@ If screenshots go, remove the action type, the worker branch, and `upload_screen
 
 **Survives Temporal.** Nothing here is orchestration — it is a missing persistence path plus a
 product decision. The migration neither fixes nor worsens it.
+
+---
+
+## BUG-005 — Batch is broken on all three execution paths (`job_id` is NULL, and the contract assumes it never is)
+
+**Severity:** High (two paths hang forever with no error; the third silently returns the wrong
+content and breaks tenant isolation)
+**Discovered:** 2026-08-04, reviewing inputs for ADR-009
+**Status:** Open — **fix before the migration** (triage reasoning below)
+
+### What happens
+
+Batch scraping is broken end to end, in three different ways, all from one root cause. None of
+the three produces a user-visible error.
+
+**Path A — batch on the `playwright` engine: every item is dropped at the scrape stage.**
+`POST /batch` dispatches `"job_id": None` in the fat message (`routers/batch.py:126`). The
+Playwright worker's `JobMessage.job_id` is a **required `str`**
+(`playwright-worker/worker/models.py:31`), so `model_validate_json` raises. `handle_message`'s
+parse guard logs `malformed_message`, **acks, and returns** (`worker/worker.py:42-46`) — the ack
+tells JetStream the message was handled, so it is never redelivered. Every item stays `pending`
+forever. Stale-pending recovery cannot rescue them: it resolves `Job` by `run.job_id`, which is
+`None`, and skips (`scheduler.py:154-156`). **This is already recorded** — see BUG-001, which
+notes in passing that "batch runs stuck in `pending` are not recoverable via this path anyway."
+That line is Path A, written down and read as an aside.
+
+**Path B — batch on the `http` engine: it "succeeds" and returns the wrong pages.**
+Go is more permissive than Python here. `encoding/json` unmarshals JSON `null` into a plain
+`string` field as the zero value `""` **and returns no error**, so the Go worker proceeds with an
+empty job id and writes (`internal/storage/minio.go:53,69`):
+
+```
+latest/.html                 ← a single global object: every batch item, every user, every batch
+history//1759000000.html     ← note the empty path segment; keyed only by second
+```
+
+Within one batch the items run concurrently and many complete in the same second, so they write
+**the same history key** and overwrite each other. Each item's `job_runs.result_path` then points
+at that one object, holding whichever page landed last. The batch reports success and returns
+duplicated, wrong content.
+
+Across users the same collision is worse than corruption: two batch items from **different
+tenants**, same second, same output format, resolve to the same object, and each user's result
+endpoint serves the other's scraped content. That breaks the platform's cross-tenant isolation
+invariant through the storage layer rather than the API layer, where all the existing 404 guards
+live.
+
+**Path C — batch with `llm_config` (either engine): items hang at `processing` forever.**
+On scrape completion the result consumer dispatches the LLM stage with `"job_id": None`
+(`result_consumer.py:206`). The LLM worker's `JobMessage.job_id` is likewise a required `str`
+(`llm-worker/worker/models.py:6`) → validation error → `malformed_message` → **ack and drop**
+(`llm-worker/worker/worker.py:48-53`). The run sits at `processing`; nothing in the system
+recovers a run in that state (stale-pending only looks at `pending`). `batch.completed + failed`
+never reaches `batch.total`, so the batch never transitions to `completed`/`partial_failure` and
+the `batch.completed` webhook never fires. Even had the message parsed, the LLM worker would then
+upload with `job_id=None`, reproducing Path B's `history/None/{ts}.json` collision.
+
+### Root cause
+
+`job_runs.job_id` is nullable **by design** — ADR-006 made a run belong to *either* a `jobs` row
+*or* a `batch_items` row, precisely so batch items would not have to masquerade as job templates.
+That decision was correct and is not in question.
+
+What was not carried through is that **two contracts still assume `job_id` always exists**:
+
+1. **The fat-message and LLM-message schemas** type it as a required string, so a legitimately
+   absent job id is indistinguishable from a malformed message — and the malformed-message
+   handler's job is to discard.
+2. **The MinIO path convention** (ADR-002 §8) keys every artifact on `job_id`:
+   `latest/{job_id}.{ext}` and `history/{job_id}/{ts}.{ext}`. With no job id there is no distinct
+   path, so all artifacts pile into one.
+
+ADR-006 explicitly states "workers are unchanged" — true of the *routing*, but not true of the
+*identity* the message and storage layers depend on.
+
+### Evidence
+
+Both parser behaviours were reproduced directly rather than inferred:
+
+| Check | Result |
+|---|---|
+| Python (Pydantic v2) `JobMessage` with `job_id: null` | `ValidationError: job_id — Input should be a valid string` |
+| Go `encoding/json` into `JobID string` with `"job_id":null` | `err=<nil>`, `JobID=""` → `latest/.html`, `history//1759000000.html` |
+
+Per the JSON spec Go implements, unmarshalling `null` into a non-pointer type is a **no-op**, not
+an error — which is exactly how a hard failure on one worker became silent data corruption on
+another.
+
+### Why the tests did not catch it
+
+`api/tests/test_batch.py:451` asserts `payload["job_id"] is None` — **the test pins the broken
+value as the expected one.** The API-side tests prove the API emits `None`; each worker's tests
+prove it parses well-formed messages. No test ever feeds an API-produced message into a worker's
+parser, so every suite is green while the wire between them is severed.
+
+This is the more important half of the fix. A contract check — take the payload the API actually
+builds, run it through each worker's parser — is cheap and would have caught all three paths at
+once. Without it, the same class of gap reopens the next time a message field changes.
+
+### Fix — two parts, plus the test
+
+1. **Make "a run with no job" representable in the message contract.** The Python workers must
+   accept it rather than discard it as malformed; the Go worker must *stop silently accepting* a
+   missing id, because "quietly defaulted to empty string" is what converted Path A's loud failure
+   into Path B's silent corruption. A missing identifier should fail loudly or be explicitly
+   optional — never default.
+2. **Key the artifact path on something that always exists.** `run_id` is the natural candidate:
+   every run has one, it is unique, and it is already the handle the result consumer and result
+   endpoint work from. This changes the ADR-002 §8 path convention, so it belongs in an ADR
+   amendment rather than a quiet edit — and it needs a decision on what happens to `latest/`,
+   whose whole purpose ("the newest result for this thing") is job-shaped and has no meaning for a
+   one-shot batch item.
+3. **Add the cross-service contract test**, and delete the assertion that currently pins the bug.
+
+Note that fixing only (1) leaves Path B's collisions intact, and fixing only (2) leaves Paths A
+and C dropping messages. They ship together or not at all.
+
+### Triage — why this is fixed pre-migration despite §3
+
+Both `result_consumer.py` and the workers' NATS message models are on the migration's deletion
+list, so `phase4-backlog.md` §3's rule ("do not fix bugs in code the migration deletes") points at
+do-not-fix. Fixed anyway, for the same reason **Q6** was: §3's principle is *don't spend effort on
+code that is about to vanish*, and it yields when the bug is live in production and the migration
+is not imminent. Q6 dissolved under Temporal and was still fixed pre-migration because it was
+actively billing users. This one is not costing money, but it is silently breaking a shipped
+feature, and every path fails without telling anyone.
+
+Two things here **survive** the migration regardless and are not throwaway work:
+
+- **The identity decision** (what a run that is not a job is called, and what its artifacts are
+  keyed on) is exactly OQ-1's question, and pipelines are the next thing to ask it.
+- **The cross-service contract test** outlives the transport it tests.
+
+Mitigating factor on urgency: batch appears unused in production, so the corruption in Path B is
+latent rather than realised.
+
+### Interactions
+
+- **ADR-009 / PRD-016 OQ-1 — the strongest evidence available.** Batch was the platform's first
+  "a run that is not a job," and it broke in three places because the identity model assumed
+  otherwise. Pipelines are the second, larger instance of the same shape: no `job_id`, multiple
+  artifacts per run, a second consumer of the quota meters. This bug is what OQ-1 looks like when
+  it is answered implicitly instead of decided.
+- **ADR-002 §8** — the MinIO path convention is the thing that has to change; do not let the fix
+  bypass the ADR.
+- **ADR-006** — not wrong, but its "workers are unchanged" claim needs a footnote: routing was
+  unchanged, identity was not.
+- **BUG-001** — its "harmless log noise" reading stands for the log spam itself, but the sentence
+  about unrecoverable batch runs is Path A's symptom. Worth cross-linking so neither is closed on
+  the strength of the other.
+- **UF-003 / the transient-vs-terminal work** — orthogonal. Those classifiers fire on exceptions
+  during processing; this is a parse failure *before* processing, on a path whose only handler is
+  "discard." Worth noting that the malformed-message branch is the one remaining place where a
+  worker still acks unconditionally on failure, which is the shape of bug UF-003 spent three
+  commits removing everywhere else.
