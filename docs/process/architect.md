@@ -407,18 +407,24 @@ Carry all of these into Phase 4.
 
 ## 9. What Phase 4 Will Require From You
 
-> **⚠️ Addendum 2026-07-28 — Phase 4 has started, and one PRD is waiting for you.**
+> **⚠️ Addendum 2026-08-04 — ADR-009 is drafted and awaiting review; it is not yet accepted.**
 >
-> **Your next artifact is [ADR-009](../adr/README.md)** — the workflow-engine decision and the
-> v1/v2 coexistence contract. Inputs, in order:
+> **[ADR-009](../adr/ADR-009-workflow-engine-temporal.md) — Workflow Engine: Temporal + the v1/v2
+> coexistence contract — is written in DRAFT** and answers all **11** of PRD-016's open questions.
+> Review it before doing anything else; nothing in it is settled. **If you are picking up after it
+> is Accepted, your next artifact is the conditional-execution PRD** that ADR-009 §14 places before
+> PRD-018 (Monitors) — layer A, additive to the block model, not absorbed into B.
+>
+> *Original addendum (2026-07-28), still the correct reading order for the inputs:*
 > 1. **`docs/project/phase4-backlog.md`** — single source of truth for Phase 4 scope. **Read §3
 >    ("dissolved by Temporal — do NOT fix") first:** it lists bugs whose containing code the
 >    migration deletes, so designing fixes for them is wasted work.
 > 2. **[PRD-016 — Workflows: Pipelines](../project/phase4-prd/PRD-016-workflows-pipelines.md)** —
->    the PM spec, layer A only. It ends with **nine open questions addressed to you**; ADR-009 is
->    where they get answered. **OQ-2** (a pipeline edited while a run from the previous version is
->    in flight) and **OQ-3** (what *structurally* prevents a unit of work executing on both lanes)
->    are the two that produce correctness bugs rather than design disagreements.
+>    the PM spec, layer A only. It ends with **eleven open questions addressed to you** (nine at
+>    the time this was written; PM review added OQ-10 and OQ-11); ADR-009 is where they get
+>    answered. **OQ-2** (a pipeline edited while a run from the previous version is in flight) and
+>    **OQ-3** (what *structurally* prevents a unit of work executing on both lanes) are the two
+>    that produce correctness bugs rather than design disagreements.
 > 3. `workflows-scoping.md` §7 (engine comparison — note its DBOS-first *recommendation* is
 >    superseded; the decision is Temporal) and `temporal-full-migration.md` (change inventory +
 >    strangler-fig sequence).

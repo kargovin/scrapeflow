@@ -18,6 +18,7 @@ ADRs are the primary record of *why* the system is built the way it is. They are
 | [`adr/ADR-006`](adr/ADR-006-batch-scraping-data-model.md) | Batch Scraping Data Model | **Accepted** |
 | [`adr/ADR-007`](adr/ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** |
 | [`adr/ADR-008`](adr/ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** — Patchright + headed Chrome under Xvfb |
+| [`adr/ADR-009`](adr/ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | 📝 **Draft (2026-08-04), pending review** — engine decision + answers to all 11 of PRD-016's open questions. **Not yet a decision** |
 
 See [`adr/README.md`](adr/README.md) for full ADR index, status definitions, and how to write a new ADR.
 
@@ -44,7 +45,7 @@ Day-to-day docs that are still actively consulted.
 | [`project/phase4-prd/`](project/phase4-prd/) | Phase 4 PRDs (PRD-016 →) — one file per feature layer |
 | [`project/workflows-scoping.md`](project/workflows-scoping.md) | The Workflows feature scoping + engine comparison |
 | [`project/temporal-full-migration.md`](project/temporal-full-migration.md) | Complete change inventory + strangler-fig migration sequence |
-| [`project/open-bugs.md`](project/open-bugs.md) | BUG-001 → BUG-004 |
+| [`project/open-bugs.md`](project/open-bugs.md) | BUG-001 → BUG-005 |
 | [`project/usage-findings.md`](project/usage-findings.md) | UF-001 → UF-003 — findings from running the platform |
 
 ---

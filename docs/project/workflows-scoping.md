@@ -24,7 +24,9 @@
 >   Monitors) and the state-ownership split (engine owns execution state, thin Postgres mirror
 >   backs the UI) are the shape **PRD-016** was written against.
 > - **§10's next step is done:** PRD-016 exists at
->   `phase4-prd/PRD-016-workflows-pipelines.md`, scoped to layer **A** only. ADR-009 is next.
+>   `phase4-prd/PRD-016-workflows-pipelines.md`, scoped to layer **A** only.
+>   **[ADR-009](../adr/ADR-009-workflow-engine-temporal.md) is now drafted** (2026-08-04, pending
+>   review) and answers all 11 of its open questions.
 
 **Status:** Draft — for discussion (see status update above)
 **Date:** 2026-07-14
@@ -309,8 +311,10 @@ If this direction is approved, the house-style next artifacts are:
 
 1. ✅ **Done — [PRD-016](./phase4-prd/PRD-016-workflows-pipelines.md)** (2026-07-28), scoped to
    layer **A (Pipelines)** only so C and B don't move the target under the Architect.
-2. ⏭ **Next — ADR-009**, recording the **engine decision** and the v1/v2 coexistence contract.
-   It also answers PRD-016's nine open questions.
+2. 📝 **Drafted (2026-08-04, pending review) — [ADR-009](../adr/ADR-009-workflow-engine-temporal.md)**,
+   recording the **engine decision** and the v1/v2 coexistence contract. It answers all **11** of
+   PRD-016's open questions (nine when this line was written; PM review added two). **Not accepted
+   yet — do not cite it as settled.** §1 of it is where this doc's §7 comparison table ends up.
 
 ---
 

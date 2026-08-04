@@ -10,7 +10,7 @@
 > *orchestration* bugs that the migration deletes outright. Those are recorded in
 > §3 as **do-not-fix**, with the reason, so they don't get re-raised.
 >
-> **Last restructured:** 2026-07-17 · **Last updated:** 2026-07-28 (**§1 Pre-Phase 4 queue is now EMPTY — P1 through P5 all closed.** P4/BUG-002 deployed (8 crit / 13 high → **0 crit / 0 high**); P5 Q1–Q4 closed out, with Q8 marked do-not-fix in the same pass, so no open question remains. **Next: Phase 4 proper — the Workflows PRD, then engine ADR-009.** 47 medium/low Dependabot alerts remain, deferred to §4, alongside BUG-004.)
+> **Last restructured:** 2026-07-17 · **Last updated:** 2026-08-04 (**§1 has one open item again — P6 / BUG-005**, batch broken on all three execution paths, found reviewing ADR-009's inputs. P1–P5 remain closed. Same day: **PRD-016 PM review round 2** — three Architect escalations decided in place; §2's PRD-016/017/018 rows updated, and 017 + 018 now carry inherited commitments rather than blank slates.) · *2026-07-28 (**§1 Pre-Phase 4 queue was EMPTY — P1 through P5 all closed.** P4/BUG-002 deployed (8 crit / 13 high → **0 crit / 0 high**); P5 Q1–Q4 closed out, with Q8 marked do-not-fix in the same pass, so no open question remains. **Next: Phase 4 proper — the Workflows PRD, then engine ADR-009.** 47 medium/low Dependabot alerts remain, deferred to §4, alongside BUG-004.)*
 
 ---
 
@@ -19,7 +19,7 @@
 | Doc | Covers |
 |-----|--------|
 | `docs/project/open-questions.md` | Q1–Q8 — full context, options, recommendations |
-| `docs/project/open-bugs.md` | BUG-001 → BUG-004 |
+| `docs/project/open-bugs.md` | BUG-001 → BUG-005 |
 | `docs/project/usage-findings.md` | UF-001, UF-002, UF-003 |
 | `docs/project/workflows-scoping.md` | Temporal Workflows feature scoping + engine comparison |
 | `docs/project/temporal-full-migration.md` | Complete change inventory + strangler-fig sequence |
@@ -32,12 +32,17 @@
 Selection rule: **survives Temporal** (the migration won't fix it) **and** stands alone
 (no unresolved design decision blocking it). Plus one exception noted below.
 
-> ✅ **This queue is complete as of 2026-07-28 — P1, P1b, P2, P3, P3b, P4 and P5 are all
-> closed, and everything except P5 is verified in production.** Nothing here blocks the
-> migration any more; the next work is §2 (PRD → ADR-009). The rows are kept because
-> several carry **domain knowledge that must be ported into Temporal activities, not
-> deleted with the NATS plumbing** — specifically Q5's `ensure_ready()` + 180s timeout,
-> and the transient/terminal MinIO classifier from P3b. See §3.
+> ✅ **P1, P1b, P2, P3, P3b, P4 and P5 are all closed**, and everything except P5 is verified
+> in production. The rows are kept because several carry **domain knowledge that must be
+> ported into Temporal activities, not deleted with the NATS plumbing** — specifically Q5's
+> `ensure_ready()` + 180s timeout, and the transient/terminal MinIO classifier from P3b. See §3.
+>
+> ⚠️ **Reopened 2026-08-04 with one new item — P6 (BUG-005).** The queue was empty between
+> 2026-07-28 and 2026-08-04. BUG-005 was found while reviewing ADR-009's inputs, not during
+> triage, which is why it is late: **batch is broken on all three execution paths**, silently,
+> and the root cause (`job_id` is NULL for batch runs while the message and storage contracts
+> assume it is not) is the same identity question PRD-016's **OQ-1** has to answer for
+> pipelines. ADR-009 does not block on it, but should cite it.
 
 | # | Item | Why now | Size |
 |---|------|---------|------|
@@ -47,6 +52,7 @@ Selection rule: **survives Temporal** (the migration won't fix it) **and** stand
 | **P3** ✅ **DONE** | **UF-001 — MinIO missing from `/health/ready`** — fixed 2026-07-23, **not** the way the finding proposed. Adding MinIO to `/health/ready` would have been wrong: that endpoint is the k8s **readinessProbe** on a single-replica API, so a MinIO outage would have 503'd the whole API (`/jobs`, auth, admin panel) — a partial outage escalated to a total one. Shipped a **split** instead: `/health/ready` keeps serving deps only (DB/Redis/NATS, unchanged, still the probe); new **`GET /health/deps`** reports those plus MinIO (`bucket_exists` + 3s timeout), 503s when degraded, and nothing routes on it. Deployment note: **no infra change** — `api.yaml` still probes `/health/ready`. | Endpoint reported `200 ok` while every job silently failed to store output if MinIO was down. Health checks are API-side and untouched by the migration. Details in `usage-findings.md`; curl recipes in `COMMANDS.md`. 6 new tests → **249**. | S |
 | **P3b** ✅ **DONE** | **UF-003 — MinIO write-path failures handled inconsistently** — **closed 2026-07-24 (unpushed).** | Surfaced closing UF-001. Three behaviours, none right: (3a) **playwright + Go workers ack on a MinIO write fault** → the Q5 ack-on-failure bug; a transient blip permanently fails a job after the expensive render/LLM call is done. **Playwright ✅ `2432be7`** (new `playwright-worker/worker/errors.py` + nak/backoff; 24 tests → 155). **LLM aiohttp gap ✅ `6ad95e3`** — the port surfaced that the LLM worker retried MinIO 5xx *codes* but not MinIO *unreachable* (`aiohttp.ClientConnectionError` is not an `S3Error`); added the two aiohttp types to its `_TRANSIENT_TYPES` (3 tests → 90). **Go worker (3a) ✅ `fbce01f`** — new `http-worker/internal/worker/errors.go` (`classify`/`classifyMinIO`/`retryDelay`) + nak/backoff in `handleMessage`, capped at the consumer's existing `NATS_MAX_DELIVER` (3, already set — unlike the Python workers). **Go-specific divergence:** a `net.Error` in Go is ambiguous (both `net/http` fetcher and `minio-go` use the net stack — a dead *site* and a dead *MinIO* both raise `*net.OpError`/`*url.Error`), so transient-eligibility is scoped to the upload step via a typed `*uploadError` wrapper; only then is `net.Error`→transient / `minio.ErrorResponse.Code`→5xx applied. New `errors_test.go` (16 subtests). (3b) `result_consumer` swallowed MinIO errors with **no log line** — **✅ `7c339a2`** added `minio_stat_failed` (`storage.py`, the money-adjacent one — silent stat→0 under-counts quota) and `content_hash_failed` (`result_consumer.py`); one `logger.warning` each, control flow unchanged. **3a survives Temporal as domain knowledge** — the transient/terminal S3 split is the same classification §3 says must port into the activity `RetryPolicy`. Full detail in `usage-findings.md` → UF-003. | S (3a) / XS (3b) |
 | **P4** ✅ **DONE** | **BUG-002 — Dependabot alerts** (critical + high only) | **Closed + deployed 2026-07-28: 8 crit / 13 high → 0 crit / 0 high.** 22 crit/high collapsed to ~9 bumps across 3 ecosystems, one commit each: **`b9c8a1a`** Go `x/crypto` 0.23→0.52 (clears **11** — all 8 crit + 3 high, all SSH-only/not-reachable; forced go 1.25 + Dockerfile bump; fixed a latent bad import in an `//go:build integration` test); **`e8726bf`** API python-multipart/cryptography/starlette/pyjwt/Mako (8 high) — **clerk-backend-api 5→6 was mandatory** (clerk 5.x pins `cryptography<47`; crypto fix needs 48), clerk 6 surface verified vs our code (no change), 249 tests green, login smoke-tested; **`b110591`** frontend js-cookie (npm `overrides`, @clerk/shared exact-pins it) + postcss/vite (dev/Windows-only). The stale committed `uv.lock` got reconciled in passing. Dependency CVEs are orthogonal to orchestration — the migration neither fixes nor worsens them. **47 medium/low remain, deferred** (see §4 BUG-002 moderate/low). | M |
+| **P6** 🔴 **OPEN** | **BUG-005 — batch broken on all three execution paths.** (A) `playwright` batch: workers reject `job_id: null` as malformed and **ack+drop** → items stuck `pending` forever, unrecoverable (stale-pending resolves `Job` by a NULL id and skips — the aside in BUG-001 *is* this symptom). (B) `http` batch: Go unmarshals `null` into `string` as `""` with **no error**, so every item writes `latest/.html` and `history//{ts}.{ext}` — items overwrite each other within a batch, and across users the same object is served to both tenants, breaking isolation at the storage layer where no 404 guard reaches. (C) batch + `llm_config`: same drop at the LLM stage → stuck `processing` forever, batch counters never reach `total`, `batch.completed` never fires. Both parser behaviours reproduced directly. `api/tests/test_batch.py:451` **asserts the broken value is correct**, which is why every suite is green. | ⚠️ **Second exception to the rule** — the containing code *is* deleted by the migration (§3 would say do-not-fix), but this is the **Q6 precedent**: a live, silent, shipped-feature failure with the migration months out. Two parts survive regardless: the **identity decision** (what a non-job run is keyed on) is literally OQ-1, and the **cross-service contract test** outlives the transport. Fix is not one line — the message contract and the ADR-002 §8 artifact-path convention must change together, or half the paths stay broken. Latent in prod (batch appears unused). Full writeup: `open-bugs.md` → BUG-005. | M |
 | **P5** ✅ **DONE** | **Q1–Q4 — formally close out** — **closed 2026-07-28.** All four verified against live code, not just marked done, and each now carries a STATUS block in `open-questions.md`: **Q1** Option A — `uq_api_keys_user_name` + `IntegrityError`→409 (`api_key.py:13`, `users.py:54`, migration `f050c65b689a`). **Q2** Option **C, not the recommended B** — Postgres `BEFORE UPDATE` trigger `trg_jobs_updated_at` (migration `ebbcc72c1472`), because the scheduler and cancel route write via `db.execute(update(...))`, which silently skips SQLAlchemy `onupdate`. **Q3** as written — `webhook_url` → `Text` (migration `53a03ff4c7a1`). **Q4** Option **B, not the recommended A** — disable is its own operation (`PATCH /jobs/{id}` `{"schedule_status":"paused"}`), enforced in `scheduler.py:57` + a partial index; `DELETE` keeps soft-cancel, with Option C available as `?permanent=true`. The flag is deliberately **tri-state** (`NULL` = not scheduled at all), which a bare `is_active` boolean could not express. **Q8 also closed** in the same pass as **do-not-fix** (§3) so no question is left without a status. | XS |
 
 ---
@@ -73,15 +79,17 @@ at each step. Full sequence in `temporal-full-migration.md` §9.
 and the `coordinator/` service; removes NATS; workers become Temporal activity workers; the API
 becomes thin and horizontally scalable (drops the single-replica / `Recreate` constraint).
 
-**Next artifacts:** PRD (PM template) → engine **ADR-009** recording the Temporal decision and
-the v1/v2 coexistence contract.
+**Artifact chain:** PRD-016 (✅ written, PM-reviewed ×2) → **ADR-009** (📝 drafted 2026-08-04,
+pending review) → conditional-execution PRD (layer A) → PRD-017 (C) / PRD-018 (B). Note ADR-009
+§14 places the conditional-execution PRD **before** PRD-018; PRD-017 is unblocked and may proceed
+in parallel with it.
 
 | Artifact | State |
 |---|---|
-| **[PRD-016 — Workflows: Pipelines](./phase4-prd/PRD-016-workflows-pipelines.md)** | ✅ **written 2026-07-28 — ready for Architect.** Covers layer **A only**; C and B get their own PRDs so the Architect isn't designing against a moving target. Acceptance gate is **R6**: reproduce today's `scrape → LLM → webhook` recipe as a pipeline with equivalent output *before* any new block type is designed. 9 open questions for the Architect — **OQ-2** (editing a pipeline with runs in flight) and **OQ-3** (structurally enforcing one-lane-only) are the two most likely to produce a subtle correctness bug. **OQ-6** is the do-not-delete list: LLM cold-start handling + the transient/terminal storage classifier are *block requirements*, not NATS artifacts. |
-| PRD-017 — Delivery sinks (C) | not started — write after A ships |
-| PRD-018 — Monitors (B) | not started — absorbs the dormant scheduled-crawl gap |
-| **ADR-009 — engine decision + coexistence contract** | not started — Architect's first artifact, answers PRD-016's OQs |
+| **[PRD-016 — Workflows: Pipelines](./phase4-prd/PRD-016-workflows-pipelines.md)** | ✅ **written 2026-07-28 · PM-reviewed 2026-08-04 · PM review round 2 2026-08-04 — ready for Architect.** Covers layer **A only**; C and B get their own PRDs so the Architect isn't designing against a moving target. Acceptance gate is **R6**: reproduce today's `scrape → LLM → webhook` recipe as a pipeline with equivalent output *before* any new block type is designed. **11 open questions** for the Architect — **OQ-2** (editing a pipeline with runs in flight) and **OQ-3** (structurally enforcing one-lane-only) are the two most likely to produce a subtle correctness bug. **OQ-6** is the do-not-delete list: LLM cold-start handling + the transient/terminal storage classifier are *block requirements*, not NATS artifacts. **Round 2 settled three Architect escalations:** (1) **no change-detection / cost gate in layer A** — both halves go to **Monitors (B)**, because "the previous run of this same thing" is undefinable once R1 run inputs exist; the repeat-run cost delta (one LLM call **+ one stored artifact**) is an accepted, measured, named exclusion and **B cannot ship without the gate**; (2) **at most one Webhook block per pipeline**, rejected at save time — multi-destination delivery is layer **C**'s defining capability and arrives there with saga rollback; (3) **cancellation never aborts a block mid-execution** (the Scrape exception is dropped), with new user-facing requirements that the wait be acknowledged, visible, time-bounded, and that completed blocks' outputs stay retrievable. **OQ-10 is half-answered; OQ-4's PM constraint is split into hard metering parity vs a waived, expiring feature-parity gap.** |
+| PRD-017 — Delivery sinks (C) | not started — write after A ships. **Now carries an inherited commitment:** PRD-016 caps layer A at **one Webhook block** and points users here for "one result, several destinations" — so multi-sink fan-out **with rollback** is C's to deliver, not an optional extra. |
+| PRD-018 — Monitors (B) | not started — absorbs the dormant scheduled-crawl gap. **Now carries a launch requirement:** PRD-016 assigns **both halves of change detection** (the cost gate *and* the reporting diff) to B, because a monitor is what supplies "the previous run of this same thing." B **does not ship without the cost gate** — layer A deliberately ships without it, and B is the layer that makes its absence hurt (scheduled reruns). B also depends on a layer-A primitive it cannot build for itself: a block that ends a run early with a `completed` outcome (PRD-016 OQ-1). |
+| **[ADR-009 — Workflow Engine: Temporal + v1/v2 coexistence](../adr/ADR-009-workflow-engine-temporal.md)** | ✅ **written + Accepted 2026-08-04.** Records the engine decision and **answers all 11 of PRD-016's open questions**. Load-bearing calls: pipeline runs get **their own table**, and quota counting moves off tables onto a **view** (today's meters hardcode `FROM job_runs`, so any new lane is invisible by construction — this is BUG-005's lesson generalised); blocks use **explicit named wiring**, not implicit previous-block chaining, so branching stays additive; blocks pass **references, never content** (history is retained after completion, and real pages run 291 KiB–4.1 MiB), with the v2 artifact path re-keyed on the **run**, dropping `latest/` — a partial departure from ADR-002 §8, v2 lane only; in-flight edits **pin** the definition version (adopting mid-run breaks replay determinism); metering is **one run = one unit**, shared pools, and **only the final artifact is charged** (intermediates are operator-side cost); webhooks take **OQ-11 option (c)** with a horizon matched to today's ≈2.6 h reach and **no delivery table** on the v2 lane; conditional execution gets **its own layer-A PRD before PRD-018**, not absorbed into B. **⚠️ §9 flags that integration option (a) recreates the Q5/Q6/Q7 double-retry bug** unless NATS-side retry is neutralised for workflow-originated work. **⚠️ §10 adds to the do-not-delete list:** `diff.py` + content-hash are *relocated, not deleted, and not yet re-homed* — they must outlive `result_consumer.py` and wait for B. |
 
 **Cutover gotchas to handle at migration time (not deferred):**
 1. A job must run on **exactly one lane** — never both (double-scrape / double-LLM-bill risk).
@@ -131,8 +139,9 @@ Real work, untouched by the migration, but not blocking it. Revisit after Phase 
 
 ## Sequencing
 
-1. **Pre-Phase 4 (§1)** — P1 → P5. Roughly one focused session if BUG-002 triage is clean.
-   Do **P1 (LLM `ack_wait`) first** — it's the only one costing money while it sits.
+1. **Pre-Phase 4 (§1)** — P1 → P5 are done. **P6 (BUG-005) is the only one left** and does not
+   block ADR-009 — the ADR should cite it as OQ-1's precedent, then it can be fixed in parallel
+   with, or after, the ADR. Fix it before any batch traffic arrives, not before the design lands.
 2. **Phase 4 (§2)** — write the PRD, then **ADR-009**, then execute the strangler-fig sequence
    from `temporal-full-migration.md` §9.
 3. **Post-Phase 4 (§4)** — revisit, led by UF-002 (which unblocks BUG-003's remaining tiers).

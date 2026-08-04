@@ -10,7 +10,8 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 
 | Status | Meaning |
 |--------|---------|
-| **Proposed** | Under discussion — not yet implemented |
+| **Draft** | Written but not yet reviewed. **Not a decision** — do not implement against it, and do not cite it as settled in another document |
+| **Proposed** | Reviewed and under discussion — not yet implemented |
 | **Accepted** | Decision is final and has been (or is being) implemented |
 | **Partially Superseded** | Some sections replaced by a later ADR; see supersession notice for which sections remain authoritative |
 | **Superseded** | Fully replaced by a later ADR; kept for historical context only |
@@ -30,18 +31,31 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-006](ADR-006-batch-scraping-data-model.md) | Batch Scraping Data Model | **Accepted** | 2026-04-15 | — | — |
 | [ADR-007](ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** | 2026-04-15 | — | — |
 | [ADR-008](ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** | 2026-07-03 | — | — |
-| ADR-009 *(not written)* | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Next artifact** | — | — | — |
+| [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Draft** | 2026-08-04 | — | — |
 
-**ADR-009 is the next ADR to write.** It records the Phase 4 engine decision (Temporal, already
-made — see `docs/project/phase4-backlog.md` §2) and the coexistence contract between the existing
-NATS path and the Temporal path. Its inputs: **[PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md)**
-(nine open questions addressed to the Architect), `workflows-scoping.md` §7 (the engine
-comparison), and `temporal-full-migration.md` (change inventory + strangler-fig sequence).
+**ADR-009 is drafted and awaiting review — it is not yet a decision.** It records the Phase 4
+engine decision (Temporal), answers all **11** of
+PRD-016's open questions, and defines the contract under which the NATS path (**v1**) and the
+Temporal path (**v2**) run side by side. Its inputs were
+**[PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md)**, `workflows-scoping.md` §7
+(the engine comparison), `temporal-full-migration.md` (change inventory + strangler-fig sequence),
+`open-questions.md` **Q8** (the incident grounding the decision), and `open-bugs.md` **BUG-005**
+(the batch identity failure that grounds its run-identity and artifact-path decisions).
+
+Three things in it that are easy to miss and expensive to rediscover:
+
+- **§9 warns that integration option (a) recreates the Q5/Q6/Q7 failure mode** — dispatching to
+  the existing NATS workers from an activity puts *two* retry layers on the same work. NATS-side
+  retry must be neutralised for workflow-originated messages.
+- **§10's port list gained an item.** `diff.py` and the content-hash logic are **relocated, not
+  deleted, and not yet re-homed** — the PM assigned change detection to Monitors (B), which is
+  unwritten, so they must survive the deletion of `result_consumer.py` and wait.
+- **§5 partially departs from ADR-002 §8** (the MinIO path convention) for the v2 lane only.
 
 It will eventually **supersede parts of ADR-001/002/004** — the NATS subjects, fat-message schema,
-and worker result contract are all deleted at the migration's end state. Record that in the
-Supersedes column when it lands, not before: those contracts stay authoritative for as long as v1
-serves traffic.
+and worker result contract are all deleted at the migration's end state. Those rows stay empty
+until then, per ADR-009 §17: the contracts remain authoritative for as long as v1 serves traffic,
+and the supersession notices are added when each v1 component is actually deleted.
 
 ---
 

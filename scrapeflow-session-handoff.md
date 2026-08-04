@@ -66,7 +66,65 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ✅ START HERE (2026-08-04) — PRD-016 PM review **complete**; next is **ADR-009 (Architect)**
+- ## 📝 START HERE (2026-08-04, later session) — **ADR-009 is DRAFTED and needs your review**
+  **The next action is a human review of
+  [`docs/adr/ADR-009-workflow-engine-temporal.md`](docs/adr/ADR-009-workflow-engine-temporal.md)**
+  — 605 lines, status **Draft**, *not* Accepted. It records the Temporal decision, answers **all
+  11** of PRD-016's open questions, and defines the v1/v2 coexistence contract. Nothing in it is
+  settled; do not implement against it or cite it as a decision elsewhere until the status changes.
+
+  **Three findings from this session that are not in the ADR and matter on their own:**
+
+  - **BUG-005 — batch is broken on all three execution paths, silently.** Found while verifying
+    PRD-016's claims against live code, not during triage. **(A)** playwright batch: workers
+    reject `job_id: null` as malformed and **ack+drop**, so items hang at `pending` forever and
+    stale-pending recovery can't reach them. **(B)** http batch: **Go unmarshals `null` into
+    `string` as `""` with no error** (reproduced), so every item writes `latest/.html` and
+    `history//{ts}.{ext}` — items overwrite each other inside one batch, and across users the same
+    object is served to two tenants, breaking isolation *at the storage layer* where no 404 guard
+    reaches. **(C)** batch + LLM: same drop at the LLM stage → stuck `processing`, batch counters
+    never reach `total`, `batch.completed` never fires. One root cause: **`job_id` is NULL for
+    batch runs (correct, per ADR-006) while both message schemas and the ADR-002 §8 path
+    convention assume it is not.** `api/tests/test_batch.py:451` **asserts the broken value is
+    correct**, which is why every suite is green. Filed as **P6** in the backlog; fix is three
+    parts that must ship together (writeup in `open-bugs.md`).
+  - **The quota meters cannot see a new lane.** `_count_monthly_runs` and `_count_concurrent_jobs`
+    both *recount* rather than store, and both hardcode `FROM job_runs`. A `pipeline_runs` table is
+    invisible to them **by construction** — a user out of monthly job runs could trigger unlimited
+    pipeline runs. This is why ADR-009 §3 moves counting onto a view. `storage_bytes_used` is fine
+    (it's a counter incremented by whoever writes bytes, already lane-agnostic).
+  - **`webhook_deliveries` rejects a pipeline row at the database level** —
+    `num_nonnulls(job_id, batch_id, crawl_id) = 1` and `num_nonnulls(run_id, crawl_id) = 1`, with
+    `run_id` an FK into `job_runs`. So OQ-11 option (b) was never the free reuse it read as.
+
+  **PM review round 2 happened in the same session** (a PM agent, decisions recorded *in* PRD-016
+  per the doc-under-review rule; 446 → 721 lines). Three Architect escalations settled: **no
+  change-detection / cost gate in layer A** — both halves go to Monitors, because *"the previous
+  run of this same thing"* is undefinable once R1 run inputs exist, and **B cannot ship without the
+  gate**; **at most one Webhook block per pipeline**, rejected at save time, because two would ship
+  layer C's fan-out *without* its rollback; **cancellation never aborts a block mid-execution** —
+  the Scrape exception is dropped. It also found a **fourth** R6 divergence: a pipeline that fails
+  before its Webhook block **tells nobody**, where a job fires `job.failed` from any stage. That
+  one is deliberately **unassigned** — it depends on the open half of OQ-10.
+
+  **Two warnings in the ADR worth not rediscovering the hard way:**
+  - **§9 — integration option (a) recreates Q5/Q6/Q7.** Dispatching to the existing NATS workers
+    from an activity puts **two retry layers on the same work**. NATS-side retry must be
+    neutralised for workflow-originated messages.
+  - **§10 — `diff.py` + content-hash are relocated, not deleted, and not yet re-homed.** The
+    migration inventory sends them to a "diff/dedup activity"; the PM has since assigned change
+    detection to Monitors, which is unwritten. They must outlive `result_consumer.py` and wait.
+
+  **After the ADR is Accepted, the next artifact is the conditional-execution PRD** (layer A),
+  which ADR-009 §14 places *before* PRD-018 (Monitors). PRD-017 (Delivery sinks) is unblocked and
+  can proceed in parallel — it adds block types without extending what a pipeline can express.
+
+  **Docs-only session — no code changed.** `develop` and `main` are still level at `b110591` for
+  code; docs commits sit on top of `develop`.
+
+  <details><summary>Prior START HERE (2026-08-04, earlier session) — PRD-016 PM review round 1</summary>
+
+  ## ✅ (2026-08-04) — PRD-016 PM review **complete**; next is **ADR-009 (Architect)**
   PRD-016 was read section by section and revised in place. This was **not a copy-edit pass** —
   several claims were verified against live code and found wrong, and four capabilities were
   missing outright. The doc went **270 → 446 lines**; open questions **9 → 11**.
@@ -292,6 +350,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   </details>
 
   </details>
+
+  </details>
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
@@ -377,7 +437,8 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 | 3b | UF-003 — inconsistent MinIO write-path failure handling | ✅ **done, deployed.** playwright 3a `2432be7`, LLM aiohttp gap `6ad95e3`, Go worker 3a `fbce01f`, 3b log lines `7c339a2`. All four parts closed 2026-07-24. |
 | 4 | BUG-002 — Dependabot critical + highs only | ✅ **done, deployed 2026-07-28** (`b9c8a1a` Go x/crypto + `e8726bf` Python incl. forced clerk 5→6 + `b110591` frontend). **8 crit / 13 high → 0 crit / 0 high**; login smoke-tested on deploy. 47 medium/low left, out of scope. |
 | 5 | Q1–Q4 close-out | ✅ **done 2026-07-28.** Verified against live code, not taken on trust — **Q2 landed as Option C (Postgres trigger), Q4 as Option B (`PATCH schedule_status`)**, both differing from the doc's recommendation. **Q8 closed alongside as do-not-fix**, so `open-questions.md` has no entry without a STATUS block |
-| — | **§1 queue is EMPTY** | **Next: Phase 4 proper — Workflows PRD → engine ADR-009** (backlog §2) |
+| 6 | **BUG-005 — batch broken on all three execution paths** | 🔴 **OPEN, filed 2026-08-04.** `job_id` is NULL for batch runs (correct per ADR-006) while both message schemas and the ADR-002 §8 artifact-path convention assume it is not. Playwright batch drops every message and hangs at `pending`; http batch collides all items onto `latest/.html` + `history//{ts}.{ext}` (cross-tenant); batch + LLM hangs at `processing`. Fixed pre-migration on the **Q6 precedent**. `open-bugs.md` → BUG-005 |
+| — | **§1 queue: 1 open (P6)** | **Next: review ADR-009 (drafted 2026-08-04), then the conditional-execution PRD** (backlog §2) |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---

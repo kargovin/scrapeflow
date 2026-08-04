@@ -11,10 +11,23 @@
 > **Status update — 2026-07-28.** No longer hypothetical: **Phase 4 *is* this migration**, and
 > the §1 pre-migration queue is closed (tagged `prephase4`). The change inventory below is the
 > reference for what gets deleted/kept; **[PRD-016](./phase4-prd/PRD-016-workflows-pipelines.md)**
-> is the product spec for the first layer, and **ADR-009** is the next artifact. One correction to
-> carry: the deletions here are not all *pure* deletions — the LLM cold-start handling and the
-> transient/terminal storage-fault classifier live inside code marked for removal but are
-> **business logic that must be ported into the activities** (backlog §3, PRD-016 OQ-6).
+> is the product spec for the first layer, and
+> **[ADR-009](../adr/ADR-009-workflow-engine-temporal.md) is now drafted** (2026-08-04, pending
+> review — not yet a decision). One correction to carry: the deletions here are not all *pure*
+> deletions — the LLM cold-start handling and the transient/terminal storage-fault classifier live
+> inside code marked for removal but are **business logic that must be ported into the activities**
+> (backlog §3, PRD-016 OQ-6).
+>
+> **⚠️ Two corrections to this doc from ADR-009, both about §4's relocation map:**
+> - §4 sends content dedup (`xxhash`) and `diff.py` to "a diff/dedup **activity**, pure logic
+>   reused verbatim." **That is no longer where they go.** PM review assigned *both halves of
+>   change detection* to **Monitors (B)**, which is unwritten — so they are **relocated, not
+>   deleted, and not yet re-homed**. They must survive the deletion of `result_consumer.py` and
+>   wait. ADR-009 §10 calls this the most likely accidental loss in the migration.
+> - §9 step 2 (activities dispatch to the existing NATS workers) puts **two retry layers on the
+>   same work** — Temporal's `RetryPolicy` above, JetStream redelivery below. That is the
+>   Q5/Q6/Q7 failure mode reintroduced by the migration itself. NATS-side retry must be
+>   neutralised for workflow-originated messages (ADR-009 §9).
 
 **Status:** Draft — for discussion (see status update above)
 **Date:** 2026-07-14
