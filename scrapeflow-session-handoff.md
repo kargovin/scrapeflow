@@ -66,7 +66,82 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## ✅ START HERE (2026-07-28) — queue empty + PRD-016 written; next is **ADR-009 (Architect)**
+- ## ✅ START HERE (2026-08-04) — PRD-016 PM review **complete**; next is **ADR-009 (Architect)**
+  PRD-016 was read section by section and revised in place. This was **not a copy-edit pass** —
+  several claims were verified against live code and found wrong, and four capabilities were
+  missing outright. The doc went **270 → 446 lines**; open questions **9 → 11**.
+
+  **Start the next session as the Architect**, on `docs/project/phase4-prd/PRD-016-workflows-pipelines.md`.
+  Two sequencing facts to not re-derive:
+  - **Answer OQ-1 first.** The block model is upstream of nearly everything — OQ-2 needs the
+    identifiers it defines, OQ-10's conditionals need the shape it picks.
+  - **OQ-11 is on R6's critical path.** You cannot run the acceptance gate without a Webhook
+    block, and you cannot build one without deciding what a failed delivery does to a run.
+    It reads like a side question. It isn't.
+
+  **What the review found (verified against code, not taken on trust):**
+  - **Today's recipe is `scrape → [content-hash gate] → LLM → diff → webhook`.** The diff runs
+    **after** the LLM, on the final artifact — JSON diff if the LLM ran (`result_consumer.py:506`),
+    text diff if not (`:460`). There are **two distinct change-detection mechanisms**, not one:
+    the **cost gate** (`:376`, exact-byte hash, *before* the LLM, skips everything downstream)
+    and the **reporting diff** (after, purely descriptive). They serve different purposes and
+    almost certainly don't belong in the same layer.
+  - **The Problem section was factually wrong.** It claimed users "cannot do anything conditional
+    — *only call the LLM if the page actually changed*." The content-hash gate does **exactly
+    that**, today. Rewritten: the one conditional that exists is hard-coded, always-on, invisible
+    in API and UI, and byte-equality only. Same complaint, now unfalsifiable by someone reading
+    the code.
+  - **Conditionals and change detection are homeless → OQ-10.** `workflows-scoping.md` §4A lists
+    **branch** in layer A's own catalog; §4B's Monitors example (*"if it changes, tell me"*) needs
+    both a diff signal and a conditional. Neither Delivery (C) nor Monitors (B) extends what a
+    pipeline can *express*, so **B depends on capabilities this PRD defers.** OQ-1 gained a
+    forward-compat constraint so the deferral stays reversible.
+  - **Run inputs were missing entirely → R1.** The URL lived in the Scrape block's config, so one
+    saved pipeline served one URL. That breaks user stories 1 *and* 3, collides with the
+    pipelines-per-user limit, and makes a pipeline a **downgrade from a job** on that axis.
+  - **Webhook-as-a-block silently changes failure semantics → OQ-11.** Today
+    `create_webhook_delivery` writes a *pending* row and `webhook_loop` delivers async — the run
+    is already `completed`, so **an undelivered webhook never fails a job**. As a block it does.
+    Three options, none clean (fail the run / succeed-on-queued / wait on a long horizon), and
+    the third collides with the concurrency ceiling.
+  - **Quota is a shared pool → OQ-4 rewritten.** `user_quotas` has `monthly_runs_limit`,
+    `concurrent_jobs_limit`, `storage_bytes_limit`. Jobs are its only consumer today; pipelines
+    become a second one, which is where R5's "no user-visible change" comes under pressure.
+    One-unit invites arbitrage; per-block makes the R6 pipeline cost **3×** the job it reproduces.
+    **PM constraint added (not an Architect call): the R6 gate pipeline must not cost more than
+    the job it reproduces.** Note `concurrent_jobs_limit` **already exists** — the question is
+    share-or-split, not whether to build one.
+  - **Blocks must pass references, not payloads → OQ-1.** Activity I/O lands in **workflow
+    history**, which caps payload size and is **retained after completion** by design. Real pages
+    run 291 KiB–4.1 MiB (BUG-003 audit), so a content-passing model fails on big pages for
+    reasons unrelated to scraping. Contrast worth keeping: today's NATS stream is
+    `--retention work`, so orchestration state is deleted on ack — free and self-cleaning.
+    History is not. **This is the largest new operator-side cost in the migration.**
+
+  **Decisions made in the doc (PM calls, don't relitigate):** Validate rules are **declarative
+  only** (an evaluator is user-code by another name; a durable engine *replays*, so a
+  nondeterministic rule is a correctness bug that only shows after a restart; validation is
+  terminal and fires *after* the LLM billed). Validate asserts on the block's **input**, so it can
+  guard content *before* an LLM call. Cancellation lets the **in-flight block finish** — runs stop
+  at a block boundary — with **Scrape** the sole abortable block; written as a *rule* (long +
+  scarce resource + no side effect) rather than a list, so layer C inherits "sinks are never
+  abortable" for free. R6 equivalence is judged on **structure and mechanics, not byte-equality**
+  (the LLM block is nondeterministic). MCP tooling for pipelines is a **non-goal**; the SPA surface
+  is pinned to list + run status.
+
+  **Also added:** R4 time budgets (declared, **composing** — a run ceiling shorter than the sum of
+  block ceilings *is Q6 again* — and attempt-timeout=transient vs total-budget=terminal, with the
+  LLM cold-start floor named); R4's **fail-closed** rule (unknown error → terminal) which was
+  carried only by reference in OQ-6; R3's **concurrent-runs-per-user** ceiling, which the platform
+  operator user story asked for and no requirement delivered.
+
+  **Process rule worth keeping:** review findings land **in the document under review**, never in a
+  parallel notes file. A review note *about* a PRD is a second copy of its open questions — the
+  same drift this handoff already fixed once by deleting the duplicated triage tables.
+
+  <details><summary>Prior START HERE (2026-07-28) — pre-Phase-4 queue closed + PRD-016 first draft</summary>
+
+  ## ✅ (2026-07-28) — queue empty + PRD-016 written; next is **ADR-009 (Architect)**
   **P5 (Q1–Q4 close-out) is DONE, and with it the entire §1 pre-migration queue** — nothing
   blocks the Temporal migration. **PRD-016 (Workflows: Pipelines) is written and ready for the
   Architect:** `docs/project/phase4-prd/PRD-016-workflows-pipelines.md`. The next artifact is
@@ -211,6 +286,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   moot until these commits are pushed + deployed (they aren't). Verify NATS consumer state only via
   `nats consumer info **--json**` (the table omits `Max Deliver` when `-1`), never the worker's
   `subscribed` log line (prints config, not the live consumer).
+
+  </details>
 
   </details>
 
