@@ -3,12 +3,31 @@
 **Priority:** P1 — the foundation layer of Phase 4
 **Source:** `docs/project/workflows-scoping.md` §4A (feature), `phase4-backlog.md` §2 (engine decision)
 **Status:** Ready for Architect
-**Last updated:** 2026-08-04
+**Last updated:** 2026-08-04 (PM review round 2 — three Architect escalations decided; see the
+revision note below. Still **11** open questions: **OQ-10 is now half-answered** — change
+detection is assigned, conditional execution is not — and **OQ-4**'s PM constraint is narrowed.
+No OQ is fully closed.)
 
 > **Scope note.** "ScrapeFlow Workflows" is one feature in three nested layers:
 > **Pipelines (A) → Delivery sinks (C) → Monitors (B)**. This PRD covers **A only** —
 > the layer the other two are built on. C and B get their own PRDs once A ships, so the
 > Architect is not designing against a moving target.
+
+> **Revision note — PM review round 2 (2026-08-04).** Three questions raised by the Architect
+> while writing ADR-009 are now decided, in place:
+>
+> | Question | Decision | Landed in |
+> |---|---|---|
+> | Does layer A get a change-detection / cost gate? | **No.** Both halves of change detection go to **Monitors (B)**, where "the previous run of this same thing" is well defined; layer A's obligation is only to not foreclose a block that halts a run early. The cost delta is an accepted, bounded, *named* divergence. | **OQ-10** (change-detection half answered; conditional execution still open), **OQ-4** (constraint narrowed), **OQ-1** (forward-compat obligation), **Non-goals**, **R6**, Success criteria |
+> | More than one Webhook block per pipeline? | **No — at most one, rejected at save time** with a message naming the limit. Multi-destination delivery is what layer **C** exists to provide, with rollback; layer A must not teach a fan-out pattern C then has to replace. Silent collapse is explicitly ruled out. | **R2**, **R6**, Success criteria |
+> | Cancellation model | **Ratified: no block is ever aborted mid-execution** — the Scrape exception is dropped. The user-facing half is new: cancellation is acknowledged immediately, is visible while pending, says what is still running and for how long, and the completed blocks' outputs stay retrievable. | **R3**, Success criteria |
+>
+> **One gap was found while deciding these and is recorded, not decided:** a pipeline that fails
+> before reaching its Webhook block **tells nobody**, where the equivalent job fires `job.failed`
+> from any stage. It is now R6's **fourth** known exclusion with a success criterion of its own.
+> It is not assigned to a layer, because the honest answer depends on whether run-failure
+> notification arrives as an on-failure branch (conditional execution, **OQ-10**) or as a
+> run-level setting that is not a block at all — and that is the half of OQ-10 still open.
 
 ---
 
@@ -68,7 +87,10 @@ owns run state; Q8 is the operational one.
 ## Non-goals
 
 - **Delivery sinks (S3 / database / Sheet / email) and saga rollback** — the next layer, its
-  own PRD. This PRD's only outbound block is the **webhook** that already exists.
+  own PRD. This PRD's only outbound block is the **webhook** that already exists, and there may
+  be **at most one of it per pipeline** (R2). "Send one result to several destinations" is the
+  defining capability of layer C and arrives there with rollback attached; layer A must not teach
+  a fan-out pattern that C then has to replace.
 - **Monitors** — scheduling, durable long sleeps, human-approval waits, and the dormant
   scheduled-crawl gap. Own PRD, built on this one.
 - **A visual pipeline builder in the SPA.** Pipelines are API-first in this PRD. The
@@ -79,7 +101,13 @@ owns run state; Q8 is the operational one.
   and nothing auto-converts. Retiring the old lane is a separate, later decision.
 - **Branching and parallel fan-out.** Chains are linear in this PRD. (Conditional execution
   is the *first* thing to add after it ships — see **OQ-10**, which also records that
-  Monitors appears to depend on it.)
+  Monitors depends on it.)
+- **Change detection — neither the cost gate nor the reporting diff.** Now an explicit non-goal
+  rather than an unassigned gap: both belong to **Monitors (B)**, because "the previous run of
+  this same thing" is only well defined once a monitor supplies the identity (**OQ-10**). Layer A
+  owes B one thing — not foreclosing a block that ends a run early and still reports success
+  (**OQ-1**). The consequence is that a repeat run against an unchanged page costs more as a
+  pipeline than as a job; that is accepted, bounded and measured, not overlooked (**OQ-4**, R6).
 - **User-authored code as a block.** Blocks come from a fixed catalog. Arbitrary user code is
   a sandboxing problem, not a pipeline problem. The **Validate** block is the one place user
   input shapes execution, and it is deliberately confined to a declarative rule vocabulary
@@ -151,7 +179,26 @@ most visibly lack:
 | **Clean** | Strips boilerplate (nav, ads, scripts) from content | New capability; the cost-saving step users lack |
 | **LLM extract** | Runs the user's schema against content via their own key | Same provider/key model as today |
 | **Validate** | Asserts that the block's **input** satisfies a user-supplied rule — so it can guard scraped content *before* an LLM call as well as check extracted output after one | Rules are **declarative only** (schema, type, presence, comparison to a constant); no expression evaluation. Failing validation is a **terminal** run failure naming the rule that failed |
-| **Webhook** | Delivers the run result to a user URL | Reuses today's delivery + SSRF re-validation behaviour, including on every attempt. **Delivery is a step the run depends on, not a fire-and-forget side effect** — a terminal delivery failure fails the run. This diverges from today's path; mechanism and retry horizon are **OQ-11** |
+| **Webhook** | Delivers the run result to a user URL | Reuses today's delivery + SSRF re-validation behaviour, including on every attempt. **Delivery is a step the run depends on, not a fire-and-forget side effect** — a terminal delivery failure fails the run. This diverges from today's path; mechanism and retry horizon are **OQ-11**. **At most one Webhook block per pipeline** — see below |
+
+**A pipeline may contain at most one Webhook block, and a second one is rejected at save
+time** under R1's validation rule, with a message that names the limit and says multi-destination
+delivery is coming as its own capability. It is **not** silently accepted and collapsed into one
+delivery — a user who wires two destinations and gets one, with no error, has lost data and has
+no way to find out.
+
+The reason is layer ownership, not difficulty. *"Send this one result to several places"* is the
+defining sentence of **Delivery sinks (layer C)** — `workflows-scoping.md` §4C is literally "put
+the file in my S3 bucket, append a row to BigQuery, and email me a summary," and the thing C adds
+alongside the sinks is **saga rollback for partial failure**. Two Webhook blocks in layer A would
+ship that exact fan-out *without* rollback, and R2's own rule makes the gap concrete: delivery is
+a step the run depends on, so if the second webhook fails terminally the first has already fired
+and cannot be undone, and the run reports `failed` having half-delivered. That is a half-saga,
+taught to users, that C must then either honour or break. Capping at one keeps the capability
+whole and arriving once.
+
+The cap is a **layer-A cap, not a permanent product rule** — it lifts when C ships, with rollback
+attached. Users are not being told "no"; they are being told "not from this block."
 
 Each block declares what it consumes and produces, so R1's save-time validation is possible.
 Bot-wall detection stays the **Scrape** block's responsibility and remains a terminal failure
@@ -180,29 +227,66 @@ accident through a vague requirement.
   and timing, so a user can see which step failed. This is the single biggest observability
   gain over today's opaque `job_runs.status`.
 - Output is retrievable per run, and the final block's output is retrievable as *the* result.
-- A run can be **cancelled in flight**. Cancellation stops *subsequent* blocks; work already
-  completed is not rolled back (rollback is the Delivery layer's saga). **The block already
-  executing runs to completion**, so a run always stops at a block boundary and "where did it
-  stop" always has one clean answer. The sole exception is a block that is long-running, holds
-  a scarce shared resource, **and** has no external side effect — such a block may be aborted
-  mid-execution. Today that is Scrape alone:
+- A run can be **cancelled in flight**. Cancellation takes effect at the **next block
+  boundary**: the block already executing runs to completion, no subsequent block starts, and
+  work already completed is not rolled back (rollback is the Delivery layer's saga).
+  **No block is ever aborted mid-execution — there is no exception.** A run therefore always
+  stops at a block boundary, and "where did it stop" always has one clean answer.
 
-  | Block | On cancel |
-  |---|---|
-  | **Scrape** | may be **aborted** mid-execution — longest block, holds a browser, aborting costs the user nothing |
-  | **Clean**, **Validate** | complete — they finish faster than a cancellation can be delivered, so an abort path would be machinery with nothing to do |
-  | **LLM extract** | completes — aborting does **not** reliably avoid the provider bill (tokens already generated are still charged), so the machinery buys a partial benefit at full cost |
-  | **Webhook** | completes; **never** aborted — cutting a delivery mid-flight replaces a known outcome with an unknown one |
+  The rule is absolute on purpose. An earlier draft of this PRD carved out **Scrape** — the one
+  block that is long-running, holds a scarce shared resource, and has no external side effect.
+  **That exception is dropped.** The reasoning is recorded here so it is not relitigated:
+  - it was the only thing complicating R3's own rule, and Delivery sinks (layer C) — which are
+    all side-effecting — now inherit "never abortable" with no special-casing to write;
+  - the cost of not aborting is **bounded and small**: one wasted scrape, capped by the Scrape
+    block's own declared time budget (R4). Against that, real mid-flight abort needs
+    interruptible work, cancellation delivery, and heartbeating;
+  - it is **not a regression**. Today's cancel does not stop the scrape either — the API marks
+    the run cancelled and the worker's result is discarded when it arrives
+    (`result_consumer.py:614`). The worker is never told anything;
+  - it is a one-way door **in the safe direction**: adding abort later is a pure improvement,
+    removing it later would be a visible regression.
 
-  Written as a rule rather than a list because Delivery sinks (layer C) are all side-effecting:
-  the rule already tells that PRD's author they are never abortable.
-- Because a cancelled run may still have billed the user for an in-flight LLM block, the API
-  response and the run detail must **say so**. A Cancel button that silently keeps charging
-  reads as a bug; it is only acceptable if the user was told.
+  **Abortable blocks are a deliberate later enhancement, not an oversight.** If they are ever
+  added, Scrape remains the only candidate in this catalog and the test is unchanged:
+  long-running, holds a scarce shared resource, and has no external side effect. LLM extract
+  fails that test (aborting does not reliably avoid the provider bill — generated tokens are
+  still charged); Clean and Validate finish faster than a cancellation could reach them; Webhook
+  and every layer-C sink are side-effecting, and cutting a delivery mid-flight replaces a known
+  outcome with an unknown one.
+
+- **Cancellation must be visible while it is still pending.** This is the user-facing cost of the
+  rule above and it is a requirement, not a UI detail: a user who cancels during a Scrape can
+  wait most of that block's budget before the run reports `cancelled`, and a Cancel button that
+  appears to do nothing for a minute reads as broken. So:
+  - the cancel request is **acknowledged immediately**. It must never look ignored — and it must
+    never report `cancelled` before the run has actually stopped, which would be the same lie in
+    the other direction;
+  - until the run reaches its terminal outcome, it reports that cancellation is **in progress**,
+    distinguishable from both "running normally" and "cancelled";
+  - it says **what is still running** — which block — and **an upper bound on how long the wait
+    can last**. R4 already requires every block's time budget to be declared, so a bound always
+    exists and can be stated. A user must never be asked to wait an unknown length of time.
+- **What the user was charged, and what they get for it.** A cancelled run may already have
+  billed the user for an in-flight LLM block. The API response and the run detail must **say
+  so** — a Cancel button that silently keeps charging reads as a bug, and is only acceptable if
+  the user was told. It follows that **the outputs of blocks that completed before the
+  cancellation stay retrievable**, under this section's per-run output rule: telling a user they
+  were charged for a step and then withholding what they paid for is worse than not telling them
+  at all. This is a deliberate improvement on today's path, which discards a cancelled run's
+  worker result outright (`result_consumer.py:614`).
 - A run must survive an API or worker **restart or redeploy** mid-run and continue. This is
   the property today's path lacks and the whole engine choice exists to provide.
 - Runs count against the user's existing quota and storage accounting. **How** a multi-step
   run is metered is an Architect question (see OQ-4), but it must not be free.
+- **Hitting the storage ceiling must be legible.** `storage_bytes_used` is a hard, enforced
+  quota, and layer A ships **without** the content-hash gate that keeps repeat runs from adding
+  bytes (OQ-10, R6) — so a pipeline accumulates storage faster than the job it reproduces, and a
+  user can meet this wall who never approached it before. A run that fails for lack of storage
+  quota must say **that** — which block, which quota, how much was needed — not a generic
+  failure. Today's equivalent reports `storage_accounting_failed` (`result_consumer.py:413`),
+  which tells the user nothing they can act on; the pipeline path must do better, because it is
+  the path more likely to hit it.
 - **A ceiling on concurrent runs per user**, operator-configurable, alongside R1's
   blocks-per-pipeline and pipelines-per-user limits. This is the limit that actually protects
   worker capacity: R1's two bound how much a user can *define*, not how much they can *start
@@ -278,21 +362,42 @@ the pipeline model, which is the only thing under test. Equivalence therefore me
 - the artifact is stored in the same place and retrievable by the same means;
 - the webhook fired with a payload of the same **shape**, field for field.
 
-**Not claimed: behavioural parity with today's job path**, which has three things this pipeline
+**Not claimed: behavioural parity with today's job path**, which has four things this pipeline
 does not:
 
-- the **content-hash cost gate** (`result_consumer.py:376`), which skips the LLM entirely when
-  a page is byte-identical to the previous run;
+- the **content-hash cost gate** (`result_consumer.py:376`), which on a byte-identical repeat
+  skips the LLM entirely **and** deletes the artifact it just wrote, repointing the run at the
+  previous run's stored file (`:380–393`). **Two costs, not one** — the PRD previously tracked
+  only the LLM half. A repeat run of the R6 pipeline against an unchanged page therefore costs
+  **one billable LLM call and at least one newly stored artifact** (more if OQ-4 retains
+  intermediates) where the job costs **zero of each**. Both halves must be measured (Success
+  criteria) and both are accepted here. **Owner: Monitors (B) — see OQ-10**;
 - the **reporting diff** (`:460` text / `:506` JSON), which populates
-  `diff_detected`/`diff_summary` in the webhook payload;
+  `diff_detected`/`diff_summary` in the webhook payload. **Owner: Monitors (B) — see OQ-10**;
 - **webhook failure semantics.** Today `create_webhook_delivery` inserts a *pending* row and
   `webhook_loop` delivers it asynchronously with backoff — the run is already `completed` by
   then, so **an undelivered webhook never fails a job**. As a pipeline *block* it does (R2).
-  Same recipe, different terminal outcome. That is **OQ-11**.
+  Same recipe, different terminal outcome. That is **OQ-11**;
+- **notification when the run fails before reaching the Webhook block.** Today *any* worker
+  failure — scrape or LLM — fires `job.failed` to the user's webhook URL
+  (`result_consumer.py:563–575`), because delivery is triggered by the run's outcome, not by a
+  position in the recipe. In a pipeline the Webhook
+  block is a *step in the chain*: if an earlier block fails terminally, the chain stops and the
+  Webhook block never runs, so nobody is told. Failure visibility in this PRD is **R3's per-block
+  run status, read from the API** — deliberately, because the alternative is either an
+  on-failure branch (conditional execution, a non-goal here) or a **run-level** notification
+  that is not a block at all. Which of those it becomes is settled when conditional execution is
+  settled; **it is not layer A in this PRD** (see OQ-10).
 
-The first two are OQ-10. All three are stated here so a divergence found during the comparison
-is read as a **known exclusion** — not as a failed gate, and not as licence to add a diff block
-outside R2's catalog, which is the exact move this gate exists to prevent.
+All four are stated here so a divergence found during the comparison is read as a **known
+exclusion** — not as a failed gate, and not as licence to add a diff block outside R2's catalog,
+which is the exact move this gate exists to prevent. Each now names the layer that owns it, so
+"nothing picked it up" cannot recur.
+
+**Multi-destination delivery is likewise out of the comparison.** The R6 recipe has one webhook,
+so R2's one-Webhook-block cap does not narrow the gate. It is noted only because a reader
+reproducing "today's recipe" for a job with several consumers will reach for a second Webhook
+block and must be sent to layer C rather than around the cap.
 
 ---
 
@@ -303,6 +408,9 @@ outside R2's catalog, which is the exact move this gate exists to prevent.
 - [ ] Saving a pipeline with an unknown block type, invalid block config, a chain not
       starting with a source block, or an unsatisfiable input fails with a message naming the
       block and the reason.
+- [ ] Saving a pipeline with **two Webhook blocks is rejected** with a message naming the
+      one-per-pipeline limit; it is never accepted and silently collapsed into a single
+      delivery. A pipeline with exactly one Webhook block saves and runs normally.
 - [ ] Per-user limits on blocks-per-pipeline, pipelines-per-user, and **concurrent runs per
       user** are enforced and operator-configurable; hitting the concurrency ceiling produces a
       clear response rather than a silent stall.
@@ -314,15 +422,24 @@ outside R2's catalog, which is the exact move this gate exists to prevent.
       byte-equality of nondeterministic LLM output.
 - [ ] One saved pipeline runs against different URLs by supplying the URL as a run input, and
       changing its extraction schema is **one** edit rather than one per URL.
-- [ ] The cost of an R6 pipeline run is measured against the equivalent job: run each twice
-      against an **unchanged** page and count billable LLM calls. Today's content-hash gate
-      makes the job's second run cost zero; a pipeline without that gate costs one every run.
-      Any increase is **recorded before shipping**, not discovered on a user's invoice.
-- [ ] The R6 gate pipeline consumes no more **quota** (`monthly_runs_limit`,
-      `concurrent_jobs_limit`, `storage_bytes_used`) than the job it reproduces — same work must
-      not cost more for having been expressed as a pipeline (OQ-4).
+- [ ] The cost of an R6 pipeline run is measured against the equivalent job **on both axes**:
+      run each twice against an **unchanged** page, then count (a) billable LLM calls and
+      (b) **bytes added to `storage_bytes_used`**. Today's content-hash gate makes the job's
+      second run cost zero on both; a pipeline without that gate costs one call and one artifact
+      every run. The measured delta is **recorded before shipping** — not discovered on a user's
+      invoice or at a storage wall.
+- [ ] **Metering parity (hard):** for the *same* work, the R6 gate pipeline consumes no more
+      quota (`monthly_runs_limit`, `concurrent_jobs_limit`, `storage_bytes_used`) than the job it
+      reproduces **for having been expressed as a pipeline** — a 3-block pipeline doing one
+      scrape and one LLM call must not bill 3 units where the job bills 1 (OQ-4).
+- [ ] **Feature-parity gap (accepted, bounded):** the repeat-run delta above is attributable
+      *only* to the absent content-hash gate, and to nothing else. It is recorded against R6 as a
+      known exclusion owned by Monitors (B), with the storage figure stated in absolute terms
+      (bytes per run) so the size of the exposure is a number, not an adjective.
 - [ ] A run reports per-block status and timing; a failed run names the failing block and the
       reason.
+- [ ] A run that exhausts the user's storage quota fails with a message naming the block, the
+      quota, and the shortfall — not a generic accounting error.
 - [ ] A run interrupted by an API/worker restart mid-execution resumes and completes; it does
       not re-execute already-completed blocks.
 - [ ] A transient block failure retries automatically; a terminal one stops the run. An
@@ -330,11 +447,21 @@ outside R2's catalog, which is the exact move this gate exists to prevent.
 - [ ] A run whose webhook receiver is unreachable produces the outcome OQ-11 settles on, and
       that outcome is recorded as a known divergence from the job path rather than found during
       the R6 comparison.
+- [ ] A pipeline whose **Scrape block fails terminally** stops the run and names that block in
+      the run detail, and **sends no webhook** — the equivalent job's `job.failed` delivery has
+      no layer-A counterpart. Verified deliberately, as the fourth R6 known exclusion, so the
+      silence is a recorded product decision and not a bug report waiting to happen.
 - [ ] An LLM block is billed once per run per block, verified across an induced retry and an
       induced restart.
-- [ ] A run can be cancelled mid-flight; no subsequent block executes after cancellation. A
-      cancellation arriving during a Scrape block aborts it; one arriving during any other
-      block lets it complete, and the response states what was still charged.
+- [ ] A run can be cancelled mid-flight; no subsequent block executes after cancellation, and
+      **no block is aborted mid-execution — including Scrape**. The executing block completes and
+      the run stops at that boundary.
+- [ ] The cancel request is acknowledged immediately; while the executing block finishes, the run
+      reports cancellation **in progress** — distinguishable from both running and cancelled —
+      and states **which block is still running** and **an upper bound on the remaining wait**.
+      The run does not report `cancelled` until it has actually stopped.
+- [ ] A cancelled run states **what was already charged** (e.g. a completed LLM block), and the
+      outputs of blocks that completed before the cancellation are **still retrievable**.
 - [ ] A single attempt exceeding its budget retries; a block exhausting its total budget fails
       the run and names the block. A configuration whose run ceiling is shorter than the sum of
       its block ceilings is rejected at save time.
@@ -357,6 +484,17 @@ are non-goals *of this PRD*, not of the feature — and a strictly linear model 
 previous-block wiring would make adding them later a breaking change to every stored pipeline
 definition rather than an additive one. Leaving room costs nothing now; not leaving it costs a
 re-spec (see OQ-10).
+
+**One forward-compatibility obligation is now concrete rather than hypothetical.** OQ-10 assigns
+change detection to Monitors (B), but the half of it that layer A owns is the ability for a block
+to **stop a run early and have the run still be a success**: the cost gate's whole purpose is to
+skip everything downstream and finish. No block in R2's catalog does this, so nothing needs
+building here — but the model must be able to express **"run ended before the last block, outcome
+`completed`, these blocks were skipped"** without inventing a new terminal outcome and without a
+breaking change to stored definitions. R3's terminal outcomes stay three (completed / failed /
+cancelled); "skipped" is a *block* state, not a run state. If the model cannot represent that,
+B's PRD turns into unplanned layer-A rework — which is exactly the failure OQ-10 was raised to
+catch.
 
 **Settle in the same breath how a block names its input:** implicitly the previous block's
 output, or an explicit reference to any earlier block? R1's validation clause says "anything
@@ -422,8 +560,33 @@ two budgets to reason about.
 
 PM position: users must be able to see *why* a step failed, so at minimum **failure context is
 retained**. Retention of successful intermediates and the metering rule itself are Architect
-calls — subject to one constraint that is not: **the R6 gate pipeline must not cost a user more
-than the job it reproduces.**
+calls — subject to the constraint below.
+
+**The constraint, narrowed (PM review round 2).** It previously read: *"the R6 gate pipeline must
+not cost a user more than the job it reproduces."* As written that is now false, and it was
+conflating two different things:
+
+- **(a) Metering parity — stays hard, unchanged in force.** Identical work must not consume more
+  quota **for having been expressed as a pipeline**. This is the arbitrage/penalty question above
+  — the "one unit per block" option that makes the R6 pipeline burn 3 units for one scrape and
+  one LLM call is ruled out by this, and so is any storage rule that charges for retained
+  intermediates the user did not ask for. This constraint is not the Architect's to relax.
+- **(b) Feature parity — explicitly waived for layer A, with a named expiry.** The R6 pipeline
+  lacks the content-hash cost gate, so a *repeat* run against an unchanged page costs one LLM
+  call and one stored artifact where the job costs zero of each. That is a **missing feature**,
+  not a metering defect, and OQ-10 assigns it to Monitors (B). The waiver is bounded three ways:
+  it applies only to repeat runs against unchanged content; the delta must be **measured and
+  recorded before shipping** (Success criteria), not estimated; and **B does not ship without the
+  gate** — this is a launch requirement of B, not a wish.
+
+**Why the waiver is safe in layer A specifically.** The gate's value is proportional to run
+frequency, and R3 makes pipeline runs **on demand only** — scheduling is Monitors. The
+pathological case that motivates the gate (*watch hourly, changes twice a week: ~2 stored files
+per week as a job, 24 per day as a pipeline, against an enforced 5 GB `storage_bytes_used` wall*)
+**is not reachable in layer A at all**, because nothing in layer A can make a pipeline recur. A
+human clicking "run" is asking for a fresh result; that is the point of clicking. The exposure
+appears the moment something *else* clicks run on a timer — which is the moment B exists. So the
+gap opens and closes in the same layer.
 
 **OQ-5 — Reusing existing workers.** The scoping doc recommends activities dispatching to the
 existing workers over the current queue for the first phase, with a later move to workers as
@@ -448,9 +611,14 @@ engine — namespace per user/tier, or user identity encoded in the run identifi
 **OQ-9 — Does the crawl coordinator migrate?** Out of scope here, but it is the obvious
 second candidate and the answer shapes the block model if a Crawl block is ever wanted.
 
-**OQ-10 — Conditional execution and change detection: which layer owns them?** Neither is in
-this PRD, and — as the layers are currently scoped — neither is picked up by what follows.
-Delivery (C) adds outbound blocks; Monitors (B) wraps a pipeline in a durable loop. Both are
+**OQ-10 — Conditional execution and change detection: which layer owns them?**
+**⚙️ PARTIALLY RESOLVED (PM, review round 2): change detection is decided — both halves go to
+Monitors (B). Conditional execution stays open and is the Architect's to sequence.** The original
+framing is kept below because it is what the decision answers.
+
+Neither is in this PRD, and — as the layers were originally scoped — neither is picked up by
+what follows. Delivery (C) adds outbound blocks; Monitors (B) wraps a pipeline in a durable
+loop. Both are
 built *on* the pipeline model; neither extends what a pipeline can **express**. Two facts make
 this a decision rather than an omission:
 
@@ -477,6 +645,39 @@ Sub-questions:
   B. But the cost gate must be able to halt a chain mid-run, which is a layer-A capability.
   They are unlikely to land in the same layer.
 
+  **✅ PM decision — both halves go to Monitors (B). Layer A gets no change-detection block.**
+
+  The two halves land in the same layer after all, and the deciding argument is not effort — it
+  is that **"the previous run of this same thing" is not definable in layer A.** A job is one
+  URL, so its previous run is unambiguous. A *pipeline* takes **run inputs** (R1): one saved
+  pipeline run against 50 URLs has 50 independent histories, and a gate in layer A would have to
+  invent a per-input-tuple identity concept that layer A has no other reason to want, and that
+  the Architect would have to guess at. Under a Monitor that ambiguity does not exist — the
+  monitor instance *is* the identity, and its previous iteration is the obvious comparand. The
+  same argument settles the reporting diff, which needs the identical comparand.
+
+  Three consequences, all recorded elsewhere in this PRD so they are not lost:
+  - **layer A's only obligation is to not foreclose it** — a block that halts a run early with a
+    `completed` outcome must be expressible later without a breaking change (**OQ-1**);
+  - **the cost delta is accepted, bounded, measured, and named** — one LLM call and at least one
+    stored artifact per repeat run against unchanged content, waived under **OQ-4(b)**, recorded
+    as a known exclusion under **R6**, and quantified in Success criteria;
+  - **B does not ship without the gate.** It is a launch requirement of that PRD, not a backlog
+    item — the layer that makes pipelines recur is the layer that makes the missing gate hurt.
+
+  What this does **not** decide: whether the gate's comparand is an exact-byte hash (today's
+  mechanism) or something a user can point at a field. That is B's PRD to write, and today's
+  byte-equality-only behaviour is on record in the Problem section as a limitation, not a target.
+
+- **Still open — does conditional execution need a follow-up layer-A PRD before B can be
+  specced, or does B absorb it?** This is the half of OQ-10 that remains, and the change-detection
+  decision above sharpens rather than removes it: B now owns a capability (**halt the run when
+  nothing changed**) that consumes a layer-A primitive B cannot build for itself. Answering this
+  is what makes OQ-1's forward-compatibility constraint concrete — it says what the block model
+  must leave room for, **and by when**. The PM position is only that the *answer* must exist
+  before B's PRD is written; which way it goes, and whether it arrives as a PRD-016 follow-up or
+  inside B, is an Architect sequencing call.
+
 **OQ-11 — Webhook delivery: a step, or a side effect?** Today delivery is **decoupled** — the
 run is marked `completed`, a pending row is written, and `webhook_loop` retries it
 independently with backoff for as long as it takes. An undelivered webhook never fails a job.
@@ -500,9 +701,11 @@ The mechanism is the open part, and the options are not equivalent:
 
 Whichever is chosen, the divergence from today's path must be recorded against R6, not
 discovered during the comparison.
-- **Does conditional execution need a follow-up layer-A PRD before B can be specced, or does
-  B absorb it?** Answering this is what makes OQ-1's forward-compatibility constraint concrete
-  — it says what the block model must leave room for, and by when.
+
+**One complication is now removed:** R2 caps a pipeline at **one** Webhook block, so option (c)'s
+long-horizon wait can tie up at most one delivery per run. A user cannot build a chain of five
+webhook blocks each waiting hours on a dead receiver. That does not settle OQ-11, but it bounds
+the concurrency interaction flagged in R3.
 
 ---
 
