@@ -86,8 +86,15 @@ path (nothing ripped out).
   inside plumbing the migration deletes (backlog §3, PRD-016 OQ-6): the **LLM cold-start handling**
   (`ensure_ready()` + 180s timeout) and the **transient/terminal storage-fault classifier** on all
   three workers. Both must be **ported into the Temporal activities, not deleted with NATS.**
-  Deferred and not blocking: **BUG-004** (screenshots orphaned on every path) and **47 medium/low**
-  Dependabot alerts (aiohttp ×21 + dompurify ×17 dominate — both transitive, low-reach).
+  Deferred and not blocking: **BUG-004** (screenshots orphaned on every path) and **BUG-006**
+  (**Dependabot scans 3 of 6 manifests** — `coordinator/`, `llm-worker/` and `playwright-worker/`
+  have no lockfile and are unmonitored, so the true advisory count is unknown; the visible aiohttp
+  high is the *unreachable* copy while the reachable one — `coordinator/sitemap.py` fetching
+  robots.txt/sitemaps from user-supplied target sites — is in a service nothing scans. **Do not
+  close it as dissolved by the migration:** the coordinator is deleted, but sitemap discovery
+  *ports into a `CrawlWorkflow` activity* and carries the exposure unless the port uses **httpx**,
+  as every other untrusted-target fetch already does). Alert count as of 2026-08-05: **51 open —
+  2 high, 34 medium, 15 low**, all against the three scanned manifests.
   **`develop` and `main` are level and deployed.**
 - **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
 - **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).

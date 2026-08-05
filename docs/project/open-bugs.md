@@ -429,3 +429,140 @@ latent rather than realised.
   "discard." Worth noting that the malformed-message branch is the one remaining place where a
   worker still acks unconditionally on failure, which is the shape of bug UF-003 spent three
   commits removing everywhere else.
+
+---
+
+## BUG-006 — Dependabot scans 3 of 6 dependency manifests; the unscanned half contains the only reachable instance of a live CVE
+
+**Severity:** Medium (contained DoS vector — but the coverage gap behind it is the larger problem)
+**Discovered:** 2026-08-05, from a push-time Dependabot banner
+**Status:** Open — **deferred behind BUG-005 and the Temporal migration** (owner's call, recorded
+in `phase4-backlog.md` §4)
+
+### What happens
+
+Two separate problems that were found together and are best fixed together.
+
+**1. Three of six dependency manifests are never scanned.** There is no
+`.github/dependabot.yml`, so the repository runs on default auto-setup. Every open alert is filed
+against one of three manifests:
+
+| Manifest | Open alerts |
+|---|---|
+| `api/uv.lock` | 29 |
+| `frontend/package-lock.json` | 21 |
+| `http-worker/go.mod` | 1 |
+
+**`coordinator/`, `llm-worker/` and `playwright-worker/` produce zero alerts** — not because they
+are clean, but because nothing looks at them. Each has a `pyproject.toml` carrying floor-only
+constraints (`aiohttp>=3.9.0`, `cryptography>=41.0.0`) and **no lockfile**. Three of the five
+Python services in the platform are unmonitored.
+
+**2. Because of (1), the one *reachable* instance of a live high-severity CVE is invisible, while
+the visible alert is for an unreachable copy.**
+
+`CVE-2026-69244` / `GHSA-cq5v-8q36-5273` — an out-of-bounds heap read in aiohttp's **C HTTP
+response parser**, on the error path for a malformed **chunked** response. Vulnerable `<= 3.14.2`,
+fixed in **3.14.3**.
+
+Reachability turns entirely on *whose* HTTP responses aiohttp parses, and the codebase splits
+cleanly:
+
+| Service | What its aiohttp parses | Reachable |
+|---|---|---|
+| `api`, `llm-worker`, `playwright-worker` | MinIO responses only — aiohttp is `miniopy-async`'s backend. The two workers import `aiohttp` solely to name its exception types in their transient/terminal classifiers | **No** — in-cluster, trusted |
+| `coordinator` | `robots.txt` and sitemap XML fetched **from the user-supplied target site** (`coordinator/coordinator/sitemap.py:11`, `:28`, `:45`) | **Yes** |
+
+Everything else that contacts an untrusted host already uses **httpx**: webhook delivery
+(`webhook_loop.py`), the Playwright worker's robots.txt fetch (`playwright-worker/worker/robots.py`),
+LLM calls and the warm-up probe (`llm-worker/worker/llm.py`), and Clerk JWKS (`auth/jwt.py`). The
+coordinator's sitemap discovery is **the only place aiohttp faces a server we do not control** — and
+it is in the one service Dependabot cannot see.
+
+The alert that exists (`#94`, against `api/uv.lock`, aiohttp `3.13.3`) is for a copy that only ever
+talks to MinIO.
+
+**Compounding the gap:** `coordinator/Dockerfile` builds with `pip install --no-cache-dir .`
+against an unbounded floor. The aiohttp version actually running in production is whatever PyPI
+resolved at image-build time — unpinned, non-reproducible, and not determinable without inspecting
+the image. The same is true of both Python workers.
+
+### Root cause
+
+Two independent omissions that mask each other:
+
+1. **No `dependabot.yml`.** Default setup discovers a subset of manifests; nothing enumerates the
+   monorepo's six dependency roots.
+2. **No lockfiles outside `api/`.** Without a lock, there is no resolved version for a scanner to
+   compare against an advisory, and no reproducibility for the build either. The floor-only
+   constraints were adequate when these services were new and are not now.
+
+### Severity assessment — deliberately not inflated
+
+The reachable defect is an out-of-bounds **read**, not a write. The realistic outcome is a crash of
+the coordinator pod, or a small heap disclosure surfacing inside a parse error — not remote code
+execution. Triggering it requires a crawl aimed at a server the attacker controls, which is
+ScrapeFlow's advertised function, so the practical bar is *"has an account."*
+
+Blast radius is contained: the coordinator is its own pod, k8s restarts it, and because the BFS
+frontier is persisted in the `crawl_queue` Postgres table rather than held in memory, in-progress
+crawls survive the restart. That is ADR-005's placement decision paying off in a scenario it was
+not written for.
+
+The **coverage gap** is the more serious half, and it is not scoped to this CVE: three services
+have never been scanned, so the true count of unaddressed advisories in this repository is unknown.
+
+### The second high alert (`#95` — not reachable, recorded for completeness)
+
+`CVE-2026-69247` / `GHSA-g6cj-pr64-35w5` — `cryptography` PKCS#7 EnvelopedData decryption exposes a
+Bleichenbacher oracle. Vulnerable `>= 44.0.0, < 50.0.0`; we run **48.0.1**; fixed in **50.0.0**.
+
+**Not reachable.** The only symbols any service imports from `cryptography` are `Fernet` and
+`InvalidToken`. Fernet is AES-CBC + HMAC-SHA256; PKCS#7 EnvelopedData is RSA key transport. There is
+no `pkcs7` reference anywhere in the repository, and `clerk-backend-api` uses the library for JWKS
+signature *verification*, not enveloped decryption.
+
+Worth noting for whoever does the bump: **clerk-backend-api 6.0.1 declares `cryptography` with no
+upper bound**, so 48 → 50 will not repeat BUG-002's problem, where clerk 5.x pinned
+`cryptography<47` and made the CVE fix unreachable without a major version bump.
+
+### Fix — four steps, in this order
+
+1. **Add `.github/dependabot.yml` enumerating all six manifest directories** (`api`, `frontend`,
+   `http-worker`, `coordinator`, `llm-worker`, `playwright-worker`). This is the actual fix; the
+   two CVEs are the symptom that exposed it.
+2. **Generate lockfiles** for `coordinator`, `llm-worker` and `playwright-worker`. Without one,
+   Dependabot has no resolved version to compare and the images stay non-reproducible regardless of
+   step 1.
+3. **aiohttp → `>= 3.14.3`**, coordinator first — it is the only reachable instance.
+4. **cryptography → `50.0.0`** whenever convenient. Not urgent; not reachable.
+
+**Expect the alert count to rise before it falls.** Steps 1 and 2 will surface advisories against
+three services that have never been scanned. That is the point, but it should not be mistaken for a
+regression.
+
+### Sequencing
+
+**Deferred behind BUG-005 and the Temporal migration** — owner's decision, 2026-08-05. Neither CVE
+is being exploited, the reachable one needs an authenticated user pointing a crawl at their own
+server, and the coverage work is bounded and self-contained whenever it is picked up.
+
+### Interactions
+
+- **⚠️ Do not close this as dissolved by the migration.** The `coordinator/` service *is* deleted
+  (backlog §3), so a reader may reasonably assume the reachable instance disappears with it. **It
+  does not.** Sitemap and robots.txt discovery is *business logic* that ports into a `CrawlWorkflow`
+  activity — the fetch still happens, still targets a user-supplied host, and inherits whichever
+  HTTP client the activity uses. Same shape as the Q5 `ensure_ready()` carry-forward: plumbing goes,
+  behaviour stays.
+- **Recommendation for that port: use `httpx`, not `aiohttp`.** Every other untrusted-target fetch
+  in the platform already does. Converging on one client for untrusted responses removes this
+  exposure as a side effect of the migration rather than as separate work, and leaves `aiohttp`
+  used only where `miniopy-async` requires it — against MinIO, which we control. Worth adding to
+  ADR-009 §10's port list when that ADR is reviewed.
+- **BUG-002** — same ecosystem, different problem. BUG-002 was "these known alerts need version
+  bumps." This is "the scanner has a hole in it," and no amount of triaging visible alerts finds
+  it. The remaining-alerts row in `phase4-backlog.md` §4 was written from a count that only ever
+  covered half the repository.
+- **BUG-005** — unrelated in mechanism, related in shape: both are failures that every existing
+  check reported as green, because the check did not cover the thing that was broken.

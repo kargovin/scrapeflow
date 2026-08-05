@@ -73,7 +73,20 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   11** of PRD-016's open questions, and defines the v1/v2 coexistence contract. Nothing in it is
   settled; do not implement against it or cite it as a decision elsewhere until the status changes.
 
-  **Three findings from this session that are not in the ADR and matter on their own:**
+  **Filed 2026-08-05 — BUG-006: Dependabot scans 3 of 6 dependency manifests.** No
+  `.github/dependabot.yml`, so only `api/uv.lock`, `frontend/package-lock.json` and
+  `http-worker/go.mod` are covered; **`coordinator/`, `llm-worker/` and `playwright-worker/` have
+  no lockfile and have never been scanned**, so the real advisory count is unknown. Surfaced by a
+  live aiohttp high (`CVE-2026-69244`, OOB heap read in the C response parser) whose **visible
+  alert is the unreachable copy** — for `api` and the two workers aiohttp only parses MinIO
+  responses — while the **reachable** one, `coordinator/sitemap.py` fetching robots.txt and
+  sitemap XML from *user-supplied target sites*, sits in a service nothing scans. ⚠️ **Do not
+  close it as dissolved by the migration:** `coordinator/` is deleted, but sitemap discovery
+  *ports into a `CrawlWorkflow` activity* and carries the exposure unless the port uses **httpx**,
+  as every other untrusted-target fetch already does. **Deferred behind BUG-005 and Temporal**
+  (owner's call). Alert count 2026-08-05: **51 open — 2 high, 34 medium, 15 low.**
+
+  **Three findings from the ADR session that are not in the ADR and matter on their own:**
 
   - **BUG-005 — batch is broken on all three execution paths, silently.** Found while verifying
     PRD-016's claims against live code, not during triage. **(A)** playwright batch: workers

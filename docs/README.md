@@ -45,7 +45,7 @@ Day-to-day docs that are still actively consulted.
 | [`project/phase4-prd/`](project/phase4-prd/) | Phase 4 PRDs (PRD-016 →) — one file per feature layer |
 | [`project/workflows-scoping.md`](project/workflows-scoping.md) | The Workflows feature scoping + engine comparison |
 | [`project/temporal-full-migration.md`](project/temporal-full-migration.md) | Complete change inventory + strangler-fig migration sequence |
-| [`project/open-bugs.md`](project/open-bugs.md) | BUG-001 → BUG-005 |
+| [`project/open-bugs.md`](project/open-bugs.md) | BUG-001 → BUG-006 |
 | [`project/usage-findings.md`](project/usage-findings.md) | UF-001 → UF-003 — findings from running the platform |
 
 ---
