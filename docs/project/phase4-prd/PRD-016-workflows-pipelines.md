@@ -3,10 +3,12 @@
 **Priority:** P1 — the foundation layer of Phase 4
 **Source:** `docs/project/workflows-scoping.md` §4A (feature), `phase4-backlog.md` §2 (engine decision)
 **Status:** Ready for Architect
-**Last updated:** 2026-08-04 (PM review round 2 — three Architect escalations decided; see the
-revision note below. Still **11** open questions: **OQ-10 is now half-answered** — change
-detection is assigned, conditional execution is not — and **OQ-4**'s PM constraint is narrowed.
-No OQ is fully closed.)
+**Last updated:** 2026-08-08 (PM review round 3 — **OQ-4 gains a decided section**: the crawl lane
+joins the quota meters, at page granularity. Still **11** open questions; OQ-4's *pipeline* metering
+question remains the Architect's, but *which lanes the meter covers* is now answered.)
+*Previously: 2026-08-04 (PM review round 2 — three Architect escalations decided; see the
+revision note below. **OQ-10 is half-answered** — change detection is assigned, conditional
+execution is not — and **OQ-4**'s PM constraint is narrowed. No OQ is fully closed.)*
 
 > **Scope note.** "ScrapeFlow Workflows" is one feature in three nested layers:
 > **Pipelines (A) → Delivery sinks (C) → Monitors (B)**. This PRD covers **A only** —
@@ -28,6 +30,25 @@ No OQ is fully closed.)
 > It is not assigned to a layer, because the honest answer depends on whether run-failure
 > notification arrives as an on-failure branch (conditional execution, **OQ-10**) or as a
 > run-level setting that is not a block at all — and that is the half of OQ-10 still open.
+
+> **Revision note — PM review round 3 (2026-08-08) — ✅ owner-confirmed 2026-08-08.** The round-3
+> decision below is ratified and carried into ADR-009 §3/§8. (Rounds 1 and 2 above are also
+> settled.) Note the ADR *as a whole* remains Draft — this decision is settled within it, and is
+> tracked for implementation as backlog **§1 P7**. ADR-009 §3 moves quota counting off
+> hardcoded table names and onto a **view** that is the single definition of *"a run this user
+> started."* That raises a product question the Architect cannot answer alone — **which lanes are
+> in the view** — and it is answered in place, in **OQ-4**:
+>
+> | Question | Decision | Landed in |
+> |---|---|---|
+> | Do crawls join the view — i.e. do crawls start consuming quota? | **Yes.** A lane that can start work and is absent from the definition of "a run this user started" is a **bug, not a discount**. Crawls consume zero of all three meters today; writing the view while knowingly omitting the one shipped lane it does not cover would bake the omission into the artifact built to prevent it. | **OQ-4** (new decided section), **R5** (named exception) |
+> | What counts as one run — one per crawl, or one per page? | **The unit is one fetch of one target URL that produces one stored result.** So: per **page** for `monthly_runs_limit` and `storage_bytes_used`; per **crawl** for `concurrent_jobs_limit`. Cost and contention are different quantities and are allowed to disagree — this is batch's existing shape, not a new asymmetry. | **OQ-4**, Success criteria |
+>
+> **This is a metering change to a shipped, live feature**, and therefore a named exception to R5's
+> "no user-visible change" — scoped to accounting only, with no change to crawl mechanics, API
+> shape, or results. It is **not caused by pipelines**: it is a pre-existing gap that the view
+> forces us to name, and it would be correct even if Phase 4 were cancelled. Rollout, storage
+> reclaim (a hard precondition), and sequencing are all settled in OQ-4.
 
 ---
 
@@ -335,7 +356,12 @@ accident through a vague requirement.
 ### R5 — Coexistence with the existing path
 
 - Pipelines are **additive**. Jobs, batches, crawls, schedules, webhooks, the admin panel,
-  and the MCP server keep working with no user-visible change.
+  and the MCP server keep working with no user-visible change — with **one named exception**:
+  **crawls begin consuming quota** (OQ-4, round 3). That is an accounting change only — crawl
+  mechanics, API shape and results are untouched — and it is **not caused by pipelines**. It is a
+  pre-existing gap (crawls consume zero of all three meters today) that ADR-009's run-counting view
+  forces us to name, and it would be correct even if Phase 4 were cancelled. It is called out here
+  so it is a recorded product decision rather than a contradiction found later.
 - **A unit of work executes on exactly one lane — never both.** Double execution means a
   double scrape of the target site and a double LLM bill. This is the top cutover risk on
   record and must be structurally prevented, not just avoided by convention.
@@ -432,6 +458,14 @@ block and must be sent to layer C rather than around the cap.
       quota (`monthly_runs_limit`, `concurrent_jobs_limit`, `storage_bytes_used`) than the job it
       reproduces **for having been expressed as a pipeline** — a 3-block pipeline doing one
       scrape and one LLM call must not bill 3 units where the job bills 1 (OQ-4).
+- [ ] **Lane completeness (OQ-4, round 3):** the run-counting view enumerates **every** lane that
+      can start work — job runs, batch items, **crawl pages**, pipeline runs — and adding a lane
+      later is a change to the view, not an audit of every call site. Verified by exhausting a
+      user's `monthly_runs_limit` and confirming that a **crawl** is then refused at creation,
+      naming the meter and the shortfall. A lane absent from the view is a bug, not a discount.
+- [ ] **Crawl metering granularity:** a crawl of N pages consumes **N** monthly runs and **one**
+      concurrent slot, and each stored page counts against `storage_bytes_used`. Crawl artifacts
+      are deletable and deleting them frees the bytes — verified before counting is enabled.
 - [ ] **Feature-parity gap (accepted, bounded):** the repeat-run delta above is attributable
       *only* to the absent content-hash gate, and to nothing else. It is recorded against R6 as a
       known exclusion owned by Monitors (B), with the storage figure stated in absolute terms
@@ -587,6 +621,192 @@ per week as a job, 24 per day as a pipeline, against an enforced 5 GB `storage_b
 human clicking "run" is asking for a fresh result; that is the point of clicking. The exposure
 appears the moment something *else* clicks run on a timer — which is the moment B exists. So the
 gap opens and closes in the same layer.
+
+---
+
+**✅ DECIDED (PM review round 3, 2026-08-08) — which lanes the meter covers: crawls join, at page
+granularity.** *(The pipeline metering rule itself stays the Architect's, under the constraint
+above. This answers the prior question the view raises: which lanes it contains.)*
+
+ADR-009 §3 answers OQ-1(a) by moving quota counting off hardcoded table names and onto a **view**
+that is the single definition of *"a run this user started."* That is the right fix, and it forces
+a question the Architect cannot answer alone: **which lanes are in the view.** Pipelines obviously
+are. **Crawls are not — and are not in today's meters either.**
+
+**The gap, verified against live code (2026-08-08).** `JobRun` rows are created in exactly three
+places — `routers/jobs.py:207`, `routers/batch.py:105`, `core/scheduler.py:80` — and never for a
+crawl. Crawl work lives in `crawl_pages`, with its own `status` and `result_path`.
+`routers/crawls.py` contains **no quota check of any kind**. `increment_storage_bytes` has exactly
+one call site (`result_consumer.py:85`), gated on `job_runs.storage_accounted_at`; the coordinator's
+result handler sets `page.result_path` and never accounts. Net effect: **a crawl of up to
+`max_pages` = 10,000 pages costs zero monthly runs, zero concurrent slots and zero counted bytes**,
+from one API call. Nobody decided crawls are free — the query never looked. This is the same shape
+as BUG-005: a contract that assumed every unit of work is a job.
+
+**1. Crawls join the view.** A lane that can start work and is absent from the definition of "a run
+this user started" is a **bug, not a discount**. Writing the view now while knowingly omitting the
+one shipped lane it does not cover would bake the omission into the very artifact built to prevent
+it — and would leave the platform's stated position as "your 500-run limit is real unless you phrase
+the work as a crawl."
+
+**2. The unit is one fetch of one target URL that produces one stored result** — not one user
+action, and not one step. Applied across all four lanes: a job run is 1; a batch of N URLs is N
+(already shipped); **a crawl of N pages is N**; a pipeline run is 1. A crawl page is byte-for-byte
+the same unit of work as a job run — same NATS subject, same worker, same fat message, same stored
+artifact, same proxy bandwidth. It differs from a batch item only in that the URL was *discovered*
+rather than supplied, and **discovery is not a discount**.
+
+**3. This does not contradict ADR-009 §8 — it supplies the reason §8 is true.** §8 prices a pipeline
+run at one unit "regardless of block count," and that stays correct: R1 fixes one run to one URL,
+and Clean / LLM extract / Validate / Webhook fetch nothing, so block count does not change how many
+pages were fetched. R6's metering-parity criterion still passes unchanged. Stating the rule as *the
+fetch is the unit* is what makes it extend to a lane the ADR did not originally cover, instead of
+being a per-lane convention.
+**One rider for the Architect:** if layer A permits more than one Scrape block in a chain, that run
+fetches twice and costs 2. PM preference is to **count executed Scrape blocks** rather than cap
+Scrape at one — the Webhook cap had a layer-ownership reason (C owns fan-out) that has no analogue
+here, and capping would foreclose "scrape a page, then scrape a link found on it." Either resolution
+satisfies the rule; leaving it unstated does not, because "regardless of block count" reads as a
+licence for a five-Scrape pipeline to cost 1.
+
+**4. `concurrent_jobs_limit`: a crawl is one unit, not N.** Cost and contention are different
+quantities and are allowed to disagree. Three reasons, all pointing the same way:
+- Per-page concurrency makes the feature unrunnable. The default `concurrent_jobs_limit` is **5**
+  and the default `max_pages` is **100** — every default crawl would be permanently over-limit. A
+  meter that makes a shipped feature impossible is misconfigured, not strict.
+- Making it work would require dispatch throttling against a live quota read inside `coordinator/`
+  — new scheduling logic in a service ADR-009 §13 deletes. It would change crawl throughput (a real
+  user-visible change) and then be thrown away.
+- The contention the limit exists to bound is already bounded on this lane by two other mechanisms:
+  the coordinator's dispatch batch size, and the one-active-crawl-per-origin rule in
+  `routers/crawls.py`. The meter is not the only thing protecting worker capacity here.
+
+So a crawl occupies **exactly one concurrent slot for its lifetime**, from creation until terminal.
+Revisit the granularity when `CrawlWorkflow` exists and per-workflow activity concurrency is a
+configuration value rather than new code.
+
+**5. Batch is the precedent, and it already has this exact shape.** `routers/batch.py:46–47`
+pre-approves **monthly** runs at `batch_count=len(urls)` but checks **concurrency** once, at
+`batch_count=1`. One user action, N cost units, one admission slot — which is precisely the crawl
+rule. (Named honestly: batch's N `job_runs` rows *do* then count individually against the *next*
+request, so a 100-item batch locks the user out until it drains. That is an inconsistency inside
+batch, not a precedent to copy; if it is ever normalised it should move **toward** this rule, not
+away from it.)
+
+**6. `storage_bytes_used`: every stored crawl page is charged — and this ships in the same change,
+not separately.** ADR-009 §8's "only the final artifact is charged" needs **no exception** here: a
+crawl has no intermediates, every page result is a deliverable the user retrieves via
+`GET /crawls/{id}/pages`. In scope because it is the axis where crawls are most dangerous —
+10,000 pages at the BUG-003-measured 291 KiB–4.1 MiB range is **2.8 GB–40 GB from a single API
+call**, against an enforced 5 GB default — and because shipping "crawls now cost quota" while the
+largest axis stays free means announcing a **second** pricing change to the same feature later. One
+change, announced once.
+
+> **Hard precondition: crawl artifacts must become reclaimable before their bytes are counted.**
+> No path frees them today. `DELETE /crawls/{id}` cancels and deletes no objects; job permanent
+> delete (`routers/jobs.py:391`) and both admin delete paths (`admin.py:213`, `admin.py:336`)
+> enumerate `job_runs.result_path` and never see `crawl_pages.result_path` — **so even deleting a
+> user leaves that user's crawl artifacts in MinIO forever**, which is a retention problem
+> independent of quota. Counting bytes against a hard, enforced wall with no user-side remedy is a
+> support incident by design: the counter could only ever go up.
+
+**7. Admission checks the declared ceiling; the meter charges what actually happened.** A crawl is
+pre-checked at creation against `max_pages`, exactly as a batch is pre-checked against `len(urls)`;
+pages are counted as they are created; the unused remainder of the ceiling is **not** charged
+(crawls usually discover fewer pages than their ceiling). Checking the ceiling is the honest UX — a
+crawl that dies at page 37 because quota ran out is worse than one that never starts. The same rule
+covers a pipeline's declared Scrape-block count. A crawl rejected for quota must say so **at
+creation**, naming the meter, the ceiling checked and the shortfall — the same legibility bar R3
+already sets for a pipeline hitting the storage wall.
+
+**8. Rollout — a pricing change to a shipped, live feature.**
+- **Monthly runs and concurrency need no grandfathering.** Neither is a stored ledger; both recount
+  live (`_count_monthly_runs`, `_count_concurrent_jobs`). The meters can only ever see crawls
+  created *after* the change, so no user can wake up retroactively over-limit. There is nothing to
+  forgive, and the "do nothing" answer here is also the correct one.
+- **Storage is the only cumulative counter and the only real hazard. Do not backfill.** Accounting
+  **starts at cutover; history is not reconciled** — pre-cutover crawl artifacts stay uncounted, and
+  once the delete path exists, deleting one must **not** decrement (it was never incremented). The
+  counter is already approximate — BUG-004's screenshots are uncounted, and a failed stat silently
+  counts 0 (`minio_stat_failed`) — so no exactness is being surrendered that we currently claim.
+- **Measure before enabling.** A read-only audit: for each user, what their last 90 days of crawls
+  *would have* cost under this rule. That converts "could someone land over-limit" from speculation
+  into a number, and it is one query.
+- **If the audit finds anyone affected, raise that user's `user_quotas` row — do not move the
+  global default.** Per-user limits already exist and are nullable-with-fallback, so a bump is one
+  row and zero code. Raising `default_quota_monthly_runs` to absorb crawls would silently loosen the
+  limit for every user who never crawls, which is a worse change than the one being made.
+- **Accept and announce.** No feature flag, no dual-counting period, no grandfather list. That
+  machinery exists for a large paying tenant base; here the user set is known and countable, and the
+  audit says in advance exactly who is affected. If it finds nobody — the likely outcome, and the
+  same "latent in prod" state BUG-005 found for batch — ship it plainly, with a changelog entry
+  naming the date accounting starts.
+
+**9. What this blocks.** The **decision** blocks ADR-009 §3 and §8 and is needed now, before the
+view is written; retrofitting a lane into "the single definition of a run" afterwards is exactly the
+audit-every-call-site failure the view exists to prevent. The **implementation** does not block the
+migration and must not be sequenced behind it: it ships on today's code, in `phase4-backlog.md` §1,
+**after P6/BUG-005** — which it should follow, because BUG-005 re-keys the v1 artifact path and
+touches the same accounting surface. It is legitimately §1 work by the backlog's own selection rule:
+`core/quota.py` and `routers/crawls.py` **survive** the migration, and only the storage-accounting
+call site sits inside `coordinator/`, which does not. After the migration, `CrawlWorkflow` inherits
+the rule unchanged.
+
+**No new PRD.** This is a metering-policy answer to OQ-4 on an existing shipped feature, with no new
+user-facing capability. It belongs in the document under review, not in a PRD-019 that would restate
+OQ-4 under a new number — duplicated tracking docs have already caused drift twice on this project.
+
+---
+
+**Carry into ADR-009 (Architect — this PRD does not edit the ADR).**
+
+**§3 — after the `storage_bytes_used` paragraph, which needs correcting.** The ADR currently says
+`storage_bytes_used` "needs no change… it is already lane-agnostic. Only the two COUNT-based meters
+had the defect." The *mechanism* is lane-agnostic; the **call sites are not** — there is exactly one
+(`result_consumer.py:85`), gated on a `job_runs` column, so the crawl lane never increments it. All
+three meters have the defect, in two different ways.
+
+> **Which lanes the view contains: four, not two** — `job_runs` on the job path, `job_runs` on the
+> batch path, **`crawl_pages`**, and `pipeline_runs`. Crawls consume no quota today
+> (`routers/crawls.py` has no quota check and crawl work never creates a `JobRun`), which is the
+> same omission this view exists to end, one lane earlier. **A lane that can start work and is
+> absent from the view is a bug, not a discount** (PM, PRD-016 OQ-4, round 3).
+>
+> The view is **one row per countable unit**, and the two COUNT meters aggregate it differently:
+> `monthly_runs` counts **rows** (a batch of N counts N; a crawl of N pages counts N);
+> `concurrent_jobs` counts **distinct concurrency groups** among non-terminal rows, where the group
+> is the **crawl** for crawl pages and the row itself on every other lane — so one crawl occupies
+> one slot however many pages are in flight.
+
+**§8 — metering.**
+
+> **The unit is one fetch of one target URL that produces one stored result** — not one user action,
+> and not one step. Job run = 1; batch of N = N (shipped); **crawl of N pages = N**; pipeline run =
+> 1, because R1 fixes one run to one URL and the non-Scrape blocks fetch nothing. "Regardless of
+> block count" is true *because* block count does not change how many pages were fetched.
+> **Rider:** if layer A permits more than one Scrape block in a chain, that run fetches twice and
+> costs 2 — PM preference is to count executed Scrape blocks rather than cap Scrape at one.
+>
+> **Admission checks the declared ceiling; the meter charges what actually happened.** A crawl is
+> pre-checked against `max_pages` at creation, as a batch is against `len(urls)`; pages are counted
+> as created and the unused remainder is not charged. Same rule for a pipeline's declared Scrape
+> count.
+>
+> **`concurrent_jobs_limit`: a crawl is one unit, not N.** Cost and contention are different
+> quantities and may disagree. Per-page concurrency would put every default crawl (`max_pages` 100)
+> permanently over the default ceiling of 5, and satisfying it would need dispatch throttling inside
+> the service §13 deletes. Crawl-lane contention is already bounded by the coordinator's dispatch
+> batch size and the one-active-crawl-per-origin rule. Revisit when `CrawlWorkflow` makes throttling
+> a config value rather than new code.
+>
+> **`storage_bytes_used`: every stored crawl page is charged.** "Only the final artifact is charged"
+> needs no exception — a crawl has no intermediates; every page result is a deliverable.
+> **Precondition:** crawl artifacts must first become reclaimable (no path frees them today, and the
+> job/admin delete paths enumerate `job_runs.result_path` only — even user deletion orphans them).
+> **Accounting starts at cutover; history is not reconciled** — pre-cutover artifacts stay uncounted
+> and deleting one must not decrement.
+
+---
 
 **OQ-5 — Reusing existing workers.** The scoping doc recommends activities dispatching to the
 existing workers over the current queue for the first phase, with a later move to workers as
