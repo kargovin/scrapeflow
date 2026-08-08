@@ -238,6 +238,121 @@ Never big-bang. Each step ships independently; both systems run until a flow is 
 Each of these is a reversible increment — if a step misbehaves, that flow falls back to the
 NATS path until fixed.
 
+### 9a. The two shapes worth seeing
+
+§2 draws the **end state**. It is the shape we operate for the longest, but it is not the shape
+that carries the risk. Two others matter: where we start, and the **peak** — steps 2–3, when both
+orchestrators run at once. Steps 4–6 are purely subtractive from the peak and need no picture.
+
+**Today (v1) — five hand-rolled orchestrators, execution state in Postgres.**
+
+```
+   SPA ──HTTPS──►┌────────────────────────────────────────────────┐
+                 │  API pod      replicas: 1 · strategy: Recreate │
+                 │  auth · CRUD · quotas                          │
+                 │  ┌──────────────────────────────────────────┐  │
+                 │  │ 4 in-process loops — the reason for      │  │
+                 │  │ replicas: 1                              │  │
+                 │  │  result_consumer  ·  scheduler           │  │
+                 │  │  webhook_loop     ·  advisory            │  │
+                 │  └──────────────────────────────────────────┘  │
+                 └──────────┬───────────────────────┬─────────────┘
+                            │                       │
+   ┌────────────────────┐   │                       │
+   │ coordinator pod    │   │                       │
+   │ BFS crawl frontier ├───┤                       │
+   │ (5th orchestrator) │   │                       │
+   └─────────┬──────────┘   │                       │
+             │              ▼                       ▼
+             │   ┌─────────────────────────┐   ┌──────────────────────┐
+             └──►│ NATS JetStream          │   │ Postgres (app)       │
+                 │ stream SCRAPEFLOW       │   │ job_runs.status IS   │
+                 │ --retention work        │   │   execution state    │
+                 │  jobs.run.http          │   │ crawl_queue (BFS)    │
+                 │  jobs.run.playwright    │   │ webhook_deliveries   │
+                 │  jobs.llm               │   └──────────────────────┘
+                 │  jobs.result            │   ┌──────────────────────┐
+                 │  $JS…MAX_DELIVERIES     │   │ Redis (rate limit)   │
+                 └───┬────────┬────────┬───┘   └──────────────────────┘
+                     ▼        ▼        ▼
+              ┌──────────┐ ┌────────┐ ┌────────┐
+              │ Go http- │ │ play-  │ │ llm-   │
+              │ worker   │ │ wright │ │ worker │
+              └────┬─────┘ └───┬────┘ └───┬────┘
+                   └───────────┴──────────┘
+                               ▼
+                    ┌──────────────────────┐
+                    │ MinIO (results)      │
+                    └──────────────────────┘
+```
+
+Two properties to hold onto, because both **invert** in the end state: orchestration state lives in
+**app Postgres** (which is what made Q8 possible — one overloaded status column), and NATS is
+`--retention work`, so orchestration messages are **deleted on ack** — free and self-cleaning.
+Temporal's history is neither.
+
+**The peak (after step 2, before step 3) — two orchestrators, one set of workers.**
+
+```
+                        ┌────────────────────────────────────┐
+       SPA ──HTTPS─────►│  API pod   replicas: 1 · Recreate  │
+                        │  auth · CRUD · quotas              │
+                        └────┬────────────────────────┬──────┘
+                new jobs (v2)│                        │ v1: batches, crawls,
+                             │                        │ schedules, in-flight
+              ┌──────────────▼─────────────┐          │ jobs
+              │ Temporal Server            │          │
+              │  Postgres #2 (separate)    │          │
+              │  Web UI (port-forward)     │          │
+              └──────────────┬─────────────┘          │
+                  task queue │                        │
+              ┌──────────────▼─────────────┐          │
+              │ workflow-worker pod        │          │
+              │ JobWorkflow                │          │
+              │ ⚠ RetryPolicy = retry #1   │          │
+              └──────────────┬─────────────┘          │
+                             │ option (a): the        │
+                             │ activity publishes     │
+                             │ into NATS              │
+                             └───────────┬────────────┘
+                                         ▼
+                        ┌────────────────────────────────┐
+                        │ NATS JetStream  (unchanged)    │
+                        │ ⚠ redelivery = retry #2        │
+                        └───┬─────────┬─────────┬────────┘
+                            ▼         ▼         ▼
+                     ┌─────────┐ ┌────────┐ ┌────────┐
+                     │Go http- │ │playwr. │ │ llm-   │  ← unchanged;
+                     │worker   │ │worker  │ │worker  │    serving BOTH
+                     └────┬────┘ └───┬────┘ └───┬────┘    lanes at once
+                          └──────────┴──────────┘
+                                     ▼
+              ┌──────────────────┐  ┌──────────────────┐
+              │ Postgres (app)   │  │ MinIO (results)  │
+              │ shared, both     │  │ shared, both     │
+              └──────────────────┘  └──────────────────┘
+
+        still running, not drawn: coordinator pod · all 4 API loops · Redis
+```
+
+**What the picture is for.** The two ⚠ markers sit directly above one another on purpose: under
+option (a) a workflow activity dispatches into NATS, so **Temporal's `RetryPolicy` and JetStream's
+redelivery are stacked on the same unit of work.** That is the Q5/Q6/Q7 failure mode reintroduced
+by the migration itself — and on the LLM path each duplicate is billed to the **user's own** API
+key. NATS-side retry must be neutralised for workflow-originated messages before step 2 carries
+real traffic (ADR-009 §9).
+
+Three further facts the diagram makes visible:
+
+- **The API does not get thinner here.** It keeps `replicas: 1` and all four loops through step 5.
+  The horizontal-scaling payoff lands at step 7, not step 2 — the shrink is the *last* thing to
+  arrive, not the first.
+- **The workers serve both lanes simultaneously.** They are the one component with no v1/v2 split,
+  which is exactly why option (a) is cheap to reach and why the retry hazard exists at all.
+- **This is the capacity worst case.** Nothing is removed until step 3; everything in the "today"
+  diagram is still running underneath. ADR-009 §2d sizes the cluster against this moment
+  deliberately, not against steady state.
+
 ---
 
 ## 10. Risks specific to full adoption

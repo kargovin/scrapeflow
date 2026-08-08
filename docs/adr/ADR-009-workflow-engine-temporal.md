@@ -1,8 +1,18 @@
 # ADR-009: Workflow Engine — Temporal, and the v1/v2 Coexistence Contract
 
-**Status:** Draft — pending review by @karthik. **Nothing here is settled yet**; do not implement
-against it, and do not cite it as a decision in another document until it is Accepted.
-**Date:** 2026-08-04
+**Status:** Draft — under section-by-section review by @karthik. **Nothing here is settled yet**;
+do not implement against it, and do not cite it as a decision in another document until the
+document status is Accepted.
+**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress)
+**Review log:** §1 taken as settled (engine decided pre-ADR). **§2 resolved 2026-08-08** — three
+open points closed in place (2a separate Postgres instance · 2b Web UI not exposed · 2c retention
+30 days). **§3 reviewed 2026-08-08** — two factual corrections applied (crawls are already an
+uncounted lane; the `storage_bytes` exemption was wrong — all three meters are blind to crawls,
+not two), plus the recount race named. Crawl metering answered by the PM (PRD-016 OQ-4 round 3)
+and wired into §3/§8 — **✅ confirmed by owner 2026-08-08**; no §3 item remains open.
+The workflow-ID format is **settled**: it stays user-free, and **§12 was reversed** to match
+(its "user identity in the workflow ID" claim is withdrawn — Temporal never parses the ID, so the
+property was never structural). §4–§11 and §13–§17 not yet reviewed.
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
@@ -86,16 +96,135 @@ problem.
 
 New infrastructure:
 
-- **Temporal Server** + **its own Postgres database** (distinct from the app database) +
-  **Web UI**, ingress-exposed and admin-gated.
+- **Temporal Server** + **Web UI**, plus a **separate Postgres instance** for Temporal
+  persistence — see 2a.
 - **Workflow-worker pod(s)** — hosts workflow and activity definitions (Python SDK).
+- A **namespace-registration init job**, analogous to today's `nats-init-job.yaml`. This is where
+  retention is set — see 2c.
 - The three scrapers eventually become **activity workers** (Go SDK for http-worker, Python for
   the others). Not in the first increment — see [§9](#9-oq-5--reuse-existing-workers-via-option-a-first).
 
 The API keeps auth, CRUD, and quota enforcement, and gains "start / signal / query workflow." It
 loses all five background loops. That is what lifts the current single-replica + `Recreate`
-constraint and makes the API horizontally scalable — a concrete architectural payoff, recorded
-here so it is not mistaken for incidental.
+constraint (`app/api.yaml`) and makes the API horizontally scalable — a concrete architectural
+payoff, recorded here so it is not mistaken for incidental. **The workflow worker is horizontally
+scalable too** (stateless task-queue polling), so this removes the bottleneck rather than moving
+it. The playwright worker stays vertically constrained regardless — that is a headed-Chrome fact,
+not something the engine change addresses.
+
+#### 2a. Temporal persistence is a separate Postgres *instance*
+
+**Decision: a second Postgres StatefulSet, not a second database on the existing one.**
+
+A separate *database* on the shared instance would not buy the isolation the separation is for: a
+history-write burst would still degrade the app DB through shared connections, shared buffers and
+shared disk. The instance boundary is the one that actually holds.
+
+Two further reasons, both about lifecycle rather than load:
+
+- **Backup/restore discipline differs.** The Temporal DB holds in-flight execution state — losing
+  it loses running work, not just history (see Consequences). It wants a different restore posture
+  than app metadata.
+- **Schema ownership differs, and this is the one most likely to bite.** The app DB's schema is
+  Alembic's, auto-applied from `api/app/main.py` on API startup. Temporal's schema is owned by
+  **`temporal-sql-tool`** and versioned on Temporal's release cadence — a server image bump can
+  require a schema step that nothing in our deploy flow performs. Two migration mechanisms is
+  already a cost; entangling them on one instance compounds it.
+
+Cost is small: cloning the `infrastructure/postgres.yaml` pattern (`postgres:16` StatefulSet,
+100m/256Mi requests, 10Gi PVC) is roughly **+100–250m CPU and +256–512Mi memory in requests**,
+plus a PVC.
+
+**Note that Temporal wants two databases *inside* that instance** — `temporal` and
+`temporal_visibility` — even on standard visibility. Provisioning one and wondering why startup
+fails is the predictable way to lose an hour here.
+
+#### 2b. The Web UI is not ingress-exposed
+
+**Decision: no ingress, no DNS record, no cert. Access via `kubectl port-forward` only.**
+
+The governing fact is that **the Temporal Web UI is not a read-only dashboard.** It can terminate
+and cancel workflows, send signals, and reset a run to a prior point. Exposing it publishes a
+*write-capable control plane over production orchestration*, which is a materially higher bar than
+the mlflow precedent on this cluster (a `basicAuth` Middleware in front of experiment tracking).
+OSS Temporal UI also ships with **no authentication of its own**, so whatever gates it we supply.
+
+Compounding it: [§12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary)
+settles on a **single namespace** with the API as the *only* tenant boundary, so every tenant's
+runs share one engine-side listing — a surface with none of the 404-not-403 discipline applied
+everywhere else, and one the API's ownership check does not reach, because the UI talks to
+Temporal directly.
+
+Not exposing it removes both problems outright instead of mitigating them, adds no components, and
+is **fully reversible** — an ingress is purely additive later. The accepted cost is that the UI is
+unavailable without cluster access, which is tolerable because its value peaks during incidents and
+those are worked from a machine with `kubectl`.
+
+**Deferred to post-Phase 4, tracked in "Deliberately not decided here":** if always-on access is
+wanted later, the two candidates are **Traefik `basicAuth`** (the mlflow pattern already in the
+infra repo — cheap, but one shared credential, no attribution of who terminated what) and
+**Traefik `forwardAuth`** against an API admin endpoint (one identity system, real revocation and
+attribution, but it must be built, it couples UI availability to API availability, and it depends
+on Clerk's session **cookie** being scoped to a domain the Temporal host shares — a browser
+navigating directly sends cookies, not the SPA's bearer token). Neither is worth building for a
+single operator today.
+
+#### 2c. Namespace retention is 30 days
+
+**Decision: register the namespace with a 30-day retention period.**
+
+Retention governs how long a **closed** workflow's event history survives before cleanup deletes
+it. It buys post-hoc debugging — the per-run timeline that replaces `grep status=` log-spelunking —
+and the ability to *reset* a run, which only works while its history exists. It costs disk in the
+Temporal DB, scaling with runs × events-per-run × payload size in history.
+
+Three things make 30 days a low-stakes pick rather than a load-bearing one:
+
+- **It has no correctness role.** [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
+  forbids answering any user-facing question from Temporal's DB — run counting moves onto a view
+  over app Postgres. So retention cannot silently redefine "runs this month". It is purely an
+  operator dial.
+- **It is changeable after creation.** Not a one-way door. The namespace needs *a* number to exist,
+  not the *right* number.
+- **Volume is nowhere near the constraint.** The BUG-003 prod audit had 15 completed runs to
+  examine in total. At that scale the difference between 7 and 30 days is megabytes.
+
+30 rather than 7 because retroactive archaeology is worth protecting — the BUG-003 investigation
+found the 40% bot-wall rate by auditing runs *after the fact*, and a 7-day window would have to be
+lucky. 30 rather than 90 because 90 retains history for runs nobody will open. 30 also aligns with
+the monthly quota window and is Temporal's default, so it matches every doc and default encountered
+later.
+
+**The coupling worth stating explicitly: retention is cheap only because
+[§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity) holds.** Under
+references-not-payloads a five-block run is plausibly tens of KB of history. The moment an activity
+returns page *content*, one run goes from ~50 KB to ~4 MB (real pages measured at 291 KiB–4.1 MiB)
+and retention becomes the binding constraint overnight. If this number ever needs revisiting
+urgently, suspect §5 first.
+
+**Archival** — shipping closed histories to MinIO before deletion — is the escape hatch that would
+make a *shorter* retention safe. Deliberately not enabled: another moving part, for data currently
+worth very little.
+
+#### 2d. Capacity
+
+For the record, since "heaviest dependency we run" invites the question. The node (`kimsufi-server`,
+8 CPU / 32 GiB) currently sits at **28% CPU requests and 11% memory requests**. Temporal Server +
+its Postgres + Web UI + a workflow worker is roughly **+1.5–2 CPU and +2–3 GiB in requests** —
+landing near 50% CPU requests, with memory still under 20%. Requests are not the constraint.
+
+**This figure already is the coexistence peak, which is the number that matters.** The 28% baseline
+includes NATS, the coordinator and all three workers, so adding Temporal on top describes the
+cluster at migration steps 2–3 (drawn in `temporal-full-migration.md` §9a) — both orchestrators running, both
+worker sets alive, five loops still serving in-flight v1 work. Nothing later in the sequence is
+heavier; every subsequent step *removes* a component. Sizing to steady state would have understated
+it, and the several weeks spent at the peak are exactly when a capacity surprise would land.
+
+**CPU *limits* are.** The node is already at **162% limit overcommit**, and the playwright worker
+alone is 500m request / 2000m limit for headed Chrome. A simultaneous headed render and a Temporal
+history burst means CFS throttling on the history service, which surfaces as workflow task timeouts
+and retries. **That looks exactly like a workflow bug and is not one** — recorded here so it is not
+debugged twice.
 
 ### 3. OQ-1(a) — Run identity: pipeline runs get their own table, and quota counting stops naming a table
 
@@ -127,10 +256,43 @@ Neither is a stored counter — both recount on every check. A new table is ther
 the meters by construction*: a user who exhausts 500 monthly job runs could trigger unlimited
 pipeline runs, not because anyone decided pipelines are free, but because the query never looked.
 
+> **This is not a prediction. It has already happened, to crawls.** `JobRun(...)` is constructed
+> in exactly three places — `routers/jobs.py:207`, `routers/batch.py:105`, `core/scheduler.py:80`
+> — and **never for a crawl**. Crawl work lives in `crawl_pages`, with its own `status` and
+> `result_path`. So both count meters are already blind to the crawl lane, and
+> `routers/crawls.py` carries **no quota check at all** (zero references to `check_user_quota`).
+> A 500-page crawl costs the user **zero** monthly runs and **zero** concurrent slots today.
+> Pipelines would be the *third* lane to arrive invisible, not the first — which makes this a
+> live gap rather than migration preparation.
+
 So: **introduce a database view that is the single definition of "a run this user started," and
 point the quota queries at it.** Adding Monitors later is one view change rather than an audit of
 every call site. This survives the migration — when `job_runs` becomes a read-model mirror of
 Temporal state, the view is unaffected.
+
+**PM decision — PRD-016 OQ-4, review round 3 (2026-08-08). ✅ Confirmed by owner 2026-08-08.**
+Whether crawls join the view was a **product** question, not an architectural one: it changes what
+a shipped, live feature costs. The answer is **yes, and the view carries four lanes, not two** —
+job `job_runs`, batch `job_runs`, **`crawl_pages`**, and `pipeline_runs`.
+
+The view is **one row per countable unit**, and the two meters aggregate it differently:
+
+- **`monthly_runs` counts rows.**
+- **`concurrent_jobs` counts distinct concurrency *groups*** among non-terminal rows, where the
+  group is the **crawl** for crawl pages and the row itself on every other lane.
+
+That split is deliberate: cost and contention are different quantities. Per-page concurrency would
+put every default crawl (`max_pages` 100) permanently over the default ceiling of 5 — a meter that
+makes a shipped feature unrunnable is misconfigured, not strict — and enforcing it would need
+dispatch throttling inside `coordinator/`, which [§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block)
+deletes.
+
+**What the view fixes, and what it does not.** It fixes *which rows count*. It does **not** fix
+*when they are counted*: both meters recount on every check, so two concurrent creations can each
+read 499/500 and both proceed. That race is pre-existing and low-impact at current volume, but a
+second lane and an engine that makes concurrent starts easy both push against it. Recorded so a
+reader does not assume the view closed it — converting the meters to stored counters is a separate
+change, deliberately not made here.
 
 > **This is BUG-005's lesson generalised.** That bug was not "batch used the wrong table." It was
 > that three separate contracts — two message schemas and the MinIO path convention — hardcoded
@@ -138,12 +300,32 @@ Temporal state, the view is unaffected.
 > broke in three places. Pipelines are the second and larger instance of the same shape. Every
 > decision in this section exists to make the identity explicit rather than assumed.
 
-`storage_bytes_used` needs no change: it is a stored counter incremented by whoever writes bytes,
-so it is already lane-agnostic. Only the two COUNT-based meters had the defect.
+**`storage_bytes_used` is not exempt, and an earlier draft of this section wrongly said it was.**
+It is a stored counter rather than a recount, which is why it looks lane-agnostic — but it is
+incremented from exactly **one** call site, `result_consumer.py:85`, and guarded by
+`run.storage_accounted_at`, a **`job_runs` column**. The crawl coordinator writes page bytes to
+MinIO (`coordinator/result_handler.py:150` sets `page.result_path`) and never touches storage
+accounting at all. So crawl bytes are uncounted today for the same structural reason crawl runs
+are: the accounting is keyed on a column only one lane has.
+
+All **three** meters are therefore blind to the crawl lane, not two. The correction matters because
+the exemption told an implementer that storage needed no thought — and pipeline artifacts written
+by an activity rather than by `result_consumer.py` would be uncounted by exactly the same
+mechanism. [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)'s
+"only the final artifact is charged" presumes something does the charging; on the v2 lane that
+something must be named, not inherited.
 
 **The workflow ID is the correlation key** between an app record and its engine execution —
 `pipeline-run-{pipeline_run_id}`, and `job-run-{run_id}` for migrated jobs. This replaces today's
 `nats_stream_seq` correlation, and `nats_stream_seq` is dropped when v1 retires.
+
+> **✅ Settled on review (2026-08-08).** These formats are final and carry **no user identity** —
+> [§12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary) previously
+> claimed `user_id` was encoded in the workflow ID and has been reversed to match. The ID does
+> exactly two jobs: correlate an app row with its engine execution (here), and give
+> [§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee)'s mechanism 2
+> its engine-level double-start guarantee. It is **not** a tenant-isolation mechanism; the API's
+> ownership check is the only one.
 
 ### 4. OQ-1(b) — Block model: fixed typed catalog, JSON in Postgres, explicit named wiring
 
@@ -278,17 +460,46 @@ There is no replayable backlog a v2 executor could later re-consume.
 
 **Decision:**
 
+**The unit, stated once for every lane** (PM, PRD-016 OQ-4 round 3 — ✅ owner-confirmed
+2026-08-08): **one fetch of one target URL that produces one stored result.** Not one user
+action, and not one step. So: job run = 1; batch of N = N; **crawl of N pages = N**; pipeline run
+= 1, because R1 fixes one run to one URL and the non-Scrape blocks fetch nothing. **Admission
+checks the declared ceiling; the meter charges actuals** — a crawl is pre-checked against
+`max_pages` exactly as a batch is against `len(urls)`.
+
 - **`monthly_runs_limit`: a pipeline run is one unit, regardless of block count.** Per-block
   metering makes the R6 gate pipeline cost 3 units where the identical job costs 1 — a direct
   violation of the PM's hard constraint (a), and it makes pipelines a *penalty* for expressing
   the same work differently. The arbitrage risk in the other direction is bounded structurally by
   R1's max-blocks-per-pipeline, and the genuinely expensive resource — LLM tokens — is billed to
   the user's own provider key regardless.
+  **⚠️ Rider from the PM:** "regardless of block count" holds only while a pipeline fetches once.
+  If layer A ever permits more than one Scrape block in a chain, that run fetches twice and must
+  cost 2. The PM's preference is to **count executed Scrape blocks** rather than cap Scrape at one
+  — the one-Webhook cap had a layer-ownership reason (fan-out belongs to C) with no analogue here.
 - **`concurrent_jobs_limit`: one shared pool, not two.** The limit exists to protect worker
   capacity, and worker capacity is shared between lanes. A separate pipeline pool would let one
   user consume twice the capacity, which inverts the limit's purpose. **The ceiling counts runs
   actively executing a block, not runs that exist** — see [§15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for).
-- **`storage_bytes_used`: unchanged mechanism, and only the final artifact is charged.**
+  **A crawl is one concurrency unit, not N** ([§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)) —
+  the one place cost and contention deliberately disagree.
+- **`storage_bytes_used`: every stored *final* artifact is charged, on every lane.** The mechanism
+  is unchanged; the **call sites are not lane-agnostic and must be fixed** (see
+  [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)).
+  **Every crawl page is a final artifact** — a crawl has no intermediates — so the
+  only-the-final-artifact rule applies to crawls with no exception.
+
+  Storage is the axis where crawls are most dangerous: 10,000 pages at BUG-003's measured
+  291 KiB–4.1 MiB is **2.8–40 GB from a single API call** against a 5 GB wall. Two conditions the
+  PM attaches, both of which are architectural obligations rather than product preferences:
+
+  - **Reclaim ships with counting.** Verified independently: **nothing frees crawl artifacts
+    today.** `DELETE /crawls/{id}` (`routers/crawls.py:127`) is cancel-only and removes no objects;
+    the admin user-delete (`admin.py:195`) and job hard-delete both enumerate `JobRun.result_path`
+    only, so **deleting a user orphans their crawl artifacts in MinIO**. Charging against a hard
+    wall with no way to free space is a support incident by construction.
+  - **Accounting starts at cutover.** No backfill, no reconciliation of history — and deleting a
+    pre-cutover artifact must not decrement, or the counter goes negative.
 
 That last clause is what satisfies the PM's metering-parity constraint on the storage axis.
 Because blocks pass references, every block output is a real MinIO object; charging all of them
@@ -373,12 +584,14 @@ subscriber. `batch_status` already demonstrates the JSON-payload pattern to foll
 one status vocabulary to serve two different shapes of consumer is the Q8 mistake at a different
 altitude.
 
-**Temporal Web UI is an operator tool**, admin-gated, and is not part of any user-facing surface.
+**Temporal Web UI is an operator tool** and is not part of any user-facing surface. Per
+[§2b](#2b-the-web-ui-is-not-ingress-exposed) it is not exposed at all — `kubectl port-forward`
+only — so nothing user-facing may depend on it being reachable.
 
-### 12. OQ-8 — Tenant isolation: single namespace, user identity in the workflow ID
+### 12. OQ-8 — Tenant isolation: single namespace, and the API is the only boundary
 
-**Decision: one Temporal namespace. Tenant identity is encoded in the workflow ID. The API
-remains the enforcement boundary.**
+**Decision: one Temporal namespace. The API is the enforcement boundary — the sole one. Tenant
+identity is deliberately *not* encoded in the workflow ID.**
 
 Namespace-per-user is rejected: namespace provisioning would become part of signup, per-namespace
 configuration drifts, and Temporal namespaces are a much heavier boundary than the isolation we
@@ -387,9 +600,43 @@ explicitly left open, but buys nothing at current scale.
 
 **The real boundary does not move.** Cross-tenant access returns 404 because the API checks
 ownership of the `pipelines` / `pipeline_runs` row before it makes any engine call. The engine
-never receives an unauthorised request because the API never issues one. Encoding `user_id` in
-the workflow ID adds a second, structural property: operator-side queries (Web UI, CLI) can be
-scoped by tenant, and a signal cannot be addressed to another tenant's run by accident.
+never receives an unauthorised request because the API never issues one.
+
+**Reversed on review (2026-08-08): an earlier draft of this section claimed that encoding
+`user_id` in the workflow ID "adds a second, structural property" — operator queries scopable by
+tenant, and signals that cannot reach another tenant's run by accident.** Both claims are
+withdrawn, and the ID keeps the plain form
+[§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
+defines (`pipeline-run-{pipeline_run_id}`, `job-run-{run_id}`). Four reasons:
+
+- **It would not be structural.** Temporal treats a workflow ID as an opaque string and never
+  parses it. An embedded `user_id` protects nothing unless some other layer reads it back and
+  validates it — which is *a check we wrote*, precisely what
+  [§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee)'s mechanism 2
+  is valuable for **not** being. Claiming both under one banner would attribute the uniqueness
+  guarantee's strength to something that does not have it.
+- **Tenant-scoped operator queries contradict [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table).**
+  "List this user's runs" is exactly the class of question this ADR says is *never* answered from
+  Temporal. `pipeline_runs` holds both `user_id` and the workflow ID, so the app database answers
+  it better and hands back the precise IDs to look up.
+- **The accidental-signal case is already closed upstream.** The API loads the run row, checks
+  ownership, then derives the workflow ID *from that row*. Once ownership is proven the format is
+  irrelevant. The only path an embedded `user_id` would rescue is one that builds an ID from
+  user-supplied input without loading the row — a path that must not exist, and whose real defect
+  would not be the ID format.
+- **It keeps tenant identity out of engine-side data.** Workflow IDs travel into event history,
+  task-queue metadata, logs and metrics, and into archival if that is ever enabled
+  ([§2c](#2c-namespace-retention-is-30-days)). There is no reason to seed user identifiers across
+  all of it for a property we just established is not real.
+
+[§2b](#2b-the-web-ui-is-not-ingress-exposed) independently removed what little the operator-query
+argument had left: with the UI unexposed, its audience is one operator who owns all the data, at a
+workstation, during incidents — a filter convenience, not an isolation mechanism.
+
+**The consequence to hold onto: there is exactly one tenant boundary, and it is the API's ownership
+check.** Nothing structural backs it up at the engine, and this section previously implied
+otherwise. Any future code path that reaches Temporal without first loading and ownership-checking
+the app row is a tenant-isolation bug with no second line of defence.
 
 Task queues are **shared** across tenants — per-tenant queues would require per-tenant workers.
 
@@ -509,6 +756,13 @@ onto `JobWorkflow` via option (a) → workers to activity workers (option b) →
 scheduling and webhooks → delete `result_consumer.py` → remove NATS → lift the API's
 single-replica/`Recreate` constraint.
 
+**The shape of coexistence is drawn in `temporal-full-migration.md` §9a**, not here: it changes at
+four of the seven steps, so it is sequence material rather than a decision. Two things it shows
+that this contract only states in words — the API keeps `replicas: 1` and all four loops until
+step 5 (the thinning is the *last* payoff, not the first), and the three workers serve **both
+lanes at once**, which is what makes option (a) cheap and the [§9](#9-oq-5--reuse-existing-workers-via-option-a-first)
+retry-stacking hazard real.
+
 **Reversibility.** Every step is a reversible increment: a misbehaving flow falls back to the v1
 path until fixed. This holds **only while both lanes exist**, which is the reason the deletion
 step is last and gated.
@@ -562,8 +816,11 @@ index's own rule.
   that did not previously exist. Losing it loses running work, not just history.
 - **Workflow history retention is a new, ongoing storage cost** that scales with completed runs
   and does not self-clean the way `--retention work` does. [§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)'s
-  references-not-payloads rule is what keeps it proportionate; retention and archival settings
-  still need to be chosen.
+  references-not-payloads rule is what keeps it proportionate; retention is set at **30 days**
+  ([§2c](#2c-namespace-retention-is-30-days)) and archival stays off.
+- **A second migration mechanism.** Temporal's schema is `temporal-sql-tool`'s, on Temporal's
+  release cadence — separate from Alembic, and not applied by anything in the current deploy flow
+  ([§2a](#2a-temporal-persistence-is-a-separate-postgres-instance)).
 - **Determinism bugs are a new failure class.** Non-deterministic workflow code breaks replay,
   and it fails *after* a restart rather than at the point of the mistake.
 - Two SDKs (Go and Python) means a small duplication in activity-worker setup.
@@ -583,8 +840,9 @@ finished with v1" a measured fact rather than an assumption.
 | Item | Why deferred, and to what |
 |---|---|
 | Crawl frontier model (visited-set + `continue-as-new` vs child-workflow-per-page) | Binding constraint is history size; decide against measurements at the crawl migration step ([§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block)) |
-| Temporal retention / archival settings | Needs real history-growth data from the first flows |
-| Namespace-per-tier | Buys nothing at current scale; revisit under noisy-neighbour pressure ([§12](#12-oq-8--tenant-isolation-single-namespace-user-identity-in-the-workflow-id)) |
+| Temporal **archival** (closed histories → MinIO) | Retention itself is now decided — 30 days ([§2c](#2c-namespace-retention-is-30-days)). Archival stays off: another moving part, for data currently worth little. Revisit if history growth ever forces a *shorter* retention |
+| **Web UI ingress exposure** (post-Phase 4) | Not exposed for now — `kubectl port-forward` only ([§2b](#2b-the-web-ui-is-not-ingress-exposed)). If always-on access is wanted later, choose between Traefik `basicAuth` (the mlflow pattern; cheap, one shared credential, no attribution) and `forwardAuth` against an API admin endpoint (one identity system; must be built, couples UI to API availability, depends on Clerk's session cookie domain). Owner's call, 2026-08-08 |
+| Namespace-per-tier | Buys nothing at current scale; revisit under noisy-neighbour pressure ([§12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary)) |
 | Conditional execution's design | Its own layer-A PRD, before PRD-018 ([§14](#14-oq-10-remaining-half--conditional-execution-gets-its-own-layer-a-prd-before-monitors)) |
 | Run-failure notification (R6's fourth exclusion) | The PM left it unassigned on purpose: it is either an on-failure branch or a run-level setting, and that depends on the conditional-execution decision above |
 | Whether `webhook_deliveries` / `crawl_pages` survive as v1-only audit mirrors | Decide at the step that retires each flow, not now |
