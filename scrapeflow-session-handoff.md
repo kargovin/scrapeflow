@@ -66,7 +66,112 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-04, later session) — **ADR-009 is DRAFTED and needs your review**
+- ## 📝 START HERE (2026-08-08) — **ADR-009 review is UNDERWAY. Next section: §4 (block model).**
+
+  The ADR is being reviewed **section by section**, not read straight through, and decisions are
+  landing **in the document under review**. **The ADR's own `Review log` (status block, top of
+  `ADR-009-workflow-engine-temporal.md`) is authoritative** for what is settled — read it first
+  rather than trusting this summary.
+
+  **State: §1 (settled pre-ADR), §2, §3 done. §12 reversed as a knock-on. §4–§11, §13–§17 not yet
+  reviewed.** The document as a whole is **still Draft** — individual sections being settled does
+  **not** make it Accepted, and nothing may be implemented against it yet.
+
+  ### What §2 gained (four sub-decisions, all new)
+  - **2a — Temporal persistence is a SEPARATE Postgres instance.** A separate *database* on the app
+    instance buys no isolation (shared connections/buffers/disk). Two further reasons: the Temporal
+    DB holds **in-flight execution state** so its restore posture differs, and its schema is owned
+    by **`temporal-sql-tool`** on Temporal's release cadence — **a second migration mechanism**
+    alongside Alembic, which nothing in the deploy flow currently runs. **Temporal wants two DBs
+    inside that instance** (`temporal` + `temporal_visibility`) even on standard visibility.
+  - **2b — the Web UI is NOT exposed.** `kubectl port-forward` only. The governing fact: the UI
+    **terminates, cancels, signals and resets** workflows — a *write-capable control plane*, not a
+    dashboard, so the mlflow `basicAuth` precedent on this cluster does not transfer. OSS Temporal
+    UI ships with no auth of its own. Deferred alternatives (basicAuth vs forwardAuth, with the
+    Clerk **cookie-vs-bearer** wrinkle spelled out) are tracked in the ADR's "Deliberately not
+    decided here" table, post-Phase 4.
+  - **2c — namespace retention = 30 days.** Low-stakes on purpose: it has **no correctness role**
+    (§3 forbids answering user-facing questions from Temporal), it is changeable after creation, and
+    volume is tiny. ⚠️ **It is cheap *only because* §5's references-not-payloads holds** — if an
+    activity ever returns page *content*, a run goes ~50 KB → ~4 MB and retention becomes binding
+    overnight. **If this number ever needs urgent revisiting, suspect §5 first.**
+  - **2d — capacity.** Node is 8 CPU / 32 GiB at **28% CPU / 11% memory requests**; Temporal adds
+    ~+1.5–2 CPU, landing near 50%. **That figure IS the coexistence peak** (the baseline already
+    includes NATS + coordinator + all workers), so nothing later in the sequence is heavier.
+    ⚠️ **CPU *limits* are the real risk — already 162% overcommitted.** A headed render plus a
+    Temporal history burst throttles the history service and **surfaces as workflow task timeouts
+    that look exactly like a workflow bug.**
+
+  ### What §3's review found (verified against live code, and it changed the section)
+  - **🔴 Crawls consume ZERO of all three quota meters — filed as P7, decision owner-confirmed.**
+    `JobRun(...)` is constructed in exactly three places (`routers/jobs.py:207`,
+    `routers/batch.py:105`, `core/scheduler.py:80`) and **never for a crawl**; crawl work lives in
+    `crawl_pages`. `routers/crawls.py` has **no quota check at all**. So the ADR's "a new table
+    would be invisible by construction" was describing something **already true, of crawls** —
+    a live gap, not migration prep.
+  - **The `storage_bytes` exemption was wrong.** The ADR said it "needs no change… already
+    lane-agnostic." It isn't: `increment_storage_bytes` has **one** call site
+    (`result_consumer.py:85`) gated on `run.storage_accounted_at`, a **`job_runs` column**. **All
+    three meters are blind to crawls, not two.** The exemption was dangerous because it told an
+    implementer storage needed no thought — and pipeline artifacts written by an *activity* would
+    be uncounted by the identical mechanism.
+  - **A fourth thing, found while checking the above: nothing ever frees crawl artifacts.**
+    `DELETE /crawls/{id}` is cancel-only; admin user-delete and job hard-delete both enumerate
+    `JobRun.result_path` only. **Deleting a user orphans their crawl artifacts in MinIO.**
+  - **The view fixes *which rows*, not *when*.** Both meters recount, so two concurrent creates can
+    each read 499/500 and both proceed. Pre-existing; named in the ADR so nobody assumes the view
+    closed it. Converting to stored counters is deliberately **not** done.
+
+  ### P7 — the crawl-metering decision (PM, PRD-016 OQ-4 round 3 · ✅ owner-confirmed 2026-08-08)
+  Crawls join the run-counting view. **The unit is one fetch of one target URL producing one stored
+  result** — a crawl page is identical work to a job run, differing only in that the URL was
+  *discovered* rather than supplied, and **discovery is not a discount**. That framing is also what
+  keeps §8's "one run = one unit regardless of block count" true rather than contradicted.
+  - **Per page** for `monthly_runs` and `storage_bytes`; **per crawl** for `concurrent_jobs`
+    (the one axis where cost and contention deliberately disagree — per-page concurrency would put
+    every default crawl, `max_pages` 100, permanently over the default ceiling of 5, and enforcing
+    it would need throttling inside `coordinator/`, which §13 deletes).
+  - **Reclaim ships with counting** — charging against a hard wall with no way to free space is a
+    support incident by construction. Scale: 10,000 pages at BUG-003's measured 291 KiB–4.1 MiB is
+    **2.8–40 GB from one API call** against a 5 GB default.
+  - **Accounting starts at cutover** — no backfill, and deleting a pre-cutover artifact must not
+    decrement or the counter goes negative.
+  - **⚠️ Rider on §8, still to rule on:** "one unit regardless of block count" holds only while a
+    pipeline fetches once. If layer A ever permits two Scrape blocks, that run fetches twice and
+    must cost 2. PM prefers **counting executed Scrape blocks** over capping Scrape at one.
+  - **Sequence: after P6/BUG-005**, which re-keys the v1 artifact path and touches the same
+    accounting surface. Not a §3 do-not-fix — `core/quota.py` and `routers/crawls.py` **survive**
+    the migration; only the storage-accounting call site is in `coordinator/`.
+
+  ### §12 reversed — read this before touching tenant isolation
+  The ADR claimed tenant identity was encoded in the workflow ID, giving "a second, structural
+  property." **Withdrawn.** The IDs stay `pipeline-run-{id}` / `job-run-{run_id}`, user-free.
+  **Temporal never parses a workflow ID** — it is an opaque string — so an embedded `user_id`
+  protects nothing unless something reads it back, which is *a check we wrote*, exactly what §7's
+  uniqueness mechanism is valuable for **not** being. It also contradicted §3 (never ask Temporal a
+  user-scoped question) and duplicated a guarantee the API's ownership check already provides.
+  **The consequence to carry: there is exactly ONE tenant boundary — the API's ownership check —
+  and nothing at the engine backs it up.** Any future path reaching Temporal without first loading
+  and ownership-checking the app row is a tenant-isolation bug with no second line of defence.
+
+  ### Two open items carried forward
+  - **§8's multi-Scrape rider** (above) — unresolved, needs an owner call when §8 is revisited.
+  - **The coexistence topology diagram** is now drawn (`temporal-full-migration.md` **§9a**, two
+    ASCII diagrams: today-v1 and the peak). Placement was deliberate — the shape changes at four of
+    the seven steps, so it is *sequence* material, and the ADR holds decisions only. §16 points at
+    it rather than duplicating it.
+
+  **Docs-only session — no code changed.** Five files modified and **uncommitted**: `CLAUDE.md`,
+  `scrapeflow-session-handoff.md`, `docs/adr/ADR-009-…`, `docs/project/phase4-backlog.md`,
+  `docs/project/phase4-prd/PRD-016-…`, `docs/project/temporal-full-migration.md`.
+  Also fixed in passing: **`phase4-backlog.md` claimed ADR-009 was "written + Accepted"** while the
+  ADR, the ADR index, `CLAUDE.md` and this handoff all said Draft — the one doc designated single
+  source of truth was the only one asserting a decision that had not been made.
+  **`develop` and `main` remain level and deployed** (code at `b110591`).
+
+  <details><summary>Prior START HERE (2026-08-04, later session) — ADR-009 drafted</summary>
+
+  ## 📝 (2026-08-04, later session) — **ADR-009 is DRAFTED and needs your review**
   **The next action is a human review of
   [`docs/adr/ADR-009-workflow-engine-temporal.md`](docs/adr/ADR-009-workflow-engine-temporal.md)**
   — 605 lines, status **Draft**, *not* Accepted. It records the Temporal decision, answers **all
@@ -365,6 +470,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   </details>
 
   </details>
+
+  </details>
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
@@ -451,7 +558,8 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 | 4 | BUG-002 — Dependabot critical + highs only | ✅ **done, deployed 2026-07-28** (`b9c8a1a` Go x/crypto + `e8726bf` Python incl. forced clerk 5→6 + `b110591` frontend). **8 crit / 13 high → 0 crit / 0 high**; login smoke-tested on deploy. 47 medium/low left, out of scope. |
 | 5 | Q1–Q4 close-out | ✅ **done 2026-07-28.** Verified against live code, not taken on trust — **Q2 landed as Option C (Postgres trigger), Q4 as Option B (`PATCH schedule_status`)**, both differing from the doc's recommendation. **Q8 closed alongside as do-not-fix**, so `open-questions.md` has no entry without a STATUS block |
 | 6 | **BUG-005 — batch broken on all three execution paths** | 🔴 **OPEN, filed 2026-08-04.** `job_id` is NULL for batch runs (correct per ADR-006) while both message schemas and the ADR-002 §8 artifact-path convention assume it is not. Playwright batch drops every message and hangs at `pending`; http batch collides all items onto `latest/.html` + `history//{ts}.{ext}` (cross-tenant); batch + LLM hangs at `processing`. Fixed pre-migration on the **Q6 precedent**. `open-bugs.md` → BUG-005 |
-| — | **§1 queue: 1 open (P6)** | **Next: review ADR-009 (drafted 2026-08-04), then the conditional-execution PRD** (backlog §2) |
+| 7 | **P7 — crawls consume zero of all three quota meters** | 🔴 **OPEN, filed 2026-08-08** (decision ✅ owner-confirmed; implementation not started). Every meter is keyed on `job_runs`; a crawl never creates one, and `routers/crawls.py` has no quota check at all. A 10,000-page crawl costs **zero** runs, **zero** concurrent slots and **zero** counted bytes — 2.8–40 GB of artifacts against a 5 GB default. Nothing frees crawl artifacts either: deleting a user orphans them in MinIO. Per page for runs + storage, per crawl for concurrency; reclaim ships with counting; accounting starts at cutover. **Sequence after P6.** `phase4-backlog.md` §1 P7 · PRD-016 OQ-4 round 3 |
+| — | **§1 queue: 2 open (P6, P7)** | **Next: resume the ADR-009 section review at §4** (block model). §1–§3 + §12 are done — see the ADR's Review log, which is authoritative |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---
