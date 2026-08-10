@@ -12,7 +12,58 @@ not two), plus the recount race named. Crawl metering answered by the PM (PRD-01
 and wired into §3/§8 — **✅ confirmed by owner 2026-08-08**; no §3 item remains open.
 The workflow-ID format is **settled**: it stays user-free, and **§12 was reversed** to match
 (its "user identity in the workflow ID" claim is withdrawn — Temporal never parses the ID, so the
-property was never structural). §4–§11 and §13–§17 not yet reviewed.
+property was never structural).
+**§4 reviewed 2026-08-10** — five corrections, two of them owner calls: **layer A validates a
+single chain in data flow as well as execution order** (data-flow fan-out is wanted but deferred
+post-Phase 4, and the PRD problem it leaves unfixed is now a recorded known exclusion), and **run
+inputs are config bindings restricted to per-type declared fields** (today only Scrape's `url`).
+Also corrected: block identifiers must be **stable across versions**, not merely immutable once
+assigned; the block-state column is **named** (`pipeline_run_blocks.status`) rather than asserted;
+and per-type config-schema versioning is acknowledged as the residual DSL cost. Knock-ons applied
+to **§5** (run-input scalars are an exception to "inputs are references") and **§8** ("final" =
+last block in execution order, pinned before fan-out can make it ambiguous).
+**§5 reviewed 2026-08-10** — decision upheld and strengthened. The payload figures are now
+**measured, not hedged** (256 KiB warn / 2 MiB error), which puts the *entire* BUG-003 page range
+past a threshold; the self-hosted config escape hatch is named as a trap that would undo §5 and
+§2c together. Two owner calls: the catalog splits into **content-producing (Scrape, Clean, LLM)
+and effect (Validate, Webhook)** blocks, with effect blocks passing their input reference through
+unchanged — **"one object per block" was false of two of the five types**, which §4's strict-path
+data flow turned into a correctness question; and **the run's result, and the charged artifact,
+are both the last *content-producing* block's output**, without which **R6's own gate pipeline**
+(ending in a Webhook) has no result and charges zero. Second call: the intermediate-output
+retention window is **a product promise, not a free dial** — result never collected, collection
+per run not per block, collected renders as *collected*, and per-block status in the app DB
+outlives both Temporal retention and the window. Knock-on applied to **§8** (metering + GC rules).
+**§6 reviewed 2026-08-10** — decision upheld, **its stated reason replaced.** The replay argument
+was factually wrong (Temporal replays workflow *code* against recorded history, and **input
+arguments are part of that history**, so a definition passed in as an argument is pinned
+automatically); the described failure needs a workflow body that loads the definition from
+Postgres, which this section's own determinism rule forbids. The real basis is **semantic**: a run
+that executed the old shape cannot continue into a new one. Four previously unstated things now
+decided: the definition travels as a **workflow input argument**; the pinned version is recorded
+in **`pipeline_runs.pipeline_version_id`**; a pipeline with a run in flight **may be deleted and
+the run finishes** (deleting a definition is not a back-door cancel — the Q4 split again); and
+**run history holds the name** — delete with no runs frees it, delete with runs soft-deletes and
+409s on reuse. **Worker-code versioning promoted from a passing mention to an explicit deferral**
+(Worker Versioning is GA and Temporal's default; needs server-side enablement, so it is infra).
+**§7 reviewed 2026-08-10** — the section **under-covered its hardest case**, and gained a fourth
+mechanism. Mechanism 1 is now explicitly **pipelines-only**: a migrated job keeps its `job_runs`
+row *by requirement* (§3 makes that table a read-model mirror; R5 forbids user-visible change), so
+from migration step 2 the covering set drops to mechanism 2 alone. Into that gap:
+**`_recover_stale_pending` (`scheduler.py:131`) re-publishes any `job_runs` row stale at `pending`
+past 10 minutes, to NATS, with no lane filter** — so a v2-owned run whose workflow has not started
+is dispatched to a v1 worker, and mechanism 2 never intervenes because no second *workflow* was
+started. Hence **mechanism 4: a lane marker on `job_runs`, written in the insert transaction,
+built at step 2** (✅ owner's call). Mechanism 2 also **over-claimed** — the default
+`WorkflowIdReusePolicy` is `ALLOW_DUPLICATE`, which permits a new execution once the prior one
+closes, so **`REJECT_DUPLICATE` must be pinned** for "once, ever". Two smaller: the
+`--retention work` reassurance covered only the safe half (**unacked** messages are the risk, tied
+now to §16's drain gate), and mechanism 3's **rollback ordering** is stated since §16 claims
+reversibility. Carried to §9: mechanism 1 is true of rows, not messages — under option (a) v2
+results land on `scrapeflow.jobs.result` where `result_consumer` is subscribed, with neither FK
+set, which is BUG-005's shape one lane later.
+**Next: §8** (metering — already amended twice as a knock-on from §4 and §5, and carrying the
+open multi-Scrape rider). §9–§11 and §13–§17 not yet reviewed.
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
@@ -329,9 +380,11 @@ something must be named, not inherited.
 
 ### 4. OQ-1(b) — Block model: fixed typed catalog, JSON in Postgres, explicit named wiring
 
-**Decision: a fixed catalog of typed blocks, stored as JSON in Postgres. Every block carries a
-stable identifier unique within its pipeline, and names its input by explicit reference to an
-earlier block or a declared run input. Execution is linear; the wiring is expressed as a graph.**
+**Decision: a fixed catalog of typed blocks, stored as JSON in Postgres. Every block carries an
+identifier that is stable across versions of its pipeline and names its input by explicit
+reference to an earlier block. Data flow in layer A is a single chain; the stored shape is a
+graph, so relaxing that is a validator change rather than a data migration. Run inputs are
+config bindings, not graph edges.**
 
 - **Fixed catalog, not a general DAG schema.** R2's catalog is closed, user-authored code is a
   non-goal, and R1's save-time validation requires knowing each type's declared consumes/produces.
@@ -339,28 +392,101 @@ earlier block or a declared run input. Execution is linear; the wiring is expres
 - **JSON in Postgres, not a DSL.** A DSL needs a grammar, a parser, versioning *of the grammar*,
   and its own error messages. At five block types that is pure cost. JSON validates against a
   schema and produces field-level errors for free.
-- **Explicit named input references, not implicit previous-block wiring.** This is the part that
-  matters, and PRD-016 is internally inconsistent without it: R1's validation clause says a
-  block's input must be producible by "anything before it," while Non-goals says chains are
-  linear. Both hold only if a block can name an earlier block. The Problem section settles it —
-  *"run two extractions on one fetched page"* requires the second LLM block to consume the
-  **page**, not the first LLM's JSON, and is unsatisfiable under implicit wiring.
-- **Block identifiers are immutable once assigned.** This is what makes OQ-2's version pinning
-  meaningful and what lets per-block run history reference a block that a later edit removed.
-- **Linearity is enforced by validation, not by the schema.** The stored shape is a graph; R1's
-  validator rejects anything that is not a single chain. Relaxing that later is a validator
-  change, not a migration of every stored definition. That is the entire forward-compatibility
-  requirement, satisfied at zero cost now.
+- **Explicit named input references, not implicit previous-block wiring.** PRD-016 is internally
+  inconsistent without it: R1's validation clause says a block's input must be producible by
+  "anything before it," while Non-goals says chains are linear. Both hold only if a block can name
+  an earlier block. **Under the linearity decision below, explicit wiring buys no capability that
+  implicit wiring could not express today** — it is bought for forward-compatibility (see the two
+  bullets below on execution order vs data flow) and because named references need identifiers, which
+  OQ-2's pinning and R3's per-block history require regardless.
+- **Block identifiers are stable across versions, which is stronger than immutable.** "Immutable
+  once assigned" is satisfied by an edit that regenerates every identifier — nothing changed, they
+  are merely all new — and under that reading both benefits evaporate: per-block history cannot be
+  correlated across versions, and user story 3 ("edit my schema and re-run") produces run history
+  that looks like a different pipeline. **The property is therefore an assertion about the edit
+  operation, not about the stored row: an update carries block identifiers through, a new
+  identifier means a new logical step, and an identifier absent from an update is a deletion.**
+  This is what makes OQ-2's pinning meaningful and what lets per-block run history reference a
+  block a later edit removed.
+- **Execution order and data flow are different properties, and only one of them is linear by
+  necessity.** Sequential execution — one block at a time, no parallelism — is what PRD-016's
+  "parallel fan-out" non-goal forbids. A *data-flow* fan-out (two LLM blocks both consuming the
+  Scrape block's page, executed one after the other) violates neither parallelism nor branching.
+  An earlier draft of this section used "a single chain" for both meanings and so rejected, in its
+  validator rule, the very example it cited to justify explicit wiring.
+- **Layer A validates a single chain in both senses. ✅ Owner's call, 2026-08-10.** Data flow is a
+  path: block *n* consumes block *n−1*. Data-flow fan-out is wanted, but **deferred to post-Phase
+  4** rather than smuggled in here. The stored shape stays a graph, so lifting the restriction is
+  a validator change against unchanged stored definitions — which is the entire
+  forward-compatibility requirement, still satisfied at zero cost.
+- **The consequence, recorded as a known exclusion.** PRD-016's Problem section lists *"run two
+  extractions on one fetched page"* among the things a user cannot do today. **Layer A does not
+  fix it** — a second extraction still means a second Scrape, hence a second render and a second
+  hit on the target site. This belongs in PRD-016's exclusion list alongside R6's four
+  divergences; a problem statement the design does not answer must be visible, not implied by the
+  absence of a feature.
+- **Per-type config schemas are the residual of the DSL cost, and are versioned like the
+  validator, not like the data.** Rejecting a DSL avoids a grammar and a parser; it does not avoid
+  needing a schema per block type, a validator over it, and a story for changing it. Config
+  schemas live with the block-type definitions in the workflow worker, versioned with the code.
+  **The obligation this creates: the validator must remain able to validate historical config
+  shapes**, because §6 pins definitions and a pinned old version keeps the config shape it was
+  saved under. A block type that gains a required field therefore needs a default for already-saved
+  definitions, exactly as a database column would. Adding an optional field is free.
+
+> **✅ Settled on review (2026-08-10).** Five corrections, none cosmetic. **(1) Linearity is now
+> stated in both senses** — execution order *and* data flow — where the section previously used
+> one phrase for both and contradicted its own motivating example; data-flow fan-out is deferred
+> post-Phase 4 and the unfixed PRD problem is recorded as a known exclusion. **(2) Run inputs are
+> config bindings, not graph edges** (below), resolving a direct conflict with
+> [§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)'s
+> "inputs are MinIO references" — a URL is not one. **(3) Block identifiers must be stable across
+> versions**, not merely immutable once assigned. **(4)** The block-state column is now named
+> rather than asserted. **(5)** Config-schema versioning is acknowledged as the residual DSL cost
+> with the historical-validation obligation stated.
+
+**Run inputs are config bindings, not graph edges — and only declared fields are bindable.**
+A block reading an earlier block's output and a value supplied at trigger time are different
+things: the first is a data-flow edge carrying a **MinIO object reference**
+([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)), the second is a
+**scalar substituted into a config field**. R1 already separates them — its validation list has
+one rule for "a block whose input cannot be produced by anything before it" and a second for "a
+block referencing a run input the pipeline does not declare." So:
+
+- **Scrape consumes nothing. It is a source block**, and its `url` config field is *bound* to a
+  run input rather than fed by an edge. R1's "a chain that does not start with a source block" is
+  read against this: the source is Scrape, not a run-input node.
+- **Each block type declares which of its config fields may be bound to a run input.** Today that
+  is exactly one field: Scrape's `url`, which is R1's stated minimum. **✅ Owner's call,
+  2026-08-10 — narrow, not "any config field."**
+- **The reason is that R1's promise is save-time validation, and a wide binding rule dissolves
+  it.** Binding the LLM block's extraction schema at run time means Save cannot check the schema —
+  the user learns it is malformed *after* paying for a render, standing at the LLM block. Binding
+  the Webhook URL turns "at most one Webhook block per pipeline" from a save-time rule into a
+  per-run one. Widening later is additive (declare one more field bindable); narrowing later
+  breaks saved pipelines.
 
 **The halt-early obligation (from the PM's OQ-10 decision) is satisfied structurally.** Monitors
 (B) will need a block that ends a run before its last block *with the run still reporting
 success*. Two rules make that additive rather than breaking:
 
-- **Run outcomes stay three** — `completed`, `failed`, `cancelled`. A halted-early run is
-  `completed`.
+- **Run outcomes stay three** — `pipeline_runs.status` ∈ `completed`, `failed`, `cancelled`. A
+  halted-early run is `completed`.
 - **Block state is a separate vocabulary from run outcome, and includes `skipped` from day one.**
-  Nothing in R2's catalog produces it, but the column admits it now so that B is a new block type
-  rather than a schema change plus a backfill.
+  The column is **`pipeline_run_blocks.status`**, and its vocabulary is `pending`, `running`,
+  `completed`, `failed`, `skipped`. Nothing in R2's catalog produces `skipped`, but the column
+  admits it now so that B is a new block type rather than a schema change plus a backfill.
+  **Naming the column matters:** an earlier draft asserted "the column admits it" without saying
+  which column, and §3 introduces `pipeline_run_blocks` without enumerating its columns — between
+  them, the one defence against a future backfill was a claim about a column no section defined.
+  A `CHECK` constraint written from the states in use would produce exactly the migration this
+  rule exists to avoid.
+  **One value covers both cases on purpose:** a block skipped because an upstream gate halted the
+  run (B) and a block skipped because its branch was not taken (conditionals,
+  [§14](#14-oq-10-remaining-half--conditional-execution-gets-its-own-layer-a-prd-before-monitors))
+  are the same fact from the run's perspective — it did not execute, and that is not a failure.
+  If the two ever need distinguishing, that is a *reason* column beside the state, not a second
+  state.
 
 Overloading a single status vocabulary across two levels of a hierarchy is exactly what Q8 was.
 Keeping block state and run outcome distinct is that lesson applied before the fact.
@@ -370,11 +496,44 @@ Keeping block state and run outcome distinct is that lesson applied before the f
 **Decision: block inputs and outputs are MinIO object references. Page content never enters
 workflow history. The v2 artifact path is keyed on the pipeline run and block, not on a job.**
 
+> **Knock-on from [§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)'s
+> review (2026-08-10), to be carried into §5's own review.** "Inputs and outputs are references"
+> is a statement about **data-flow edges between blocks**. It is not true of **run inputs**, which
+> are scalars bound into a block's config (§4) — Scrape's URL is a string, not a MinIO object, and
+> Scrape has no input edge at all. Run-input scalars *do* enter workflow history, which is
+> harmless and intended: they are the run's arguments, they are bounded, and a run that could not
+> see its own inputs could not replay. The rule to carry forward is narrower than it reads:
+> **content is never a payload; arguments may be.**
+
 Activity inputs and outputs are recorded in workflow history, which caps individual payload size
-(low single-digit MB — confirm the current figure against Temporal's own documentation, not this
-ADR) and bounds total history size. The BUG-003 audit measured genuine pages between **291 KiB
-and 4.1 MiB**. A content-passing model therefore fails on large pages for reasons that have
+and bounds total history size. **The figures, confirmed against Temporal's documentation on
+2026-08-10** (an earlier draft said only "low single-digit MB", which understated it):
+
+| Limit | Warn | Error |
+|---|---|---|
+| Single payload / blob | **256 KiB** | **2 MiB** |
+| gRPC message | — | 4 MiB |
+| Event history, size | 10 MiB | 50 MiB |
+| Event history, event count | 10,240 | 51,200 |
+
+Set those against the BUG-003 audit, which measured genuine pages between **291 KiB and 4.1 MiB**:
+
+- the **largest** measured page is **over twice the hard 2 MiB payload limit** — a content-passing
+  model does not degrade on it, it fails outright;
+- the **smallest** measured page already **exceeds the 256 KiB warn threshold**. Not the outliers —
+  the whole measured range is above the line where Temporal starts complaining.
+
+So the decision is not "content-passing fails on unusually large pages." It is that **essentially
+every real page we have measured is at or past a payload threshold**, for reasons that have
 nothing to do with scraping.
+
+> ⚠️ **The escape hatch is real and taking it is the wrong move.** We self-host
+> ([§2](#2-topology)), so unlike Temporal Cloud these limits *are* configurable
+> (`blobSizeLimitError`, `historySizeLimitError`). Raising them is the obvious-looking fix and it
+> silently undoes this section **and** [§2c](#2c-namespace-retention-is-30-days) together: content
+> moves into history, and history is retained 30 days after completion. §2c's warning — "if this
+> number ever needs urgent revisiting, suspect §5 first" — is describing exactly this failure,
+> reached by config change rather than by code.
 
 The subtler cost: **workflow history is retained after completion by design** — that retention is
 what buys replay and resumption. Today's NATS stream is `--retention work`, so acked messages are
@@ -385,11 +544,57 @@ operator-side cost in the migration**.
 R2's "each block declares what it consumes and produces" is therefore read as declaring **types
 of reference**, not types of payload.
 
+**Not every block produces an object. ✅ Owner's call, 2026-08-10.** An earlier draft's "one
+immutable object per block per run" was false of two of the five catalog types, and
+[§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)'s
+strict-path data flow makes that load-bearing rather than pedantic: block *n* consumes block
+*n−1*, so every non-terminal block must emit something its successor can consume. R2's catalog
+therefore splits in two:
+
+| Kind | Blocks | Produces | Emits as its output |
+|---|---|---|---|
+| **Content-producing** | Scrape, Clean, LLM extract | a new object | a reference to that object |
+| **Effect** | Validate, Webhook | nothing | **its own input reference, unchanged** |
+
+- **Effect blocks are pass-through by contract, not by accident.** Validate asserts on its input
+  and either continues or fails the run terminally; Webhook delivers. Neither transforms content,
+  so neither writes an object. The alternative — writing a byte-identical copy so that every block
+  has "its own" artifact — is storage spent to satisfy a naming convention, on every run.
+- **Two blocks may therefore name one object**, which is the constraint that makes
+  [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)'s
+  garbage collection non-trivial: collecting "block *n*'s output" must not orphan a reference held
+  by block *n+1*. Objects are collected by **run**, on the rules in §8 — never per block.
+
+**This is what makes "the result" well defined, and R6 is why it had to be settled here.** R3 says
+the final block's output is retrievable as *the* result, and §8 charges the final artifact. R6's
+acceptance-gate pipeline is `scrape → LLM → webhook` — **it ends in an effect block.** Read
+naively, that pipeline has no result and charges zero storage, while the job it reproduces charges
+the LLM output: a metering break in the *opposite* direction from the one the PM guarded against,
+and structurally identical to [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)'s
+invisible-lane bug. So, stated once and used by both rules:
+
+> **The result of a run is the output of the last *content-producing* block in execution order.
+> That same object is the artifact charged to `storage_bytes_used`.** An effect block that runs
+> last does not change either answer — it delivers or asserts on the result; it does not replace
+> it.
+
 **The v2 path convention:**
 
 ```
-pipelines/{pipeline_run_id}/{block_id}.{ext}      — one immutable object per block per run
+pipelines/{pipeline_run_id}/{block_id}.{ext}   — one immutable object per content-producing block
 ```
+
+- **The key is deterministic, and that is a guarantee rather than an incident.** An activity that
+  fails after uploading and is retried by Temporal re-uploads to the *same* key, so a retry is
+  idempotent at the storage layer. The contrast is BUG-005, where the key was derived from a value
+  that was NULL for batch runs: a non-deterministic key collided across tenants, while a
+  run-and-block-keyed one cannot collide at all.
+- **The path carries no tenant segment, and does not need one** — `pipeline_run_id` is unique, so
+  BUG-005's shared-object failure is unreachable here. But the reference stored in workflow history
+  is a **bare path**, so anything that resolves one into bytes must ownership-check the run first.
+  This is [§12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary)'s
+  "there is exactly one tenant boundary, and nothing at the engine backs it up," at the storage
+  layer, where BUG-005 proved no 404 guard reaches.
 
 Two deliberate departures from ADR-002 §8:
 
@@ -404,57 +609,218 @@ This **partially supersedes ADR-002 §8 for the v2 lane only**. v1 keeps its con
 retired. Note that BUG-005's fix re-keys the v1 batch path on `run_id`, which converges the two
 conventions rather than forking them further.
 
+> **✅ Settled on review (2026-08-10).** The decision stands and is **more load-bearing than the
+> section claimed**. Four changes: **(1)** the payload/history figures are now measured rather than
+> hedged — at a **256 KiB warn / 2 MiB error** blob limit, the BUG-003 range means the *largest*
+> real page is over twice the hard limit and the *smallest* is already past the warn line, so this
+> is not an large-page edge case; plus the self-hosting escape hatch is named as a trap, because
+> raising the limit undoes this section and §2c together. **(2)** The catalog splits into
+> content-producing and effect blocks; "one object per block" was false of Validate and Webhook,
+> and §4's strict-path data flow made that a correctness question rather than a wording one.
+> **(3)** "The result" and "the charged artifact" are both pinned to the **last content-producing
+> block** — without which **R6's own acceptance-gate pipeline**, which ends in a Webhook, has no
+> retrievable result and charges zero storage. **(4)** Deterministic keys are stated as an
+> idempotency guarantee, and the absence of a tenant segment is tied back to §12's single boundary.
+
 ### 6. OQ-2 — In-flight edits: definitions are pinned, and that is a different problem from code versioning
 
 **Decision: a run executes the definition version it started with. Pipeline definitions are
-immutable versioned rows; an edit creates a new version; a run records the version it pinned.**
+immutable versioned rows; an edit creates a new version; a run records the version it pinned in
+`pipeline_runs.pipeline_version_id`.**
 
-Adopting an edit mid-run is not merely undesirable, it is incoherent: a run that has already
-executed blocks 1–3 of the old shape cannot meaningfully continue into a *different* block 2.
-Under a replaying engine it is worse than incoherent — replay reconstructs in-memory state by
-re-reading history against the current definition, so a changed definition makes replay produce a
-different answer than the original execution. That is a determinism violation, and it surfaces
-only *after* a restart, which is the hardest possible failure to reproduce.
+**The reason is semantic, not mechanical.** A run that has already executed blocks 1–3 of the old
+shape cannot meaningfully continue into a *different* block 2. If the edit deleted a block the run
+has already executed, there is no answer to "which block is it on"; if it changed the LLM schema,
+the run produces output half-conforming to each. This is true of any engine and would be true with
+no engine at all.
 
-R1's "deleting a pipeline must not destroy the history of runs already executed from it" falls
-out of this for free: versions are retained as long as any run references them.
+> **⚠️ Corrected on review (2026-08-10) — the mechanical argument an earlier draft gave was
+> wrong.** It claimed replay "reconstructs in-memory state by re-reading history against the
+> current definition," making a mid-run edit a determinism violation. **Temporal's replay
+> re-executes the workflow function against the recorded event history, and the workflow's input
+> arguments are part of that history** (confirmed against Temporal's documentation). So a
+> definition passed in as a workflow argument is *automatically* pinned — replay reuses the
+> recorded argument and never reads the current row. The described failure is reachable only by a
+> workflow body that loads the definition from Postgres mid-run, which the determinism rule at the
+> end of this section already forbids. **Leaving the wrong reason in place was the actual risk:**
+> it invites a correct rebuttal — *"we pass it as an argument, so replay is safe, so we may adopt
+> edits"* — against a decision whose real basis is the paragraph above, which that rebuttal does
+> not touch.
+
+**The mechanism follows from the correction: the definition is a workflow input argument.** That
+is what makes pinning free rather than something we enforce. It is also consistent with
+[§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)'s rule as settled —
+*content is never a payload; arguments may be* — and a definition is bounded by R1's
+max-blocks-per-pipeline, so it is small against the 2 MiB payload limit. The standing prohibition
+is narrower and sharper than "don't adopt edits": **the workflow body must never load the
+definition itself.**
+
+**Retention, naming, and deleting a pipeline.** R1's "deleting a pipeline must not destroy the
+history of runs already executed from it" means version rows are retained as long as any run
+references them. Two consequences that an earlier draft left unstated, both settled here:
+
+- **A pipeline with a run in flight may be deleted, and the run finishes. ✅ Owner's call,
+  2026-08-10.** The run already pinned its version, that version is retained, and the run is its
+  own record. Cancelling a run is R3's explicit, separate operation — deleting the definition is
+  not a back-door cancel. This mirrors the Q4 decision on jobs, where retiring a schedule and
+  cancelling a run were deliberately split rather than folded into `DELETE`.
+- **The run history holds the name, not the pipeline. ✅ Owner's call, 2026-08-10 (option C).**
+  Deleting a pipeline that has **no runs** deletes it outright and frees the name immediately.
+  Deleting one that **has runs** soft-deletes it; the retained rows keep holding the name, and
+  reusing it returns **409**. The reason to hold a name is that run history refers to it — no
+  history, nothing refers to it, nothing to hold. This lands close to the `api_keys` precedent
+  (*"revoked keys still hold their name — names are identifiers, not recycled"*) without
+  over-applying it: a revoked key holds its name for a different reason that always applies (the
+  key string may be recorded elsewhere), whereas a never-run pipeline is referenced by nothing.
+  The alternative — freeing the name on every delete — makes run history ambiguous by
+  construction: two pipelines named "Price watch", possibly different URLs and different schemas,
+  and no way to tell from a run which one produced it.
 
 **Two versioning problems are easy to conflate, and only one is solved above.**
 
 - **The user's definition** (data) — solved by pinning.
 - **Our workflow code** (the interpreter) — *not* solved by pinning, and still requires
-  Temporal's own versioning discipline (patched APIs / Worker Versioning). Changing how the
-  engine interprets a Clean block affects in-flight runs regardless of which definition version
-  they pinned.
+  Temporal's own versioning discipline. Changing how the engine interprets a Clean block affects
+  in-flight runs regardless of which definition version they pinned.
+
+Pinning means **the cook keeps the recipe card they started with**; it says nothing about swapping
+the cook mid-dish. **Worth noticing: Temporal's current answer to the second problem has the same
+shape as our answer to the first** — with pinned Worker Deployment Versions an execution runs
+entirely on the worker version it started on. Pin the recipe, pin the interpreter. The mechanism
+is **deliberately not chosen here** (see the deferral table), but it is not an open-ended question:
+**Worker Versioning is GA and is Temporal's stated default**, patching is the older approach that
+leaves conditional branches to clean up later, and the pre-2025 *experimental* Worker Versioning is
+already withdrawn from the server — so the choice is between the current mechanism and patching,
+not among three. It needs **server-side enablement** on our self-hosted deployment
+([§2](#2-topology)), which makes it an infra task rather than a code flag.
 
 The second brings a **new failure class**: workflow code must be deterministic. No I/O, no
 `datetime.now()`, no `random()`, no direct database or MinIO access inside a workflow body —
 those belong in activities. This is a standing review rule, not a one-time cleanup.
 
+**Two obligations elsewhere in this ADR are this rule seen from the other end:**
+
+- [§10](#10-oq-6--the-do-not-delete-list)'s do-not-delete list — the LLM cold-start
+  `ensure_ready()` probe and the transient/terminal storage classifier — must be ported into
+  **activities**. Both do I/O; this rule is precisely what forbids them in a workflow body. The two
+  sections are read together by whoever does the port, and neither previously pointed at the other.
+- [§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)'s
+  config-schema obligation exists *because* of the pinning decided here: a pinned old version keeps
+  the config shape it was saved under, so the validator must remain able to validate historical
+  shapes, and a block type that gains a required field needs a default for definitions already
+  saved.
+
+> **✅ Settled on review (2026-08-10).** The decision stands; **its stated reason did not.** The
+> replay argument was factually wrong (arguments live in history, so a definition passed in is
+> pinned automatically) and, being wrong, invited the opposite conclusion from anyone who knew
+> Temporal — the real basis is the semantic incoherence of continuing a run into a changed shape.
+> Four things previously unstated are now decided: the definition travels as a **workflow input
+> argument**; the pinned version is recorded in **`pipeline_runs.pipeline_version_id`**; a pipeline
+> with a run in flight **may be deleted and the run finishes**; and **run history holds the name**
+> — delete with no runs frees it, delete with runs soft-deletes and 409s on reuse.
+
 ### 7. OQ-3 — One lane: disjoint identity, plus an engine-level uniqueness guarantee
 
-**Decision: "exactly one lane" is enforced by three stacked mechanisms, none of which is a
-routing flag or a convention.**
+**Decision: "exactly one lane" is enforced by four stacked mechanisms, none of which is a
+routing flag or a convention. They do not all cover the same cases — mechanisms 1 and 4 divide
+between them, and which one applies depends on whether the work is a pipeline or a migrated job.**
 
-1. **Disjoint identity spaces.** A pipeline run is a `pipeline_runs` row and never a `job_runs`
-   row. v1 executors read `job_runs` and NATS subjects; v2 executors read Temporal task queues.
-   No object exists that *could* be picked up by both. For layer A this makes R5 trivially true —
-   see [§16](#16-the-v1v2-coexistence-contract).
+1. **Disjoint identity spaces — pipelines only.** A pipeline run is a `pipeline_runs` row and
+   never a `job_runs` row. v1 executors read `job_runs` and NATS subjects; v2 executors read
+   Temporal task queues. No object exists that *could* be picked up by both.
+   ⚠️ **This covers layer A and nothing else.** A **migrated job keeps its `job_runs` row** —
+   [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
+   makes that table a read-model mirror of Temporal state rather than replacing it, because R5
+   forbids user-visible change and the job API, SPA, admin views and quota view all read it. So
+   from migration step 2 onward the same row is visible to both lanes **by requirement**, and
+   mechanism 1 stops applying exactly when the problem becomes real
+   ([§16](#16-the-v1v2-coexistence-contract) says the same thing from the sequence side).
 2. **Workflow ID uniqueness, for flows that do migrate.** When jobs move to `JobWorkflow`, the
    workflow ID is derived from the run identifier (`job-run-{run_id}`). Temporal refuses to start
-   a second execution with a workflow ID that is already running. Double-start becomes impossible
-   *at the engine*, rather than prevented by a check we wrote.
+   a second execution with a workflow ID that is already **open** — the default Workflow ID
+   Conflict Policy is `Fail` — so a concurrent double-start is impossible *at the engine* rather
+   than prevented by a check we wrote.
+   ⚠️ **Pin `WorkflowIdReusePolicy.REJECT_DUPLICATE`, or this is weaker than it reads.** The
+   default reuse policy is **`ALLOW_DUPLICATE`**, which permits a *new* execution with the same ID
+   once the previous one has **closed**. That yields "never two at once," not "this run executes
+   once, ever" — and R5 asks for the second. A run identifier is genuinely single-use, so
+   rejecting duplicates costs nothing. Note also what would silently destroy the guarantee:
+   `TERMINATE_IF_RUNNING` converts a refused double-start into a kill-and-restart.
 3. **`schedule_status` is the interlock for recurring work** (cutover gotcha #2). A job moved to
    a Temporal Schedule must be `paused` in v1 or it fires on both lanes. This is what Q4's
    deliberately tri-state flag is for.
+4. **A lane marker on `job_runs`, from migration step 2. ✅ Owner's call, 2026-08-10.** A column
+   written in the **same transaction as the row insert** (a later write leaves a window in which a
+   v2 row is indistinguishable from a v1 row), and every v1 background query that dispatches work
+   filters on it. This is mechanism 1's disjointness extended to the rows that cannot have it
+   structurally. It is **step-2 work, not day-one work** — §16's routing rule keeps jobs on v1
+   until their flow is explicitly migrated, so layer A ships without it — but it is recorded here
+   because §7 is what someone will consult *at* step 2.
+
+**Why mechanism 4 is required and not belt-and-braces.** `_recover_stale_pending`
+(`core/scheduler.py:131`) selects **every** `job_runs` row with `status = 'pending'` older than
+`stale_pending_threshold_minutes` (default **10**) and re-publishes it to
+`scrapeflow.jobs.run.http` / `.playwright`. It carries no lane filter and cannot know a workflow
+owns the row. So: a job migrated to v2 whose workflow has not yet started — worker pod down,
+task-queue backlog, Temporal unreachable — sits at `pending`, and ten minutes later **v1
+dispatches it to a NATS worker**. When the workflow worker returns, the same URL is scraped a
+second time and an LLM stage bills the user's key twice. Mechanism 2 does not intervene: v1 never
+started a workflow, it published a message, so the engine had nothing to refuse.
+
+Two things make it worse than a corner case. It fires **precisely when v2 looks stalled**, so the
+operator's model is "nothing is running" while v1 quietly ran it; and it is **silent** — nothing
+records that two lanes touched one run.
+
+> ⚠️ **A documentation trap behind this.** `phase4-backlog.md` §3 lists `_recover_stale_pending`
+> under "dissolved by Temporal — do NOT fix," because it exists only to police the hand-rolled
+> scheduler. That is true of the **end state** and false of the **transition**: the loop is live
+> for the whole coexistence period, which is exactly when this risk exists. *"Dissolved by the
+> migration"* and *"safe during the migration"* are different claims, and §3 of the backlog only
+> makes the first.
+
+**The one v1 loop that is already safe is safe by accident, which is the argument for making it
+deliberate.** `advisory.py:28` matches runs on `nats_stream_seq`, which is `NULL` for anything v1
+never dispatched — a lane marker in disguise. It works, but the column it depends on is dropped
+when v1 retires ([§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)),
+so the protection is a side effect of something on its way out.
 
 **Ordering matters for mechanism 3, and the safe order is the counter-intuitive one:** pause in
 v1 → confirm no v1 dispatch is in flight → *then* create the Temporal Schedule. The reverse order
 leaves a window in which both lanes are armed. A double scrape costs a double render; a double
 LLM stage bills the user twice.
 
-One property helps: the NATS stream is `--retention work`, so a message acked by v1 is deleted.
-There is no replayable backlog a v2 executor could later re-consume.
+**Rollback has the mirror-image ordering, and it is not symmetric by intuition.** §16 claims every
+step is reversible, which means the reverse move needs the same discipline: **pause the Temporal
+Schedule → confirm no v2 execution is in flight → only then set `schedule_status` back to
+`active`.** Un-pausing v1 first re-arms both lanes just as surely as creating the Schedule too
+early does. Written down because whoever performs it is rolling back under pressure.
+
+**One property helps, but only for the half that was never dangerous.** The NATS stream is
+`--retention work`, so a message *acked* by v1 is deleted and there is no replayable backlog a v2
+executor could later re-consume. The risk is the **unacked** message — in flight, or unprocessed
+on the stream at the moment of cutover — which is still deliverable to a v1 worker. Retention says
+nothing about those. The check that does is already written as §16's **deletion gate** (zero
+unprocessed, zero outstanding acks, verified with `nats consumer info --json`); it is a **cutover
+gate too**, not only a deletion gate, and the two sections should be read together.
+
+> **✅ Settled on review (2026-08-10).** The section under-covered its hardest case. **(1)**
+> Mechanism 1 is now explicitly **pipelines-only** — a migrated job keeps its `job_runs` row by
+> requirement, so at step 2 the covering set drops to mechanism 2 alone. **(2)** A **fourth
+> mechanism** is added: a lane marker on `job_runs`, because `_recover_stale_pending` is a live v1
+> dispatcher that re-publishes any stale `pending` row with no lane awareness — verified in code,
+> 10-minute default threshold. **(3)** Mechanism 2 **over-claimed**: the default reuse policy
+> allows a fresh execution once the previous one closes, so `REJECT_DUPLICATE` must be pinned for
+> "once, ever" rather than "never two at once." **(4)** The `--retention work` reassurance
+> addressed the safe half; the unacked-message case is now tied to §16's drain gate. **(5)** The
+> rollback ordering for mechanism 3 is stated, since §16 claims reversibility at every step.
+
+**Carried to [§9](#9-oq-5--reuse-existing-workers-via-option-a-first)'s review — mechanism 1 is
+true of rows, not of messages.** Under §9's option (a) a v2 activity dispatches to the existing
+NATS workers, so v2 work traverses v1 infrastructure by design. The return path is the sharper
+half: the worker publishes to `scrapeflow.jobs.result`, where `result_consumer.py` is subscribed,
+and its routing (`result_consumer.py:616`) branches on `run.job_id is not None` /
+`run.batch_item_id` — a pipeline-originated result has neither. That is BUG-005's shape one lane
+later. §9 carries a warning about stacked *retry*; it needs one about the *result* path.
 
 ### 8. OQ-4 — Metering: one run is one unit, pools are shared, and only the final artifact is charged
 
@@ -483,7 +849,17 @@ checks the declared ceiling; the meter charges actuals** — a crawl is pre-chec
   actively executing a block, not runs that exist** — see [§15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for).
   **A crawl is one concurrency unit, not N** ([§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)) —
   the one place cost and contention deliberately disagree.
-- **`storage_bytes_used`: every stored *final* artifact is charged, on every lane.** The mechanism
+- **`storage_bytes_used`: every stored *final* artifact is charged, on every lane.** On a pipeline
+  run, **"final" means the output of the last *content-producing* block in execution order** — not
+  "an output nothing else consumes," and not simply the last block, which may be an effect block
+  that produces nothing ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)).
+  R6's gate pipeline ends in a Webhook, so "the last block" would charge it zero. The
+  nothing-consumes-it reading fails for a different reason: it coincides with the intended one only
+  while [§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)
+  validates data flow as a path, and diverges the moment fan-out is allowed post-Phase 4, since a
+  fanning graph has several leaves but still one last-executed block. Pinning the definition now is
+  what stops either change from silently altering both what a run costs and what R3's "the result"
+  returns. *(Knock-on from the §4 and §5 reviews, 2026-08-10.)* The mechanism
   is unchanged; the **call sites are not lane-agnostic and must be fixed** (see
   [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)).
   **Every crawl page is a final artifact** — a crawl has no intermediates — so the
@@ -511,6 +887,31 @@ the user's quota.** The user is charged for the result they keep, exactly as wit
 Failure context is retained unconditionally (the PM's stated position): the failing block, its
 input reference, and its error survive garbage collection, because "see why a step failed" is
 R3's purpose.
+
+**That window is a product-visible retention promise, not a free operator dial. ✅ Owner's call,
+2026-08-10 (§5 review).** R3 promises a user can see which step failed *and what it returned*; for
+**successful** intermediate blocks, that second half is exactly what garbage collection deletes.
+Three rules keep the promise honest:
+
+- **The run's result is not an intermediate and is never collected by this mechanism.** It is the
+  charged artifact ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity):
+  the last content-producing block's output), the user is paying storage for it, and it is removed
+  only when the user removes the run. **Collection operates per run, not per block** — an effect
+  block passes its input reference through, so two blocks can name one object and per-block
+  collection would orphan a live reference.
+- **A collected output renders as collected.** The API and the SPA must distinguish *never
+  produced* (an effect block), *collected* (retention elapsed) and *failed*. A collected
+  intermediate that surfaces as a 404, an error or an empty result reads to the user as data loss.
+- **What is retained is decoupled from Temporal's retention, and outlives it.** Per-block status
+  and timing live in `pipeline_run_blocks` in the **app** database, so R3's "which step failed"
+  survives indefinitely regardless of both the 30-day namespace retention
+  ([§2c](#2c-namespace-retention-is-30-days)) and this window. Only *content* has a retention
+  window. Stated because the natural assumption — that a run stops being inspectable when its
+  workflow history expires — is wrong here, and designing to it would throw away observability the
+  app database already provides for free.
+
+The number itself is still an operator dial; what is decided is that it is chosen against a stated
+promise rather than picked for storage cost alone.
 
 ### 9. OQ-5 — Reuse existing workers via option (a) first
 
@@ -674,8 +1075,8 @@ it does not prevent the work, it only renames it and hides it inside a PRD nobod
 layer-A change.
 
 The cost of a separate PRD is low precisely because [§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)
-already left the room: explicit named wiring, immutable block identifiers, graph-shaped storage
-with linearity enforced in the validator, and a `skipped` block state. The follow-up PRD is
+already left the room: explicit named wiring, block identifiers stable across versions,
+graph-shaped storage with linearity enforced in the validator, and a `skipped` block state. The follow-up PRD is
 additive to the model rather than a re-specification of it. That is the payoff of the
 forward-compatibility constraint, and it is worth stating that the constraint has now been *spent*
 on something concrete rather than held as a vague intention.
@@ -843,10 +1244,12 @@ finished with v1" a measured fact rather than an assumption.
 | Temporal **archival** (closed histories → MinIO) | Retention itself is now decided — 30 days ([§2c](#2c-namespace-retention-is-30-days)). Archival stays off: another moving part, for data currently worth little. Revisit if history growth ever forces a *shorter* retention |
 | **Web UI ingress exposure** (post-Phase 4) | Not exposed for now — `kubectl port-forward` only ([§2b](#2b-the-web-ui-is-not-ingress-exposed)). If always-on access is wanted later, choose between Traefik `basicAuth` (the mlflow pattern; cheap, one shared credential, no attribution) and `forwardAuth` against an API admin endpoint (one identity system; must be built, couples UI to API availability, depends on Clerk's session cookie domain). Owner's call, 2026-08-08 |
 | Namespace-per-tier | Buys nothing at current scale; revisit under noisy-neighbour pressure ([§12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary)) |
+| **Mechanism for versioning our *workflow code*** (Worker Versioning vs `patched`) | Distinct from §6's pinning of *user definitions*, which is decided. Not open-ended: **Worker Versioning is GA and Temporal's stated default**; patching is the older approach leaving branches to clean up; the pre-2025 experimental variant is already withdrawn from the server. Decide at the first workflow-code deploy that must survive in-flight runs — it needs **server-side enablement** on the self-hosted deployment ([§2](#2-topology)), so it is an infra task, not a code flag ([§6](#6-oq-2--in-flight-edits-definitions-are-pinned-and-that-is-a-different-problem-from-code-versioning)) |
 | Conditional execution's design | Its own layer-A PRD, before PRD-018 ([§14](#14-oq-10-remaining-half--conditional-execution-gets-its-own-layer-a-prd-before-monitors)) |
+| **Data-flow fan-out** (one block's output consumed by two later blocks — "two extractions on one fetched page") | **Wanted, deferred to post-Phase 4. Owner's call, 2026-08-10.** Layer A validates data flow as a path ([§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)). The stored shape is already a graph, so this is a validator change against unchanged definitions — but it is **not free elsewhere**: it makes §8's "final artifact" ambiguous unless "last in execution order" holds (now pinned in §8), and it is the point at which §8's multi-Scrape rider must be answered. Distinct from *parallel* fan-out, which stays a PRD-016 non-goal |
 | Run-failure notification (R6's fourth exclusion) | The PM left it unassigned on purpose: it is either an on-failure branch or a run-level setting, and that depends on the conditional-execution decision above |
 | Whether `webhook_deliveries` / `crawl_pages` survive as v1-only audit mirrors | Decide at the step that retires each flow, not now |
-| Retention window for intermediate block outputs | Operator dial; needs a real number from the first pipelines ([§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)) |
+| Retention window for intermediate block outputs — **the number only** | Needs a real number from the first pipelines ([§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)). **No longer a free dial** (§5 review, 2026-08-10): it is chosen against a stated promise, since it bounds how long R3's "what did this step return" works. The rules around it — result never collected, collection per run not per block, collected renders as *collected* — are decided |
 
 ---
 

@@ -66,7 +66,237 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-08) — **ADR-009 review is UNDERWAY. Next section: §4 (block model).**
+- ## 📝 START HERE (2026-08-10) — **ADR-009 review is UNDERWAY. Next section: §8 (metering).**
+
+  **§4, §5, §6 and §7 all reviewed in this session.** The ADR's Review log remains authoritative.
+  §8 has already been amended twice as a knock-on (from §4 and §5) and still carries the open
+  multi-Scrape rider, so it opens with three things to check rather than a clean read.
+
+  ### §7 (one lane) — reviewed 2026-08-10, **under-covered its hardest case**; gained a 4th mechanism
+
+  - **🔴 Mechanism 1 (disjoint identity) covers pipelines only — and stops applying exactly where
+    the problem starts.** A **migrated job keeps its `job_runs` row *by requirement***: §3 makes
+    that table a read-model mirror of Temporal state rather than replacing it, because R5 forbids
+    user-visible change and the job API, SPA, admin views and quota view all read it. So from
+    migration **step 2** the same row is visible to both lanes by design. §16 says this from the
+    sequence side (*"a real problem only at migration step 2"*) — §7 didn't say it from the
+    mechanism side, so three mechanisms read as covering a case only one of them touches.
+  - **🔴 The gap is not theoretical — `_recover_stale_pending` walks into it.**
+    `core/scheduler.py:131` selects **every** `job_runs` row with `status='pending'` older than
+    `stale_pending_threshold_minutes` (**default 10**) and re-publishes it to
+    `scrapeflow.jobs.run.http`/`.playwright`. **No lane filter; it cannot know a workflow owns the
+    row.** So a v2-migrated run whose workflow hasn't started (worker pod down, task-queue backlog,
+    Temporal unreachable) gets dispatched to a v1 worker ten minutes later — then the workflow
+    worker returns and scrapes the same URL again. **Mechanism 2 never intervenes: v1 started no
+    workflow, it published a message.** It fires *precisely when v2 looks stalled*, and it is
+    **silent**.
+    ⚠️ **Documentation trap:** backlog §3 lists this loop under "dissolved by Temporal — do NOT
+    fix." True of the **end state**, false of the **transition** — it is live for the whole
+    coexistence period, which is when the risk exists.
+  - **✅ Owner's call — mechanism 4: a lane marker on `job_runs`**, written in the **same
+    transaction as the insert** (a later write leaves a window where a v2 row looks like a v1 row),
+    with every v1 dispatching query filtering on it. **Step-2 work, not day-one** — §16's routing
+    rule keeps jobs on v1 until their flow is migrated, so layer A ships without it. Recorded in §7
+    because that is what someone will read *at* step 2.
+    Supporting evidence: **`advisory.py:28` is already safe, but by accident** — it matches on
+    `nats_stream_seq`, `NULL` for anything v1 never dispatched. A lane marker in disguise, on a
+    column §3 drops when v1 retires.
+  - **🔴 Mechanism 2 over-claimed.** *"Temporal refuses a second execution with a workflow ID
+    already running"* is correct (default **Conflict Policy = `Fail`**). *"Double-start becomes
+    impossible at the engine"* is not: the default **`WorkflowIdReusePolicy` is `ALLOW_DUPLICATE`**,
+    which permits a fresh execution once the prior one **closed**. That is "never two at once", not
+    R5's "once, ever". **Pin `REJECT_DUPLICATE`** on `job-run-{run_id}` and `pipeline-run-{id}`; a
+    run identifier is single-use, so it costs nothing. Also named: **`TERMINATE_IF_RUNNING` would
+    silently destroy the guarantee** by converting a refused double-start into a kill-and-restart.
+  - **🟠 The `--retention work` reassurance covered the half that was never dangerous.** Acked
+    messages are deleted — fine. The risk is the **unacked** message, in flight or unprocessed at
+    cutover, still deliverable to a v1 worker. The check already exists as §16's **deletion gate**
+    (zero unprocessed / zero outstanding acks via `nats consumer info --json`) — it is a **cutover
+    gate too**, and §7 now points at it.
+  - **🟠 Rollback ordering stated.** §16 claims every step is reversible, so the reverse move needs
+    the same discipline as the forward one: **pause the Temporal Schedule → confirm no v2 execution
+    in flight → only then set `schedule_status` back to `active`.** Un-pausing v1 first re-arms
+    both lanes exactly as creating the Schedule too early does.
+  - **🟡 Carried to §9's review:** mechanism 1 is true of **rows, not messages**. Under option (a) a
+    v2 activity dispatches into NATS, and the result returns on `scrapeflow.jobs.result` where
+    `result_consumer` is subscribed — its routing (`result_consumer.py:616`) branches on
+    `run.job_id` / `run.batch_item_id`, and a pipeline-originated result has **neither**. BUG-005's
+    shape, one lane later. §9 warns about stacked *retry*; it needs one about the *result* path.
+
+  ### §6 (in-flight edits / pinning) — reviewed 2026-08-10, decision upheld, **its reason replaced**
+
+  - **🔴 The central technical argument was wrong, and wrong in a way that invited the opposite
+    conclusion.** §6 claimed replay "reconstructs in-memory state by re-reading history against the
+    current definition," making a mid-run edit a determinism violation. **Verified against
+    Temporal's docs: replay re-executes the workflow *code* against recorded event history, and the
+    workflow's input arguments are part of that history.** So a definition passed in as an argument
+    is pinned *automatically* — replay never reads the current row. The described failure requires
+    a workflow body that loads the definition from Postgres, which §6's own determinism rule (three
+    paragraphs later) already forbids. The danger was that anyone who knows Temporal could
+    correctly reply *"we pass it as an argument, so replay is safe, therefore we can adopt edits"*
+    — against a decision whose real basis the rebuttal doesn't touch. **The real reason is
+    semantic:** a run that already executed the old shape cannot coherently continue into a new one
+    (it ran a Clean block that v2 deleted). True of any engine, or none.
+  - **The mechanism is now stated: the definition travels as a workflow input argument.** That's
+    what makes pinning free rather than enforced, and it's consistent with §5's settled rule
+    (*content is never a payload; arguments may be*) — a definition is bounded by R1's
+    max-blocks-per-pipeline, so it's small against the 2 MiB limit. The standing prohibition is
+    sharper than "don't adopt edits": **the workflow body must never load the definition itself.**
+  - **"A run records the version it pinned" named no column.** Same shape as §4's `skipped`
+    problem. Now **`pipeline_runs.pipeline_version_id`**.
+  - **✅ Owner's call: deleting a pipeline with a run in flight lets the run finish.** It already
+    pinned its version, that version is retained, and the run is its own record. Cancelling is R3's
+    separate explicit operation — deleting a definition is not a back-door cancel. Same reasoning
+    as the Q4 split on jobs.
+  - **✅ Owner's call (option C): the run *history* holds the name, not the pipeline.** Delete a
+    pipeline with **no runs** → deleted outright, name free immediately. Delete one **with runs** →
+    soft-deleted, holds its name, reuse returns **409**. Principle: the reason to hold a name is
+    that history refers to it; no history, nothing to hold. Close to the `api_keys` precedent
+    without over-applying it (a revoked key holds its name for a reason that always applies — the
+    key string may be logged elsewhere). Freeing the name on every delete would make run history
+    ambiguous by construction: two "Price watch" pipelines, different URLs and schemas, no way to
+    tell which produced a given run.
+  - **🟡 Worker-code versioning promoted from a passing mention to an explicit deferral row.**
+    §6 correctly separates *user definition* versioning (solved by pinning) from *our workflow
+    code* versioning (not solved by it) — the recipe card vs the cook — but named "patched APIs /
+    Worker Versioning" without choosing. Checked: **Worker Versioning is GA and Temporal's stated
+    default**; patching is the older approach leaving branches to clean up; the pre-2025
+    *experimental* variant is already withdrawn from the server. So it's a two-way choice, not
+    three. **Note the symmetry worth keeping:** pinned Worker Deployment Versions run an execution
+    entirely on the version it started on — the same answer as §6's, applied to the interpreter.
+    Needs **server-side enablement** on our self-hosted deployment, so it's an infra task.
+  - **Two cross-references added.** §10's do-not-delete list (LLM `ensure_ready()`, the
+    transient/terminal classifier) must land in **activities**, and §6's determinism rule is
+    exactly what forbids them in a workflow body — the two sections are read together by whoever
+    does the port and neither pointed at the other. And §4's config-schema obligation exists
+    *because* §6 pins.
+
+  ### §5 (references, not payloads) — reviewed 2026-08-10, decision upheld and strengthened
+
+  - **✅ The payload numbers are now measured, not hedged.** The section said "low single-digit MB
+    — confirm against Temporal's docs." Confirmed: **256 KiB warn / 2 MiB error** per payload;
+    history 10 MiB warn / **50 MiB error**, 10,240 / 51,200 events. Against BUG-003's measured
+    291 KiB–4.1 MiB that means the **largest real page is over twice the hard limit** and the
+    **smallest is already past the warn line**. This is not a big-page edge case — the whole
+    measured range is over a threshold, which makes §5 considerably more load-bearing than it read.
+  - **⚠️ Named a trap the section didn't have: we self-host, so these limits ARE configurable**
+    (unlike Cloud). Raising `blobSizeLimitError` is the obvious-looking fix and it undoes **§5 and
+    §2c together** — content into history, history retained 30 days. §2c's "suspect §5 first"
+    warning is reachable by config change, not just by code.
+  - **🔴 "One immutable object per block per run" was false of two of the five block types.**
+    Validate asserts on its input; Webhook delivers. Neither produces content. §4's strict-path
+    data flow (block *n* consumes *n−1*) turned that from pedantry into correctness: every
+    non-terminal block must emit something consumable. **✅ Owner's call: the catalog splits into
+    content-producing (Scrape, Clean, LLM) and effect (Validate, Webhook) blocks; effect blocks
+    pass their input reference through unchanged and write nothing.** Consequence to carry: two
+    blocks can name one object, so **GC is per run, never per block**.
+  - **🔴 R6's own acceptance gate had no definable result.** R6's pipeline is
+    `scrape → LLM → webhook` — it **ends in an effect block**. Under R3 ("the final block's output
+    is *the* result") plus §8's freshly pinned "final = last block in execution order", that
+    pipeline returns nothing and charges **zero** storage, while the job it reproduces charges the
+    LLM output. Metering break in the *opposite* direction from the one the PM guarded against, and
+    structurally identical to §3's invisible-lane bug. **✅ Resolved: the result — and the charged
+    artifact — is the last *content-producing* block's output.** Worth noting this was invisible
+    until yesterday's §8 pin made "final" explicit.
+  - **🟠 The GC window was listed as a free operator dial; it isn't.** R3 promises "which step
+    failed *and what it returned*" — GC deletes exactly that second half for successful
+    intermediates. **✅ Owner's call: it's a product-visible retention promise.** Three rules now
+    stated: the run's **result is never collected** (it's charged storage the user owns), collection
+    is **per run**, and a collected output must render **as collected** — never a 404, an error or
+    an empty result. Plus the decoupling nobody had written down: **per-block status/timing live in
+    `pipeline_run_blocks` in the app DB**, so "which step failed" outlives both the 30-day namespace
+    retention and this window. Only *content* has a retention window.
+  - **Two smaller ones:** deterministic keys are now stated as an **idempotency guarantee** (a
+    retried activity re-uploads to the same key — the direct contrast with BUG-005's NULL-derived
+    colliding key), and the **absence of a tenant segment** is tied back to §12's single boundary:
+    the reference in history is a bare path, so whatever resolves it into bytes must ownership-check
+    the run first.
+
+  ### §4 (block model) — reviewed 2026-08-10, five corrections, two owner calls
+  The section's two core choices (fixed typed catalog; explicit named wiring) survived. What
+  changed was whether the section as written actually delivered them.
+
+  - **🔴 §4 rejected its own motivating example.** It justified explicit wiring with *"run two
+    extractions on one fetched page"* — Scrape feeding **two** LLM blocks — and then stated a
+    validator rule that "rejects anything that is not a single chain," which rejects exactly that.
+    Root cause: **"linear" was doing duty for two different properties.** *Execution order* linear
+    (one block at a time, no parallelism) is PRD-016's non-goal; *data flow* linear (block *n*
+    consumes *n−1*) is a stronger claim nobody had made deliberately.
+    **✅ Owner's call: linear in both senses for layer A. Data-flow fan-out is wanted but deferred
+    post-Phase 4** — added to the ADR's "Deliberately not decided here" table. Consequence recorded
+    honestly: **explicit wiring now buys no capability that implicit wiring couldn't**, and is kept
+    purely for forward-compatibility plus the identifiers OQ-2/R3 need anyway. And **layer A does
+    not fix the PRD Problem section's "two extractions on one page"** — logged in the ADR as a known
+    exclusion; **PRD-016 should absorb it** next PM pass (not done — Architect doesn't edit the PM's
+    doc).
+  - **🔴 "Input" meant two incompatible things in one sentence.** A block reading an earlier
+    block's output is a data-flow edge carrying a **MinIO reference** (§5); a run input is a
+    **scalar bound into a config field**. §5 says inputs are *always* references — and Scrape's URL
+    is a string, so §4 and §5 contradicted each other. **Resolved: run inputs are config bindings,
+    not graph edges; Scrape consumes nothing and is a source block.**
+    **✅ Owner's call: narrow binding** — each block type declares which config fields are bindable;
+    today exactly one, Scrape's `url`. Wide binding (any field) would dissolve R1's whole promise:
+    an LLM schema supplied at run time can't be checked at Save, so the user finds out it's
+    malformed *after* paying for a render. Widening later is additive; narrowing breaks saved
+    pipelines.
+  - **Block IDs: "immutable once assigned" was the wrong property.** It's satisfied by an edit that
+    regenerates every ID — nothing changed, they're all just new — which breaks both things it was
+    supposed to buy. Corrected to **stable across versions**, stated as a rule about the *edit
+    operation*: an update carries IDs through; an omitted ID is a deletion.
+  - **`skipped` was asserted about a column no section defined.** §3 introduces
+    `pipeline_run_blocks` without columns; §4 said "the column admits it." Now named:
+    **`pipeline_run_blocks.status` ∈ `pending`/`running`/`completed`/`failed`/`skipped`** — else a
+    `CHECK` written from states-in-use produces the exact migration+backfill the rule exists to
+    prevent.
+  - **Config-schema versioning is the DSL's grammar cost arriving by the back door.** §4 rejects a
+    DSL partly to avoid "versioning of the grammar," but a typed catalog still needs a schema per
+    block type and a story for changing it. Now stated, with the obligation it creates: **§6 pins
+    definitions, so the validator must stay able to validate historical config shapes** — a new
+    required field needs a default for already-saved definitions.
+
+  **Knock-ons applied:** **§5** gained a note that run-input scalars are the exception to
+  "inputs are references" (*content is never a payload; arguments may be*), to be carried into §5's
+  own review. **§8** now pins **"final artifact" = last block in execution order**, not "an output
+  nothing consumes" — the two coincide only while data flow is a path, and diverge the moment
+  fan-out ships.
+
+  **§8's multi-Scrape rider is still open** and unaffected: one Scrape feeding two LLMs still
+  fetches once, so "one run = one unit" survives. Two *Scrape* blocks remains the open question.
+
+  ### Session close (2026-08-10)
+
+  **Docs-only session — no code changed.** Three files, committed on `develop`: `CLAUDE.md`,
+  `scrapeflow-session-handoff.md`, `docs/adr/ADR-009-…`. **`develop` and `main` remain level for
+  code at `b110591`**; docs commits sit on top of `develop`.
+
+  **Four sections reviewed (§4, §5, §6, §7).** The ADR is **still Draft** — sections being settled
+  individually does not make it Accepted, and nothing may be implemented against it yet.
+
+  **What carries into the next session, in priority order:**
+
+  1. **Next section is §8 (metering)** — it does *not* open clean. It has been amended twice as a
+     knock-on already (from §4: "final" pinned to execution order; from §5: re-pinned to the last
+     *content-producing* block, plus the three GC rules), and it still carries the **open
+     multi-Scrape rider** from the PM. Three things to check before reading it as drafted.
+  2. **§9 opens carrying a finding from §7** — under option (a), v2 results land on
+     `scrapeflow.jobs.result` where `result_consumer` is subscribed with **neither FK set**
+     (BUG-005's shape, one lane later). §9 currently warns only about stacked *retry*.
+  3. **§5's own review closed, but §5 carries a note into §4's territory** — already applied; no
+     action.
+  4. **Two things owed to other documents, not done** (deliberately — the Architect does not edit
+     the PM's doc): **PRD-016 should absorb §4's known exclusion** ("two extractions on one fetched
+     page" is *not* fixed by layer A), and **backlog §3 should be corrected** — it files
+     `_recover_stale_pending` as "dissolved by Temporal — do NOT fix", which is true of the end
+     state and false of the transition, where §7's mechanism 4 now depends on it.
+
+  **Two implementation obligations recorded this session that are easy to lose**, both of them
+  step-2 migration work rather than layer-A work: the **lane marker on `job_runs`** (§7 mechanism
+  4) and **`WorkflowIdReusePolicy.REJECT_DUPLICATE`** on both workflow-ID formats (§7 mechanism 2).
+  Neither is needed to ship pipelines; both are needed before a job runs on Temporal.
+
+  <details><summary>Prior START HERE (2026-08-08) — §2/§3 reviewed, §12 reversed</summary>
+
+  ## 📝 (2026-08-08) — **ADR-009 review UNDERWAY. Next section: §4 (block model).**
 
   The ADR is being reviewed **section by section**, not read straight through, and decisions are
   landing **in the document under review**. **The ADR's own `Review log` (status block, top of
@@ -161,9 +391,10 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
     the seven steps, so it is *sequence* material, and the ADR holds decisions only. §16 points at
     it rather than duplicating it.
 
-  **Docs-only session — no code changed.** Five files modified and **uncommitted**: `CLAUDE.md`,
-  `scrapeflow-session-handoff.md`, `docs/adr/ADR-009-…`, `docs/project/phase4-backlog.md`,
-  `docs/project/phase4-prd/PRD-016-…`, `docs/project/temporal-full-migration.md`.
+  **Docs-only session — no code changed.** Six files modified — since **committed** as `59ae835`
+  and `5f43863`: `CLAUDE.md`, `scrapeflow-session-handoff.md`, `docs/adr/ADR-009-…`,
+  `docs/project/phase4-backlog.md`, `docs/project/phase4-prd/PRD-016-…`,
+  `docs/project/temporal-full-migration.md`.
   Also fixed in passing: **`phase4-backlog.md` claimed ADR-009 was "written + Accepted"** while the
   ADR, the ADR index, `CLAUDE.md` and this handoff all said Draft — the one doc designated single
   source of truth was the only one asserting a decision that had not been made.
@@ -472,6 +703,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   </details>
 
   </details>
+
+  </details>
 - Phase 1 + Phase 2 + Phase 3 complete and production-verified at `scrapeflow.govindappa.com`
 - **Auth on production Clerk instance** as of 2026-07-03 (was dev instance). See "Clerk production cutover" below.
 - **In Phase 4. Scope is now decided: Phase 4 *is* the Temporal durable-workflows migration.** All Phase 4 items live in one place — **`docs/project/phase4-backlog.md`** — split into Pre-Phase 4 / the migration / **dissolved by Temporal (do NOT fix)** / survives-Temporal. Read that first; it supersedes the triage tables that used to be inlined in this handoff. Shipped Phase 4 work so far: **admin result viewer + user-email surfacing**, the **user-facing job dashboard**, and the **Playwright anti-bot hardening (ADR-008)**.
@@ -559,7 +792,7 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 | 5 | Q1–Q4 close-out | ✅ **done 2026-07-28.** Verified against live code, not taken on trust — **Q2 landed as Option C (Postgres trigger), Q4 as Option B (`PATCH schedule_status`)**, both differing from the doc's recommendation. **Q8 closed alongside as do-not-fix**, so `open-questions.md` has no entry without a STATUS block |
 | 6 | **BUG-005 — batch broken on all three execution paths** | 🔴 **OPEN, filed 2026-08-04.** `job_id` is NULL for batch runs (correct per ADR-006) while both message schemas and the ADR-002 §8 artifact-path convention assume it is not. Playwright batch drops every message and hangs at `pending`; http batch collides all items onto `latest/.html` + `history//{ts}.{ext}` (cross-tenant); batch + LLM hangs at `processing`. Fixed pre-migration on the **Q6 precedent**. `open-bugs.md` → BUG-005 |
 | 7 | **P7 — crawls consume zero of all three quota meters** | 🔴 **OPEN, filed 2026-08-08** (decision ✅ owner-confirmed; implementation not started). Every meter is keyed on `job_runs`; a crawl never creates one, and `routers/crawls.py` has no quota check at all. A 10,000-page crawl costs **zero** runs, **zero** concurrent slots and **zero** counted bytes — 2.8–40 GB of artifacts against a 5 GB default. Nothing frees crawl artifacts either: deleting a user orphans them in MinIO. Per page for runs + storage, per crawl for concurrency; reclaim ships with counting; accounting starts at cutover. **Sequence after P6.** `phase4-backlog.md` §1 P7 · PRD-016 OQ-4 round 3 |
-| — | **§1 queue: 2 open (P6, P7)** | **Next: resume the ADR-009 section review at §4** (block model). §1–§3 + §12 are done — see the ADR's Review log, which is authoritative |
+| — | **§1 queue: 2 open (P6, P7)** | **Next: resume the ADR-009 section review at §8** (metering — already amended twice as a knock-on, and carrying the open multi-Scrape rider). §1–§7 + §12 are done — see the ADR's Review log, which is authoritative |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---
