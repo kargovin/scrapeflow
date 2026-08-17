@@ -66,11 +66,117 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-10) — **ADR-009 review is UNDERWAY. Next section: §8 (metering).**
+- ## 📝 START HERE (2026-08-17) — **ADR-009 review is UNDERWAY. Next section: §9 (worker reuse).**
 
-  **§4, §5, §6 and §7 all reviewed in this session.** The ADR's Review log remains authoritative.
-  §8 has already been amended twice as a knock-on (from §4 and §5) and still carries the open
-  multi-Scrape rider, so it opens with three things to check rather than a clean read.
+  **§8 reviewed 2026-08-17.** (§4–§7 were reviewed 2026-08-10; their notes are below and still
+  accurate except where §8 supersedes them.) The ADR's Review log remains authoritative.
+
+  ### §8 (metering) — reviewed 2026-08-17, **storage rule REVERSED**; §5, §3 and §15 amended
+
+  Four owner calls, and the first one changes a rule §5 had already settled.
+
+  - **🔴 Storage is charged for what is stored — bytes on disk, not "the result".** Every object a
+    run still holds is charged, on every lane, for as long as it is stored. **Withdraws §5's
+    clause that the result and the charged artifact are the same object**; §5 keeps *the result*
+    (R3 display, permanence, never collected), §8 owns *what is charged*. Simpler: no notion of
+    finality, so fan-out, effect blocks and shared objects stop being special cases. Turns
+    intermediate-output GC into a **user-visible refund** rather than housekeeping.
+  - **🔴 The parity argument in both §5 and §8 was factually backwards.** Both said the R6
+    pipeline would charge zero while "the job it reproduces charges the LLM output". **The job
+    path charges the *scraped page*.** Traced: scrape completes → adds HTML, stamps
+    `storage_accounted_at` (`result_consumer.py:411`); LLM completes → tries to add JSON, **skipped
+    by the stamp** (`:485`→`:81`); `result_path` repointed at the JSON (`:500`); the LLM worker
+    wrote to a **new** key so the HTML is still there (`llm-worker/worker/storage.py:23`).
+  - **🔴 Two unfiled defects fall out, neither touched by the migration** (so backlog §3 does not
+    cover them — these are pre-migration fixes on live code, and they need filing in
+    `open-bugs.md`):
+    1. **The counter is permanently inflated by every deleted LLM job.** Hard delete enumerates
+       `JobRun.result_path` (`routers/jobs.py:391`, `admin.py:336`), stats the **JSON** and
+       decrements by that, while what was added was the **HTML**. Clamps at zero, never balances —
+       delete every job you own and usage still reads non-zero.
+    2. **The scraped page is never deleted.** Nothing enumerates it; it outlives the run, the job
+       and the user. Same shape as BUG-004's orphaned screenshots.
+    **Root cause named:** `_try_increment_storage`'s idempotency stamp is keyed on the **run** when
+    it should be keyed on the **stored object** — a NATS redelivery and a genuinely second artifact
+    are indistinguishable to it. The mechanism isn't wrong, its granularity is. Same on the batch
+    path (`:237` scrape, `:274` LLM).
+  - **⚠️ Open, and it blocks implementing the storage rule: the `latest/` + `history/` dual write.**
+    Every worker writes each result twice (ADR-002 §8) while `result_size` reports one copy, so
+    MinIO holds **2× what the meter counts** on every v1 lane. "Charge what is stored" read
+    literally charges both. **Recommendation on record, not yet an owner call: charge one copy** —
+    `latest/` is a convenience alias, not a second artifact. v2 already drops `latest/`, so this is
+    v1-only with a known end state.
+  - **✅ One submission = one concurrency slot, every lane.** Cost and contention therefore
+    disagree **in general**, not only for crawls — the old text called crawls "the one place" they
+    disagree, but **batch already disagreed in the opposite direction, by accident**:
+    `batch.py:46-47` admits a batch by checking the ceiling **once**, then inserts N rows, so 100
+    URLs are admitted as 1 and meter as 100, locking a user out of a 5-slot pool with one call.
+    Live behaviour change on the batch path; it is a loosening, so it cannot break a caller.
+  - **✅ A pipeline run parked on a durable timer does not hold its slot; v1 lanes unchanged.**
+    §3 defined active as *not yet finished*, §15 as *actively executing a block* — **contradictory,
+    and §15's ≈2.6 h webhook horizon only survives under the second.** Resolved per-lane: v1 keeps
+    `quota.py:59`'s `pending`/`running`/`processing` (R5 forbids narrowing a live limit), pipelines
+    exclude timer-parked runs. Cost: the counting view needs a lane-aware predicate. Accepted.
+  - **✅ The multi-Scrape rider is CLOSED, and its premise was wrong.** The rider rested on *"R1
+    fixes one run to one URL"* — R1 does **not**: the URL is an *optional* run input, so nothing in
+    R1 stops two Scrape blocks with URLs typed into their configs. The conclusion still holds, for
+    a **structural** reason: §4 validates a single chain **in data flow** and **Scrape consumes
+    nothing**, so a Scrape block has no valid position except first and a second is unsatisfiable
+    at Save. **The reopening trigger is multiple roots, not fan-out** — the rider named the wrong
+    one, and this makes fan-out cheaper to ship than the deferral table claimed.
+    **🔴 Because the guarantee is emergent from two rules stated pages apart, §8 now asserts it
+    directly: a layer-A pipeline has exactly one starting block, and it is a Scrape block.** A
+    validator written as *"each block consumes the previous one, unless it declares no input"*
+    satisfies §4 as written and admits a second Scrape — silently under-charging.
+
+  Three gaps recorded rather than closed:
+
+  - **The unit is "one fetch attempted"**, not "…that produces one stored result". The meter counts
+    rows created at **dispatch** (`JobRun` at submission, `CrawlPage` at `dispatcher.py:103`) and
+    never waits for an outcome — **a failed scrape already costs a monthly run today**. Also
+    stated, because it is the next question the definition invites: **a retry is not a new unit.**
+  - **`crawl_pages` has no accounted-at marker** (and no size column), and nothing specifies one on
+    `pipeline_runs`. The PM's "counting starts at cutover, no backfill, don't decrement for
+    pre-cutover artifacts" needs a per-object record of whether it was counted — `job_runs` has
+    one, two of four lanes don't. Each lane needs its marker **in the same change that starts
+    counting it**.
+  - **Per-run GC is safe only while no object is shared *between* runs.** v1 already shares them —
+    on a content-hash match `result_consumer.py:385` points the new run at the **previous run's**
+    object. Pipelines are safe only because change-detection was deferred to Monitors; when
+    Monitors ship, per-run collection breaks exactly as per-block collection breaks now, and the
+    rule becomes *collect when no run references it*.
+
+  **§8d names two things no section owns:** which component performs v2 accounting (§3 says it
+  "must be named, not inherited"; §8 pointed back at §3 — on v1 it is `result_consumer.py`, which
+  the migration deletes), and **what happens when a pipeline hits the storage wall**. The second is
+  a real product question: the wall is hit at the **last** block, *after* the user's own LLM key
+  has been billed, and admission-time checking cannot substitute because output size isn't knowable
+  in advance. Fail the run, allow the overage, or refuse to start new runs while over.
+
+  ### Session close (2026-08-17)
+
+  **Docs-only session — no code changed.** Four files on `develop`: `docs/adr/ADR-009-…`
+  (+412/−82), `docs/project/open-bugs.md` (**BUG-007** filed), `scrapeflow-session-handoff.md`,
+  `CLAUDE.md`. All ADR internal anchors re-verified after the §8 retitle. Older handoff entries
+  about the multi-Scrape rider were marked **superseded** rather than rewritten.
+
+  **What carries into the next session, in priority order:**
+
+  1. **⚠️ One open decision blocks implementing §8's storage rule: is the `latest/` copy
+     chargeable?** The dual write (ADR-002 §8) means MinIO holds 2× what the meter counts on every
+     v1 lane, so "charge for what is stored" is undefined until this is ruled on. Recommendation on
+     record: **charge one copy**. It is in the ADR's deferred table marked as blocking, and
+     **BUG-007 cannot be fixed without it** — fixing the bug means deciding what one result's
+     storage *is*.
+  2. **Next section is §9 (worker reuse).** It opens carrying a finding from §7: under option (a),
+     v2 results land on `scrapeflow.jobs.result` where `result_consumer` is subscribed with
+     **neither FK set** — BUG-005's shape one lane later. §9 as drafted warns only about stacked
+     *retry*, not about this.
+  3. **BUG-007 should be sequenced with P7 (crawl quota), not fixed separately.** Same accounting
+     surface, same family of mistake, and P7 already sits after P6/BUG-005.
+  4. **§8d's two unowned items** — which component does v2 accounting, and what happens at the
+     storage wall — need homes. The first belongs to §9's activity inventory; the second is a
+     product question for the layer-A implementation PRD.
 
   ### §7 (one lane) — reviewed 2026-08-10, **under-covered its hardest case**; gained a 4th mechanism
 
@@ -262,6 +368,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
   **§8's multi-Scrape rider is still open** and unaffected: one Scrape feeding two LLMs still
   fetches once, so "one run = one unit" survives. Two *Scrape* blocks remains the open question.
+  → **CLOSED 2026-08-17 in the §8 review** (see START HERE): two Scrape blocks are unsatisfiable at
+  Save, because §4 validates a single chain in **data flow** and Scrape consumes nothing. The
+  reopening trigger is **multiple roots, not fan-out**.
 
   ### Session close (2026-08-10)
 
@@ -278,6 +387,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
      knock-on already (from §4: "final" pinned to execution order; from §5: re-pinned to the last
      *content-producing* block, plus the three GC rules), and it still carries the **open
      multi-Scrape rider** from the PM. Three things to check before reading it as drafted.
+     → **DONE 2026-08-17.** All three resolved, and the storage rule was reversed outright — the
+     "final artifact" pinning both earlier knock-ons installed is **withdrawn**. See START HERE.
   2. **§9 opens carrying a finding from §7** — under option (a), v2 results land on
      `scrapeflow.jobs.result` where `result_consumer` is subscribed with **neither FK set**
      (BUG-005's shape, one lane later). §9 currently warns only about stacked *retry*.
@@ -369,6 +480,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   - **⚠️ Rider on §8, still to rule on:** "one unit regardless of block count" holds only while a
     pipeline fetches once. If layer A ever permits two Scrape blocks, that run fetches twice and
     must cost 2. PM prefers **counting executed Scrape blocks** over capping Scrape at one.
+    → **RULED 2026-08-17: closed on structural grounds.** Layer A cannot fetch twice, so nothing
+    needs counting. The PM's preference stands for the day multiple roots ship.
   - **Sequence: after P6/BUG-005**, which re-keys the v1 artifact path and touches the same
     accounting surface. Not a §3 do-not-fix — `core/quota.py` and `routers/crawls.py` **survive**
     the migration; only the storage-accounting call site is in `coordinator/`.
@@ -386,6 +499,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
   ### Two open items carried forward
   - **§8's multi-Scrape rider** (above) — unresolved, needs an owner call when §8 is revisited.
+    → **Resolved 2026-08-17.**
   - **The coexistence topology diagram** is now drawn (`temporal-full-migration.md` **§9a**, two
     ASCII diagrams: today-v1 and the peak). Placement was deliberate — the shape changes at four of
     the seven steps, so it is *sequence* material, and the ADR holds decisions only. §16 points at

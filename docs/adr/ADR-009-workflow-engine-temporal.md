@@ -30,7 +30,9 @@ and effect (Validate, Webhook)** blocks, with effect blocks passing their input 
 unchanged — **"one object per block" was false of two of the five types**, which §4's strict-path
 data flow turned into a correctness question; and **the run's result, and the charged artifact,
 are both the last *content-producing* block's output**, without which **R6's own gate pipeline**
-(ending in a Webhook) has no result and charges zero. Second call: the intermediate-output
+(ending in a Webhook) has no result and charges zero. *(The second half of that call — the charged
+artifact — was **superseded by the §8 review on 2026-08-17**; the result half stands.)* Second
+call: the intermediate-output
 retention window is **a product promise, not a free dial** — result never collected, collection
 per run not per block, collected renders as *collected*, and per-block status in the app DB
 outlives both Temporal retention and the window. Knock-on applied to **§8** (metering + GC rules).
@@ -62,8 +64,43 @@ now to §16's drain gate), and mechanism 3's **rollback ordering** is stated sin
 reversibility. Carried to §9: mechanism 1 is true of rows, not messages — under option (a) v2
 results land on `scrapeflow.jobs.result` where `result_consumer` is subscribed, with neither FK
 set, which is BUG-005's shape one lane later.
-**Next: §8** (metering — already amended twice as a knock-on from §4 and §5, and carrying the
-open multi-Scrape rider). §9–§11 and §13–§17 not yet reviewed.
+**§8 reviewed 2026-08-17** — **the storage rule is reversed, and §5 is amended to match.**
+✅ Owner's call: **the meter measures bytes on disk.** Every object a run still holds is charged,
+on every lane, for as long as it is stored — replacing "only the final artifact is charged" and
+withdrawing §5's clause that the result and the charged artifact are the same object. §5 keeps
+*the result* (R3, permanence); §8 owns *what is charged*. The rule is simpler — it needs no notion
+of finality, so fan-out, effect blocks and shared objects stop being special cases — and it makes
+intermediate-output collection a **user-visible refund** rather than housekeeping. Knock-ons:
+screenshots become chargeable (BUG-004's other half), and the parity argument both sections leaned
+on was **factually inverted** — the job path charges the *scraped page*, not the LLM output.
+That trace surfaced **two unfiled defects on live code**, neither touched by the migration:
+hard delete decrements by the JSON while the HTML was what was added, so the counter is
+**permanently inflated by every deleted LLM job**, and **the scraped page is never deleted at
+all**. Root cause named: `_try_increment_storage`'s idempotency stamp is keyed on the **run**
+when it should be keyed on the **stored object**, so a redelivery and a genuinely second artifact
+are indistinguishable. ⚠️ **Left open:** the `latest/` + `history/` dual write stores 2× what the
+meter counts, so "charge what is stored" is not implementable until it is decided whether the
+convenience copy is chargeable (recommendation: charge one copy; v2 already drops `latest/`).
+Three more owner calls: **one submission = one concurrency slot on every lane** — which makes cost
+and contention disagree *in general* rather than only for crawls, and incidentally fixes
+`batch.py:46-47` admitting a 100-URL batch as 1 while metering it as 100; **a pipeline run parked
+on a durable timer does not hold its slot, while v1 lanes keep today's behaviour** — §3 and §15
+had contradictory definitions of "active" and §15's webhook horizon only survives under one of
+them; and **the PM's multi-Scrape rider is closed** — §4's single-chain data flow plus "Scrape
+consumes nothing" already makes a second Scrape unsatisfiable at Save, so the rider's premise
+("R1 fixes one run to one URL") was wrong even though its conclusion held, and the trigger to
+reopen is **multiple roots, not fan-out**. Because that guarantee is emergent from two rules
+stated pages apart, §8 now asserts it directly: **a layer-A pipeline has exactly one starting
+block, and it is a Scrape block.** Three gaps recorded rather than closed: the unit is now "one
+fetch **attempted**" (the meter never waits for a result, and a failed scrape already costs a run
+today) with **a retry explicitly not a new unit**; **`crawl_pages` has no accounted-at marker**, so
+the "counting starts at cutover, no backfill" promise has no mechanism on two of four lanes; and
+**per-run collection is safe only while no object is shared *between* runs** — v1's content-hash
+dedup already shares them, so Monitors will break it. §8d names two things no section owns: which
+component performs v2 accounting, and what happens when a pipeline hits the storage wall at its
+**last** block, after the user's LLM key has already been billed.
+**Next: §9** (worker reuse — carrying §7's warning that under option (a) v2 results land on
+`scrapeflow.jobs.result` with neither FK set). §10–§11 and §13–§17 not yet reviewed.
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
@@ -329,14 +366,30 @@ job `job_runs`, batch `job_runs`, **`crawl_pages`**, and `pipeline_runs`.
 The view is **one row per countable unit**, and the two meters aggregate it differently:
 
 - **`monthly_runs` counts rows.**
-- **`concurrent_jobs` counts distinct concurrency *groups*** among non-terminal rows, where the
-  group is the **crawl** for crawl pages and the row itself on every other lane.
+- **`concurrent_jobs` counts distinct concurrency *groups*** among active rows, where the group is
+  **the submission**: the crawl for crawl pages, the **batch** for batch items, and the row itself
+  for single job runs and pipeline runs.
 
 That split is deliberate: cost and contention are different quantities. Per-page concurrency would
 put every default crawl (`max_pages` 100) permanently over the default ceiling of 5 — a meter that
 makes a shipped feature unrunnable is misconfigured, not strict — and enforcing it would need
 dispatch throttling inside `coordinator/`, which [§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block)
 deletes.
+
+> **Amended 2026-08-17 (§8 review), two changes.** ✅ Owner's call: **the group is the submission
+> on every lane**, so a batch of N is one slot, not N. The earlier text grouped only crawl pages
+> and left batch items as individual rows — which does not match `batch.py:46-47`, where admission
+> already checks the ceiling **once for the whole batch** and then inserts N rows. Admitting as 1
+> and metering as 100 locks a user out of a 5-slot pool with a single call. Crawls were never the
+> only place cost and contention disagree; under this rule they disagree everywhere, by design.
+>
+> Second: **"non-terminal" is replaced by "active", and active is per-lane.** For v1 lanes it means
+> exactly what `quota.py:59` means today — `pending`, `running`, `processing` — and R5 forbids
+> narrowing it. For pipeline runs it excludes a run parked on a durable timer, without which
+> [§15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for)'s ≈2.6 h webhook horizon would let
+> one dead receiver hold a slot for hours. The view therefore carries a lane-aware predicate on
+> this column; that cost is accepted in
+> [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored).
 
 **What the view fixes, and what it does not.** It fixes *which rows count*. It does **not** fix
 *when they are counted*: both meters recount on every check, so two concurrent creations can each
@@ -362,9 +415,12 @@ are: the accounting is keyed on a column only one lane has.
 All **three** meters are therefore blind to the crawl lane, not two. The correction matters because
 the exemption told an implementer that storage needed no thought — and pipeline artifacts written
 by an activity rather than by `result_consumer.py` would be uncounted by exactly the same
-mechanism. [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)'s
-"only the final artifact is charged" presumes something does the charging; on the v2 lane that
-something must be named, not inherited.
+mechanism. [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)'s
+storage rule presumes something does the charging; on the v2 lane that something must be named,
+not inherited. *(Still unnamed as of the §8 review — [§8d](#8d-who-charges-and-what-happens-at-the-wall--not-yet-decided).
+The rule it refers to is no longer "only the final artifact is charged": §8 charges every object
+a run holds, which widens what the unnamed component is responsible for rather than narrowing
+it.)*
 
 **The workflow ID is the correlation key** between an app record and its engine execution —
 `pipeline-run-{pipeline_run_id}`, and `job-run-{run_id}` for migrated jobs. This replaces today's
@@ -561,22 +617,31 @@ therefore splits in two:
   so neither writes an object. The alternative — writing a byte-identical copy so that every block
   has "its own" artifact — is storage spent to satisfy a naming convention, on every run.
 - **Two blocks may therefore name one object**, which is the constraint that makes
-  [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)'s
+  [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)'s
   garbage collection non-trivial: collecting "block *n*'s output" must not orphan a reference held
   by block *n+1*. Objects are collected by **run**, on the rules in §8 — never per block.
 
 **This is what makes "the result" well defined, and R6 is why it had to be settled here.** R3 says
-the final block's output is retrievable as *the* result, and §8 charges the final artifact. R6's
-acceptance-gate pipeline is `scrape → LLM → webhook` — **it ends in an effect block.** Read
-naively, that pipeline has no result and charges zero storage, while the job it reproduces charges
-the LLM output: a metering break in the *opposite* direction from the one the PM guarded against,
-and structurally identical to [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)'s
-invisible-lane bug. So, stated once and used by both rules:
+the final block's output is retrievable as *the* result. R6's acceptance-gate pipeline is
+`scrape → LLM → webhook` — **it ends in an effect block.** Read naively, that pipeline has no
+result at all, which is
+[§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)'s
+invisible-lane bug in a different costume. So, stated once:
 
-> **The result of a run is the output of the last *content-producing* block in execution order.
-> That same object is the artifact charged to `storage_bytes_used`.** An effect block that runs
-> last does not change either answer — it delivers or asserts on the result; it does not replace
-> it.
+> **The result of a run is the output of the last *content-producing* block in execution order.**
+> An effect block that runs last does not change the answer — it delivers or asserts on the
+> result; it does not replace it.
+
+**⚠️ Amended 2026-08-17 (§8 review): this defines the result, and no longer defines what is
+charged.** The original text made one object serve both purposes — *"that same object is the
+artifact charged to `storage_bytes_used`"* — and that clause is **withdrawn**. §8 now charges
+**every object the run currently holds**, so the result is simply the one that is never collected
+and the one R3 returns; the others are charged while they exist and release their charge when
+collected. The paragraph above originally carried a second argument, that the naive reading would
+also charge zero storage against a job that charges the LLM output. **That comparison was factually
+wrong** — the job path charges the *scraped page*, not the LLM output ([§8a](#8a-what-the-storage-rule-costs-on-the-job-path-found-in-review-2026-08-17)) —
+and it is removed rather than repaired, because under the new rule the size of any single block's
+output no longer determines what a run costs.
 
 **The v2 path convention:**
 
@@ -617,10 +682,12 @@ conventions rather than forking them further.
 > raising the limit undoes this section and §2c together. **(2)** The catalog splits into
 > content-producing and effect blocks; "one object per block" was false of Validate and Webhook,
 > and §4's strict-path data flow made that a correctness question rather than a wording one.
-> **(3)** "The result" and "the charged artifact" are both pinned to the **last content-producing
-> block** — without which **R6's own acceptance-gate pipeline**, which ends in a Webhook, has no
-> retrievable result and charges zero storage. **(4)** Deterministic keys are stated as an
-> idempotency guarantee, and the absence of a tenant segment is tied back to §12's single boundary.
+> **(3)** "The result" is pinned to the **last content-producing block** — without which **R6's
+> own acceptance-gate pipeline**, which ends in a Webhook, has no retrievable result. *(Amended
+> 2026-08-17: this originally also pinned "the charged artifact" to the same block. §8 now charges
+> every object a run holds, so the two claims have been separated and only the result survives
+> here.)* **(4)** Deterministic keys are stated as an idempotency guarantee, and the absence of a
+> tenant segment is tied back to §12's single boundary.
 
 ### 6. OQ-2 — In-flight edits: definitions are pinned, and that is a different problem from code versioning
 
@@ -822,16 +889,30 @@ and its routing (`result_consumer.py:616`) branches on `run.job_id is not None` 
 `run.batch_item_id` — a pipeline-originated result has neither. That is BUG-005's shape one lane
 later. §9 carries a warning about stacked *retry*; it needs one about the *result* path.
 
-### 8. OQ-4 — Metering: one run is one unit, pools are shared, and only the final artifact is charged
+### 8. OQ-4 — Metering: one run is one unit, pools are shared, and storage is charged for what is stored
 
 **Decision:**
 
 **The unit, stated once for every lane** (PM, PRD-016 OQ-4 round 3 — ✅ owner-confirmed
-2026-08-08): **one fetch of one target URL that produces one stored result.** Not one user
-action, and not one step. So: job run = 1; batch of N = N; **crawl of N pages = N**; pipeline run
-= 1, because R1 fixes one run to one URL and the non-Scrape blocks fetch nothing. **Admission
-checks the declared ceiling; the meter charges actuals** — a crawl is pre-checked against
-`max_pages` exactly as a batch is against `len(urls)`.
+2026-08-08): **one fetch of one target URL that is attempted.** Not one user action, and not one
+step. So: job run = 1; batch of N = N; **crawl of N pages = N**; pipeline run = 1, because a
+pipeline can only fetch once (below) and the non-Scrape blocks fetch nothing. **Admission checks
+the declared ceiling; the meter charges actuals** — a crawl is pre-checked against `max_pages`
+exactly as a batch is against `len(urls)`.
+
+**"Attempted", not "produces one stored result" (corrected in review, 2026-08-17).** The earlier
+wording described an outcome the meter never waits for. Every meter counts rows, and the row is
+created when the work is *dispatched*, not when it succeeds — `JobRun` at submission,
+`CrawlPage` at `dispatcher.py:103`. **A failed scrape already consumes a monthly run today**, and
+that is the defensible behaviour: the fetch was attempted, the target was hit, the capacity was
+spent. Defining the unit by its result would have made the meter unimplementable without a
+second write-back on completion, for no user-visible gain.
+
+**A retry is not a new unit.** A Temporal activity retry, a NATS redelivery and a
+`_recover_stale_pending` re-publish are all the same attempted fetch. This is stated because it is
+the first question the definition invites, and because getting it wrong reproduces Q5/Q6/Q7 on the
+billing axis instead of the execution axis. The unit is one *logical* fetch; the retry budget is a
+property of that unit, not a multiplier on it.
 
 - **`monthly_runs_limit`: a pipeline run is one unit, regardless of block count.** Per-block
   metering makes the R6 gate pipeline cost 3 units where the identical job costs 1 — a direct
@@ -839,65 +920,193 @@ checks the declared ceiling; the meter charges actuals** — a crawl is pre-chec
   the same work differently. The arbitrage risk in the other direction is bounded structurally by
   R1's max-blocks-per-pipeline, and the genuinely expensive resource — LLM tokens — is billed to
   the user's own provider key regardless.
-  **⚠️ Rider from the PM:** "regardless of block count" holds only while a pipeline fetches once.
-  If layer A ever permits more than one Scrape block in a chain, that run fetches twice and must
-  cost 2. The PM's preference is to **count executed Scrape blocks** rather than cap Scrape at one
-  — the one-Webhook cap had a layer-ownership reason (fan-out belongs to C) with no analogue here.
-- **`concurrent_jobs_limit`: one shared pool, not two.** The limit exists to protect worker
-  capacity, and worker capacity is shared between lanes. A separate pipeline pool would let one
-  user consume twice the capacity, which inverts the limit's purpose. **The ceiling counts runs
-  actively executing a block, not runs that exist** — see [§15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for).
-  **A crawl is one concurrency unit, not N** ([§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)) —
-  the one place cost and contention deliberately disagree.
-- **`storage_bytes_used`: every stored *final* artifact is charged, on every lane.** On a pipeline
-  run, **"final" means the output of the last *content-producing* block in execution order** — not
-  "an output nothing else consumes," and not simply the last block, which may be an effect block
-  that produces nothing ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)).
-  R6's gate pipeline ends in a Webhook, so "the last block" would charge it zero. The
-  nothing-consumes-it reading fails for a different reason: it coincides with the intended one only
-  while [§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)
-  validates data flow as a path, and diverges the moment fan-out is allowed post-Phase 4, since a
-  fanning graph has several leaves but still one last-executed block. Pinning the definition now is
-  what stops either change from silently altering both what a run costs and what R3's "the result"
-  returns. *(Knock-on from the §4 and §5 reviews, 2026-08-10.)* The mechanism
-  is unchanged; the **call sites are not lane-agnostic and must be fixed** (see
+
+  **✅ The PM's multi-Scrape rider is resolved, 2026-08-17 (owner's call). A layer-A pipeline
+  cannot fetch twice, and the reason is structural, not a cap.** The rider assumed "one run, one
+  fetch" was a policy choice that a later feature could quietly invalidate. It is not: it follows
+  from two [§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)
+  rules acting together — layer A validates a **single chain in data flow**, where each block
+  consumes the previous block's output, and **Scrape consumes nothing**. A Scrape block therefore
+  has no valid position except first, and a second one is unsatisfiable at Save.
+
+  ⚠️ **The earlier justification for the same conclusion was wrong and is withdrawn.** It read
+  "R1 fixes one run to one URL". R1 does not: it makes the URL an *optional* run input, so nothing
+  in R1 stops a pipeline from carrying two Scrape blocks with two URLs typed into their configs
+  and never using a run input at all. The right answer was reached from the wrong premise, which
+  is worth recording because the wrong premise is the plausible-sounding one.
+
+  **Because the guarantee is emergent, it must be written down where the validator is built:
+  a layer-A pipeline has exactly one starting block, and it is a Scrape block.** Nothing in §4
+  says this in one sentence; it falls out of two rules stated pages apart. A validator implemented
+  as "every block consumes the previous one, unless it declares no input" satisfies §4 as written
+  and admits a second Scrape — at which point the metering rule silently under-charges. **The
+  counting rule may not rest on a property no single document asserts.**
+
+  **What would reopen this is a second starting block, not fan-out** — the rider named the wrong
+  trigger. Fan-out (one output feeding several blocks, deferred post-Phase 4 by §4) still has one
+  Scrape and still costs 1. Multiple *roots* — a pipeline that fetches two pages and merges them —
+  is the change that makes a run cost 2, and it is not on any roadmap. The PM's preference stands
+  for that day: **count executed Scrape blocks** rather than cap Scrape at one.
+- **`concurrent_jobs_limit`: one shared pool, and the unit of contention is one submission.**
+  The limit exists to protect worker capacity, and worker capacity is shared between lanes. A
+  separate pipeline pool would let one user consume twice the capacity, which inverts the limit's
+  purpose.
+
+  **✅ Owner's call, 2026-08-17: one submission occupies one concurrency slot, on every lane.**
+  A job run, a batch of any size, a crawl of any size and a pipeline run each hold exactly one.
+  **Cost and contention therefore disagree by design and in general** — `monthly_runs` counts
+  attempted fetches, `concurrent_jobs` counts submissions in flight. The previous text called the
+  crawl case "the one place cost and contention deliberately disagree"; that was wrong on its own
+  terms, because **batch already disagrees, in the opposite direction and by accident**:
+  `batch.py:46-47` admits a batch by checking `concurrent_jobs` **once, as a single unit**, then
+  inserts N `job_runs` rows, so a 100-URL batch is admitted as 1 and immediately meters as 100 —
+  locking the user out of a 5-slot pool with one call. Making the rule uniform fixes that as a
+  side effect rather than as a special case. ⚠️ **This is a live behaviour change on the batch
+  path**, and the only one in this section; it is a loosening, so it cannot break an existing
+  caller.
+
+  **✅ Owner's call, 2026-08-17: a pipeline run waiting on a durable timer does not hold its slot;
+  v1 lanes are unchanged.** §15 lets a Webhook block wait for real delivery on a ≈2.6 h horizon,
+  and defended the resulting long-lived runs by asserting the ceiling "counts runs actively
+  executing a block, not runs that exist". [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
+  defines the counting view as *not yet finished*. **These are different definitions and §15's
+  argument only survives under the first**, so the divergence is resolved explicitly rather than
+  left for whoever writes the view.
+  - **v1 (jobs, batches, crawls): unchanged.** `quota.py:59` counts `pending`, `running` and
+    `processing`, and a `pending` row is doing nothing while still holding a slot. That is
+    today's shipped behaviour; R5 forbids changing it, and narrowing it would be a silent
+    loosening of a live limit.
+  - **v2 (pipeline runs): a run parked on a durable timer is not active.** It occupies no worker,
+    and charging for it would let one unreachable webhook receiver consume a user's pool for
+    hours. Blocked-on-delivery is the *expected* state of a §15 run, not an anomaly.
+
+  The cost is that the counting view is not lane-blind on this axis: it needs a per-lane predicate
+  for "active". That is a real cost and it is accepted, because the alternative is either
+  reopening §15 or changing v1 behaviour.
+- **`storage_bytes_used`: every stored object is charged, on every lane, for as long as it is
+  stored.** **✅ Owner's call, 2026-08-17 — this reverses the previous rule and part of §5.**
+
+  The meter measures **bytes on disk**, not "the result". If an object exists in MinIO on the
+  user's behalf, it is charged; when it is deleted — by the user, or by intermediate-output
+  collection — the charge is released. Storing something for the user and not charging for it is
+  the defect, whichever lane does it.
+
+  **Withdrawn:** §5's clause that *the charged artifact is the last content-producing block's
+  output*, and this section's "every stored **final** artifact is charged". **Retained from §5,
+  and still load-bearing:** that the same output is **the run's result** — what R3 returns, what
+  the SPA shows, and what is never collected. The two ideas were fused and only one of them was
+  about billing:
+
+  | | definition | used for |
+  |---|---|---|
+  | **the result** | last content-producing block's output (§5, unchanged) | R3 display, permanence, what survives collection |
+  | **what is charged** | every object currently stored for the run (new) | `storage_bytes_used` |
+
+  This is simpler than what it replaces — it needs no notion of finality, so it is unaffected by
+  fan-out, by effect blocks producing nothing, and by two blocks naming one object. It also makes
+  intermediate-output collection **a user-visible benefit rather than housekeeping**: when a
+  pipeline's intermediates are collected, the user's storage number actually falls.
+
+  Applied to the other lanes: **every crawl page is charged** (a crawl has no intermediates, so
+  nothing changes there), and **screenshots are chargeable** — they are stored on the user's
+  behalf today and counted by nothing, which is BUG-004's other half and an argument for fixing it
+  rather than deferring it further.
+
+  The **call sites are not lane-agnostic and must be fixed** (see
   [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)).
-  **Every crawl page is a final artifact** — a crawl has no intermediates — so the
-  only-the-final-artifact rule applies to crawls with no exception.
 
-  Storage is the axis where crawls are most dangerous: 10,000 pages at BUG-003's measured
-  291 KiB–4.1 MiB is **2.8–40 GB from a single API call** against a 5 GB wall. Two conditions the
-  PM attaches, both of which are architectural obligations rather than product preferences:
+#### 8a. What the storage rule costs on the job path (found in review, 2026-08-17)
 
-  - **Reclaim ships with counting.** Verified independently: **nothing frees crawl artifacts
-    today.** `DELETE /crawls/{id}` (`routers/crawls.py:127`) is cancel-only and removes no objects;
-    the admin user-delete (`admin.py:195`) and job hard-delete both enumerate `JobRun.result_path`
-    only, so **deleting a user orphans their crawl artifacts in MinIO**. Charging against a hard
-    wall with no way to free space is a support incident by construction.
-  - **Accounting starts at cutover.** No backfill, no reconciliation of history — and deleting a
-    pre-cutover artifact must not decrement, or the counter goes negative.
+The rule is a reversal, so the gap between it and live behaviour has to be stated. **Today an LLM
+job stores the scraped page and the extracted JSON as separate objects, charges only the page, and
+on delete subtracts only the JSON.** Traced end to end:
 
-That last clause is what satisfies the PM's metering-parity constraint on the storage axis.
-Because blocks pass references, every block output is a real MinIO object; charging all of them
-would make a 3-block pipeline consume 3× the storage of the job it reproduces for identical work.
-So: **intermediate block outputs are an operator-side cost, retained for a bounded,
-operator-configurable window for debuggability, then garbage-collected. They are never charged to
-the user's quota.** The user is charged for the result they keep, exactly as with a job.
+| step | code | effect |
+|---|---|---|
+| scrape completes | `result_consumer.py:411` | adds **HTML** size, sets `storage_accounted_at` |
+| LLM completes | `result_consumer.py:485` → `:81` | tries to add **JSON** size, **skipped** — stamp already set |
+| run finalised | `result_consumer.py:500` | `result_path` repointed at the **JSON** |
+| worker wrote | `llm-worker/worker/storage.py:23` | JSON to a **new** key; the HTML is still there |
+
+The short-circuit in `_try_increment_storage` is not itself wrong — it exists to make NATS
+redelivery idempotent, which is necessary. **Its granularity is wrong: it is keyed on the run when
+it should be keyed on the stored object.** A redelivery of the same result and a genuinely second
+artifact are indistinguishable to it. Same pattern on the batch path (`:237` scrape, `:274` LLM).
+
+Two consequences, both defects under the new rule and neither previously filed:
+
+- **The counter is permanently inflated by every deleted LLM job.** Hard delete enumerates
+  `JobRun.result_path` (`routers/jobs.py:391`, `admin.py:336`), stats *that* object — the JSON —
+  and decrements by its size, while what was added was the HTML. `decrement_storage_bytes` clamps
+  at zero, so it never goes negative; it also never returns to zero. Delete every job you own and
+  your usage still reads non-zero.
+- **The scraped page is never deleted.** Nothing enumerates it, so it outlives the run, the job
+  and the user. Same shape as BUG-004's orphaned screenshots.
+
+Neither file is touched by the migration, so **§10's do-not-delete reasoning does not apply and
+backlog §3 does not cover these** — they are pre-migration fixes on live code. Filed as
+**BUG-007** (`docs/project/open-bugs.md`), which carries the full trace; this section records only
+why the metering decision depends on it.
+
+**⚠️ Unresolved by this decision: the dual write.** Every worker writes each result **twice** —
+`latest/{job_id}.{ext}` and `history/{job_id}/{ts}.{ext}` (ADR-002 §8) — while `result_size`
+reports one copy, so MinIO holds 2× what the meter counts, on every lane, today.
+"Charge for what is stored" read literally means charging both. **Recommendation, not yet an
+owner call: charge one copy.** `latest/` is a convenience alias for bytes the user is already
+paying for, not a second artifact; billing twice for one result is not defensible to a user, and
+the honest fix is that the *duplicate* should not be free-standing rather than that it should be
+billed. The v2 artifact path already drops `latest/` (§5), so this is a v1-only discrepancy with a
+known end state — but it needs a decision before the storage bullet can be called implementable,
+because "charge what is stored" and "charge one copy" are not the same rule.
+
+#### 8b. Crawl conditions, and the mechanism the cutover promise needs
+
+Storage is the axis where crawls are most dangerous: 10,000 pages at BUG-003's measured
+291 KiB–4.1 MiB is **2.8–40 GB from a single API call** against a 5 GB wall. Two conditions the
+PM attaches, both architectural obligations rather than product preferences:
+
+- **Reclaim ships with counting.** Verified independently: **nothing frees crawl artifacts
+  today.** `DELETE /crawls/{id}` (`routers/crawls.py:127`) is cancel-only and removes no objects;
+  the admin user-delete (`admin.py:195`) and job hard-delete both enumerate `JobRun.result_path`
+  only, so **deleting a user orphans their crawl artifacts in MinIO**. Charging against a hard
+  wall with no way to free space is a support incident by construction.
+- **Accounting starts at cutover.** No backfill, no reconciliation of history — and deleting a
+  pre-cutover artifact must not decrement, or the counter goes negative.
+
+**The second condition has no mechanism on two of the four lanes (found in review, 2026-08-17).**
+"Do not decrement for something that was never incremented" requires knowing, at delete time,
+whether a given object was counted. On the job path that knowledge exists —
+`job_runs.storage_accounted_at` (`models/job_runs.py:35`) is exactly this marker. **`crawl_pages`
+has no equivalent, and no size column either**, and nothing yet specifies one on `pipeline_runs`.
+Without a per-object marker the cutover boundary is a date comparison against row timestamps,
+which is wrong for any row created before cutover and deleted after. **Each lane that starts
+counting needs its own accounted-at marker, added in the same change that starts counting it.**
+
+#### 8c. Intermediate-output collection
 
 Failure context is retained unconditionally (the PM's stated position): the failing block, its
 input reference, and its error survive garbage collection, because "see why a step failed" is
 R3's purpose.
+
+Under the new storage rule the economics of this window change direction. Previously intermediates
+were free to the user and a pure operator cost, so the window traded operator storage against
+debuggability. **Now intermediates are charged while they exist**, so the window also bounds what
+the user pays: a long window is a larger bill, a short one collects evidence they may still want.
+It remains an operator dial, but it is now a dial with a **user-visible price**, which strengthens
+rather than weakens the case for treating it as a promise.
 
 **That window is a product-visible retention promise, not a free operator dial. ✅ Owner's call,
 2026-08-10 (§5 review).** R3 promises a user can see which step failed *and what it returned*; for
 **successful** intermediate blocks, that second half is exactly what garbage collection deletes.
 Three rules keep the promise honest:
 
-- **The run's result is not an intermediate and is never collected by this mechanism.** It is the
-  charged artifact ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity):
-  the last content-producing block's output), the user is paying storage for it, and it is removed
-  only when the user removes the run. **Collection operates per run, not per block** — an effect
-  block passes its input reference through, so two blocks can name one object and per-block
+- **The run's result is not an intermediate and is never collected by this mechanism.** It is
+  the last content-producing block's output
+  ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)) — the run's
+  *result*, which since the 2026-08-17 review is no longer the same claim as *the charged
+  artifact*: the user pays for this object and every other object the run still holds. It is
+  removed only when the user removes the run. **Collection operates per run, not per block** — an
+  effect block passes its input reference through, so two blocks can name one object and per-block
   collection would orphan a live reference.
 - **A collected output renders as collected.** The API and the SPA must distinguish *never
   produced* (an effect block), *collected* (retention elapsed) and *failed*. A collected
@@ -912,6 +1121,38 @@ Three rules keep the promise honest:
 
 The number itself is still an operator dial; what is decided is that it is chosen against a stated
 promise rather than picked for storage cost alone.
+
+**⚠️ "Per run, never per block" is safe only while no object is shared *between runs* (found in
+review, 2026-08-17).** The rule was derived from a within-run hazard: an effect block passes its
+input through, so two blocks in one run can name one object. The same hazard exists one level up,
+and v1 already has it — on a content-hash match, `result_consumer.py:385` points the new run at
+the **previous run's** object instead of writing a new one. Collecting per run would then delete
+an object a later run still references. Pipelines do not have this yet, only because
+change-detection was deferred to Monitors; **the deferral is what makes per-run collection safe,
+not the design.** When Monitors bring "skip if unchanged" onto the pipeline lane, per-run
+collection breaks exactly as per-block collection breaks now, and the rule becomes *collect an
+object when no run references it*. Recorded here so that arrives as a known consequence rather
+than as a data-loss bug. It interacts with the storage rule too: a shared object is stored once
+and must be charged once, not once per referencing run.
+
+#### 8d. Who charges, and what happens at the wall — not yet decided
+
+Two gaps this section does not close, both noted so they are not mistaken for settled:
+
+- **No section names the component that performs the accounting on the v2 lane.**
+  [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
+  says it "must be named, not inherited"; this section says the mechanism is unchanged and points
+  back at §3. On v1 it is `result_consumer.py`, which the migration deletes. The plausible answer
+  is a metering activity at run completion, which has the useful property of being retryable and
+  idempotent under Temporal, but it is a decision for §9's activity inventory, not an assumption.
+- **Enforcement has no v2 story at all** — this section covers *counting* only. On v1, exceeding
+  the wall is handled at `result_consumer.py:631`: the result is deleted and the run fails. The
+  pipeline lane needs an equivalent and the ergonomics are worse, because the ceiling is reached
+  at the **last** block, after the user's own LLM key has already been billed for the extraction.
+  Failing the run there destroys paid work to reclaim a few KB. **Admission-time checking cannot
+  substitute** — a pipeline's output size is not knowable before it runs. This is a real product
+  question (fail the run, keep it and let the account go over, or refuse to start new runs while
+  over) and it belongs to whoever writes the layer-A implementation PRD.
 
 ### 9. OQ-5 — Reuse existing workers via option (a) first
 
@@ -1101,9 +1342,13 @@ There is no `webhook_deliveries` row for the v2 lane.**
 - **The PRD's objection to (c) dissolves.** It worried that runs waiting hours on dead receivers
   would consume a user's concurrency budget. But that ceiling protects **worker capacity**, and a
   workflow sleeping on a durable timer occupies none — it is not resident anywhere. Hence
-  [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)'s
+  [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)'s
   rule: the ceiling counts runs **actively executing a block**. The collision was an artefact of
-  counting the wrong thing.
+  counting the wrong thing. *(Scoped on review, 2026-08-17: this holds for the **pipeline lane**,
+  which is all this section governs. §3's counting view defines active as "not yet finished", and
+  **v1 keeps that definition** — `quota.py:59` counts `pending` rows that occupy no worker either,
+  and R5 forbids changing it. §8 carries the per-lane split; the argument above is not a claim
+  about jobs.)*
 - **The PM's one-Webhook-block cap bounds this to at most one open delivery per run**, which
   removes the pathological case entirely.
 
@@ -1246,10 +1491,13 @@ finished with v1" a measured fact rather than an assumption.
 | Namespace-per-tier | Buys nothing at current scale; revisit under noisy-neighbour pressure ([§12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary)) |
 | **Mechanism for versioning our *workflow code*** (Worker Versioning vs `patched`) | Distinct from §6's pinning of *user definitions*, which is decided. Not open-ended: **Worker Versioning is GA and Temporal's stated default**; patching is the older approach leaving branches to clean up; the pre-2025 experimental variant is already withdrawn from the server. Decide at the first workflow-code deploy that must survive in-flight runs — it needs **server-side enablement** on the self-hosted deployment ([§2](#2-topology)), so it is an infra task, not a code flag ([§6](#6-oq-2--in-flight-edits-definitions-are-pinned-and-that-is-a-different-problem-from-code-versioning)) |
 | Conditional execution's design | Its own layer-A PRD, before PRD-018 ([§14](#14-oq-10-remaining-half--conditional-execution-gets-its-own-layer-a-prd-before-monitors)) |
-| **Data-flow fan-out** (one block's output consumed by two later blocks — "two extractions on one fetched page") | **Wanted, deferred to post-Phase 4. Owner's call, 2026-08-10.** Layer A validates data flow as a path ([§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)). The stored shape is already a graph, so this is a validator change against unchanged definitions — but it is **not free elsewhere**: it makes §8's "final artifact" ambiguous unless "last in execution order" holds (now pinned in §8), and it is the point at which §8's multi-Scrape rider must be answered. Distinct from *parallel* fan-out, which stays a PRD-016 non-goal |
+| **Data-flow fan-out** (one block's output consumed by two later blocks — "two extractions on one fetched page") | **Wanted, deferred to post-Phase 4. Owner's call, 2026-08-10.** Layer A validates data flow as a path ([§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)). The stored shape is already a graph, so this is a validator change against unchanged definitions. **Cheaper than it looked, after the §8 review (2026-08-17):** it was thought to make §8's "final artifact" ambiguous and to force the multi-Scrape rider — neither now applies. §8 charges every stored object, so there is no "final artifact" for fan-out to make ambiguous, and the rider is closed on structural grounds with **multiple roots, not fan-out**, named as the trigger that would reopen it. A fanning graph still has one Scrape and still costs one run. Distinct from *parallel* fan-out, which stays a PRD-016 non-goal |
 | Run-failure notification (R6's fourth exclusion) | The PM left it unassigned on purpose: it is either an on-failure branch or a run-level setting, and that depends on the conditional-execution decision above |
 | Whether `webhook_deliveries` / `crawl_pages` survive as v1-only audit mirrors | Decide at the step that retires each flow, not now |
-| Retention window for intermediate block outputs — **the number only** | Needs a real number from the first pipelines ([§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-only-the-final-artifact-is-charged)). **No longer a free dial** (§5 review, 2026-08-10): it is chosen against a stated promise, since it bounds how long R3's "what did this step return" works. The rules around it — result never collected, collection per run not per block, collected renders as *collected* — are decided |
+| Retention window for intermediate block outputs — **the number only** | Needs a real number from the first pipelines ([§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)). **No longer a free dial** (§5 review, 2026-08-10): it is chosen against a stated promise, since it bounds how long R3's "what did this step return" works. The rules around it — result never collected, collection per run not per block, collected renders as *collected* — are decided. **The trade-off changed direction in the §8 review (2026-08-17):** intermediates are now charged while they exist, so the window is no longer operator-storage vs debuggability but **the user's bill vs debuggability**, and collection is a visible refund. It also becomes a *correctness* deadline once Monitors ship: per-run collection is unsafe as soon as an object is shared between runs |
+| **Whether the `latest/` copy is chargeable** ⚠️ blocks §8's storage rule | Every worker dual-writes `latest/` + `history/` (ADR-002 §8) while `result_size` reports one copy, so MinIO holds **2× what the meter counts** on every v1 lane. "Charge for what is stored" read literally charges both. Recommendation on record in [§8a](#8a-what-the-storage-rule-costs-on-the-job-path-found-in-review-2026-08-17): **charge one copy** — `latest/` is a convenience alias, not a second artifact, and billing twice for one result is not defensible. Not an owner call yet, and the storage rule is not implementable until it is. v2 already drops `latest/` ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)), so this is v1-only with a known end state |
+| **Which component performs v2 storage accounting**, and **what happens when a pipeline hits the wall** | [§8d](#8d-who-charges-and-what-happens-at-the-wall--not-yet-decided). §3 says the accounting component "must be named, not inherited"; §8 says the mechanism is unchanged and points back at §3 — so no section names it. On v1 it is `result_consumer.py`, which the migration deletes; the plausible answer is a metering activity at run completion (retryable, idempotent), but that belongs to §9's activity inventory. Enforcement is worse than counting: the wall is hit at the **last** block, after the user's own LLM key has been billed, and admission-time checking cannot substitute because output size is not knowable in advance. Product question — fail the run, allow the overage, or refuse to start new runs while over |
+| **Per-lane `storage_accounted_at` markers** | [§8b](#8b-crawl-conditions-and-the-mechanism-the-cutover-promise-needs). The PM's "counting starts at cutover, no backfill, and deleting a pre-cutover artifact must not decrement" needs a per-object record of whether it was ever counted. `job_runs` has one (`models/job_runs.py:35`); **`crawl_pages` has neither that nor a size column**, and nothing yet specifies one on `pipeline_runs`. Not deferred so much as unassigned: each lane needs its marker **in the same change that starts counting it**, or the cutover boundary degrades to a date comparison that is wrong for every row created before and deleted after |
 
 ---
 

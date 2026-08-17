@@ -566,3 +566,71 @@ server, and the coverage work is bounded and self-contained whenever it is picke
   covered half the repository.
 - **BUG-005** — unrelated in mechanism, related in shape: both are failures that every existing
   check reported as green, because the check did not cover the thing that was broken.
+
+---
+
+## BUG-007 — LLM jobs charge storage for the wrong object, leak the scraped page, and inflate the counter on delete
+
+**Severity:** Medium (billing accuracy + unbounded storage leak; no data corruption, no cross-tenant exposure)
+**Discovered:** 2026-08-17 (tracing ADR-009 §8's metering-parity claim against live code)
+**Status:** Open
+
+### What happens
+
+An LLM job stores **two** objects and charges for the wrong one. On delete it subtracts the wrong
+one again, in the opposite direction, so the user's storage counter never returns to zero and the
+scraped page is never removed at all.
+
+| step | code | effect |
+|---|---|---|
+| scrape completes | `result_consumer.py:411` | adds **HTML** size to `storage_bytes_used`, sets `storage_accounted_at` |
+| LLM completes | `result_consumer.py:485` → `:81` | tries to add **JSON** size — **skipped**, stamp already set |
+| run finalised | `result_consumer.py:500` | `result_path` repointed at the **JSON** |
+| what the worker wrote | `llm-worker/worker/storage.py:23` | JSON to a **new** key; the HTML object is untouched |
+| job hard-deleted | `routers/jobs.py:391`, `admin.py:336` | enumerates `JobRun.result_path` → stats the **JSON** → decrements by **that** |
+
+So: charged for a 291 KiB–4.1 MiB page, credited back a few KiB of JSON.
+
+### Root cause
+
+**`_try_increment_storage`'s idempotency stamp is keyed on the run when it should be keyed on the
+stored object** (`result_consumer.py:75-90`). The short-circuit itself is correct and necessary —
+it makes NATS redelivery idempotent. But at run granularity it cannot tell a *redelivered result*
+from a *genuinely second artifact*, and an LLM run produces exactly the latter. Same pattern on the
+batch path (`:237` scrape, `:274` LLM).
+
+This is why the bug reads as three separate problems: one wrong granularity, three symptoms.
+
+### Symptoms
+
+1. **The counter is permanently inflated by every deleted LLM job.** `decrement_storage_bytes`
+   clamps at zero (`quota.py:205`), so it never goes negative — it also never balances. A user who
+   deletes every job they own still sees non-zero usage, against a 5 GB wall.
+2. **The scraped page is never deleted.** Nothing enumerates it: not job delete, not admin
+   user-delete, not `cleanup_old_runs.py`. It outlives the run, the job and the user.
+3. **The charge is on the object the user did not ask for.** The user requested structured
+   extraction; they are billed for the raw HTML and shown the JSON.
+
+### Why this is not covered by backlog §3
+
+Neither `result_consumer.py`'s accounting nor the two delete paths is "dissolved by Temporal" in
+the way §3 means. `core/quota.py`, `routers/jobs.py` and `routers/admin.py` all **survive** the
+migration — only the *call site* inside `result_consumer.py` moves into an activity. The wrong
+granularity would be ported along with it. Same carry-forward shape as the Q5 `ensure_ready()`
+case: the plumbing goes, the mistake stays unless it is fixed first.
+
+### Interactions
+
+- **ADR-009 §8 (reviewed 2026-08-17)** decided storage is charged for **bytes actually stored**,
+  which makes all three symptoms defects by definition rather than judgement calls. §8a records the
+  trace; this bug is the tracker entry it points at.
+- **⚠️ Blocked on an open decision.** §8 left the `latest/` + `history/` dual write unresolved:
+  every worker writes each result twice (ADR-002 §8) while `result_size` reports one copy, so MinIO
+  holds 2× what the meter counts on **every** lane. Fixing this bug means deciding what "one
+  result's storage" is. Recommendation on record: **charge one copy**.
+- **BUG-004** — the same missing idea from the other end. Screenshots are stored, never counted and
+  never deleted; here the *scraped page* is. Both are "an object exists that no accounting path
+  knows about," and §8's rule makes them one problem.
+- **P7 / crawl quota** — same family again: a whole lane storing objects nothing counts. P7 is
+  scheduled after P6/BUG-005 and touches the same accounting surface, so these should be sequenced
+  together rather than fixed twice.
