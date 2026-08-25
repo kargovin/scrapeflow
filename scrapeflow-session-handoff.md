@@ -159,9 +159,12 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   inside the activity.
 
   **Carried into the next session:**
-  1. ⚠️ **File the coordinator failure as a bug** — live, silent, latent only because crawls are
-     unused. It is also §9's load-bearing evidence, so the ADR should point at a tracker entry
-     rather than re-argue it.
+  1. ✅ **Filed as BUG-008**, with the owner's disposition: **not fixed on the NATS path** — it is
+     in `phase4-backlog.md` §3 (dissolved by Temporal). The defect *is* the NATS integration, and
+     the component that carries it is deleted by the migration. ⚠️ **The deferral has a condition:**
+     crawls migrate **last**, so this stays broken for the whole migration — acceptable only while
+     usage is zero (it is: `crawls` and `crawl_pages` are empty). If crawls are ever offered to
+     users before that step, reject `POST /crawls` rather than repair the consumer.
   2. **§10 is next, and it is now first-increment work** rather than later — the workers port
      first, so the do-not-delete list ports with them.
   3. **The §8 blocker still stands:** is the `latest/` copy chargeable? Storage metering is not

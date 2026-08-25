@@ -1276,8 +1276,10 @@ neutralisation, and a lane marker. The second is the problem.
 > `asyncio.gather(..., return_exceptions=True)`, which captures the exception and never re-raises.
 > The pod reports itself started and healthy with half of itself dead. **No crawl has ever run in
 > production** (`crawls` and `crawl_pages` are both empty), so nothing has surfaced it — the same
-> shape as BUG-005: shipped, silently broken, never exercised. **Not yet filed; it needs its own
-> tracker entry.**
+> shape as BUG-005: shipped, silently broken, never exercised. Filed as **BUG-008**
+> (`docs/project/open-bugs.md`), and **deliberately not fixed on the NATS path** — the defect *is*
+> the NATS integration, and [§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block)
+> deletes the component that carries it.
 
 So option (a) must invent a result path — a new subject, a second stream, or polling Postgres for
 the row `result_consumer.py` writes. The last is the worst available answer and the most likely to

@@ -634,3 +634,120 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
 - **P7 / crawl quota** — same family again: a whole lane storing objects nothing counts. P7 is
   scheduled after P6/BUG-005 and touches the same accounting surface, so these should be sequenced
   together rather than fixed twice.
+
+---
+
+## BUG-008 — The crawl coordinator's result consumer has never existed; crawls cannot complete
+
+**Severity:** High (the feature cannot work at all — pages dispatch and never complete, with no
+error anywhere) — **but entirely latent: no crawl has ever been run in production**
+**Discovered:** 2026-08-23 (tracing ADR-009 §9's option-(a) bridge against the live NATS stream)
+**Status:** Open — **WILL NOT FIX on the v1/NATS path.** See *Disposition*.
+
+### What happens
+
+`coordinator/result_handler.py:203` subscribes to `scrapeflow.jobs.result` with the durable name
+`coordinator-result-consumer`, so the coordinator can pick up crawl page results and advance the
+crawl. **That consumer has never existed.** On the live cluster:
+
+```
+$ nats consumer ls SCRAPEFLOW
+  api-result-consumer
+  go-worker
+  python-llm-worker
+  python-playwright-worker
+```
+
+So the coordinator dispatches crawl pages and then never learns any of them finished.
+
+### Why it fails
+
+The `SCRAPEFLOW` stream is created `--retention work` — a work queue — with subjects
+`scrapeflow.jobs.>` (`docker/docker-compose.yml:81`, and identically in the infra repo at
+`clusters/k3s-server/scrapeflow/app/nats-init-job.yaml:20`). **A work-queue stream refuses a
+second consumer whose filter subject overlaps an existing one**, and `api-result-consumer` already
+claims `scrapeflow.jobs.result` in full, unfiltered. The coordinator's `pull_subscribe` therefore
+raises.
+
+The ack-and-skip pattern in both services — the API skipping messages where `crawl_context` is
+set (`result_consumer.py:603`), the coordinator skipping those where it is null
+(`result_handler.py:225`) — was written for a stream where **both consumers receive every
+message**. That is interest or limits retention, not work-queue. The routing design and the stream
+configuration disagree, and the stream wins.
+
+### Why nobody noticed
+
+Two independent silencers:
+
+1. **The subscribe is outside the loop that would have caught it.** `result_handler_loop` does
+   `pull_subscribe` at line 203, logs `result_handler_subscribed` at 204, and only *then* enters
+   `while True:` with its `except Exception` handler. So the failure happens before any of the
+   loop's own error handling exists.
+2. **The exception is swallowed at the top level.** `main.py:82` runs
+   `await asyncio.gather(dispatch_task, handler_task, return_exceptions=True)`. That captures the
+   dead task's exception and never re-raises, so the process stays up serving the surviving task.
+
+The observable result is a pod that is `1/1 Running` and looks healthy with half of itself dead.
+Its own logs show the asymmetry plainly — `dispatch_loop_started` appears, and
+`result_handler_subscribed` appears **zero** times in the entire retained log.
+
+**Note the API is not affected by the same pattern.** Its `return_exceptions=True`
+(`api/app/main.py:103`) is at *shutdown*, after explicitly cancelling the tasks, which is the
+correct use. And its four background loops each wrap their work in `while True: try: … except
+Exception: log and continue`, so a runtime error does not kill them. The coordinator is the only
+service that puts failure-prone setup outside its protective loop.
+
+### Blast radius today: zero
+
+`crawls` and `crawl_pages` are both **empty** in production — no crawl has ever been run. Same
+shape as BUG-005: a shipped feature that has never worked, and has never been exercised.
+
+If a crawl *were* started, it would: dispatch its seed page, scrape it successfully, store the
+result in MinIO, and then stop. The queue item stays `dispatched` forever, the crawl never
+completes, no webhook fires, and no error is recorded. `reenqueue_stalled`
+(`dispatcher.py:27`) runs **only at coordinator startup**, so each restart would delete the stalled
+`CrawlPage` rows, reset the items to `pending`, and re-scrape the same pages — repeated waste on
+every restart rather than a tight loop.
+
+### Disposition: not fixed here; dissolved by the Temporal migration
+
+**Owner's decision, 2026-08-23: this is not fixed on the NATS path.** It belongs in
+`phase4-backlog.md` §3 — the set of bugs the migration deletes rather than repairs.
+
+The reasoning is that the fix and the migration are the same work. The bug *is* the NATS
+integration: a second consumer that a work-queue stream will not allow. ADR-009
+[§13](../adr/ADR-009-workflow-engine-temporal.md) deletes `coordinator/` outright, and crawl result
+handling becomes workflow logic — a workflow observing its child activities' return values, with no
+queue, no second consumer, and no subject to contend for. **There is no version of this defect that
+survives into the end state**, so repairing it on the NATS path means writing code with a known
+expiry date, in the component with the shortest remaining life in the system.
+
+**⚠️ The deferral rests on one condition, and it should be stated rather than assumed: crawls stay
+unused until they migrate.** ADR-009 §13 migrates the crawl coordinator **last**, so this stays
+broken for the entire migration — the longest possible deferral. That is acceptable only while the
+usage is zero. If crawls are ever offered to users before the crawl migration lands, this becomes a
+live High and the cheap mitigation is to reject `POST /crawls` rather than to repair the consumer.
+
+### Contrast with BUG-006 — why *that* one is not dissolved and this one is
+
+BUG-006 carries an explicit warning not to close it as dissolved by the migration: `coordinator/`
+is deleted, but sitemap and robots.txt discovery is *business logic* that ports into a
+`CrawlWorkflow` activity and takes its `aiohttp` exposure with it. **This bug is the opposite
+case.** What is broken here is not logic that ports — it is the transport itself. Crawl result
+handling does port, but it ports as a workflow awaiting activity results, which is a mechanism in
+which "a second consumer on a work-queue subject" has no counterpart. The distinction worth
+carrying: **ask whether the broken thing is the behaviour or the plumbing.** Behaviour ports and
+takes its bugs along; plumbing is replaced.
+
+### Interactions
+
+- **ADR-009 §9 (reviewed 2026-08-23)** — this bug is the load-bearing evidence for rejecting the
+  option-(a) NATS bridge. The bridge needed exactly this addition: a second consumer on
+  `scrapeflow.jobs.result` so a Temporal activity could hear its result. The coordinator proves
+  that is not merely awkward but impossible on the current stream, and proves the failure is
+  silent when attempted.
+- **BUG-005** — same family: shipped, silently broken on every path, never exercised, and found by
+  reading rather than by an alert.
+- **P7 / crawl quota** — P7 adds quota counting to a lane that has never successfully completed a
+  page. Worth knowing when sequencing: P7's accounting cannot be tested end to end until either
+  this is fixed or the crawl migration lands.
