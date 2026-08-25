@@ -170,6 +170,49 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   3. **The §8 blocker still stands:** is the `latest/` copy chargeable? Storage metering is not
      implementable until that is ruled on, and BUG-007 cannot be fixed without it.
 
+  ### Session close (2026-08-23)
+
+  **Docs-only session — no code changed.** Three commits on `develop`:
+
+  | commit | what |
+  |---|---|
+  | `2849da3` | §8 metering reviewed — storage rule reversed; BUG-007 filed |
+  | `72432b2` | §9 reviewed — **reversed to option (b)**; workers port to Temporal first |
+  | `9f37992` | BUG-008 filed with a will-not-fix disposition; backlog §3 updated |
+
+  `develop` is **8 ahead of `origin/develop`** and `main` is behind it — **nothing pushed, nothing
+  fast-forwarded.** That is deliberate, not an oversight; push when you want the docs live.
+
+  **Two decisions this session, both reversals of drafted text, both owner calls:**
+
+  1. **Storage is charged for what is stored** (§8) — bytes on disk, every object a run holds, on
+     every lane. Replaced "only the final artifact is charged" and withdrew §5's clause that the
+     result and the charged artifact are one object.
+  2. **Workers port to Temporal first; the NATS bridge is rejected** (§9) — the draft's
+     "keep workers untouched" argument failed on four premises, most decisively that the bridge's
+     result path is **impossible** on a work-queue stream, with BUG-008 as live proof.
+
+  **What is genuinely blocking, in order:**
+
+  1. ⚠️ **Is the `latest/` copy chargeable?** Every worker dual-writes `latest/` + `history/` while
+     the meter counts one copy, so MinIO holds 2× what is counted. **§8's storage rule is not
+     implementable until this is ruled on, and BUG-007 cannot be fixed without it.**
+     Recommendation on record: charge one copy. v2 already drops `latest/`.
+  2. **`temporal-full-migration.md` now contradicts the ADR.** Its step 3 is the worker port
+     (now step 1), its diagram at line 314 assumes the bridge, and the retry discussion at 339–351
+     describes a hazard that mostly no longer exists. Needs redrawing, not just renumbering.
+  3. **§8d's two unowned items** — which component performs v2 storage accounting, and what happens
+     when a pipeline hits the storage wall at its last block after the user's LLM key has already
+     been billed.
+
+  **Next section is §10 (the do-not-delete list), and its priority went up.** Under the old plan
+  the workers ported third, so §10 was later work. Now they port **first**, so the do-not-delete
+  list ports with them in the first increment: `ensure_ready()` + the 180s timeout, the
+  transient/terminal classifier on all three workers, bot-wall detection, and SSRF re-validation.
+  §9 added one constraint §10 must now satisfy: **the ported classifier becomes `RetryPolicy`
+  non-retryable error types, not its own retry loop inside the activity** — otherwise R4's
+  "retry in exactly one visible layer" is violated one level down from where it was fixed.
+
   ### Superseded: START HERE (2026-08-17) — §8 review
 
   **§8 reviewed 2026-08-17.** (§4–§7 were reviewed 2026-08-10; their notes are below and still
