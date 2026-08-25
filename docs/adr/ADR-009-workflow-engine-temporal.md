@@ -99,8 +99,48 @@ the "counting starts at cutover, no backfill" promise has no mechanism on two of
 dedup already shares them, so Monitors will break it. §8d names two things no section owns: which
 component performs v2 accounting, and what happens when a pipeline hits the storage wall at its
 **last** block, after the user's LLM key has already been billed.
-**Next: §9** (worker reuse — carrying §7's warning that under option (a) v2 results land on
-`scrapeflow.jobs.result` with neither FK set). §10–§11 and §13–§17 not yet reviewed.
+**§9 reviewed 2026-08-23 — the decision is REVERSED: option (b) first, the NATS bridge rejected.**
+✅ Owner's call. The workers gain native Temporal activity entry points in the **first** increment;
+activities never dispatch through NATS. The draft's argument — keep workers untouched so an R6
+failure is unambiguously the model's fault — was sound in form and failed on four premises.
+**(1)** "Rewriting three workers" overstated the change by an order of magnitude: only ~10–22% of
+two files per worker is transport, and everything expensive (`blocking.py`'s 313 lines of bot-wall
+detection, the Patchright stealth setup, `formatter.go`, `llm.py`, the MinIO clients) touches NATS
+**not at all**. The Go worker's `processJob(ctx, job, fetcher) (string, error)` **already has the
+shape a Temporal activity wants**. **(2)** About half of what option (a) preserved — `ack_wait`,
+the 30s heartbeat, `max_deliver`, the nak ladder — exists *because* JetStream redelivers, so it is
+**deleted, not ported**; §10's genuine carry-forwards port identically under either option, so (a)
+bought nothing and kept the code alive in two places. **(3) The bridge is blocked, with a dead
+service in production proving it:** `SCRAPEFLOW` is `--retention work` (verified on the live
+stream), and a work-queue stream refuses a second consumer overlapping `api-result-consumer`'s
+claim on `scrapeflow.jobs.result`. The coordinator attempts exactly that at
+`result_handler.py:203`, and **`coordinator-result-consumer` has never existed** —
+`result_handler_subscribed` appears zero times in its log while the sibling `dispatch_loop_started`
+logs fine, because `main.py:82`'s `asyncio.gather(..., return_exceptions=True)` swallows the
+exception. The pod is healthy with half of itself dead; **no crawl has ever run in production**, so
+nothing surfaced it (BUG-005's shape — ⚠️ **not yet filed**). The remaining answer, polling for the
+row `result_consumer.py` writes, puts **the Q8 component on the critical path of every pipeline
+run** — the thing this ADR exists to delete. Worse, a v2 result today is **destroyed, not ignored**:
+`db.get(JobRun, run_id)` misses, and the handler acks, which on a work-queue stream deletes it
+(§7 predicted "neither FK set"; the real failure is a step earlier and final). **(4)** "Workers
+unchanged" and "NATS must not retry" are **incompatible** — the retry lives in worker code
+(`worker.go:316`, `llm-worker/worker/worker.py:128`) and in per-consumer `max_deliver`, so
+neutralising it per-message is a worker change either way. The honest comparison was **a new bridge
+plus unchanged workers** vs **a thin permanent adapter plus unchanged worker logic**, where the
+bridge is the larger body of novel code, sits in exactly the area that produced Q5–Q8, and is
+deleted at the next step regardless. The gate survives via a **required pre-gate**: run the Scrape
+activity standalone and diff against a v1 run of the same URL, which is the isolation (a) claimed
+and cannot provide. Costs accepted: each worker runs as **two deployments of one image** during
+coexistence (mode flag, not one process serving both); three integrations rather than one bridge
+(two share a language, and (a)'s "one place" was illusory per premise 4); and ⚠️ **the Playwright
+container contract** — Xvfb then `exec python` as pid 1, never `xvfb-run` — must be preserved
+exactly, the riskiest part of the port. Sequence: **Go http-worker → LLM → Playwright**. Knock-ons:
+§16's sequence moves the worker port **from third to first**, §7's result-path carry-forward is
+**moot**, §2's "not in the first increment" is reversed, and the residual retry hazard is now only
+that §10's ported classifier must become **`RetryPolicy` non-retryable error types**, not its own
+loop inside the activity.
+**Next: §10** (the do-not-delete list — now first-increment work, since the workers port first).
+§11 and §13–§17 not yet reviewed.
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
@@ -189,8 +229,10 @@ New infrastructure:
 - **Workflow-worker pod(s)** — hosts workflow and activity definitions (Python SDK).
 - A **namespace-registration init job**, analogous to today's `nats-init-job.yaml`. This is where
   retention is set — see 2c.
-- The three scrapers eventually become **activity workers** (Go SDK for http-worker, Python for
-  the others). Not in the first increment — see [§9](#9-oq-5--reuse-existing-workers-via-option-a-first).
+- The three scrapers become **activity workers** (Go SDK for http-worker, Python for the others).
+  **In the first increment, not eventually** — see [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected), which rejected the NATS bridge that
+  would otherwise have deferred this. Each runs as two deployments of one image during
+  coexistence: one bound to NATS for v1, one to a Temporal task queue for v2.
 
 The API keeps auth, CRUD, and quota enforcement, and gains "start / signal / query workflow." It
 loses all five background loops. That is what lifts the current single-replica + `Recreate`
@@ -881,13 +923,22 @@ gate too**, not only a deletion gate, and the two sections should be read togeth
 > addressed the safe half; the unacked-message case is now tied to §16's drain gate. **(5)** The
 > rollback ordering for mechanism 3 is stated, since §16 claims reversibility at every step.
 
-**Carried to [§9](#9-oq-5--reuse-existing-workers-via-option-a-first)'s review — mechanism 1 is
-true of rows, not of messages.** Under §9's option (a) a v2 activity dispatches to the existing
-NATS workers, so v2 work traverses v1 infrastructure by design. The return path is the sharper
-half: the worker publishes to `scrapeflow.jobs.result`, where `result_consumer.py` is subscribed,
-and its routing (`result_consumer.py:616`) branches on `run.job_id is not None` /
+**Carried to [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)'s review — mechanism 1 is
+true of rows, not of messages.** Under the draft's option (a) a v2 activity dispatched to the
+existing NATS workers, so v2 work traversed v1 infrastructure by design. The return path was the
+sharper half: the worker publishes to `scrapeflow.jobs.result`, where `result_consumer.py` is
+subscribed, and its routing (`result_consumer.py:616`) branches on `run.job_id is not None` /
 `run.batch_item_id` — a pipeline-originated result has neither. That is BUG-005's shape one lane
-later. §9 carries a warning about stacked *retry*; it needs one about the *result* path.
+later.
+
+> **✅ Resolved by the §9 reversal, 2026-08-23 — this hazard is moot.** Option (a) is rejected, so
+> **v2 publishes no NATS results at all** and nothing v2-originated ever reaches
+> `result_consumer.py`. The §9 review also found the failure was one step earlier and more final
+> than described here: `_handle_result` resolves the run with `db.get(JobRun, run_id)`
+> (`result_consumer.py:608`), so a pipeline-run id matches no row, and the handler **acks** —
+> deleting the message on a work-queue stream — before the FK branch is ever reached. Mechanism
+> 1's "rows, not messages" limitation stands as written; it simply no longer has a v2 message
+> path to be limited against.
 
 ### 8. OQ-4 — Metering: one run is one unit, pools are shared, and storage is charged for what is stored
 
@@ -1154,33 +1205,151 @@ Two gaps this section does not close, both noted so they are not mistaken for se
   question (fail the run, keep it and let the account go over, or refuse to start new runs while
   over) and it belongs to whoever writes the layer-A implementation PRD.
 
-### 9. OQ-5 — Reuse existing workers via option (a) first
+### 9. OQ-5 — Workers become Temporal activity workers directly; the NATS bridge is rejected
 
-**Decision: activities dispatch to the existing NATS workers for the R6 gate. Move to option (b)
-— workers as native activity workers — on a named trigger, not on a schedule.**
+**Decision: the three workers gain a native Temporal activity entry point (option (b)) in the
+first increment. Option (a) — activities dispatching through NATS to the unchanged workers — is
+rejected. ✅ Owner's call, 2026-08-23, reversing this section's draft.**
 
-R6 is a test of the **pipeline model**, not of the transport. Rewriting three worker entry points
-in the same increment confounds the experiment: a failing gate could mean the model is wrong or
-the rewrite is buggy, and you cannot tell which. Option (a) leaves workers **completely
-unchanged**, so a failed gate is unambiguously the model's fault. That is the entire value of
-having an acceptance gate.
+The v1 lane is untouched by this: jobs, batches and crawls keep running on NATS until their flow
+migrates ([§16](#16-the-v1v2-coexistence-contract)). What changes is that the pipeline lane never
+acquires a NATS bridge at all.
 
-**Move to (b) when R6 has passed *and* any one of:** the extra orchestration hop becomes
-user-visible latency; we need activity-level heartbeating or cancellation that the NATS hop
-cannot express (a future abortable-Scrape needs exactly this); or per-activity retry visibility
-matters more than the migration cost.
+**The draft chose option (a) and the reasoning inverted on inspection.** The original argument was
+that R6 — reproduce today's `scrape → LLM → webhook` recipe as a pipeline — tests the *pipeline
+model*, so rewriting three workers in the same increment would confound it: a failing gate could
+mean the model is wrong or the rewrite is buggy. That argument is sound in form. It fails on its
+premises, in four ways.
 
-> **⚠️ Option (a) recreates the Q5/Q6/Q7 failure mode unless explicitly handled, and this is the
-> most likely way to reintroduce a solved bug.** Under (a) there are **two retry layers** on the
-> same work: Temporal's `RetryPolicy` on the dispatch activity, and JetStream redelivery
-> underneath it. That is precisely R4's "retry must live in exactly one visible layer" violated,
-> by the migration itself. The whole Q5/Q6/Q7 cluster was retries hidden in a layer nobody was
-> looking at, and the compounding billed users for it.
+**1. "Rewriting three workers" overstates the change by an order of magnitude.** The workers split
+cleanly into domain logic and transport, and only transport moves:
+
+| file | lines | touching NATS |
+|---|---|---|
+| `http-worker/internal/worker/worker.go` | 411 | ~22% |
+| `llm-worker/worker/main.py` | 164 | ~21% |
+| `playwright-worker/worker/main.py` | 203 | ~18% |
+| `playwright-worker/worker/worker.py` | 309 | ~10% |
+
+Everything that is expensive to get right touches the transport **not at all**: `blocking.py`
+(313 lines of tiered bot-wall detection, BUG-003), the Patchright/headed-Chrome stealth setup
+(ADR-008), `formatter.go`, `robots.go`/`robots.py`, `llm.py`, the MinIO clients. These are plain
+functions over inputs and outputs, and option (b) calls them from a different caller rather than
+changing them.
+
+The Go worker makes the point sharpest: `processJob(ctx context.Context, job *ScrapeMessage,
+f *fetcher.Fetcher) (string, error)` (`worker.go:377`) **already has the shape Temporal wants** —
+a Go activity is any `func(ctx, T) (R, error)`. The adapter is a few lines because the natural
+shape of "do the work and return where you put it" is the same in both worlds.
+
+**2. Roughly half of what option (a) preserves is compensation for NATS.** `ack_wait=120`, the
+30-second `in_progress()` heartbeat, the `max_deliver` caps, the nak-with-backoff ladder — every
+one exists because JetStream redelivers a message the worker has not acked in time. That is the Q6
+incident, and the tuning was expensive. Under Temporal it is **deleted, not ported**: activity
+heartbeating and the start-to-close timeout occupy that role. Preserving those settings is
+preserving a dressing for a wound being removed. What genuinely carries forward is
+[§10](#10-oq-6--the-do-not-delete-list)'s list — the cold-start probe, the transient/terminal
+classifier, bot-wall detection — and **that list ports identically under either option.** Option
+(a) does not avoid the work; it defers it while keeping the code that must be ported alive in two
+places.
+
+**3. Option (a)'s bridge does not exist, is not cheap, and one part of it is blocked.** The bridge
+needs four things: dispatch (trivial — the payload already exists), **result correlation**, retry
+neutralisation, and a lane marker. The second is the problem.
+
+> **⚠️ The results subject cannot take another consumer, and there is a dead service in production
+> proving it.** `SCRAPEFLOW` is `--retention work` (verified on the live stream, not from the
+> manifest), subjects `scrapeflow.jobs.>`. A work-queue stream refuses a second consumer whose
+> filter overlaps an existing one, and `api-result-consumer` already claims
+> `scrapeflow.jobs.result` in full. The crawl coordinator attempts exactly the addition option (a)
+> would need — `pull_subscribe(NATS_JOBS_RESULT_SUBJECT, durable="coordinator-result-consumer")`
+> at `coordinator/result_handler.py:203` — and **that consumer has never existed on the stream**:
 >
-> **Requirement: for v2-dispatched work, the NATS layer must not retry.** The activity owns
-> retry; the worker-side nak/backoff path and JetStream redelivery must be neutralised for
-> messages originating from a workflow. This is a contract obligation on the option-(a) bridge,
-> not an optimisation.
+> ```
+> $ nats consumer ls SCRAPEFLOW
+>   api-result-consumer · go-worker · python-llm-worker · python-playwright-worker
+> ```
+>
+> The failure is silent by construction. `result_handler_subscribed`, logged immediately after the
+> subscribe, appears **zero** times in the coordinator's retained log, while `dispatch_loop_started`
+> from the sibling task logs normally; `main.py:82` awaits both with
+> `asyncio.gather(..., return_exceptions=True)`, which captures the exception and never re-raises.
+> The pod reports itself started and healthy with half of itself dead. **No crawl has ever run in
+> production** (`crawls` and `crawl_pages` are both empty), so nothing has surfaced it — the same
+> shape as BUG-005: shipped, silently broken, never exercised. **Not yet filed; it needs its own
+> tracker entry.**
+
+So option (a) must invent a result path — a new subject, a second stream, or polling Postgres for
+the row `result_consumer.py` writes. The last is the worst available answer and the most likely to
+be reached for: it puts **`result_consumer.py` on the critical path of every pipeline run**, and
+that component is the reason this ADR exists (Q8's hand-rolled state machine and its live feedback
+loop). Adopting a durable execution engine and then routing its results through the thing it was
+adopted to replace is a contradiction the section did not notice.
+
+**And today the message would not merely be ignored — it would be destroyed.** `_handle_result`
+(`result_consumer.py:608`) resolves the run with `db.get(JobRun, run_id)`. A pipeline-run id
+resolves to nothing, so the handler logs *"Received result for unknown run, discarding"* and
+**acks** — which on a work-queue stream deletes the message. The activity then waits out its
+timeout while the scrape sits completed in MinIO. ([§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee)
+predicted this one lane later as "neither FK set"; the real failure is a step earlier and final —
+there is no row to route.)
+
+**4. "Unchanged workers" and "NATS must not retry" cannot both hold.** The draft's own warning
+required that, for workflow-originated work, the NATS layer must not retry — otherwise Temporal's
+`RetryPolicy` and JetStream redelivery stack, which is R4's "retry lives in exactly one visible
+layer" violated by the migration itself. But that retry lives **inside the workers**:
+`msg.NakWithDelay` at `worker.go:316`/`:339`/`:360`, `msg.nak(delay=…)` at
+`llm-worker/worker/worker.py:128`, and the same in the Playwright worker; and in **consumer
+config** (`max_deliver`), which is a property of a consumer, not of a message. Neither can be
+disabled per-message without either a flag the worker reads or a v2-only subject and consumer.
+**Both are worker changes.** Option (a)'s defining property — workers completely untouched — does
+not survive its own safety requirement.
+
+**The gate is preserved, by a better mechanism.** The honest comparison was never *unchanged
+workers* versus *rewritten workers*; it was **a brand-new bridge plus unchanged workers** versus
+**a thin permanent adapter plus unchanged worker logic**. The bridge is the larger body of novel
+code, it is novel in precisely the area that produced Q5, Q6, Q7 and Q8 (queue semantics, retry,
+result correlation), and **all of it is deleted at the step that was always going to follow.**
+Option (b) also admits a de-risking step option (a) cannot:
+
+> **Pre-gate (required before R6): run the Scrape activity standalone against a URL and compare
+> its output to a v1 job run of the same URL.** This separates "the adapter is wrong" from "the
+> pipeline model is wrong" *before* the model is under test, which is the isolation option (a)
+> claimed to provide. The bridge has no equivalent, because it has no simpler mode to run in.
+
+**Costs, stated plainly.**
+
+- **Each worker runs twice during coexistence** — one deployment bound to NATS for v1, one bound
+  to a Temporal task queue for v2. **Two deployments of one image with a mode flag, not one
+  process serving both**: retiring the v1 lane becomes deleting a deployment rather than unpicking
+  a conditional, and the two scale and fail independently. Cost: three extra deployments for the
+  duration.
+- **Three integrations rather than one bridge.** Per worker: a dependency (`go.temporal.io/sdk`,
+  `temporalio`), connection config (address, namespace, task queue) as env vars, an entry point,
+  and a manifest. Two of the three are the same language and SDK, so this is realistically two
+  distinct pieces of work and one repeat. Note the "one place" advantage of the bridge was
+  illusory anyway — per point 4, retry neutralisation reaches into all three workers regardless.
+- **⚠️ The Playwright worker's container contract must be preserved exactly.** Xvfb started first,
+  then `exec python` as pid 1 — never `xvfb-run` as pid 1, which stays alive after the worker dies
+  so k8s never restarts a dead container (ADR-008). A new entry point is a new opportunity to get
+  this wrong, and the failure mode is a pod that looks healthy and consumes nothing. This is the
+  single riskiest part of the port, and it is a container concern, not a Temporal one.
+- **Ordering:** none of this can begin until the Temporal server is deployed — separate Postgres
+  instance and `temporal-sql-tool` schema setup ([§2](#2-topology)). Equally true of option (a),
+  so it does not separate them.
+
+**Sequence.** Prove the pattern on the **Go http-worker** first: simplest, best-tested, and its
+`NATS_MAX_DELIVER=3` already caps retry, so a like-for-like comparison against v1 is clean. Then
+the LLM worker (it carries the cold-start and classifier logic that §10 requires be ported), then
+Playwright (the container risk above). NATS and all four API loops are untouched throughout.
+
+**What this decision dissolves elsewhere.** The stacked-retry hazard largely disappears — with no
+NATS beneath the activity there is one retry layer, Temporal's. It does **not** disappear entirely:
+§10's ported transient/terminal classifier must express itself as **non-retryable error types on
+the `RetryPolicy`**, not as its own retry loop inside the activity, or R4 is violated again one
+level down. §7's carry-forward — that under option (a) v2 results land on `scrapeflow.jobs.result`
+with neither FK set — is **moot**, since v2 publishes no NATS results. §16's sequence step
+"workers to activity workers" moves from third to first.
 
 ### 10. OQ-6 — The do-not-delete list
 
@@ -1394,20 +1563,27 @@ executors.
 1. A unit of work executes on **exactly one lane**, enforced per [§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee).
 2. A recurring job moved to a Temporal Schedule is **paused in v1 first**, in that order, with
    the pause verified before the Schedule is created.
-3. NATS workers stay alive under option (a) until v1 is drained. Worker cutover to activities is
-   what removes v1's executors, and it happens after, not during, the flow migration.
+3. NATS workers stay alive until v1 is drained — but under the reversed
+   [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)
+   they do so **as a second deployment of the same image**, bound to NATS, alongside a
+   Temporal-bound one. Removing v1's executors is deleting that deployment, and it happens after,
+   not during, the flow migration.
 
-**Sequence** (`temporal-full-migration.md` §9 is the detailed version): stand up Temporal → jobs
-onto `JobWorkflow` via option (a) → workers to activity workers (option b) → batches and crawls →
-scheduling and webhooks → delete `result_consumer.py` → remove NATS → lift the API's
-single-replica/`Recreate` constraint.
+**Sequence** (`temporal-full-migration.md` §9 is the detailed version; **reordered by the §9
+review, 2026-08-23**): stand up Temporal → **workers gain Temporal activity entry points, Go
+http-worker first** → pipelines run end-to-end on v2 (R6) → jobs onto `JobWorkflow` → batches and
+crawls → scheduling and webhooks → delete `result_consumer.py` → remove NATS → lift the API's
+single-replica/`Recreate` constraint. The worker port moves from third to first: with option (a)
+rejected there is no bridge to carry pipelines in the meantime, so the activity workers *are* the
+first increment's executors.
 
 **The shape of coexistence is drawn in `temporal-full-migration.md` §9a**, not here: it changes at
 four of the seven steps, so it is sequence material rather than a decision. Two things it shows
 that this contract only states in words — the API keeps `replicas: 1` and all four loops until
 step 5 (the thinning is the *last* payoff, not the first), and the three workers serve **both
-lanes at once**, which is what makes option (a) cheap and the [§9](#9-oq-5--reuse-existing-workers-via-option-a-first)
-retry-stacking hazard real.
+lanes at once**. *(The diagram predates the §9 reversal and needs redrawing: serving both lanes is
+now two deployments of one image rather than one process reading NATS for both, and the
+retry-stacking hazard it illustrates is largely gone with the bridge.)*
 
 **Reversibility.** Every step is a reversible increment: a misbehaving flow falls back to the v1
 path until fixed. This holds **only while both lanes exist**, which is the reason the deletion
@@ -1470,8 +1646,10 @@ index's own rule.
 - **Determinism bugs are a new failure class.** Non-deterministic workflow code breaks replay,
   and it fails *after* a restart rather than at the point of the mistake.
 - Two SDKs (Go and Python) means a small duplication in activity-worker setup.
-- During option (a), two orchestration systems run concurrently, with the retry-layering hazard
-  called out in [§9](#9-oq-5--reuse-existing-workers-via-option-a-first).
+- Two orchestration systems run concurrently for the whole coexistence period, but they no longer
+  sit on top of each other: with the NATS bridge rejected ([§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)), each unit of work is driven
+  by exactly one of them, and the retry-layering hazard is confined to §10's ported classifier
+  being expressed as `RetryPolicy` non-retryable types rather than as its own loop.
 
 **Risk explicitly named**
 
@@ -1510,6 +1688,6 @@ finished with v1" a measured fact rather than an assumption.
 - **`phase4-backlog.md`** §3 — bugs the migration dissolves; do not design fixes for them.
   **§1 P6 / BUG-005** — the batch identity failure that grounds [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
   and [§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity).
-- **`open-questions.md` Q5–Q8** — the incidents behind [§9](#9-oq-5--reuse-existing-workers-via-option-a-first)'s
+- **`open-questions.md` Q5–Q8** — the incidents behind [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)'s
   retry-layering warning and [§10](#10-oq-6--the-do-not-delete-list)'s port list.
 - **ADR-008** — the scraping behaviour that must survive the transport change untouched.

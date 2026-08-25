@@ -66,7 +66,108 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-17) — **ADR-009 review is UNDERWAY. Next section: §9 (worker reuse).**
+- ## 📝 START HERE (2026-08-23) — **ADR-009 review is UNDERWAY. Next section: §10 (the do-not-delete list).**
+
+  ### §9 (worker integration) — reviewed 2026-08-23, **DECISION REVERSED: option (b) first**
+
+  ✅ **Owner's call: the three workers gain native Temporal activity entry points in the *first*
+  increment. The NATS bridge (option (a)) is rejected.** v1 is untouched — jobs, batches and crawls
+  keep running on NATS until their flow migrates. What changes is that the pipeline lane never
+  acquires a bridge at all.
+
+  The draft's argument was: keep the workers untouched, so if the acceptance test (rebuild
+  `scrape → LLM → webhook` as a pipeline) fails, it is unambiguously the pipeline model's fault and
+  not a worker rewrite's. Sound in form. **It failed on four premises.**
+
+  1. **"Rewriting three workers" overstated the change by an order of magnitude.** Measured: only
+     **~10–22% of two files per worker** is queue plumbing. Everything expensive touches NATS
+     **not at all** — `blocking.py` (313 lines of bot-wall detection), the Patchright/headed-Chrome
+     stealth setup, `formatter.go`, `robots.*`, `llm.py`, the MinIO clients. And the Go worker's
+     `processJob(ctx, job, fetcher) (string, error)` (`worker.go:377`) **already has the exact
+     shape a Temporal activity wants** — `func(ctx, T) (R, error)` — so the adapter is a few lines.
+  2. **~Half of what option (a) "preserved" is compensation for NATS.** `ack_wait=120`, the 30s
+     `in_progress()` heartbeat, `max_deliver`, the nak backoff ladder — all exist *because*
+     JetStream redelivers unacked messages (the Q6 incident). Under Temporal they are **deleted,
+     not ported**; activity heartbeat + start-to-close timeout take that role. The genuine
+     carry-forwards (§10's cold-start probe, transient/terminal classifier, bot-wall detection)
+     **port identically under either option** — so (a) bought nothing there and kept must-port code
+     alive in two places.
+  3. **🔴 The bridge is BLOCKED, and there is a dead service in production proving it.** The
+     `SCRAPEFLOW` stream is `--retention work` (**verified against the live stream, not the
+     manifest**), and a work-queue stream **refuses a second consumer whose filter overlaps an
+     existing one** — `api-result-consumer` already claims `scrapeflow.jobs.result` in full, which
+     is exactly what a result-awaiting activity would need. The crawl coordinator attempts that
+     addition at `result_handler.py:203`, and **`coordinator-result-consumer` has never existed on
+     the stream**. It is silent by construction: `result_handler_subscribed` appears **zero** times
+     in the coordinator's retained log while the sibling `dispatch_loop_started` logs normally,
+     because `main.py:82` awaits both tasks with `asyncio.gather(..., return_exceptions=True)`,
+     which captures the exception and never re-raises. **The pod reports healthy with half of
+     itself dead.** Nothing has surfaced it because **no crawl has ever run in production** —
+     `crawls` and `crawl_pages` are both empty. Same shape as BUG-005. ⚠️ **Not yet filed as a
+     bug — it should be.**
+     The remaining option-(a) answer (poll Postgres for the row `result_consumer.py` writes) puts
+     **the Q8 component on the critical path of every pipeline run** — the component this whole ADR
+     exists to delete. And today a v2 result would be **destroyed, not merely ignored**:
+     `_handle_result` resolves the run via `db.get(JobRun, run_id)` (`result_consumer.py:608`), a
+     pipeline-run id matches nothing, and the handler **acks** — which on a work-queue stream
+     deletes the message. (§7 predicted this as "neither FK set"; the real failure is a step
+     earlier and final.)
+  4. **"Workers unchanged" and "NATS must not retry" cannot both hold.** The draft's own safety
+     requirement was that NATS must not retry workflow-originated work, or Temporal's `RetryPolicy`
+     and JetStream redelivery stack — R4 violated by the migration itself. But that retry lives
+     **inside the workers** (`worker.go:316`/`:339`/`:360`, `llm-worker/worker/worker.py:128`) and
+     in **per-consumer** `max_deliver`. Neither is switchable per message without a flag the worker
+     reads or a v2-only subject and consumer — **both worker changes.** Option (a)'s defining
+     property does not survive its own requirement.
+
+  **The honest comparison** was never *unchanged workers* vs *rewritten workers*. It was **a
+  brand-new bridge + unchanged workers** vs **a thin permanent adapter + unchanged worker logic** —
+  where the bridge is the *larger* body of novel code, sits in exactly the area that produced
+  Q5/Q6/Q7/Q8 (queue semantics, retry, result correlation), and **is deleted at the step that was
+  always going to follow.**
+
+  **The gate is preserved by a better mechanism — and this is a requirement, not a nicety:**
+  **before R6, run the Scrape activity standalone against a URL and diff its output against a v1
+  job run of the same URL.** That separates "the adapter is wrong" from "the model is wrong"
+  *before* the model is under test. Option (a) has no equivalent — it has no simpler mode to run in.
+
+  **Costs accepted:**
+  - **Each worker runs twice during coexistence** — one deployment bound to NATS (v1), one to a
+    Temporal task queue (v2). **Two deployments of one image with a mode flag, never one process
+    serving both**: retiring v1 becomes *deleting a deployment* rather than unpicking a conditional.
+  - **Three integrations rather than one bridge** (dependency + connection config + entry point +
+    manifest, per worker). Two are the same language and SDK, so realistically two distinct pieces
+    of work and one repeat. (a)'s "one place" advantage was illusory anyway — per premise 4, retry
+    neutralisation reaches into all three workers regardless.
+  - ⚠️ **The Playwright container contract must be preserved exactly** — Xvfb first, then
+    `exec python` as pid 1, **never `xvfb-run` as pid 1**, which stays alive after the worker dies
+    so k8s never restarts a dead container (ADR-008). **The riskiest part of the port**, and it is a
+    container concern rather than a Temporal one.
+  - **Ordering:** nothing starts until the Temporal server is deployed (separate Postgres +
+    `temporal-sql-tool`, §2). Equally true of option (a), so it does not separate them.
+
+  **Sequence: Go http-worker → LLM worker → Playwright worker.** The Go worker first because it is
+  simplest, best-tested, and its `NATS_MAX_DELIVER=3` already caps retry, so the v1/v2 comparison is
+  clean. LLM second because it carries §10's cold-start and classifier logic. Playwright last
+  because of the container risk. NATS and all four API loops untouched throughout.
+
+  **Knock-ons applied:** §16's sequence moves the worker port **from third to first** (there is no
+  bridge to carry pipelines in the meantime, so the activity workers *are* the first increment's
+  executors); §7's result-path carry-forward is **moot** (v2 publishes no NATS results); §2's "not
+  in the first increment" is reversed; and the residual retry hazard is now only that §10's ported
+  classifier must be expressed as **`RetryPolicy` non-retryable error types**, not as its own loop
+  inside the activity.
+
+  **Carried into the next session:**
+  1. ⚠️ **File the coordinator failure as a bug** — live, silent, latent only because crawls are
+     unused. It is also §9's load-bearing evidence, so the ADR should point at a tracker entry
+     rather than re-argue it.
+  2. **§10 is next, and it is now first-increment work** rather than later — the workers port
+     first, so the do-not-delete list ports with them.
+  3. **The §8 blocker still stands:** is the `latest/` copy chargeable? Storage metering is not
+     implementable until that is ruled on, and BUG-007 cannot be fixed without it.
+
+  ### Superseded: START HERE (2026-08-17) — §8 review
 
   **§8 reviewed 2026-08-17.** (§4–§7 were reviewed 2026-08-10; their notes are below and still
   accurate except where §8 supersedes them.) The ADR's Review log remains authoritative.
