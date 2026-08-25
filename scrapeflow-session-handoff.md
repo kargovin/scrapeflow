@@ -66,7 +66,141 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-23) — **ADR-009 review is UNDERWAY. Next section: §10 (the do-not-delete list).**
+- ## 📝 START HERE (2026-08-25) — **ADR-009 review is UNDERWAY. Next section: §10 (the do-not-delete list).**
+
+  ### §8's two blockers CLOSED (2026-08-25) — not a section review; four owner calls
+
+  §8 and §8d had been left carrying named open items that made the storage rule **un-implementable**
+  and BUG-007 **unfixable**. All are now closed. Closing them **re-sequenced the pre-Phase 4 queue**,
+  so this is not just bookkeeping.
+
+  **1. ✅ The `latest/` copy is NOT chargeable.** The rule, stated plainly:
+
+  > **Every `history/` object is charged, once. `latest/` is never charged, and is deleted with the
+  > artifact it mirrors.**
+
+  `latest/` is **kept as-is** — v2 already drops it, so the 2× discrepancy is v1-only with a known
+  end date and removing it early buys nothing. This unblocks §8's storage rule and BUG-007.
+
+  **🔴 Settling it exposed a fourth symptom nobody had counted: an LLM job leaves FOUR objects, not
+  two.** The scrape writes the job's own format and the LLM **always** writes `.json`, so
+  `latest/{job}.{fmt}` and `latest/{job}.json` are **different keys** and neither overwrites the
+  other. Hard delete derives **one** filename from `job.output_format` (`routers/jobs.py:395`), so
+  it removes whichever `latest/` matches the declared format and **orphans the other** — and *which*
+  survives depends on the format (an `output_format=json` job has only three objects, because the
+  LLM's write lands on the scrape's key). The assumption underneath is **one artifact in one format
+  per job**: the same per-run granularity error as the counting stamp, expressed in the deletion
+  path. Added to BUG-007.
+
+  **2. ✅ §8d's accountant is named: an activity in the WORKFLOW worker, never the scraper workers.**
+  ADR-001's *light worker — no DB access* rule holds, and the apparent conflict was a naming
+  collision: after the migration "worker" means two things. The **scraper workers** (Go http,
+  Playwright, LLM) run hostile pages through a real browser and stay DB-free; the **workflow
+  worker** is the new pod holding orchestration that leaves the API — `result_consumer.py`'s direct
+  successor, which has DB access by definition because orchestration *is* database work.
+  **The boundary is enforced by task-queue routing, not convention:** a scraper pod is never offered
+  accounting work because it is not listening on that queue.
+
+  A **periodic batch sweep was considered and rejected as the primary counter**, on three grounds:
+  it is a **new hand-rolled loop** of exactly the class this ADR exists to delete (Q8 was that loop
+  failing); a **stale counter breaks the admission buffer** in call 4, which can only be as live as
+  the number it reads; and it **cannot attribute bytes** without either a full-bucket join that
+  grows forever (MinIO paths carry **no tenant segment**) or moving tenant identity into the worker
+  pods — **verified: `user_id` appears in ZERO files across all four worker services today.**
+  The sweep is **retained as auditor**: reconciliation (drift alarm) and §8c collection.
+
+  **3. ✅ The record is ONE shared per-object ledger, not per-lane — and the meter is lane-blind.**
+  Per-run columns cannot work at all: `job_runs` has one `result_path` and one
+  `storage_accounted_at` while an LLM job has two chargeable objects — **that IS BUG-007** — and a
+  pipeline run has one object per content-producing block, a count unknown at schema-design time.
+  So a child table is forced; the only real choice was one table or one per lane.
+
+  > **The design rule that makes the shared table safe: the meter reads `user_id` and `bytes`.
+  > Nothing else.** `user_id` is on every lane already, never null, never needs widening — so the
+  > meter is **not lane-aware at all** and a future lane cannot be forgotten out of it. The producer
+  > link is recorded as nullable FKs but used **only** by delete and collection.
+
+  Per-lane tables were rejected because their failure is **silent** — a missing `UNION` arm returns
+  a well-formed, too-small number, **which is literally P7** — while a shared table's failure is a
+  **loud rejected insert**. ⚠️ The precedent cuts both ways and is named in the ADR:
+  **`webhook_deliveries` is already a shared table whose closed `num_nonnulls(job_id, batch_id,
+  crawl_id) = 1` structurally rejects the pipeline lane**, so the `CHECK` must be designed to be
+  widened.
+
+  **Knock-ons applied, not merely noted:** **§8b's per-lane accounted-at markers are WITHDRAWN** —
+  no lane gets its own, the ledger row *is* the marker, so "counting starts at cutover, no backfill"
+  holds by construction rather than by a date comparison; **§3 is partly superseded for storage** —
+  the counting view stays right for `monthly_runs`/`concurrent_jobs` (runs genuinely live in
+  per-lane tables) but bytes all land in one owner-keyed table, so **do not build a storage arm of
+  the view**; and **BUG-004's screenshots need no separate mechanism** — a stored object is a ledger
+  row, so it is charged and deletable by the same path.
+
+  **4. ✅ At the wall: the run FINISHES and is charged; a headroom buffer refuses to START new runs.**
+  v1's delete-the-result-and-fail (`result_consumer.py:631`) is the wrong shape for a pipeline,
+  because the ceiling is hit at the **last** block *after* the user's own LLM key was billed —
+  failing there destroys paid work to reclaim a few KB. Admission-time checking cannot substitute:
+  output size is not knowable before the run. ⚠️ **The buffer holds only while the largest single
+  admitted run is smaller than it** — comfortable for jobs and pipelines, **false for crawls**,
+  where one submission is up to `max_pages` fetches (2.8–40 GB at BUG-003's measured range).
+  **Crawls need the ceiling checked per page as they go**; that belongs to P7's implementation. The
+  buffer's *number* stays an operator dial.
+
+  ### 🔴 The sequencing change — P8, and it is NOT Temporal-era work
+
+  The ledger **reads** as v2 design because that is where it was derived. It is not. **BUG-007
+  cannot be fixed without per-object accounting**, and **P7 needs per-page counting plus reclaim,
+  which is the same table.** Build it once, before both, and v2 inherits it; build it after, and P7
+  invents a crawl-shaped marker the ledger then replaces — **the exact per-lane mistake this whole
+  bug family is made of, committed on purpose.**
+
+  **Filed as P8. The pre-Phase 4 queue is now: P6/BUG-005 → P8 (ledger) → P7 + BUG-007 together.**
+
+  ### Also corrected — a live trap in backlog §3
+
+  Owed since 2026-08-10 and never made, sitting in the table `CLAUDE.md` tells every session to read
+  before fixing an orchestration bug. The **BUG-001 row said `_recover_stale_pending` is "dissolved
+  by Temporal — do NOT fix."** True of the **log spam**, false of the **loop**: `scheduler.py:131`
+  re-publishes every `job_runs` row stale at `pending` past 10 minutes straight to NATS **with no
+  lane filter**, and §3 keeps `job_runs` as a read-model mirror for migrated jobs — so a v2-owned
+  run whose workflow has not started is dispatched to a **v1 worker**, and §7's mechanism 2 never
+  intervenes because v1 started no *workflow*, it published a *message*. It fires **precisely when
+  v2 looks stalled**. The row now says do-not-fix covers the log spam only, and points at §7's
+  **mechanism 4** (lane marker on `job_runs`) as real work owed at **migration step 2**.
+
+  ### Session close (2026-08-25)
+
+  **Docs-only session — no code changed.** Two commits on `develop`:
+
+  | commit | what |
+  |---|---|
+  | `2caaddc` | §8's two blockers closed — `latest/` not chargeable; §8d settled (workflow-worker activity + shared ledger + wall policy); §8b markers withdrawn; §3 partly superseded for storage; **P8 filed**; BUG-007 unblocked |
+  | `7e6d9ec` | backlog §3 — BUG-001's do-not-fix corrected to cover the log spam, not the lane-blind loop |
+
+  All **21** ADR internal anchors re-verified after the §8d retitle. Three rows retired from the
+  ADR's "Deliberately not decided here" table (they are decided); one added for what genuinely
+  remains — the buffer's number and per-page crawl checks.
+
+  **⚠️ `develop` is 10 ahead of `origin/develop` and `main` is behind it — nothing pushed, nothing
+  fast-forwarded.** Deliberate, as in the last three sessions; push when you want the docs live.
+
+  **What is blocking: nothing blocks §10.** What remains outstanding:
+
+  1. **`temporal-full-migration.md` still contradicts the ADR** — step 3 is the worker port (now
+     step 1), the line-314 diagram assumes the rejected bridge, and the 339–351 retry discussion
+     describes a hazard that mostly no longer exists. ✅ **Owner's call: redraw in ONE pass after the
+     review closes**, not incrementally — later sections may move things again. Not blocking, but it
+     would confidently tell an implementer to build the thing §9 rejected.
+  2. **PRD-016 owes §4's known exclusion** — that "two extractions on one fetched page" is *not*
+     fixed by layer A. Owed since 2026-08-10; deliberately not done because the Architect does not
+     edit the PM's doc. Needs a PM pass.
+  3. **§10 is next, and it is first-increment work** — the workers port first, so the do-not-delete
+     list ports with them: `ensure_ready()` + the 180s timeout, the transient/terminal classifier on
+     all three workers, bot-wall detection, SSRF re-validation. §9's constraint on it: **the ported
+     classifier becomes `RetryPolicy` non-retryable error types, not its own retry loop inside the
+     activity** — otherwise R4's "retry in exactly one visible layer" is violated one level down
+     from where it was fixed.
+
+  ### Superseded: START HERE (2026-08-23) — §9 review
 
   ### §9 (worker integration) — reviewed 2026-08-23, **DECISION REVERSED: option (b) first**
 
