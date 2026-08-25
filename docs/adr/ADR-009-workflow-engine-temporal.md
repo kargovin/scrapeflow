@@ -3,7 +3,7 @@
 **Status:** Draft — under section-by-section review by @karthik. **Nothing here is settled yet**;
 do not implement against it, and do not cite it as a decision in another document until the
 document status is Accepted.
-**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress)
+**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed)
 **Review log:** §1 taken as settled (engine decided pre-ADR). **§2 resolved 2026-08-08** — three
 open points closed in place (2a separate Postgres instance · 2b Web UI not exposed · 2c retention
 30 days). **§3 reviewed 2026-08-08** — two factual corrections applied (crawls are already an
@@ -78,9 +78,10 @@ hard delete decrements by the JSON while the HTML was what was added, so the cou
 **permanently inflated by every deleted LLM job**, and **the scraped page is never deleted at
 all**. Root cause named: `_try_increment_storage`'s idempotency stamp is keyed on the **run**
 when it should be keyed on the **stored object**, so a redelivery and a genuinely second artifact
-are indistinguishable. ⚠️ **Left open:** the `latest/` + `history/` dual write stores 2× what the
-meter counts, so "charge what is stored" is not implementable until it is decided whether the
-convenience copy is chargeable (recommendation: charge one copy; v2 already drops `latest/`).
+are indistinguishable. ⚠️ **Left open at the time:** the `latest/` + `history/` dual write stores
+2× what the meter counts, so "charge what is stored" was not implementable until it was decided
+whether the convenience copy is chargeable *(**closed 2026-08-25 — charge one copy**; see the
+2026-08-25 entry below)*.
 Three more owner calls: **one submission = one concurrency slot on every lane** — which makes cost
 and contention disagree *in general* rather than only for crawls, and incidentally fixes
 `batch.py:46-47` admitting a 100-URL batch as 1 while metering it as 100; **a pipeline run parked
@@ -98,7 +99,8 @@ the "counting starts at cutover, no backfill" promise has no mechanism on two of
 **per-run collection is safe only while no object is shared *between* runs** — v1's content-hash
 dedup already shares them, so Monitors will break it. §8d names two things no section owns: which
 component performs v2 accounting, and what happens when a pipeline hits the storage wall at its
-**last** block, after the user's LLM key has already been billed.
+**last** block, after the user's LLM key has already been billed *(**both closed 2026-08-25** —
+see the entry below)*.
 **§9 reviewed 2026-08-23 — the decision is REVERSED: option (b) first, the NATS bridge rejected.**
 ✅ Owner's call. The workers gain native Temporal activity entry points in the **first** increment;
 activities never dispatch through NATS. The draft's argument — keep workers untouched so an R6
@@ -118,7 +120,7 @@ claim on `scrapeflow.jobs.result`. The coordinator attempts exactly that at
 `result_handler_subscribed` appears zero times in its log while the sibling `dispatch_loop_started`
 logs fine, because `main.py:82`'s `asyncio.gather(..., return_exceptions=True)` swallows the
 exception. The pod is healthy with half of itself dead; **no crawl has ever run in production**, so
-nothing surfaced it (BUG-005's shape — ⚠️ **not yet filed**). The remaining answer, polling for the
+nothing surfaced it (BUG-005's shape — filed as **BUG-008**, disposition **will-not-fix on the NATS path**, backlog §3). The remaining answer, polling for the
 row `result_consumer.py` writes, puts **the Q8 component on the critical path of every pipeline
 run** — the thing this ADR exists to delete. Worse, a v2 result today is **destroyed, not ignored**:
 `db.get(JobRun, run_id)` misses, and the handler acks, which on a work-queue stream deletes it
@@ -139,6 +141,45 @@ exactly, the riskiest part of the port. Sequence: **Go http-worker → LLM → P
 **moot**, §2's "not in the first increment" is reversed, and the residual retry hazard is now only
 that §10's ported classifier must become **`RetryPolicy` non-retryable error types**, not its own
 loop inside the activity.
+**§8's two open blockers closed 2026-08-25 — no section review, four owner's calls on items §8
+and §8d had left unresolved.** (1) **The `latest/` copy is not chargeable**: every `history/`
+object is charged once, `latest/` is never charged and is deleted with the artifact it mirrors.
+`latest/` is kept as-is because v2 already drops it. That unblocks §8's storage rule and BUG-007.
+Settling it exposed a second defect — **an LLM job leaves four objects, not two**, since the
+scrape writes the job's format and the LLM always writes `.json`, so the two `latest/` keys differ
+by extension; hard delete derives **one** filename from `job.output_format` and therefore always
+orphans the other. The assumption underneath is *one artifact in one format per job* — the same
+per-run granularity error as the accounting stamp, in the deletion path. (2) **§8d's accountant is
+named: an activity in the workflow worker**, never the scraper workers, which keep ADR-001's
+no-DB rule — enforced by **task-queue routing** rather than by convention, since a scraper pod is
+never offered work on a queue it does not listen to. A periodic sweep was considered and
+**rejected as the primary counter** (it is a new hand-rolled loop, of the class this ADR exists to
+delete; a stale counter breaks the admission buffer; and it cannot attribute bytes without either
+a growing full-bucket join or moving tenant identity into the worker pods, where `user_id` appears
+in **zero** files today). The sweep is retained as **auditor** — reconciliation and §8c
+collection. (3) **The record is one shared per-object ledger, not per-lane**, with the design rule
+that **the meter reads `user_id` and `bytes` only**; the producer link is nullable FKs used solely
+by delete and collection. Per-lane tables were rejected because their failure is *silent* (a
+missing `UNION` arm returns a well-formed, too-small number — **which is P7**), while a shared
+table's failure is a **loud rejected insert**. The precedent cuts both ways and is named:
+`webhook_deliveries` is already a shared table whose closed `CHECK` structurally rejects the
+pipeline lane, which is exactly what the lane-blind meter rule avoids. Knock-ons: **§8b's
+per-lane accounted-at markers are withdrawn** (the ledger row is the marker for every lane, so
+"counting starts at cutover" holds by construction), **§3 is partly superseded for storage** (the
+counting view stays right for `monthly_runs`/`concurrent_jobs`, which count runs living in
+per-lane tables; bytes all land in one table keyed on the owner, so a storage arm of the view
+would be a layer over a table that needs none — **do not build one**), and **BUG-004's screenshots
+need no separate mechanism** — a stored object is a ledger row, so it is charged and deletable by
+the same path. (4) **At the wall: the run finishes and is charged; a headroom buffer refuses to
+start new runs near the limit.** v1's delete-the-result-and-fail is the wrong shape when the
+ceiling is hit at the last block after the user's own LLM key was billed, and admission-time
+checking cannot substitute because output size is not knowable in advance. ⚠️ **The buffer holds
+only while the largest single admitted run is smaller than it** — true for jobs and pipelines,
+**false for crawls**, which need per-page checks; the buffer's number stays an operator dial.
+**Sequencing knock-on recorded outside this ADR:** the ledger is **pre-migration** work, not
+Temporal-era — BUG-007 cannot be fixed without per-object accounting, and P7 needs per-page
+counting plus reclaim, which is the same table. Filed as **P8** in `phase4-backlog.md` §1, ahead
+of P7 and BUG-007.
 **Next: §10** (the do-not-delete list — now first-increment work, since the workers port first).
 §11 and §13–§17 not yet reviewed.
 **Deciders:** @karthik
@@ -459,10 +500,19 @@ the exemption told an implementer that storage needed no thought — and pipelin
 by an activity rather than by `result_consumer.py` would be uncounted by exactly the same
 mechanism. [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)'s
 storage rule presumes something does the charging; on the v2 lane that something must be named,
-not inherited. *(Still unnamed as of the §8 review — [§8d](#8d-who-charges-and-what-happens-at-the-wall--not-yet-decided).
-The rule it refers to is no longer "only the final artifact is charged": §8 charges every object
-a run holds, which widens what the unnamed component is responsible for rather than narrowing
-it.)*
+not inherited.
+
+> **✅ Named 2026-08-25 — and the storage meter's answer is *not* this section's view.**
+> [§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25) settles the charging
+> component (an activity in the workflow worker) and the record (one shared per-object ledger, with
+> the meter reading `user_id` and `bytes` only). **That partly supersedes this section for storage.**
+> The view remains the answer for `monthly_runs` and `concurrent_jobs`, which count *runs* — and
+> runs genuinely do live in a different table per lane, so a single definition of "a run this user
+> started" is exactly right. Bytes do not: under §8d they all land in one table keyed on the owner,
+> so the storage meter is lane-blind before any view is involved and a storage arm of the view
+> would be a layer over a table that does not need one. **Do not build one.** The two are the same
+> principle — *stop naming a table* — reaching different mechanisms because runs and bytes are
+> shaped differently.
 
 **The workflow ID is the correlation key** between an app record and its engine execution —
 `pipeline-run-{pipeline_run_id}`, and `job-run-{run_id}` for migrated jobs. This replaces today's
@@ -1099,16 +1149,40 @@ backlog §3 does not cover these** — they are pre-migration fixes on live code
 **BUG-007** (`docs/project/open-bugs.md`), which carries the full trace; this section records only
 why the metering decision depends on it.
 
-**⚠️ Unresolved by this decision: the dual write.** Every worker writes each result **twice** —
-`latest/{job_id}.{ext}` and `history/{job_id}/{ts}.{ext}` (ADR-002 §8) — while `result_size`
-reports one copy, so MinIO holds 2× what the meter counts, on every lane, today.
-"Charge for what is stored" read literally means charging both. **Recommendation, not yet an
-owner call: charge one copy.** `latest/` is a convenience alias for bytes the user is already
-paying for, not a second artifact; billing twice for one result is not defensible to a user, and
-the honest fix is that the *duplicate* should not be free-standing rather than that it should be
-billed. The v2 artifact path already drops `latest/` (§5), so this is a v1-only discrepancy with a
-known end state — but it needs a decision before the storage bullet can be called implementable,
-because "charge what is stored" and "charge one copy" are not the same rule.
+**✅ The dual write is settled (owner's call, 2026-08-25): charge one copy.** Every worker writes
+each result **twice** — `latest/{job_id}.{ext}` and `history/{job_id}/{ts}.{ext}` (ADR-002 §8) —
+while `result_size` reports one copy, so MinIO holds 2× what the meter counts on every v1 lane.
+Read literally, "charge for what is stored" charges both. It does not. The rule is:
+
+> **Every `history/` object is charged, once. `latest/` is never charged, and is deleted with the
+> artifact it mirrors.**
+
+`latest/` is a convenience alias for bytes the user is already paying for, not a second artifact;
+billing twice for one result is not defensible to a user. **`latest/` is kept as-is** — the v2
+artifact path already drops it ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)),
+so the discrepancy is v1-only with a known end date, and removing it early costs work for a
+convenience that expires on its own.
+
+**Settling it exposed a second defect: an LLM job leaves *four* objects, not two, and the delete
+path can only ever remove three of them.** The scrape writes the job's own format while the LLM
+always writes `.json`, so the two `latest/` keys differ by extension and neither overwrites the
+other. For an `output_format=markdown` LLM job:
+
+| object | charged today | deleted today |
+|---|---|---|
+| `history/{job}/{t1}.md` — the scraped page | ✅ (sets the stamp) | ❌ **never** — `result_path` was repointed away from it |
+| `latest/{job}.md` | no | ✅ |
+| `history/{job}/{t2}.json` — the extraction | ❌ skipped by the stamp | ✅ |
+| `latest/{job}.json` | no | ❌ **never** |
+
+Hard delete derives **one** filename from `job.output_format` (`routers/jobs.py:395`), so it
+removes whichever `latest/` copy matches the job's declared format and orphans the other; *which*
+one survives depends on the format, and an `output_format=json` job has only three objects because
+the LLM's write lands on the scrape's key. **The assumption underneath is that a job has one
+artifact in one format** — the same per-run granularity error as the stamp, in the deletion path
+rather than the counting path. Both are fixed by the same thing: a per-object record
+([§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25)), which lets delete
+*enumerate* what exists instead of deriving a filename and hoping. Carried into BUG-007.
 
 #### 8b. Crawl conditions, and the mechanism the cutover promise needs
 
@@ -1132,6 +1206,15 @@ has no equivalent, and no size column either**, and nothing yet specifies one on
 Without a per-object marker the cutover boundary is a date comparison against row timestamps,
 which is wrong for any row created before cutover and deleted after. **Each lane that starts
 counting needs its own accounted-at marker, added in the same change that starts counting it.**
+
+> **✅ Resolved 2026-08-25 — and the resolution is that no lane gets its own marker.**
+> [§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25) settles accounting onto a
+> single shared per-object ledger, so the ledger row *is* the accounted-at marker for every lane.
+> `crawl_pages` never gains a column; `pipeline_runs` never specifies one. "Counting starts at
+> cutover, no backfill" becomes true by construction rather than by a date comparison — a
+> pre-cutover object has no ledger row, so nothing decrements for it. This paragraph is kept
+> because the *requirement* it states is still the requirement; only the number of places that
+> satisfy it changed from four to one.
 
 #### 8c. Intermediate-output collection
 
@@ -1186,24 +1269,150 @@ object when no run references it*. Recorded here so that arrives as a known cons
 than as a data-loss bug. It interacts with the storage rule too: a shared object is stored once
 and must be charged once, not once per referencing run.
 
-#### 8d. Who charges, and what happens at the wall — not yet decided
+#### 8d. Who charges, and what happens at the wall — settled 2026-08-25
 
-Two gaps this section does not close, both noted so they are not mistaken for settled:
+Both gaps are now closed. Three owner's calls.
 
-- **No section names the component that performs the accounting on the v2 lane.**
-  [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
-  says it "must be named, not inherited"; this section says the mechanism is unchanged and points
-  back at §3. On v1 it is `result_consumer.py`, which the migration deletes. The plausible answer
-  is a metering activity at run completion, which has the useful property of being retryable and
-  idempotent under Temporal, but it is a decision for §9's activity inventory, not an assumption.
-- **Enforcement has no v2 story at all** — this section covers *counting* only. On v1, exceeding
-  the wall is handled at `result_consumer.py:631`: the result is deleted and the run fails. The
-  pipeline lane needs an equivalent and the ergonomics are worse, because the ceiling is reached
-  at the **last** block, after the user's own LLM key has already been billed for the extraction.
-  Failing the run there destroys paid work to reclaim a few KB. **Admission-time checking cannot
-  substitute** — a pipeline's output size is not knowable before it runs. This is a real product
-  question (fail the run, keep it and let the account go over, or refuse to start new runs while
-  over) and it belongs to whoever writes the layer-A implementation PRD.
+##### The accountant is the workflow worker, not the scraper workers
+
+**✅ Storage accounting is performed by the workflow worker, as an activity, and the scraper
+workers stay database-free.**
+
+The constraint is older than this ADR: *light worker — NATS + MinIO only, no DB access; all
+business logic in the API* (ADR-001). It is not a stylistic preference. The scraper workers are
+the processes that run hostile pages through a real browser; keeping Postgres credentials out of
+them is a containment boundary.
+
+Two shapes were available, and they differ precisely on that boundary:
+
+| shape | where it runs | verdict |
+|---|---|---|
+| the upload activity counts its own bytes | inside the **scraper** workers | **Rejected** — the process that wrote the object knows its size, but this hands a database to the pod that renders untrusted pages |
+| a separate accounting step after the upload | inside the **workflow worker** | **Chosen** |
+
+"Worker" is now ambiguous in this project and the ambiguity is what makes this look like a
+conflict. After the migration there are two kinds: the **scraper workers** (Go http, Playwright,
+LLM), which must stay DB-free, and the **workflow worker**, a new pod holding the orchestration
+logic that leaves the API — the direct successor to `result_consumer.py`'s role, which has database
+access by definition because orchestration *is* database work. Accounting in "a worker" does not
+breach the rule; it depends entirely on which one.
+
+**The boundary is enforced by task-queue routing, not by convention.** Activities are registered
+against a Temporal task queue and the server dispatches only to pods listening on that queue. The
+scrape activity is registered on the scraper queue, the accounting activity on the workflow-worker
+queue; a scraper pod is never offered accounting work because it is not listening for it. The
+no-DB rule stops being something an implementer has to remember and becomes a property of the
+deployment.
+
+##### A periodic sweep is the auditor, never the accountant
+
+The alternative considered was doing all accounting in a scheduled batch job, which also satisfies
+the no-DB constraint. **Rejected as the primary mechanism**, for three reasons:
+
+- **It is a new hand-rolled loop.** `result_consumer.py` is a fragile polling loop because NATS
+  offered no durability for "the work succeeded, now durably record it" — and Q8 was that loop
+  failing in production. Temporal makes exactly that step a first-class retryable primitive.
+  Writing a scheduler, failure handling and state for it by hand, inside the migration whose
+  thesis is that this project has too many hand-rolled loops, inverts the point of the exercise.
+- **A stale counter breaks the admission buffer below.** The buffer is a live guard and can only
+  be as live as the number it reads; an hourly sweep lets a user run far over during the window
+  when the guard matters most.
+- **A sweep cannot attribute bytes without breaking a different boundary.** MinIO paths carry
+  **no tenant segment** — `history/{job_id}/{ts}.{ext}` (this is the same absence
+  [§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity) ties to §12's single
+  boundary) — so a sweep must join every object back to Postgres by `job_id`, a full listing that
+  grows with total objects forever. The obvious shortcut, stamping the owner onto the object at
+  upload, requires **telling the workers who the user is**. Verified: `user_id` appears in **zero**
+  files across all four worker services today. Tenant identity has never been in those pods, and
+  moving it there to save a join is a poor trade against
+  [§12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary), where the
+  API's ownership check is already the *only* boundary.
+
+A sweep over a ledger avoids all of that — but then something already wrote the ledger, and the
+sweep is no longer primary. **So the sweep is retained for the two jobs it is genuinely good at:**
+reconciliation (compare ledger totals against what MinIO actually holds, and alert on drift — it
+is allowed to be slow and stale because it is hunting bugs, not enforcing a limit) and
+**collection/refund** ([§8c](#8c-intermediate-output-collection), which is inherently periodic
+because nothing watches a retention clock per object).
+
+##### The record is one shared ledger, and the meter is lane-blind
+
+**✅ A single shared per-object table, not a per-lane one.**
+
+Storing this on the existing per-lane rows is impossible, not merely inelegant: `job_runs` has one
+`result_path` and one `storage_accounted_at`, and an LLM job has two chargeable objects — which
+*is* BUG-007. Adding columns cannot fix it, because a pipeline run produces one object per
+content-producing block and the block count is not known when the schema is designed. A child
+table is forced. The only real choice is one table or one per lane:
+
+| | when lane #5 arrives | how you find out |
+|---|---|---|
+| per-lane tables (`job_run_artifacts`, `crawl_page_artifacts`, …) | the quota `UNION`, the delete path, the reconciler and collection each need an arm added | **you don't** — the query returns a well-formed, too-small number |
+| **one shared table** | it writes rows into the same place | nothing to find out |
+
+> **The per-lane failure is not hypothetical; it is P7.** `_count_monthly_runs` and
+> `_count_concurrent_jobs` hardcode `FROM job_runs`, crawls write `crawl_pages`, and the result is
+> that a 10,000-page crawl consumes zero of all three meters. Nothing errored. The number was
+> simply missing a lane, for as long as crawls have existed, and it was found by reading code
+> during this review rather than by using the system.
+
+**The counter-argument, from this codebase, is real and is what the design has to survive.**
+`webhook_deliveries` is already a shared-across-lanes table, guarded by
+`num_nonnulls(job_id, batch_id, crawl_id) = 1` (`models/webhook_delivery.py:45`). A pipeline run
+has none of those, so that shared table **structurally rejects the next lane** — which is why
+[§15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for)'s option (b) was never the free
+reuse it appeared to be. A shared table with a closed enumeration of lanes baked into a `CHECK`
+catches the same disease one level down.
+
+**Hence the design rule that makes the shared table safe:**
+
+> **The meter reads `user_id` and `bytes`. Nothing else.**
+
+`user_id` is present on every lane already (jobs via `job.user_id`, crawls directly on `crawls`,
+pipelines by construction), is never null, and never needs widening. If "how many bytes does this
+user hold?" is answered from owner and size alone then **the meter is not lane-aware at all**, and
+there is nothing about it for a future lane to forget. The producer link — *which run made this?*
+— is still recorded, as nullable FKs so cascade delete works, but it is used only by **delete and
+collection**, never by the meter. A future lane that forgets to widen that `CHECK` then fails
+**loudly, on its first insert in dev**, while the meter, which never depended on it, stays correct.
+
+That inverts today's failure mode. The meter is currently lane-aware and silently wrong; under
+this rule it is lane-blind and structurally right, and the part that is allowed to be loud is the
+part that is safe to be loud. It is
+[§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)'s
+"stop naming a table" applied to bytes rather than to runs.
+
+Three things fall out without further design:
+
+- **Delete stops guessing.** It enumerates ledger rows instead of deriving a filename from
+  `output_format`, which kills the orphan class in §8a rather than the LLM instance of it.
+- **Screenshots (BUG-004) need no separate mechanism** — a screenshot is a stored object, so it is
+  a ledger row, so it is charged and deletable by the same path.
+- **§8b's missing accounted-at marker resolves itself.** `crawl_pages` never gains one, because
+  the ledger row *is* the marker, shared by every lane. "Counting starts at cutover, no backfill"
+  becomes trivially true: a pre-cutover object has no ledger row, so nothing decrements for it and
+  the counter cannot go negative.
+
+##### At the wall: the run finishes, and a buffer stops the next one
+
+**✅ A run that crosses the ceiling completes and is charged. A headroom buffer refuses to *start*
+new runs near the limit.**
+
+On v1, exceeding the wall is handled at `result_consumer.py:631` — the result is deleted and the
+run fails. That is the wrong shape for a pipeline, because the ceiling is reached at the **last**
+block, *after* the user's own LLM key has already been billed for the extraction: failing there
+destroys paid work to reclaim a few KB. **Admission-time checking cannot substitute** — output
+size is not knowable before the run. The buffer sidesteps that: it never needs to predict the
+size, only to keep enough headroom that being wrong is survivable.
+
+**⚠️ The buffer holds only while the most a single admitted run can add is smaller than the
+buffer.** For pipelines that is comfortable — a run is a handful of objects. **It is false for
+crawls**, where one submission is up to `max_pages` fetches: 10,000 pages at BUG-003's measured
+291 KiB–4.1 MiB is 2.8–40 GB, which no fixed buffer survives. **Crawls must therefore check the
+ceiling per page as they go, not once at admission** — recorded here because "we have a buffer"
+will otherwise read as covering all four lanes when it covers two.
+
+The buffer's *size* remains an operator dial and is not fixed here.
 
 ### 9. OQ-5 — Workers become Temporal activity workers directly; the NATS bridge is rejected
 
@@ -1674,10 +1883,8 @@ finished with v1" a measured fact rather than an assumption.
 | **Data-flow fan-out** (one block's output consumed by two later blocks — "two extractions on one fetched page") | **Wanted, deferred to post-Phase 4. Owner's call, 2026-08-10.** Layer A validates data flow as a path ([§4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring)). The stored shape is already a graph, so this is a validator change against unchanged definitions. **Cheaper than it looked, after the §8 review (2026-08-17):** it was thought to make §8's "final artifact" ambiguous and to force the multi-Scrape rider — neither now applies. §8 charges every stored object, so there is no "final artifact" for fan-out to make ambiguous, and the rider is closed on structural grounds with **multiple roots, not fan-out**, named as the trigger that would reopen it. A fanning graph still has one Scrape and still costs one run. Distinct from *parallel* fan-out, which stays a PRD-016 non-goal |
 | Run-failure notification (R6's fourth exclusion) | The PM left it unassigned on purpose: it is either an on-failure branch or a run-level setting, and that depends on the conditional-execution decision above |
 | Whether `webhook_deliveries` / `crawl_pages` survive as v1-only audit mirrors | Decide at the step that retires each flow, not now |
+| **The headroom buffer's size**, and **per-page ceiling checks for crawls** | The wall policy is decided ([§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25)): a run that crosses the ceiling finishes and is charged, and a buffer refuses to *start* new runs near the limit. The **number** is an operator dial and wants real pipeline data. Separately, the buffer only holds while the most a single admitted run can add is smaller than the buffer — true for jobs and pipelines, **false for crawls**, where one submission is up to `max_pages` fetches (2.8–40 GB at BUG-003's measured page range). Crawls need the ceiling checked **per page as they go**; the mechanism belongs to P7's implementation, not here |
 | Retention window for intermediate block outputs — **the number only** | Needs a real number from the first pipelines ([§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)). **No longer a free dial** (§5 review, 2026-08-10): it is chosen against a stated promise, since it bounds how long R3's "what did this step return" works. The rules around it — result never collected, collection per run not per block, collected renders as *collected* — are decided. **The trade-off changed direction in the §8 review (2026-08-17):** intermediates are now charged while they exist, so the window is no longer operator-storage vs debuggability but **the user's bill vs debuggability**, and collection is a visible refund. It also becomes a *correctness* deadline once Monitors ship: per-run collection is unsafe as soon as an object is shared between runs |
-| **Whether the `latest/` copy is chargeable** ⚠️ blocks §8's storage rule | Every worker dual-writes `latest/` + `history/` (ADR-002 §8) while `result_size` reports one copy, so MinIO holds **2× what the meter counts** on every v1 lane. "Charge for what is stored" read literally charges both. Recommendation on record in [§8a](#8a-what-the-storage-rule-costs-on-the-job-path-found-in-review-2026-08-17): **charge one copy** — `latest/` is a convenience alias, not a second artifact, and billing twice for one result is not defensible. Not an owner call yet, and the storage rule is not implementable until it is. v2 already drops `latest/` ([§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)), so this is v1-only with a known end state |
-| **Which component performs v2 storage accounting**, and **what happens when a pipeline hits the wall** | [§8d](#8d-who-charges-and-what-happens-at-the-wall--not-yet-decided). §3 says the accounting component "must be named, not inherited"; §8 says the mechanism is unchanged and points back at §3 — so no section names it. On v1 it is `result_consumer.py`, which the migration deletes; the plausible answer is a metering activity at run completion (retryable, idempotent), but that belongs to §9's activity inventory. Enforcement is worse than counting: the wall is hit at the **last** block, after the user's own LLM key has been billed, and admission-time checking cannot substitute because output size is not knowable in advance. Product question — fail the run, allow the overage, or refuse to start new runs while over |
-| **Per-lane `storage_accounted_at` markers** | [§8b](#8b-crawl-conditions-and-the-mechanism-the-cutover-promise-needs). The PM's "counting starts at cutover, no backfill, and deleting a pre-cutover artifact must not decrement" needs a per-object record of whether it was ever counted. `job_runs` has one (`models/job_runs.py:35`); **`crawl_pages` has neither that nor a size column**, and nothing yet specifies one on `pipeline_runs`. Not deferred so much as unassigned: each lane needs its marker **in the same change that starts counting it**, or the cutover boundary degrades to a date comparison that is wrong for every row created before and deleted after |
 
 ---
 

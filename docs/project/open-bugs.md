@@ -573,7 +573,8 @@ server, and the coverage work is bounded and self-contained whenever it is picke
 
 **Severity:** Medium (billing accuracy + unbounded storage leak; no data corruption, no cross-tenant exposure)
 **Discovered:** 2026-08-17 (tracing ADR-009 §8's metering-parity claim against live code)
-**Status:** Open
+**Status:** Open — **unblocked 2026-08-25** (the `latest/` decision landed), now **sequenced behind
+P8**, the shared per-object storage ledger that is the actual fix vehicle
 
 ### What happens
 
@@ -624,16 +625,33 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
 - **ADR-009 §8 (reviewed 2026-08-17)** decided storage is charged for **bytes actually stored**,
   which makes all three symptoms defects by definition rather than judgement calls. §8a records the
   trace; this bug is the tracker entry it points at.
-- **⚠️ Blocked on an open decision.** §8 left the `latest/` + `history/` dual write unresolved:
-  every worker writes each result twice (ADR-002 §8) while `result_size` reports one copy, so MinIO
-  holds 2× what the meter counts on **every** lane. Fixing this bug means deciding what "one
-  result's storage" is. Recommendation on record: **charge one copy**.
+- **✅ Unblocked 2026-08-25 — the dual-write question is decided: charge one copy.** Every
+  `history/` object is charged, once; **`latest/` is never charged**, and is deleted with the
+  artifact it mirrors. `latest/` is kept as-is (v2 drops it anyway, so the 2× discrepancy is v1-only
+  with a known end date). ADR-009 §8a carries the call.
+- **The same pass found a fourth symptom, in the deletion path.** An LLM job leaves **four**
+  objects, not two: the scrape writes the job's own format and the LLM always writes `.json`, so
+  `latest/{job}.{fmt}` and `latest/{job}.json` are **different keys** and neither overwrites the
+  other. Hard delete derives **one** filename from `job.output_format` (`routers/jobs.py:395`), so
+  it removes whichever `latest/` copy matches the declared format and **orphans the other** — and
+  *which* one survives depends on the format (an `output_format=json` job has only three objects,
+  because the LLM's write lands on the scrape's key). The assumption underneath is **one artifact in
+  one format per job**: the same per-run granularity error as the counting stamp, expressed in the
+  deletion path. Add to the fix.
+- **⚠️ Now depends on P8, and should not be fixed before it.** The fix *is* per-object accounting,
+  which is P8's shared ledger (ADR-009 §8d). Patching the stamp in place — a second column, or a
+  special case for the LLM stage — reproduces the per-run granularity error one artifact later and
+  does nothing for pipelines, where the object count per run is unknown at schema-design time. With
+  the ledger in place both halves become mechanical: **count** each object as it is stored, and
+  **delete by enumerating rows** rather than deriving a filename.
 - **BUG-004** — the same missing idea from the other end. Screenshots are stored, never counted and
   never deleted; here the *scraped page* is. Both are "an object exists that no accounting path
-  knows about," and §8's rule makes them one problem.
-- **P7 / crawl quota** — same family again: a whole lane storing objects nothing counts. P7 is
-  scheduled after P6/BUG-005 and touches the same accounting surface, so these should be sequenced
-  together rather than fixed twice.
+  knows about," and §8's rule makes them one problem. **Under P8 they stop being two fixes:** a
+  screenshot is a stored object, so it is a ledger row, so it is charged and deletable by the same
+  path with no separate mechanism.
+- **P7 / crawl quota** — same family again: a whole lane storing objects nothing counts. Both are
+  now **consumers of P8**, so the sequence is **P6 → P8 → P7 + BUG-007 together** rather than P6 →
+  P7 with this trailing behind.
 
 ---
 
