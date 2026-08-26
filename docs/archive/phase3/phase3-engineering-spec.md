@@ -108,7 +108,7 @@ Remove `onupdate=lambda: datetime.now(UTC)` from the `jobs.updated_at` SQLAlchem
 
 ### 3.1 PRD-001: K8s Manifests — Phase 2 Services
 
-> **PRD:** [PRD-001-k8s-manifests.md](../project/phase3-prd/PRD-001-k8s-manifests.md)
+> **PRD:** [PRD-001-k8s-manifests.md](prd/PRD-001-k8s-manifests.md)
 
 **Problem:** Phase 2 introduced playwright-worker, llm-worker, and the cleanup cron script — but none have Kubernetes manifests. FluxCD's GitOps pipeline on `main` still deploys only Phase 1 services. Production is running Phase 1 code. Phase 3 cannot ship until Phase 2 is promoted to production.
 
@@ -187,7 +187,7 @@ spec:
 
 ### 3.2 PRD-002: Rate Limiting — Sliding Window
 
-> **PRD:** [PRD-002-sliding-window-rate-limit.md](../project/phase3-prd/PRD-002-sliding-window-rate-limit.md)
+> **PRD:** [PRD-002-sliding-window-rate-limit.md](prd/PRD-002-sliding-window-rate-limit.md)
 
 **Problem:** The current fixed-window Redis counter has a known 2x burst exploit — a user can fire `limit` requests at the end of window N and `limit` requests at the start of window N+1, effectively getting 2x the quota.
 
@@ -236,7 +236,7 @@ return 1  -- allowed
 
 ### 3.3 PRD-003: SSRF Re-validation on Webhook Delivery
 
-> **PRD:** [PRD-003-ssrf-revalidation.md](../project/phase3-prd/PRD-003-ssrf-revalidation.md)
+> **PRD:** [PRD-003-ssrf-revalidation.md](prd/PRD-003-ssrf-revalidation.md)
 
 **Problem:** DNS rebinding attack — a domain resolves to a public IP at `POST /jobs` time but later rebinds to an internal IP (`169.254.x.x`, `10.x.x.x`). The Phase 2 SSRF check runs only at job creation, not at delivery time.
 
@@ -266,7 +266,7 @@ async def _attempt_delivery(delivery: WebhookDelivery, session: AsyncSession) ->
 
 ### 3.4 PRD-004: robots.txt Compliance
 
-> **PRD:** [PRD-004-robots-txt.md](../project/phase3-prd/PRD-004-robots-txt.md)
+> **PRD:** [PRD-004-robots-txt.md](prd/PRD-004-robots-txt.md)
 
 **Problem:** ScrapeFlow makes no attempt to honour `robots.txt` directives. As the platform opens beyond a single user, ignoring robots.txt creates legal and ethical exposure — sites explicitly disallow scraping via this mechanism. A per-job toggle is needed so compliant scraping is opt-in without breaking existing jobs.
 
@@ -298,7 +298,7 @@ The field is mutable (can be changed via `PATCH /jobs/{id}`).
 
 ### 4.1 PRD-005: Proxy Rotation
 
-> **PRD:** [PRD-005-proxy-rotation.md](../project/phase3-prd/PRD-005-proxy-rotation.md)
+> **PRD:** [PRD-005-proxy-rotation.md](prd/PRD-005-proxy-rotation.md)
 
 **Problem:** Both workers make outbound requests from the server's public IP. High-frequency scraping of the same domain triggers IP-based blocks and CAPTCHAs. Proxy rotation is the standard mitigation and is treated as table-stakes by both crawl4ai and firecrawl.
 
@@ -338,7 +338,7 @@ context = await browser.new_context(**context_options)
 
 ### 4.2 PRD-006: Batch Scraping
 
-> **PRD:** [PRD-006-batch-scraping.md](../project/phase3-prd/PRD-006-batch-scraping.md)
+> **PRD:** [PRD-006-batch-scraping.md](prd/PRD-006-batch-scraping.md)
 
 **Problem:** ScrapeFlow processes one URL per job. A user scraping 50 product pages must create 50 jobs, poll 50 IDs, and assemble results manually. Both firecrawl and crawl4ai treat multi-URL batch processing as a primary API primitive. This is the most significant capability gap for ML pipeline use cases.
 
@@ -389,7 +389,7 @@ if run.batch_item_id is not None:
 
 ### 4.3 PRD-007: Site Crawl
 
-> **PRD:** [PRD-007-site-crawl.md](../project/phase3-prd/PRD-007-site-crawl.md)
+> **PRD:** [PRD-007-site-crawl.md](prd/PRD-007-site-crawl.md)
 
 **Problem:** ScrapeFlow scrapes one URL at a time. A user who wants to extract all pages of a documentation site or monitor a competitor's entire blog must manually enumerate URLs. Whole-site crawling is the headline feature of both firecrawl and crawl4ai. Without it, ScrapeFlow cannot serve the "feed an entire website into my ML pipeline" use case.
 
@@ -438,7 +438,7 @@ When this returns 0 AND all dispatched items are terminal, set `crawls.status = 
 
 ### 4.4 PRD-008: Authenticated Scraping
 
-> **PRD:** [PRD-008-authenticated-scraping.md](../project/phase3-prd/PRD-008-authenticated-scraping.md)
+> **PRD:** [PRD-008-authenticated-scraping.md](prd/PRD-008-authenticated-scraping.md)
 
 **Problem:** Many useful scraping targets are behind authentication — internal dashboards, paywalled content, SaaS tools. ScrapeFlow has no way to scrape authenticated pages. This PRD implements the narrow version: cookie injection only. Full credential storage (form login, OAuth, session capture) is Phase 4.
 
@@ -474,7 +474,7 @@ if credentials := message.get("credentials"):
 
 ### 4.5 PRD-009: Pre-crawl Page Actions
 
-> **PRD:** [PRD-009-page-actions.md](../project/phase3-prd/PRD-009-page-actions.md)
+> **PRD:** [PRD-009-page-actions.md](prd/PRD-009-page-actions.md)
 
 **Problem:** The Playwright worker navigates to a URL and immediately extracts content. Many real-world pages require interaction before useful content is visible: dismissing cookie banners, waiting for lazy-loaded components, scrolling to trigger infinite scroll, or filling a search box. Without action choreography, the Playwright worker is significantly limited for dynamic sites.
 
@@ -545,7 +545,7 @@ This runs before `page.goto()` to ensure the CSP is in effect for the initial pa
 
 ### 4.6 PRD-010: MCP Server
 
-> **PRD:** [PRD-010-mcp-server.md](../project/phase3-prd/PRD-010-mcp-server.md)
+> **PRD:** [PRD-010-mcp-server.md](prd/PRD-010-mcp-server.md)
 
 **Problem:** ScrapeFlow's primary use case is feeding data into LLM pipelines, but an LLM agent wanting to trigger a scrape must make raw HTTP calls — requiring custom integration code in every agent. Firecrawl now ships native MCP support, making its platform callable from Claude, Cursor, or any MCP-compatible client with zero integration code. ScrapeFlow needs the same capability.
 
@@ -599,7 +599,7 @@ CMD ["python", "server.py"]
 
 ### 5.1 PRD-011: Admin SPA
 
-> **PRD:** [PRD-011-admin-spa.md](../project/phase3-prd/PRD-011-admin-spa.md)
+> **PRD:** [PRD-011-admin-spa.md](prd/PRD-011-admin-spa.md)
 
 **Problem:** The admin API routes exist but there is no UI. Operating the platform requires knowing the API surface and crafting curl commands — not acceptable for a multi-user deployment. The Admin SPA wraps the existing `/admin/*` endpoints in a React dashboard covering user management, job oversight, quota controls, and webhook retry.
 
@@ -653,7 +653,7 @@ async def delete_job(job_id: UUID, permanent: bool = False, ...):
 
 ### 5.2 PRD-012: Billing and Per-user Quotas
 
-> **PRD:** [PRD-012-billing-quotas.md](../project/phase3-prd/PRD-012-billing-quotas.md)
+> **PRD:** [PRD-012-billing-quotas.md](prd/PRD-012-billing-quotas.md)
 
 **Problem:** Without enforcement, any multi-user deployment risks uncontrolled consumption exhausting worker capacity, MinIO storage, and LLM API budgets. This PRD ships quota enforcement only — monthly run limits, concurrent job limits, and storage limits. Stripe billing integration is Phase 4.
 
@@ -706,7 +706,7 @@ CREATE TABLE user_quotas (
 
 ### 5.3 PRD-013: Per-event Webhook Subscriptions
 
-> **PRD:** [PRD-013-webhook-event-filter.md](../project/phase3-prd/PRD-013-webhook-event-filter.md)
+> **PRD:** [PRD-013-webhook-event-filter.md](prd/PRD-013-webhook-event-filter.md)
 
 **Problem:** Currently all webhook events (`job.completed`, `job.failed`) fire every webhook unconditionally. A user who only wants to be notified on failures, or only on successful completions, cannot filter — every event fires their endpoint. Per-event subscription filtering was deferred from Phase 2 until a frontend existed to configure it.
 
@@ -728,7 +728,7 @@ if job.webhook_events and event_name not in job.webhook_events:
 
 ### 5.4 PRD-014: WebSocket Real-time Job Tracking
 
-> **PRD:** [PRD-014-websocket-tracking.md](../project/phase3-prd/PRD-014-websocket-tracking.md)
+> **PRD:** [PRD-014-websocket-tracking.md](prd/PRD-014-websocket-tracking.md)
 
 **Problem:** Integrations and the Admin SPA must poll `GET /jobs/{id}` repeatedly to track job progress. Polling adds unnecessary load and latency. Firecrawl ships WebSocket endpoints for live crawl status. A WS endpoint eliminates polling from any integration that needs real-time feedback.
 
@@ -845,7 +845,7 @@ await app.state.job_notifier.start(dsn)
 
 ### 5.5 PRD-015: Content Deduplication
 
-> **PRD:** [PRD-015-content-dedup.md](../project/phase3-prd/PRD-015-content-dedup.md)
+> **PRD:** [PRD-015-content-dedup.md](prd/PRD-015-content-dedup.md)
 
 **Problem:** ML pipeline consumers running high-frequency change-detection jobs re-process and re-store identical content on every run, even when the page hasn't changed. crawl4ai uses xxhash content fingerprinting to skip unchanged pages. Without deduplication, these jobs waste worker capacity, LLM API calls, and MinIO storage on content that is bit-for-bit identical to the previous run.
 

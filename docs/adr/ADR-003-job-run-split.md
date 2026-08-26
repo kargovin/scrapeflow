@@ -123,7 +123,7 @@ User-facing hard delete (removing the `jobs` row and all `job_runs` via CASCADE)
 
 ### 5. Migration 2.4 — Irreversible
 
-> **Spec reference:** [`docs/phase2/phase2-engineering-spec-v3.md` §2.4](../phase2/phase2-engineering-spec-v3.md)
+> **Spec reference:** [`docs/phase2/phase2-engineering-spec-v3.md` §2.4](../archive/phase2/phase2-engineering-spec-v3.md)
 
 ```python
 def upgrade():

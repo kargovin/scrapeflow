@@ -207,7 +207,30 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   | commit | what |
   |---|---|
   | `4d27475` | §10 reviewed — porting mechanism corrected in all four places; list split into Group A (at risk of deletion) / Group B (at risk of silent semantic change); non-retryable made explicit for SSRF + bot walls; heartbeat obligation, webhook wire contract, webhook payload schema and the correctly-dissolved list added; `diff.py` separated from the content-hash; §7 and §13 gained the relocated findings |
-  | *(this one)* | handoff + `CLAUDE.md` brought level with the review; BUG-006's port requirement recorded in `CLAUDE.md` alongside its §13 home |
+  | `a40b89b` | handoff + `CLAUDE.md` brought level with the review; BUG-006's port requirement recorded in `CLAUDE.md` alongside its §13 home |
+  | *(this one)* | **doc consistency sweep** — four more files. See below |
+
+  **The consistency sweep found two *reversed* decisions still being asserted as live guidance**,
+  neither of them from this session's review — they had been stale since 2026-08-23 and were
+  missed at the time:
+
+  | file | what was stale |
+  |---|---|
+  | `docs/adr/README.md` | Told readers §9 "warns that option (a) recreates the Q5/Q6/Q7 failure mode… NATS-side retry must be neutralised." **That is the rejected design.** Also still described the ADR as "drafted and awaiting review" with no indication ten sections are settled |
+  | `docs/project/phase4-backlog.md` §2 | Same withdrawn §9 claim, **plus** *"only the final artifact is charged"* — reversed by the §8 review on 2026-08-17 — and "review in progress (§2 resolved 2026-08-08)" |
+  | `docs/project/temporal-full-migration.md` | Caveat block rewritten and an inline 🔴 marker added above the option-(a) paragraph at ~line 358. **The doc is still not redrawn** (owner's call: one pass after the review closes) — the markers exist so nobody implements from it meanwhile |
+  | `docs/project/open-bugs.md` + backlog §4 | BUG-006's httpx switch was recorded as a *recommendation* "worth adding to §10 when reviewed". It is now a **decision in §13**; both rows updated, and the `sitemap.py` path corrected to `coordinator/coordinator/sitemap.py:11` |
+
+  **Also fixed in the same sweep: 31 broken cross-document links**, all pre-existing — the Phase 3
+  PRDs moved to `docs/archive/phase3/prd/` and the referring docs (`docs/process/product-manager.md`,
+  `docs/archive/phase3/phase3-engineering-spec.md`) still pointed at `../project/phase3-prd/`; plus
+  ADR-003's link to the Phase 2 spec. Every relative link in `docs/`, `CLAUDE.md` and this handoff
+  now resolves, and all **89** ADR-009 internal anchors do too.
+
+  ⚠️ **The lesson worth keeping:** both reversals were correctly recorded in the ADR and in
+  `CLAUDE.md`, and *neither* propagated to the two documents a new reader is most likely to open
+  first — the ADR index and the backlog that `CLAUDE.md` calls the single source of truth. **When a
+  section is reversed, the summaries elsewhere are the thing that goes stale, not the ADR.**
 
   All **89** ADR internal anchors re-verified after the §10 rewrite — none broken. (A first pass
   reported ~70 broken; that was a bug in the checker, not the document — GitHub's slug rule
@@ -230,10 +253,19 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
      describes a hazard that mostly no longer exists. ✅ Owner's call stands: **redraw in ONE pass
      after the review closes.** ⚠️ **§10's review adds to the redraw list:** §4 of that doc is the
      source of the "pure logic reused verbatim" phrasing now corrected in the ADR.
-  2. **PRD-016 owes §4's known exclusion** — that "two extractions on one fetched page" is *not*
-     fixed by layer A. Owed since 2026-08-10; needs a PM pass. **§10 adds two more R6 divergences
-     for the same pass:** a pipeline webhook payload has no `job_id`, and no `diff_detected`/
-     `diff_summary` until Monitors.
+  2. **PRD-016 owes three things, all for one PM pass.** The Architect does not edit the PM's doc,
+     which is why these accumulate rather than get fixed in place.
+     (a) **§4's known exclusion** — that "two extractions on one fetched page" is *not* fixed by
+     layer A. Owed since 2026-08-10.
+     (b) **Two more R6 divergences from §10** — a pipeline webhook payload has no `job_id`, and no
+     `diff_detected`/`diff_summary` until Monitors.
+     (c) **Two passages still reason from §8's reversed storage rule** (`PRD-016:697` and `:802`,
+     found in the 2026-08-26 doc sweep). Both cite *"only the final artifact is charged"* and argue
+     that crawls need **no exception** to it. ⚠️ **Low urgency — the conclusion survives, only the
+     reasoning is stale:** under §8's reversal (*every stored object is charged*) there was never a
+     restriction to make an exception to, so "every stored crawl page is charged" is now true by
+     default rather than by argument. Reword when the PM next opens the file; nothing downstream
+     is wrong.
   3. **§11 is next** (run state to the SPA: mirror activity + `pg_notify`), then §13–§17.
 
   ### Superseded: START HERE (2026-08-25) — §8's blockers closed

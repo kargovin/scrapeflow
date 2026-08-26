@@ -33,7 +33,10 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-008](ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** | 2026-07-03 | — | — |
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Draft** | 2026-08-04 | — | — |
 
-**ADR-009 is drafted and awaiting review — it is not yet a decision.** It records the Phase 4
+**ADR-009 is drafted and its section-by-section review is IN PROGRESS — it is not yet a decision.**
+**§1–§10 and §12 have been reviewed** (several reversed in the process); §11 and §13–§17 have not.
+The ADR's own **Review log** (top of the file) is authoritative for which sections are settled —
+prefer it over any summary, including this one. It records the Phase 4
 engine decision (Temporal), answers all **11** of
 PRD-016's open questions, and defines the contract under which the NATS path (**v1**) and the
 Temporal path (**v2**) run side by side. Its inputs were
@@ -44,12 +47,25 @@ Temporal path (**v2**) run side by side. Its inputs were
 
 Three things in it that are easy to miss and expensive to rediscover:
 
-- **§9 warns that integration option (a) recreates the Q5/Q6/Q7 failure mode** — dispatching to
-  the existing NATS workers from an activity puts *two* retry layers on the same work. NATS-side
-  retry must be neutralised for workflow-originated messages.
-- **§10's port list gained an item.** `diff.py` and the content-hash logic are **relocated, not
-  deleted, and not yet re-homed** — the PM assigned change detection to Monitors (B), which is
-  unwritten, so they must survive the deletion of `result_consumer.py` and wait.
+- **§9 was REVERSED on 2026-08-23 — the NATS bridge (option (a)) is rejected**, and the three
+  workers become Temporal activity workers in the **first** increment. ⚠️ *This entry previously
+  said option (a) merely "recreates the Q5/Q6/Q7 failure mode" and that NATS-side retry must be
+  neutralised. That described the rejected design and is withdrawn:* with no NATS beneath the
+  activity there is one retry layer, Temporal's. The bridge was also found to be **blocked** — a
+  work-queue stream refuses a second consumer overlapping `api-result-consumer`'s claim, proven by
+  a dead service in production (**BUG-008**).
+- **§10's carry-forwards are the most likely accidental loss in the migration.** `diff.py` and the
+  content-hash are **relocated, not deleted, and not yet re-homed** — the PM assigned change
+  detection to Monitors (B), which is unwritten. ⚠️ **They are not equally at risk** (§10 review,
+  2026-08-26): `diff.py` is its own module and survives its caller's deletion intact, while the
+  content-hash is seven lines *inside* `result_consumer.py`. And the dedup branch is **not** "pure
+  logic" — it deletes the new object and repoints `result_path` at the **previous run's** object,
+  which is the cross-run sharing §8 recorded as breaking per-run GC.
+- **§10's transient/terminal classifier does NOT become a `RetryPolicy` field.** Withdrawn on
+  review: Temporal offers only a denylist of error type *names*, while the classifier is a
+  fail-closed allowlist that also reads exception attributes and, in Go, keys on which step raised
+  the error. The rule is **the classifier decides; Temporal retries** — terminal verdicts raised as
+  non-retryable application errors.
 - **§5 partially departs from ADR-002 §8** (the MinIO path convention) for the v2 lane only.
 
 It will eventually **supersede parts of ADR-001/002/004** — the NATS subjects, fat-message schema,

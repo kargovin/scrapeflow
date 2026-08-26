@@ -88,21 +88,21 @@ All PRDs are in `docs/project/phase3-prd/`. The master index is `BACKLOG.md`.
 
 | # | PRD | Priority | Source |
 |---|-----|----------|--------|
-| 1 | [K8s Manifests — Phase 2 Services](../project/phase3-prd/PRD-001-k8s-manifests.md) | P1 | Committed |
-| 2 | [Rate Limiting — Sliding Window](../project/phase3-prd/PRD-002-sliding-window-rate-limit.md) | P1 | Deferred security fix |
-| 3 | [SSRF Re-validation on Webhook Delivery](../project/phase3-prd/PRD-003-ssrf-revalidation.md) | P1 | Deferred security fix |
-| 4 | [robots.txt Compliance](../project/phase3-prd/PRD-004-robots-txt.md) | P1 | Committed |
-| 5 | [Proxy Rotation](../project/phase3-prd/PRD-005-proxy-rotation.md) | P2 | Committed |
-| 6 | [Batch Scraping](../project/phase3-prd/PRD-006-batch-scraping.md) | P2 | New — from competitor research |
-| 7 | [Site Crawl — Multi-page from Seed URL](../project/phase3-prd/PRD-007-site-crawl.md) | P2 | New — from competitor research |
-| 8 | [Authenticated Scraping — Cookie Injection](../project/phase3-prd/PRD-008-authenticated-scraping.md) | P2 | Deferred from Phase 2 |
-| 9 | [Pre-crawl Page Actions](../project/phase3-prd/PRD-009-page-actions.md) | P2 | New — from competitor research |
-| 10 | [MCP Server](../project/phase3-prd/PRD-010-mcp-server.md) | P2 | Committed |
-| 11 | [Admin SPA](../project/phase3-prd/PRD-011-admin-spa.md) | P3 | Committed |
-| 12 | [Billing and Per-user Quotas](../project/phase3-prd/PRD-012-billing-quotas.md) | P3 | Committed |
-| 13 | [Per-event Webhook Subscriptions](../project/phase3-prd/PRD-013-webhook-event-filter.md) | P3 | Deferred from Phase 2 |
-| 14 | [WebSocket Real-time Job Tracking](../project/phase3-prd/PRD-014-websocket-tracking.md) | P3 | New — from competitor research |
-| 15 | [Content Deduplication](../project/phase3-prd/PRD-015-content-dedup.md) | P3 | New — from competitor research |
+| 1 | [K8s Manifests — Phase 2 Services](../archive/phase3/prd/PRD-001-k8s-manifests.md) | P1 | Committed |
+| 2 | [Rate Limiting — Sliding Window](../archive/phase3/prd/PRD-002-sliding-window-rate-limit.md) | P1 | Deferred security fix |
+| 3 | [SSRF Re-validation on Webhook Delivery](../archive/phase3/prd/PRD-003-ssrf-revalidation.md) | P1 | Deferred security fix |
+| 4 | [robots.txt Compliance](../archive/phase3/prd/PRD-004-robots-txt.md) | P1 | Committed |
+| 5 | [Proxy Rotation](../archive/phase3/prd/PRD-005-proxy-rotation.md) | P2 | Committed |
+| 6 | [Batch Scraping](../archive/phase3/prd/PRD-006-batch-scraping.md) | P2 | New — from competitor research |
+| 7 | [Site Crawl — Multi-page from Seed URL](../archive/phase3/prd/PRD-007-site-crawl.md) | P2 | New — from competitor research |
+| 8 | [Authenticated Scraping — Cookie Injection](../archive/phase3/prd/PRD-008-authenticated-scraping.md) | P2 | Deferred from Phase 2 |
+| 9 | [Pre-crawl Page Actions](../archive/phase3/prd/PRD-009-page-actions.md) | P2 | New — from competitor research |
+| 10 | [MCP Server](../archive/phase3/prd/PRD-010-mcp-server.md) | P2 | Committed |
+| 11 | [Admin SPA](../archive/phase3/prd/PRD-011-admin-spa.md) | P3 | Committed |
+| 12 | [Billing and Per-user Quotas](../archive/phase3/prd/PRD-012-billing-quotas.md) | P3 | Committed |
+| 13 | [Per-event Webhook Subscriptions](../archive/phase3/prd/PRD-013-webhook-event-filter.md) | P3 | Deferred from Phase 2 |
+| 14 | [WebSocket Real-time Job Tracking](../archive/phase3/prd/PRD-014-websocket-tracking.md) | P3 | New — from competitor research |
+| 15 | [Content Deduplication](../archive/phase3/prd/PRD-015-content-dedup.md) | P3 | New — from competitor research |
 
 ### Features considered and excluded from Phase 3
 

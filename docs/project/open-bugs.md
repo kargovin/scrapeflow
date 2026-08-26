@@ -555,11 +555,15 @@ server, and the coverage work is bounded and self-contained whenever it is picke
   activity — the fetch still happens, still targets a user-supplied host, and inherits whichever
   HTTP client the activity uses. Same shape as the Q5 `ensure_ready()` carry-forward: plumbing goes,
   behaviour stays.
-- **Recommendation for that port: use `httpx`, not `aiohttp`.** Every other untrusted-target fetch
-  in the platform already does. Converging on one client for untrusted responses removes this
-  exposure as a side effect of the migration rather than as separate work, and leaves `aiohttp`
-  used only where `miniopy-async` requires it — against MinIO, which we control. Worth adding to
-  ADR-009 §10's port list when that ADR is reviewed.
+- **✅ The port must use `httpx`, not `aiohttp` — now recorded in ADR-009 §13** (added by the §10
+  review, 2026-08-26; it landed in §13 rather than §10 because it belongs to the crawl migration
+  step). Every other untrusted-target fetch in the platform already uses httpx —
+  `playwright-worker/worker/robots.py:10` is the direct sibling. Converging on one client for
+  untrusted responses removes this exposure as a side effect of the migration rather than as
+  separate work, and leaves `aiohttp` used only where `miniopy-async` requires it — against MinIO,
+  which we control. ⚠️ Note what makes this one fragile: it is the **only** item on ADR-009 §10's
+  do-not-delete list that must be **modified** rather than copied across, so **a faithful port is
+  the failure mode here, not the success one.**
 - **BUG-002** — same ecosystem, different problem. BUG-002 was "these known alerts need version
   bumps." This is "the scanner has a hole in it," and no amount of triaging visible alerts finds
   it. The remaining-alerts row in `phase4-backlog.md` §4 was written from a count that only ever

@@ -18,16 +18,36 @@
 > inside code marked for removal but are **business logic that must be ported into the activities**
 > (backlog §3, PRD-016 OQ-6).
 >
-> **⚠️ Two corrections to this doc from ADR-009, both about §4's relocation map:**
-> - §4 sends content dedup (`xxhash`) and `diff.py` to "a diff/dedup **activity**, pure logic
->   reused verbatim." **That is no longer where they go.** PM review assigned *both halves of
->   change detection* to **Monitors (B)**, which is unwritten — so they are **relocated, not
->   deleted, and not yet re-homed**. They must survive the deletion of `result_consumer.py` and
->   wait. ADR-009 §10 calls this the most likely accidental loss in the migration.
-> - §9 step 2 (activities dispatch to the existing NATS workers) puts **two retry layers on the
->   same work** — Temporal's `RetryPolicy` above, JetStream redelivery below. That is the
->   Q5/Q6/Q7 failure mode reintroduced by the migration itself. NATS-side retry must be
->   neutralised for workflow-originated messages (ADR-009 §9).
+> **🔴 This document is KNOWN to contradict ADR-009 and is awaiting a single redraw pass once the
+> ADR review closes** (owner's call, 2026-08-23 — redrawing incrementally is wasted work while
+> later sections may move things again). **Where the two disagree, ADR-009 wins.** The specific
+> divergences, so nobody implements from a stale page:
+>
+> - **🔴 §9's step ordering and the diagram at line ~314 assume the NATS bridge, which was
+>   REJECTED (ADR-009 §9, 2026-08-23).** The three workers become **Temporal activity workers in
+>   the first increment**; the worker port moves **from step 3 to step 1**. An implementer reading
+>   this doc as written would build the thing the ADR rejected. *(This caveat previously said
+>   "activities dispatch to the existing NATS workers puts two retry layers on the same work…
+>   NATS-side retry must be neutralised" — that described the rejected design and is **withdrawn**.
+>   With no NATS beneath the activity there is one retry layer, Temporal's. The bridge was also
+>   found to be **blocked**: a `--retention work` stream refuses a second consumer overlapping
+>   `api-result-consumer`'s claim, proven by a dead service in production — **BUG-008**.)*
+> - **🔴 §4 sends content dedup (`xxhash`) and `diff.py` to "a diff/dedup activity, pure logic
+>   reused verbatim." Both halves of that are wrong.** *Where:* PM review assigned **both halves of
+>   change detection to Monitors (B)**, which is unwritten — so they are **relocated, not deleted,
+>   and not yet re-homed**, and must survive the deletion of `result_consumer.py` and wait.
+>   *What:* the dedup branch is **not pure logic** (ADR-009 §10 review, 2026-08-26) — on a hash
+>   match it **deletes the new `history/` object** and **repoints `result_path` at the previous
+>   run's object**, which is the cross-run object sharing §8 recorded as what breaks per-run GC.
+>   Also, the two are **not equally at risk**: `diff.py` is its own module and survives its
+>   caller's deletion intact; the content-hash is `result_consumer.py:49-56` plus the branch at
+>   `:375-392`, **inside** the deleted file. Only the second can be lost by accident.
+> - **The retry-hazard note in the §9 discussion (≈ lines 339–351) describes a hazard that mostly
+>   no longer exists.** What remains: ADR-009 §10's ported classifier must raise **non-retryable
+>   application errors** for terminal verdicts — *not* express itself as `RetryPolicy`
+>   non-retryable error **types**, which is not implementable (Temporal offers a denylist of type
+>   names; the classifier is a fail-closed allowlist that also reads exception attributes and, in
+>   Go, keys on which step raised the error).
 
 **Status:** Draft — for discussion (see status update above)
 **Date:** 2026-07-14
@@ -132,7 +152,7 @@ Where today's code *goes*, so nothing is "lost," only moved:
 | `crawl_queue` BFS frontier + dedup | Workflow state (visited set + frontier) in `CrawlWorkflow` |
 | `scheduler.py` croniter dispatch | Temporal Schedule attached to a recurring workflow |
 | Idempotency guards (`if run.status in terminal: return`) everywhere | Deleted — exactly-once activity results make them unnecessary |
-| Content dedup (`xxhash`), `diff.py` | A `diff`/`dedup` **activity** — pure logic reused verbatim |
+| Content dedup (`xxhash`), `diff.py` | ⚠️ **Superseded — see the caveat block at the top of this file.** Not a diff/dedup activity: both halves of change detection went to **Monitors (B)**, unwritten, so these are relocated and **not yet re-homed**. And "pure logic" is false of the dedup branch, which deletes the new object and repoints `result_path` at the previous run's object |
 | SSRF revalidation (`validate_no_ssrf_core`) | Called inside outbound activities (webhook + future sinks) |
 
 ---
@@ -334,6 +354,13 @@ Temporal's history is neither.
 
         still running, not drawn: coordinator pod · all 4 API loops · Redis
 ```
+
+> 🔴 **STALE — the diagram above and this paragraph both describe option (a), which ADR-009 §9
+> REJECTED on 2026-08-23.** Kept unrewritten pending the single redraw pass (see the caveat block
+> at the top of this file). There is no NATS beneath a v2 activity, so the stacked-retry hazard
+> below **does not arise**, and the instruction to neutralise NATS-side retry is **withdrawn**.
+> What survives: ADR-009 §10's ported classifier must raise **non-retryable application errors**
+> for terminal verdicts. Do not implement from the paragraph below.
 
 **What the picture is for.** The two ⚠ markers sit directly above one another on purpose: under
 option (a) a workflow activity dispatches into NATS, so **Temporal's `RetryPolicy` and JetStream's
