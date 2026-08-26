@@ -114,8 +114,14 @@ path (nothing ripped out).
   close it as dissolved by the migration:** the coordinator is deleted, but sitemap discovery
   *ports into a `CrawlWorkflow` activity* and carries the exposure unless the port uses **httpx**,
   as every other untrusted-target fetch already does). Alert count as of 2026-08-05: **51 open —
-  2 high, 34 medium, 15 low**, all against the three scanned manifests.
-  **`develop` and `main` are level and deployed.**
+  2 high, 34 medium, 15 low**, all against the three scanned manifests. ⚠️ **BUG-006 gained a
+  concrete port requirement on 2026-08-26** — ADR-009 §13 now carries it: `coordinator/coordinator/sitemap.py:11`
+  fetches robots.txt/sitemap XML with **aiohttp** while its sibling `playwright-worker/worker/robots.py:10`
+  uses httpx, so the `CrawlWorkflow` port must **change** the client, not copy it. The only
+  do-not-delete item that is a modification rather than a copy — a faithful port is the failure mode.
+  **Code on `develop` and `main` is level and deployed** (`b110591`); **docs commits sit on top of
+  `develop`, which is 1 ahead of `origin/develop`, with `main` 17 behind.** Deliberate — push and
+  fast-forward when you want the docs live.
 - **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
 - **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).
 - **Rollout:** one product, two engines — route new work to v2 (Temporal), drain + cut v1 (NATS) per-flow when proven; reversible each step. End state retires `result_consumer`/`scheduler`/`webhook_loop`/`advisory`/`coordinator` + NATS, and makes the API thin/horizontally scalable.

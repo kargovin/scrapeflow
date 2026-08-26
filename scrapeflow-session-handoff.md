@@ -202,15 +202,25 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
   ### Session close (2026-08-26)
 
-  **Docs-only session — no code changed.** Files touched: `docs/adr/ADR-009-…` (§10 rewritten;
-  §7 and §13 gained the relocated findings; §9, Consequences and the Review log corrected),
-  `CLAUDE.md` (LLM cold-start row + ADR-009 status paragraph), this handoff.
+  **Docs-only session — no code changed.** Two commits on `develop`:
 
-  All **89** ADR internal anchors re-verified after the §10 rewrite — none broken.
+  | commit | what |
+  |---|---|
+  | `4d27475` | §10 reviewed — porting mechanism corrected in all four places; list split into Group A (at risk of deletion) / Group B (at risk of silent semantic change); non-retryable made explicit for SSRF + bot walls; heartbeat obligation, webhook wire contract, webhook payload schema and the correctly-dissolved list added; `diff.py` separated from the content-hash; §7 and §13 gained the relocated findings |
+  | *(this one)* | handoff + `CLAUDE.md` brought level with the review; BUG-006's port requirement recorded in `CLAUDE.md` alongside its §13 home |
+
+  All **89** ADR internal anchors re-verified after the §10 rewrite — none broken. (A first pass
+  reported ~70 broken; that was a bug in the checker, not the document — GitHub's slug rule
+  collapses runs of whitespace but leaves the **double hyphen** where an em-dash was stripped from
+  between two spaces, so every `§N. OQ-x — Title` anchor looked wrong. Noted because the next
+  person to write such a checker will hit it too.)
 
   **⚠️ Correction to the last handoff's git note:** it said `develop` was 10 ahead of
-  `origin/develop` and nothing was pushed. `develop` is now **level with `origin/develop`**.
-  **`main` is 16 behind `develop`** and has not been fast-forwarded.
+  `origin/develop` and nothing was pushed. That was true when written; `develop` has since been
+  pushed. Current state: **`develop` is 1 ahead of `origin/develop`** (this session's commits) and
+  **`main` is 17 behind `develop`**, not fast-forwarded. Code on both is level at `b110591` — every
+  commit since is docs. Deliberate, as in the last four sessions; push and fast-forward when you
+  want the docs live.
 
   **What is blocking: nothing blocks §11.** Outstanding, unchanged from the last session except
   where noted:
