@@ -66,7 +66,167 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-25) — **ADR-009 review is UNDERWAY. Next section: §10 (the do-not-delete list).**
+- ## 📝 START HERE (2026-08-26) — **ADR-009 review is UNDERWAY. §10 reviewed. Next section: §11 (run state to the SPA).**
+
+  ### §10 (the do-not-delete list) — reviewed 2026-08-26; the porting *mechanism* was not implementable
+
+  All findings accepted by the owner; two relocated on the owner's call. This section had the
+  unusual property that **the decision was right and the instruction for carrying it out was
+  impossible** — so nothing was reversed, but the section was substantially rewritten.
+
+  #### 🔴 1. "The classifier becomes `RetryPolicy` non-retryable error types" is WITHDRAWN
+
+  Stated in **four** places (review log, §9, §10's table, Consequences); corrected in all four.
+  It cannot work, for three independent reasons — any one fatal:
+
+  - **Direction.** Temporal offers only a **denylist**: `non_retryable_error_types` means *retry
+    everything except these named types*. The classifier is an **allowlist** — retry only these,
+    everything else terminal. There is no `retryable_error_types`, and a denylist cannot express
+    an allowlist over an open set. The table cell asserted **"non-retryable error types"** and
+    **"fail-closed default preserved"** simultaneously; those are mutually exclusive.
+  - **Dynamism.** `classify()` reads attributes, not just types: an `APIStatusError` is transient
+    at **429** and terminal at **418**; an `S3Error` is transient on `SlowDown` and terminal on
+    `NoSuchBucket`. A list of type *names* cannot see inside the exception.
+  - **Structure (Go).** `classify` returns terminal for everything not wrapped in `*uploadError`
+    (`errors.go:71-77`), because in Go a dead **target site** and a dead **MinIO** raise the *same*
+    type — the only disambiguator is which step raised it (`worker.go:393`). "Which step" is not a
+    type name.
+
+  **Replaced by: the classifier decides; Temporal retries.** The activity catches, calls
+  `classify()`, and re-raises terminal verdicts as `ApplicationError(non_retryable=True)` (Go:
+  `NewNonRetryableApplicationError`). This is **not** the in-activity retry loop §9 warned against
+  — no second backoff, no second attempt counter, no second ceiling — so R4 still holds.
+
+  #### 🔴 2. The timeout number was wrong, and production's value is in another repo
+
+  Row 1 said *"180s request timeout."* Two budgets were conflated:
+
+  | | setting | value |
+  |---|---|---|
+  | warm-up budget | `llm_warmup_max_wait_seconds` | **180s** |
+  | request timeout | `llm_request_timeout_seconds` | **60s** in `config.py`; **180s in production**, set as `LLM_REQUEST_TIMEOUT_SECONDS` in the infra repo's `llm-worker.yaml` |
+
+  Verified against git history: `llm_request_timeout_seconds` has **never** been 180 in code.
+  An implementer sizing start-to-close from the file §10 points at computes **240s** against a
+  real requirement of **≈360s** — short by two minutes, and failing **only on cold starts**, the
+  one case the row exists for. Fixed in the ADR and in `CLAUDE.md`.
+
+  #### 🔴 3. The section's risk model was miscalibrated — now split in two
+
+  §10 opened *"These live inside code the migration removes."* **False for three of five items.**
+  Verified: `llm.py`, both `errors.py`, `errors.go` and `blocking.py` contain **zero** NATS calls
+  (two comment references between them). Nothing points a delete at them.
+
+  - **Group A — at risk of deletion.** SSRF check (`webhook_loop.py`), content-hash (inside
+    `result_consumer.py`). Instruction: *rescue before the file goes.*
+  - **Group B — at risk of silent semantic change.** Cold-start handling, the three classifiers,
+    bot-wall detection. They port by being left alone; the danger is they arrive intact and are
+    **overruled by the new retry owner** — i.e. finding 1. Instruction: *port untouched, then
+    re-establish the guarantee the old layer provided.*
+
+  #### 4. Non-retryable is now an explicit three-part obligation
+
+  1. **Classifier terminals** — the mechanism above.
+  2. **SSRF failures.** Today an SSRF block marks the delivery `exhausted` **immediately** and
+     does **not** increment `attempts` (`webhook_loop.py:99-110`). §15 makes the activity's retry
+     policy the delivery loop, so a naive port turns "instantly dead" into **≈2.6 hours of
+     re-resolving a hostname an attacker is actively rebinding**.
+  3. **Bot walls and robots disallows.** ⚠️ **These never raise today.** `detect_block()` *returns*
+     a verdict and the worker publishes `failed` (`playwright-worker/worker/worker.py:205`; robots
+     at `:61-64`) — so **the classifier has never seen a block**, and §10's rows 2 and 3 meet for
+     the first time *in the port*. Returning a failure must become raising one, marked
+     non-retryable, or Temporal re-scrapes the same wall from the same IP every attempt.
+
+  #### 5. Four items added to the list
+
+  - **The heartbeat obligation.** `ensure_ready`'s docstring carries a caller obligation
+    (*"caller must ensure the heartbeat is running: this loop can outlast `ack_wait`"*). §9 says
+    heartbeats are "deleted, not ported" — true of the **mechanism**, false of the **duty**, which
+    re-homes onto `activity.heartbeat()` + `heartbeat_timeout`. Both ways of forgetting fail: set a
+    timeout and never heartbeat → the activity fails on **every** cold start; set none → a dead
+    worker's job hangs for the full start-to-close.
+  - **The webhook wire contract** — HMAC-SHA256; header `X-ScrapeFlow-Signature: sha256=<hex>`;
+    success = `status_code < 300`; 10s per attempt; and the quirk that with no secret
+    `secret_bytes = b""`, so **the header is always sent**. Lives in a deleted file. **The most
+    externally visible thing in the migration** — change the header name or the threshold and every
+    customer integration breaks silently, with **no failing test in this repo**.
+  - **The webhook payload schema** (`webhooks.py:41-49`). Two fields have no v2 source: a pipeline
+    run has **no `job_id`**, and `diff_detected`/`diff_summary` are homeless until Monitors. Both
+    now recorded as R6 divergences rather than left to be discovered.
+  - **A correctly-dissolved list**, so it is not re-derived: the terminal-status idempotency guard
+    (`result_consumer.py:541`), schedule-drift prevention (`croniter(cron, next_run_at)`,
+    `scheduler.py:88`), and `ack_wait`/`max_deliver`/the nak ladder.
+
+  #### 6. Two precision fixes
+
+  - **`diff.py` and the content-hash are not equally at risk, and bundling them hid which.**
+    `diff.py` is its own module — its only functional caller is `result_consumer.py`
+    (`webhooks.py` imports just the `DiffResult` type), so deleting the caller leaves it orphaned
+    but **intact**. The content-hash is `_compute_content_hash` at `result_consumer.py:49-56` plus
+    the dedup branch at `:375-392`, both **inside** the deleted file. Only the second is at risk of
+    the "accidental loss" the note warns about.
+  - **"Pure logic reused verbatim" is false of the dedup branch.** On a hash match it **deletes the
+    new `history/` object** and **repoints `result_path` at the previous run's object** — the
+    cross-run object sharing §8 already recorded as what breaks per-run GC. Porting it as pure
+    logic carries the code and leaves the hazard behind.
+  - Also: **"the Scrape activity" → "the Playwright scrape activity"**, since bot-wall detection
+    exists on one lane only (the Go worker has just `fetcher.go:72`'s non-2xx check, so a `200`
+    wall passes through). Not reopening BUG-003 — but which engine the Scrape block routes to now
+    decides whether detection runs at all.
+
+  ### Two findings relocated on the owner's call
+
+  **→ §7: a scheduled job blocked by quota *waits*; it is not skipped.** `_dispatch_due_jobs`
+  checks both meters and, on a breach, logs and `continue`s **without advancing `next_run_at`**
+  (`scheduler.py:65-78`) — so the row stays due and the 60s poll retries it until a slot frees.
+  A waiting room, and a concurrency breach clears in minutes. **No Temporal Schedule overlap
+  policy reproduces this:** `SKIP` discards the firing permanently (an R5-forbidden user-visible
+  regression), `BUFFER_ONE` holds one and drops the rest — and all five react to *a previous
+  execution still running*, whereas this gate reacts to *the account's meters*, which a Schedule
+  cannot read. §3 makes the meters **count** every lane; it never said what a Schedule does when
+  one says no. Recorded as a **named open item, not decided** — the admission check likely belongs
+  in the workflow's first step (park on a durable timer and re-check, composing with §8's
+  timer-parked-holds-no-slot rule), but it pairs with §8's headroom buffer, and that pairing is
+  unreviewed: a **storage** breach does not clear on its own, so parking forever is right for
+  concurrency and wrong for storage.
+
+  **→ §13: sitemap discovery must port to `httpx`. This is a change, not a copy.**
+  `coordinator/coordinator/sitemap.py:11` fetches robots.txt and sitemap XML with **aiohttp**,
+  from **user-supplied target sites**; `playwright-worker/worker/robots.py:10` — the direct sibling
+  — uses httpx, as every other untrusted-target fetch does. This is BUG-006's reachable copy, in
+  the one service Dependabot has never scanned. **Do not close BUG-006 as dissolved:** the service
+  is deleted but sitemap discovery *ports into a `CrawlWorkflow` activity* and carries the exposure
+  unless the port changes the client. It was surviving **only** as a `CLAUDE.md` paragraph — not
+  where someone doing the crawl migration would look. ⚠️ The only do-not-delete item that must be
+  **modified** rather than copied, which makes **a faithful port the failure mode**.
+
+  ### Session close (2026-08-26)
+
+  **Docs-only session — no code changed.** Files touched: `docs/adr/ADR-009-…` (§10 rewritten;
+  §7 and §13 gained the relocated findings; §9, Consequences and the Review log corrected),
+  `CLAUDE.md` (LLM cold-start row + ADR-009 status paragraph), this handoff.
+
+  All **89** ADR internal anchors re-verified after the §10 rewrite — none broken.
+
+  **⚠️ Correction to the last handoff's git note:** it said `develop` was 10 ahead of
+  `origin/develop` and nothing was pushed. `develop` is now **level with `origin/develop`**.
+  **`main` is 16 behind `develop`** and has not been fast-forwarded.
+
+  **What is blocking: nothing blocks §11.** Outstanding, unchanged from the last session except
+  where noted:
+
+  1. **`temporal-full-migration.md` still contradicts the ADR** — step 3 is the worker port (now
+     step 1), the line-314 diagram assumes the rejected bridge, and the 339–351 retry discussion
+     describes a hazard that mostly no longer exists. ✅ Owner's call stands: **redraw in ONE pass
+     after the review closes.** ⚠️ **§10's review adds to the redraw list:** §4 of that doc is the
+     source of the "pure logic reused verbatim" phrasing now corrected in the ADR.
+  2. **PRD-016 owes §4's known exclusion** — that "two extractions on one fetched page" is *not*
+     fixed by layer A. Owed since 2026-08-10; needs a PM pass. **§10 adds two more R6 divergences
+     for the same pass:** a pipeline webhook payload has no `job_id`, and no `diff_detected`/
+     `diff_summary` until Monitors.
+  3. **§11 is next** (run state to the SPA: mirror activity + `pg_notify`), then §13–§17.
+
+  ### Superseded: START HERE (2026-08-25) — §8's blockers closed
 
   ### §8's two blockers CLOSED (2026-08-25) — not a section review; four owner calls
 

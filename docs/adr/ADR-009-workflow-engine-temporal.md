@@ -3,7 +3,7 @@
 **Status:** Draft — under section-by-section review by @karthik. **Nothing here is settled yet**;
 do not implement against it, and do not cite it as a decision in another document until the
 document status is Accepted.
-**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed)
+**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed) · 2026-08-26 (§10 reviewed)
 **Review log:** §1 taken as settled (engine decided pre-ADR). **§2 resolved 2026-08-08** — three
 open points closed in place (2a separate Postgres instance · 2b Web UI not exposed · 2c retention
 30 days). **§3 reviewed 2026-08-08** — two factual corrections applied (crawls are already an
@@ -139,8 +139,9 @@ container contract** — Xvfb then `exec python` as pid 1, never `xvfb-run` — 
 exactly, the riskiest part of the port. Sequence: **Go http-worker → LLM → Playwright**. Knock-ons:
 §16's sequence moves the worker port **from third to first**, §7's result-path carry-forward is
 **moot**, §2's "not in the first increment" is reversed, and the residual retry hazard is now only
-that §10's ported classifier must become **`RetryPolicy` non-retryable error types**, not its own
-loop inside the activity.
+that §10's ported classifier must raise **non-retryable application errors** for its terminal
+verdicts, not run a loop of its own inside the activity. *(That constraint originally named
+`RetryPolicy` non-retryable error types; corrected on the §10 review — see below.)*
 **§8's two open blockers closed 2026-08-25 — no section review, four owner's calls on items §8
 and §8d had left unresolved.** (1) **The `latest/` copy is not chargeable**: every `history/`
 object is charged once, `latest/` is never charged and is deleted with the artifact it mirrors.
@@ -180,8 +181,53 @@ only while the largest single admitted run is smaller than it** — true for job
 Temporal-era — BUG-007 cannot be fixed without per-object accounting, and P7 needs per-page
 counting plus reclaim, which is the same table. Filed as **P8** in `phase4-backlog.md` §1, ahead
 of P7 and BUG-007.
-**Next: §10** (the do-not-delete list — now first-increment work, since the workers port first).
-§11 and §13–§17 not yet reviewed.
+**§10 reviewed 2026-08-26 — the porting *mechanism* was not implementable, and the list was
+missing four items.** All findings accepted by the owner. **(1) 🔴 "the classifier becomes
+`RetryPolicy` non-retryable error types" is withdrawn**, in all four places it appeared (this log,
+§9, §10's table, Consequences). Temporal offers only a **denylist** of error type *names*, while
+the classifier is a fail-closed **allowlist** that additionally reads exception attributes
+(`APIStatusError` is transient at 429, terminal at 418; `S3Error` transient on `SlowDown`,
+terminal on `NoSuchBucket`) and, in Go, keys on **which step raised the error** (`*uploadError`,
+because a dead target site and a dead MinIO raise the same type). The cell asserted
+"non-retryable error types" and "fail-closed default preserved" simultaneously, which are mutually
+exclusive. Replaced by **the classifier decides; Temporal retries** — terminal verdicts re-raised
+as `ApplicationError(non_retryable=True)` / `NewNonRetryableApplicationError`, which is not the
+in-activity retry loop §9 warned against because it adds no second backoff, counter or ceiling.
+**(2) 🔴 The timeout figure was wrong.** "180s request timeout" conflated two budgets:
+`llm_warmup_max_wait_seconds` **is** 180, `llm_request_timeout_seconds` is **60 in `config.py`**
+and **180 in production**, set in the infra repo's `llm-worker.yaml`. Sizing start-to-close from
+the repo defaults yields 240s against a real requirement of ≈360s — short by two minutes, and
+failing *only* on cold starts. **(3) The section's risk model was miscalibrated and is now split
+in two.** Its opening claim — "these live inside code the migration removes" — is **false for
+three of five items**: `llm.py`, both `errors.py`, `errors.go` and `blocking.py` contain **zero**
+NATS calls (two comments between them), so nothing points a delete at them. Group A is at risk of
+**deletion**; Group B is at risk of **silent semantic change** under the new retry owner, which is
+a different danger needing a different instruction. **(4) Non-retryable is now an explicit
+three-part obligation**: classifier terminals, **SSRF failures** (today `exhausted` immediately
+and not counted as an attempt — a naive port turns that into ≈2.6 h of re-resolving a hostname an
+attacker is rebinding), and **bot walls / robots disallows**, which ⚠️ **never raise today** —
+`detect_block()` returns a verdict and the worker publishes `failed`, so the classifier has never
+seen a block and the two rows meet for the first time in the port. **(5) Four items added:** the
+**heartbeat obligation** (its NATS mechanism dies, the duty re-homes onto `activity.heartbeat()`;
+forgetting it fails the activity on every cold start, omitting `heartbeat_timeout` hides a dead
+worker for the full start-to-close), the **webhook wire contract** (HMAC-SHA256,
+`X-ScrapeFlow-Signature: sha256=<hex>`, success `< 300`, 10s, header always sent even with an
+empty secret — the most externally visible thing in the migration, and no test in this repo would
+catch a change), the **webhook payload schema** (with two fields that have no v2 source: a
+pipeline run has no `job_id`, and `diff_detected`/`diff_summary` are homeless until Monitors), and
+the **correctly-dissolved list** (terminal-status guard, schedule-drift base, `ack_wait`/
+`max_deliver`/nak ladder) so it is not re-derived. **(6) Two precision fixes:** the content-hash
+and `diff.py` are **not equally at risk** — `diff.py` is its own module and survives its caller's
+deletion intact, the hash is seven lines *inside* `result_consumer.py` — and **"pure logic reused
+verbatim" is false of the dedup branch**, which deletes the new object and repoints `result_path`
+at the **previous run's** object, the cross-run sharing §8 recorded as breaking per-run GC. Also:
+"the Scrape activity" → **"the Playwright scrape activity"**, since bot-wall detection exists on
+one lane only. **Two findings relocated by the owner:** the **scheduled-quota waiting room** to
+**§7** (a Schedule question — `scheduler.py` defers without advancing `next_run_at`, and no
+Temporal overlap policy reproduces that; left as a named open item because it pairs with §8's
+headroom buffer) and the **`httpx` requirement for `sitemap.py`** to **§13** (BUG-006's rider, the
+one do-not-delete item that must be *modified* rather than copied).
+**Next: §11** (run state to the SPA). §13–§17 not yet reviewed apart from §13's added rider.
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
@@ -990,6 +1036,33 @@ later.
 > 1's "rows, not messages" limitation stands as written; it simply no longer has a v2 message
 > path to be limited against.
 
+**⚠️ Mechanism 3 has an unowned behavioural gap: a scheduled job blocked by quota *waits* today,
+and no Temporal Schedule overlap policy reproduces that.** Surfaced by the [§10](#10-oq-6--the-do-not-delete-list)
+review 2026-08-26 and recorded here because it is a Schedule question, not an activity one.
+
+`_dispatch_due_jobs` checks both count meters before creating a run (`scheduler.py:65-78`). On a
+breach it logs and `continue`s — and, critically, **does not advance `next_run_at`**. The row stays
+`due`, so the 60-second poll retries it until a slot frees. Nothing is dropped; it is a waiting
+room, and a concurrency breach in particular clears in minutes.
+
+Temporal Schedules offer `SKIP`, `BUFFER_ONE`, `BUFFER_ALL`, `CANCEL_OTHER` and
+`TERMINATE_OTHER`. **None of them is this.** `SKIP` discards the firing permanently — a user who
+is briefly at their concurrency ceiling silently loses that run, which R5 forbids as a
+user-visible regression. `BUFFER_ONE` holds exactly one and drops the rest. And the closer
+mismatch: overlap policies react to *a previous execution still running*, whereas this gate reacts
+to *the account's meters*, which a Schedule cannot read.
+
+[§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
+makes the meters able to **count** every lane; it never says what a Schedule does when a meter says
+no. So the admission check must live in the **workflow**, not in the Schedule: the Schedule fires
+unconditionally, and the workflow's first step consults the counting view and either proceeds or
+parks on a durable timer and re-checks — reproducing the waiting room, and composing with
+[§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)'s
+rule that a run parked on a timer holds no slot. **Left as a named open item rather than decided
+here**, because it interacts with §8's headroom buffer (a storage breach does *not* clear on its
+own, so parking forever is wrong for that meter and right for concurrency) and that pairing has
+not been reviewed.
+
 ### 8. OQ-4 — Metering: one run is one unit, pools are shared, and storage is charged for what is stored
 
 **Decision:**
@@ -1556,35 +1629,160 @@ Playwright (the container risk above). NATS and all four API loops are untouched
 
 **What this decision dissolves elsewhere.** The stacked-retry hazard largely disappears — with no
 NATS beneath the activity there is one retry layer, Temporal's. It does **not** disappear entirely:
-§10's ported transient/terminal classifier must express itself as **non-retryable error types on
-the `RetryPolicy`**, not as its own retry loop inside the activity, or R4 is violated again one
-level down. §7's carry-forward — that under option (a) v2 results land on `scrapeflow.jobs.result`
+§10's ported transient/terminal classifier must still decide, and its terminal verdicts must be
+raised as **non-retryable application errors**, not swallowed into a retry loop inside the
+activity, or R4 is violated again one level down. *(Corrected on the §10 review, 2026-08-26: this
+originally read "expressed as non-retryable error types on the `RetryPolicy`", which is not
+implementable — `non_retryable_error_types` is a **denylist** of type names, while the classifier
+is a fail-closed **allowlist** that also reads exception attributes and, in Go, which step raised
+the error. See [§10](#10-oq-6--the-do-not-delete-list).)* §7's carry-forward — that under option (a) v2 results land on `scrapeflow.jobs.result`
 with neither FK set — is **moot**, since v2 publishes no NATS results. §16's sequence step
 "workers to activity workers" moves from third to first.
 
 ### 10. OQ-6 — The do-not-delete list
 
-These live inside code the migration removes, and are **requirements of the activities that
-replace it**. Each was paid for with a production incident.
+Each item here was paid for with a production incident. **They fall into two groups with two
+different failure modes, and conflating them was the original drafting error of this section:**
+
+- **Group A — at risk of deletion.** Genuinely inside files the migration removes
+  (`webhook_loop.py`, `result_consumer.py`). Instruction: *rescue before the file goes.*
+- **Group B — at risk of silent semantic change.** These live in worker modules with **zero queue
+  code** — verified: `llm.py`, both `errors.py`, `errors.go` and `blocking.py` contain no NATS
+  calls at all (two comment references between them). Nothing points a delete at them; they port
+  by being left alone. Their risk is the opposite one: they arrive intact and are then **overruled
+  by the new retry owner**. Instruction: *port the file untouched, then re-establish the guarantee
+  the old layer used to provide.*
+
+#### Group B — ports intact; the guarantee must be re-established
+
+| Behaviour | Where it lives now | What must hold after the port |
+|---|---|---|
+| **LLM cold-start handling** — `ensure_ready()` warm-up probe against `/models`, plus the request timeout | `llm-worker/worker/llm.py` (probe), `llm-worker/worker/config.py` (budgets) | Into the LLM activity. Temporal has no idea a scale-to-zero endpoint is cold; it would simply retry a timing-out activity and re-bill the user's key. See the two riders below |
+| **Transient/terminal classification** for storage and provider faults, incl. the aiohttp-unreachable case | `llm-worker/worker/errors.py`, `playwright-worker/worker/errors.py`, `http-worker/internal/worker/errors.go` | **The classifier decides; Temporal retries.** The activity catches, calls `classify()`, and re-raises terminal failures as a non-retryable application error. **Fail-closed default preserved** (unknown → terminal). Not a `RetryPolicy` field — see below |
+| **Bot-wall detection**, tiered, terminal, `blocked:<vendor>` | `playwright-worker/worker/blocking.py` | Stays in the **Playwright scrape activity**, unchanged semantics. Note the lane asymmetry below |
+
+**⚠️ Rider 1 — the timeout numbers, because the ADR previously had them wrong.** There are two
+budgets, not one, and the production value of the second is **not in this repo**:
+
+| | setting | value |
+|---|---|---|
+| Warm-up budget (poll `/models` until awake) | `llm_warmup_max_wait_seconds` | **180s** |
+| Request timeout (wait for the answer) | `llm_request_timeout_seconds` | **60s** in `config.py`; **180s in production**, set as `LLM_REQUEST_TIMEOUT_SECONDS` in the infra repo's `llm-worker.yaml` |
+
+**The LLM activity's start-to-close timeout must exceed *warm-up budget + request budget*.** Against
+production that is **≈360s**, not the 240s an implementer computes from the repo defaults alone.
+Sizing it from `config.py` leaves the activity **two minutes short**, and it fails *only* on cold
+starts — the exact case the row exists for. This is Q6 in a new costume — an outer layer less
+patient than the work inside it — and it is exactly the composition rule R4 makes a hard
+requirement.
+
+**⚠️ Rider 2 — the heartbeat obligation survives; only its mechanism dies.** `ensure_ready`'s
+docstring carries a caller obligation: *"Caller must ensure the NATS in-progress heartbeat is
+running: this loop can outlast `ack_wait`."*
+[§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)
+deletes `ack_wait` and the 30s `in_progress()` call, which is correct — but the **duty** is not
+deleted, only re-homed onto `activity.heartbeat()` plus a `heartbeat_timeout`. Both ways of
+forgetting it fail: set a `heartbeat_timeout` and never heartbeat and the activity fails on
+**every** cold start; set none and a dead worker's LLM job hangs for the full start-to-close.
+
+#### Group A — rescue before the file is deleted
 
 | Behaviour | Where it lives now | Where it goes |
 |---|---|---|
-| **LLM cold-start handling** — `ensure_ready()` warm-up probe against `/models` + 180s request timeout | `llm-worker/worker/llm.py` | Into the LLM activity. Temporal has no idea a scale-to-zero endpoint is cold; it would simply retry a timing-out activity and re-bill the user's key |
-| **Transient/terminal classification** for storage and provider faults, incl. the aiohttp-unreachable case | `llm-worker/worker/errors.py`, `playwright-worker/worker/errors.py`, `http-worker/internal/worker/errors.go` | Activity `RetryPolicy` non-retryable error types. **Fail-closed default preserved** (unknown → terminal) |
-| **Bot-wall detection**, tiered, terminal, `blocked:<vendor>` | `playwright-worker/worker/blocking.py` | Stays in the Scrape activity, unchanged semantics |
-| **SSRF re-validation on every delivery attempt** | `webhook_loop.py` | Inside the webhook activity — see [§15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for) |
+| **SSRF re-validation on every delivery attempt** | `api/app/core/webhook_loop.py:90` | Inside the webhook activity — see [§15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for). **Failure is terminal and immediate** — see below |
+| **The webhook wire contract** — HMAC-SHA256 over the raw payload bytes; header `X-ScrapeFlow-Signature: sha256=<hex>`; success = `status_code < 300`; 10s per-attempt timeout; and the quirk that with no configured secret `secret_bytes = b""`, so **the header is always sent** | `api/app/core/webhook_loop.py:124-137` | Into the webhook activity, byte-identical. **The most externally visible thing in the migration**: receivers check that exact header name and that threshold. Changing either breaks every customer integration silently, with no failing test in this repo |
+| **The webhook payload schema** — `event`, `job_id`, `run_id`, `result_path`, `diff_detected`, `diff_summary`, `timestamp`, plus `error` on failures | `api/app/core/webhooks.py:41-49` | Into whatever the v2 webhook activity sends. ⚠️ Two fields have no v2 source: a pipeline run has **no `job_id`**, and `diff_detected`/`diff_summary` have nothing to fill them while change detection is homeless (below). Both need recording as R6 divergences rather than discovering |
+| **Content-hash dedup** (`xxhash`) — see the standalone note below | `api/app/core/result_consumer.py:49-56` (the hash) and `:375-392` (the dedup branch) | Nowhere yet. Must survive `result_consumer.py`'s deletion and wait for Monitors |
 
-**A constraint the port must respect:** the LLM activity's start-to-close timeout must exceed
-*warm-up budget + request budget*, or a legitimate cold start times out the activity. This is Q6
-in a new costume — an outer layer less patient than the work inside it — and it is exactly the
-composition rule R4 makes a hard requirement.
+**Non-retryable is a decision the port has to make explicitly, in three places.** The classifier
+answers *is this worth retrying*; Temporal owns *whether and when*. That keeps retry in exactly one
+visible layer, satisfying R4 — but only if terminal outcomes are actually marked:
 
-**One addition to the published list.** `temporal-full-migration.md` §4 assigns content dedup
-(`xxhash`) and `diff.py` to "a diff/dedup activity, pure logic reused verbatim." The PM has since
-assigned **both halves of change detection to Monitors (B)**, which is not yet specified. So
-these are **relocated, not deleted, and not yet re-homed**: `diff.py` and the content-hash logic
-must survive the deletion of `result_consumer.py` and wait for B. Deleting them with their
-caller is the single most likely accidental loss in this migration.
+1. **Classifier terminals** — the mechanism in the Group B table.
+2. **SSRF failures.** Today an SSRF block marks the delivery `exhausted` **immediately**, does
+   **not** increment `attempts`, and logs a security event (`webhook_loop.py:99-110`). §15 makes
+   the activity's retry policy the delivery loop, so a naive port turns "instantly dead" into
+   "dead in ≈2.6 hours", re-resolving a hostname an attacker is actively rebinding, five times.
+3. **Bot walls and robots.txt disallows.** ⚠️ **These never raise today.** `detect_block()`
+   *returns* a verdict and the worker publishes `failed` (`playwright-worker/worker/worker.py:205`;
+   robots at `:61-64`) — so the classifier has **never seen a block**. Rows 2 and 3 of this section
+   have never met; the port is where they first touch. In an activity, returning a failure has to
+   become raising one, and that raise must be non-retryable, or Temporal re-scrapes the same wall
+   from the same IP on every attempt — three headed-Chrome renders and three lots of proxy
+   bandwidth to be refused three times.
+
+**⚠️ Why not `RetryPolicy` non-retryable error types.** An earlier draft of this section, and of
+§9, said the classifier "becomes `RetryPolicy` non-retryable error types." **It cannot**, for three
+independent reasons:
+
+- **Direction.** Temporal offers only a **denylist** (`non_retryable_error_types`: retry
+  everything except these named types). The classifier is an **allowlist** — retry only these,
+  everything else terminal. There is no `retryable_error_types`, and a denylist cannot express an
+  allowlist over an open set. So "non-retryable error types" and "fail-closed default preserved"
+  were mutually exclusive claims in the same table cell.
+- **Dynamism.** `classify()` reads attributes at runtime, not just types: an `APIStatusError` is
+  transient at 429 and terminal at 418; an `S3Error` is transient with code `SlowDown` and terminal
+  with `NoSuchBucket`. A list of type **names** cannot see inside the exception.
+- **Structure (Go).** `classify` returns terminal for everything not wrapped in `*uploadError`
+  (`errors.go:71-77`). That wrapper exists because in Go a dead **target site** and a dead
+  **MinIO** raise the *same* type — the only disambiguator is which step raised it
+  (`worker.go:393`). "Which step" is not a type name.
+
+The correct shape is `ApplicationError(..., non_retryable=True)` in Python and
+`temporal.NewNonRetryableApplicationError(...)` in Go. There is no second backoff, no second
+attempt counter and no second ceiling, so this is **not** the in-activity retry loop §9 warned
+against.
+
+**⚠️ The lane asymmetry behind "the Playwright scrape activity".** §9 creates three activity
+workers. Bot-wall detection exists only on the Playwright side; the Go worker has only
+`fetcher.go:72`'s non-2xx check, so a wall served as a `200` passes through on the http lane. That
+is the recorded position (BUG-003's audit found walls only at `engine=playwright`) and is not
+reopened here — but it means **which engine the Scrape block routes to determines whether bot-wall
+detection runs at all**, which the singular "the Scrape activity" hid.
+
+#### The homeless pair: content-hash and `diff.py`
+
+`temporal-full-migration.md` §4 assigns content dedup (`xxhash`) and `diff.py` to "a diff/dedup
+activity, pure logic reused verbatim." The PM has since assigned **both halves of change detection
+to Monitors (B)**, which is not yet specified. So these are **relocated, not deleted, and not yet
+re-homed** — they must survive the deletion of `result_consumer.py` and wait for B.
+
+**Two corrections to how that was stated.**
+
+- **They are not equally at risk, and bundling them hides which one is.** `diff.py` is its own
+  module whose only functional caller is `result_consumer.py` (`webhooks.py` imports just the
+  `DiffResult` type) — deleting the caller leaves it orphaned but **intact**. The content-hash is
+  `_compute_content_hash` at `result_consumer.py:49-56` plus the dedup branch at `:375-392`, both
+  **inside** the deleted file. Only the second is actually at risk of the accidental loss this
+  note warns about.
+- **"Pure logic reused verbatim" is false of the dedup branch.** On a hash match it does two
+  things beyond comparing: it **deletes the new `history/` object** and **repoints `result_path`
+  at the previous run's object**. That is cross-run object sharing, and it is precisely what
+  [§8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored)
+  recorded as breaking per-run collection: *"per-run GC is safe only while no object is shared
+  between runs — v1 already shares them."* Porting it as pure logic carries the code and leaves
+  the hazard behind.
+
+#### Correctly absent — checked, and dissolved rather than lost
+
+Recorded so this is not re-derived:
+
+- **The terminal-status idempotency guard** (`result_consumer.py:541`). Exists only because
+  JetStream redelivers; Temporal records an activity result once.
+- **Schedule-drift prevention** (`croniter(cron, job.next_run_at)` rather than `now`,
+  `scheduler.py:88`). Temporal Schedules compute the next fire from the spec, not from the actual
+  fire time.
+- **`ack_wait`, `max_deliver`, the nak backoff ladder.** Deleted with NATS per §9 — with the single
+  exception in Rider 2, where the obligation outlives the mechanism.
+
+**Two carry-forwards this section surfaced but does not own:**
+
+- **A scheduled job blocked by quota waits; it is not skipped.** Recorded in
+  [§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee), because it
+  is a Temporal Schedule question rather than an activity one.
+- **Sitemap discovery must port to `httpx`.** Recorded in
+  [§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block), because it
+  belongs to the crawl migration step.
 
 ### 11. OQ-7 — Run state to the SPA: mirror activity plus `pg_notify`
 
@@ -1680,6 +1878,23 @@ the UI.
 **history size**, and it should be decided against measurements from the crawl migration step
 rather than guessed now. Recording the constraint is the useful part; picking a winner today
 would be false precision.
+
+**⚠️ The port must switch the sitemap fetcher to `httpx`. This is a change, not a copy.**
+Recorded here by the [§10](#10-oq-6--the-do-not-delete-list) review 2026-08-26, because it belongs
+to this migration step and was surviving only as a paragraph in `CLAUDE.md`.
+
+`coordinator/coordinator/sitemap.py:11` fetches `robots.txt` and sitemap XML with **aiohttp**,
+from **user-supplied target sites**. Every other untrusted-target fetch in the platform already
+uses `httpx` — `playwright-worker/worker/robots.py:10` is the direct sibling. That matters because
+of **BUG-006**: `coordinator/` has no lockfile and has never been scanned by Dependabot, and the
+live aiohttp advisory's *visible* alert is the unreachable copy (aiohttp parsing MinIO responses)
+while **this** is the reachable one.
+
+**Do not close BUG-006 as dissolved by the migration.** The service is deleted, but sitemap
+discovery is *ported into a `CrawlWorkflow` activity* and carries the exposure with it unless the
+port changes the client. Because this is the only do-not-delete item that must be **modified**
+rather than copied, it is the easiest one to get wrong — a faithful port is the failure mode here,
+not the success one.
 
 ### 14. OQ-10 (remaining half) — Conditional execution gets its own layer-A PRD, before Monitors
 
@@ -1860,7 +2075,8 @@ index's own rule.
 - Two orchestration systems run concurrently for the whole coexistence period, but they no longer
   sit on top of each other: with the NATS bridge rejected ([§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)), each unit of work is driven
   by exactly one of them, and the retry-layering hazard is confined to §10's ported classifier
-  being expressed as `RetryPolicy` non-retryable types rather than as its own loop.
+  raising **non-retryable application errors** for its terminal verdicts rather than running a
+  retry loop of its own.
 
 **Risk explicitly named**
 
