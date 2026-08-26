@@ -208,7 +208,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   |---|---|
   | `4d27475` | §10 reviewed — porting mechanism corrected in all four places; list split into Group A (at risk of deletion) / Group B (at risk of silent semantic change); non-retryable made explicit for SSRF + bot walls; heartbeat obligation, webhook wire contract, webhook payload schema and the correctly-dissolved list added; `diff.py` separated from the content-hash; §7 and §13 gained the relocated findings |
   | `a40b89b` | handoff + `CLAUDE.md` brought level with the review; BUG-006's port requirement recorded in `CLAUDE.md` alongside its §13 home |
-  | *(this one)* | **doc consistency sweep** — four more files. See below |
+  | `1770b70` | **doc consistency sweep** — five more files + 31 broken links. See below |
 
   **The consistency sweep found two *reversed* decisions still being asserted as live guidance**,
   neither of them from this session's review — they had been stale since 2026-08-23 and were
