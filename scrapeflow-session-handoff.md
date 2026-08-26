@@ -66,7 +66,185 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-26) — **ADR-009 review is UNDERWAY. §10 reviewed. Next section: §11 (run state to the SPA).**
+- ## 📝 START HERE (2026-08-26, later session) — **ADR-009 review is UNDERWAY. §11 reviewed. Next section: §13 (the crawl coordinator).**
+
+  ### §11 (run state to the SPA) — reviewed 2026-08-26; **the first section with no factual error**
+
+  Every claim the section made was checked against live code and **all of them hold**:
+
+  | Claim | Verdict |
+  |---|---|
+  | `job_status`'s payload is a positional 3-field string that cannot be widened | ✅ — and widening fails **silently**: `job_notifier.py:51` catches the `ValueError`, logs "malformed", **drops the update** |
+  | `batch_status` already demonstrates the JSON pattern | ✅ |
+  | The mirror row is written anyway, so the notify is nearly free | ✅ |
+  | The Temporal Web UI is write-capable and not a dashboard | ✅ (§2b) |
+
+  So the decision stands as drafted — run state stays on **mirror row + `pg_notify`**, a
+  status-mirror activity replaces `result_consumer.py`, engine events are **not** streamed to the
+  browser, and pipelines get **their own JSON channel** rather than overloading `job_status`.
+  **All four findings are things the section did not say**, plus one live bug it inherits.
+
+  #### 🔴 1. The section named one writer. The contract it preserves has four. → **11a**
+
+  `job_status` is emitted from **four** files, and two are request handlers, not the background loop:
+  `result_consumer.py:579`, `quota.py:260`, **`routers/jobs.py:419`** and **`routers/admin.py:354`**
+  — the last two both cancellation, written and notified *inside the request*.
+
+  ✅ **Owner's call: keep two writers, exactly as today.** Routing cancellation through the workflow
+  would make Cancel *look broken*: the PM's rule is that a block is **never aborted mid-execution**,
+  so a run cancelled four minutes into an LLM block does not reach its next mirror point for four
+  minutes, where today the page greys out instantly. R5 forbids that regression.
+
+  ⚠️ **The accepted cost, and the reason it is now written down in three places rather than left to
+  the implementer: two writers on one status column fail SILENTLY.** The failure is a user
+  cancelling a run, watching it cancel, then watching it flip back to `completed` — with the work
+  done and charged. The single-writer alternative fails *loudly and harmlessly* (a sluggish button),
+  which is the better failure shape; it lost only because matching today's behaviour exactly is a
+  stated requirement.
+
+  > **The precedence rule: a cancellation written by the API wins. A mirror write must never move a
+  > run out of a terminal state it did not itself set.**
+
+  **It already exists on the job path and must be re-established, not invented:**
+  `result_consumer.py:613` checks `run.status == "cancelled"` **before anything else**, discards the
+  worker's result and re-notifies. The v2 mirror activity needs the same guard against
+  `pipeline_runs.status`. Now recorded in ADR §11a, in `CLAUDE.md`'s key-decisions table (its own
+  row — this is the "make sure we remember" item), and here.
+
+  #### 🔴 2. The socket gives up after 5 minutes; §15 deliberately creates runs silent for 2.6 hours. → **11b**
+
+  `jobs.py:745` waits for the next transition with a **300-second timeout**, then sends
+  `{"type":"timeout"}` and closes. Never mattered — a job run takes ~40s. It matters now:
+  §15 gives a Webhook block a delivery horizon of **≈2.6 hours** (`BACKOFF_SECONDS`
+  `[0, 30, 300, 1800, 7200]`), during which the status does not change. Monitors extend that to
+  **days**.
+
+  The frontend has no recovery: `JobDetail.tsx:81` is `ws.onclose = () => setWsLive(false)`, with
+  **no reconnect and no polling fallback**, and the react-query cache is invalidated only by a
+  *terminal* WebSocket message — which never arrives. So a pipeline parked at its webhook block goes
+  stale at **6m30s** and stays stale for the remaining two and a half hours; the eventual completion
+  notify fires into an empty room, because no subscriber is holding the queue.
+
+  ✅ **Owner's call: the client reconnects on any close that did not carry a terminal message. The
+  300-second timeout stays exactly as it is.** A server keep-alive was **rejected as the primary
+  fix**, on three grounds: it covers only **one** cause of a dead socket (not Traefik's idle cut, a
+  rolling deploy, or a closed laptop lid); it would make **BUG-009 invisible** — the browser would
+  receive heartbeats forever while receiving no status changes, where today's `timeout` at least
+  signals *something*; and it **cannot self-heal**, whereas a reconnect re-reads the row
+  (`jobs.py:734-739`) and **repairs every update missed while disconnected**.
+
+  Keeping the timeout is deliberate: alongside reconnect it stops being a defect and becomes **a
+  five-minute self-healing re-read**, a slow safety net under the fast push, at no server cost.
+  Two constraints: reconnect must **back off**, and must **honour close code 4029** —
+  `subscribe_job` refuses past `ws_max_connections_per_user`, so a loop that ignores it spins
+  against a wall. This is a small, accepted dent in the "zero frontend change" property.
+
+  #### 🔴 3. A failed mirror write. → **11c**
+
+  It is the only activity in a pipeline whose failure has **no effect on the work** — the scrape
+  still scraped, the LLM key was still billed — which is exactly why it invites a "best-effort,
+  don't fail the run" treatment. That is wrong here, because two decisions compose: §11 says don't
+  stream engine events (the app row is what the user sees) and **§2b** says the Web UI is not
+  exposed at all. Together, **the mirror row is the only window into a run that exists** — a run
+  whose mirror write failed completes, charges storage, fires its webhook, and shows as stuck at
+  `running` forever, indistinguishable from a hung run to anyone without cluster access.
+
+  ✅ **Owner's call: the run fails.** Under §3's decision that the app table is the read model, a run
+  whose state cannot be read is not a successful run.
+
+  #### 🔴 4. The payload has an 8000-byte ceiling, and overflowing it destroys the status write. → **11d**
+
+  `pg_notify` caps a payload at **8000 bytes** (documented Postgres limit; not measured — the local
+  Postgres container is down). Unreachable today (two UUIDs and a word; five integers and a URL) —
+  **this section's own JSON decision is what brings it into range.**
+
+  The failure lands in the worst place. The notify runs **inside the transaction that writes the
+  row**, which is what makes it trustworthy. So an oversized payload does not merely lose the
+  notification: **the transaction rolls back and the block's status was never written.** Realistic
+  trigger: a failed LLM block's error string, which is whatever the provider returned and can run to
+  kilobytes of JSON.
+
+  ✅ **Owner's call: identifiers and status values only — never error text, never content, never
+  anything user-supplied and unbounded.** The browser fetches detail over HTTP. This is §5's
+  references-not-payloads rule one layer down.
+
+  ✅ **Second rule, same call: absolute state, never deltas.** Temporal runs activities
+  **at least once**, so a worker that crashes after committing but before reporting success runs the
+  mirror activity again. A duplicated `status = completed` is harmless; a duplicated *"add one to
+  the completed count"* drifts. `batch_status` already sends absolute totals
+  (`result_consumer.py:345`) — **correct, but by accident**, and a per-block progress payload is
+  exactly where someone reaches for an increment.
+
+  #### 5. Scope note → **11e**
+
+  "Zero frontend change" is true **of the job path**. The pipeline lane still needs a channel, a
+  third listener on the `JobNotifier` connection, a third subscriber map and `subscribe_*` method,
+  a WebSocket route, and a page. Not a decision — recorded so the section is not read as cheaper
+  than it is.
+
+  ### 🔴 Filed against live code: BUG-009 — `JobNotifier` never reconnects
+
+  `JobNotifier` opens **one** dedicated asyncpg connection at API startup (`main.py:54` →
+  `job_notifier.py:36`), registers `job_status` and `batch_status` on it, and holds it for the
+  process lifetime. **There is no termination handler and no reconnect path** — `start()` is called
+  once, `stop()` closes it at shutdown, and nothing observes it dying in between.
+
+  So if that connection drops — a Postgres restart, a minor-version upgrade, a failover, an idle cut
+  — both subscriptions are gone for good and **every WebSocket in that API process goes deaf**:
+  the socket stays open, `pg_notify` keeps firing correctly with nobody listening, **and nothing
+  logs it.** Watchers sit until the 300s timeout; the page then shows a stale status until manually
+  refreshed. Masked today by frequent API restarts and 40-second runs.
+
+  ⚠️ **Not dissolved by Temporal** — §11 keeps this component and adds a **second channel** to the
+  same single connection, and §15/Monitors stretch watcher lifetimes from 40 seconds to hours and
+  days, which is when a blip actually gets a chance to happen.
+
+  ⚠️ **And §11b's client reconnect masks it without fixing it** — that repairs *the browser's view*
+  while the server-side listener stays dead, so the process degrades from push to a permanent
+  5-minute poll with **no operator signal**. §11b rejected a server keep-alive partly *because* it
+  would hide this bug; fixing only the client arrives at the same place by another road. The fix
+  needs all three: detect the drop, re-register **every** channel on a backoff, and **log loudly**.
+
+  Filed in `open-bugs.md` → **BUG-009**, and in `phase4-backlog.md` **§4** (survives Temporal, not
+  blocking it) alongside BUG-004 and BUG-006. **It does not jump the pre-Phase 4 queue**, which is
+  unchanged: **P6/BUG-005 → P8 (ledger) → P7 + BUG-007 together.**
+
+  ### Session close (2026-08-26, later session)
+
+  **Docs-only session — no code changed.** Files touched: `docs/adr/ADR-009-…` (§11 rewritten with
+  11a–11e; review log entry; date line), `docs/project/open-bugs.md` (BUG-009 writeup),
+  `docs/project/phase4-backlog.md` (BUG-009 → §4; ADR row updated; header date), `CLAUDE.md` (§11
+  summary + **a new key-decisions row for the two-writer precedence rule**), and this handoff.
+
+  All **22** ADR internal anchors re-verified after the rewrite — none broken. ⚠️ **The em-dash slug
+  trap bit again**, exactly as the last session predicted: a first checker reported **14** broken
+  anchors, all false. GitHub's rule is *lowercase → drop non-alphanumerics except spaces and hyphens
+  → replace each space with a hyphen*, and it does **not collapse runs of whitespace** — so ` — `
+  becomes `--`, and any checker that collapses whitespace calls every `§N. OQ-x — Title` anchor
+  broken. The last handoff recorded this; the checker was still written wrong. **If you write one
+  again: do not collapse.**
+
+  **What is blocking: nothing blocks §13.** Outstanding, unchanged from the previous session except
+  where noted:
+
+  1. **`temporal-full-migration.md` still contradicts the ADR** — its step 3 is the worker port (now
+     step 1), the line-314 diagram assumes the rejected NATS bridge, and the 339–351 retry
+     discussion describes a hazard that mostly no longer exists. ✅ Owner's call stands: **redraw in
+     ONE pass after the review closes.** 🔴 markers are in place so nobody implements from it
+     meanwhile. §10's review added §4 of that doc to the redraw list ("pure logic reused verbatim").
+     **§11 adds nothing to it** — that doc does not cover the SPA path.
+  2. **PRD-016 owes three things, all for one PM pass** (the Architect does not edit the PM's doc,
+     which is why they accumulate): (a) **§4's known exclusion** — "two extractions on one fetched
+     page" is *not* fixed by layer A, owed since 2026-08-10; (b) **two more R6 divergences from
+     §10** — a pipeline webhook payload has no `job_id`, and no `diff_detected`/`diff_summary` until
+     Monitors; (c) **two passages still reasoning from §8's reversed storage rule** (`PRD-016:697`,
+     `:802`) — ⚠️ low urgency, the conclusion survives and only the reasoning is stale.
+  3. **§13 is next** (the crawl coordinator migrates last, and a crawl is not a block) — it already
+     carries a rider added by the §10 review: **sitemap discovery must port to `httpx`, not
+     aiohttp**, the one do-not-delete item that is a *modification* rather than a copy, so a
+     faithful port is the failure mode. Then §14–§17.
+
+  ### Superseded: START HERE (2026-08-26) — §10 review
 
   ### §10 (the do-not-delete list) — reviewed 2026-08-26; the porting *mechanism* was not implementable
 

@@ -773,3 +773,89 @@ takes its bugs along; plumbing is replaced.
 - **P7 / crawl quota** — P7 adds quota counting to a lane that has never successfully completed a
   page. Worth knowing when sequencing: P7's accounting cannot be tested end to end until either
   this is fixed or the crawl migration lands.
+
+---
+
+## BUG-009 — `JobNotifier` never reconnects; one dropped connection silently deafens every WebSocket in the process
+
+**Severity:** Medium (live, silent; a stale dashboard rather than data loss — but with no signal
+that anything is wrong, and it gets worse under Phase 4's longer runs)
+**Discovered:** 2026-08-26 (reviewing ADR-009 §11, which preserves this mechanism and leans on it
+harder)
+**Status:** Open — pre-migration fix on live code. Not dissolved by Temporal: ADR-009 §11 keeps
+this component and adds a second channel to it.
+
+### What happens
+
+`JobNotifier` is the fan-out between Postgres and the browser. It opens **one** dedicated asyncpg
+connection at API startup (`main.py:54` → `job_notifier.py:36`), registers two `LISTEN` channels on
+it (`job_status`, `batch_status`), and holds it for the process lifetime. That connection is
+deliberately kept out of the SQLAlchemy pool, because a `LISTEN` connection must keep its
+subscriptions.
+
+**There is no termination handler and no reconnect path.** `start()` is called once at startup;
+`stop()` closes the connection at shutdown. Nothing observes the connection dying in between.
+
+So if that single connection drops for any reason — a Postgres restart or minor-version upgrade, a
+failover, an idle cut by a pooler or network device, a transient network fault — then:
+
+1. Both channel subscriptions are gone and are never re-registered.
+2. `pg_notify` still fires correctly from every writer; Postgres simply has no listener to deliver
+   to in that process.
+3. Every open WebSocket in that API process stops receiving updates. The socket itself stays open,
+   so the browser sees a healthy connection.
+4. Each watcher sits until its 300-second timeout (`jobs.py:745`), receives `{"type": "timeout"}`,
+   and the socket closes.
+5. The frontend does nothing with that (`JobDetail.tsx:81` — `ws.onclose = () => setWsLive(false)`),
+   and the react-query cache is invalidated only by a *terminal* WebSocket message, which never
+   arrived. **The page shows a stale status until the user manually refreshes.**
+
+**Nothing logs any of this.** There is no error, no warning, and no metric — the notifier simply
+stops receiving. The only symptom is "the dashboard stopped updating", reported by a human.
+
+### Why it has stayed hidden
+
+- The API pod restarts often enough (deploys, rollouts) that a broken notifier is usually
+  short-lived, and a restart silently repairs it.
+- A job run takes about 40 seconds, so a watcher's exposure window is tiny — the run almost always
+  finishes and closes the socket cleanly before anything drifts.
+- The failure looks exactly like "the job is still running", which is the normal state.
+
+### Why Phase 4 raises the stakes
+
+ADR-009 §11 decided to **preserve this mechanism** rather than stream engine events to the browser,
+and to add a **second notify channel** for pipelines on the same single connection. Two
+consequences:
+
+- More surface behind one connection — the pipeline channel dies with the job and batch channels.
+- **Much longer-lived watchers.** §15 gives a Webhook block a delivery horizon of ≈2.6 hours, and
+  Monitors (layer B) introduce durable sleeps measured in days. A watcher that used to be exposed
+  for 40 seconds is exposed for hours, which is when a connection blip actually gets a chance to
+  happen.
+
+### Interaction with §11's reconnect decision — this bug is *not* fixed by it
+
+ADR-009 §11b requires the **client** to reconnect on any non-terminal close, which does mask this
+bug: a browser that reconnects every 5 minutes re-reads the row and self-heals. **That is a
+mitigation, not the fix**, and the two must not be confused:
+
+- The client reconnect repairs *the browser's view*. The server-side listener stays dead, so the
+  API process degrades from push to a 5-minute poll, permanently, with no operator signal.
+- §11b explicitly **rejected a server keep-alive** partly *because* it would make this bug
+  invisible. Fixing the client and not the server reaches a similar place by a different road.
+
+### Fix sketch
+
+Not a design decision, so no ADR is owed — but three things belong in it: detect the drop
+(asyncpg exposes a termination callback), re-establish the connection **and re-register every
+channel** on a backoff, and **log loudly** when it happens, because today the failure is
+indistinguishable from silence. Worth checking whether any update can be lost in the gap between
+the drop and the re-`LISTEN` — `pg_notify` has no replay, so an update that fires while
+unsubscribed is gone; that is another argument for the client-side re-read in §11b.
+
+### Interactions
+
+- **ADR-009 §11** — filed by that review. §11 preserves this component, adds a channel to it, and
+  its 11b reconnect decision cites this bug as a reason not to use a server keep-alive.
+- **BUG-001 / BUG-005 / BUG-008** — same family: shipped, silently broken or silently degradable,
+  found by reading rather than by an alert. The recurring shape is a failure with no log line.

@@ -34,7 +34,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Draft** | 2026-08-04 | — | — |
 
 **ADR-009 is drafted and its section-by-section review is IN PROGRESS — it is not yet a decision.**
-**§1–§10 and §12 have been reviewed** (several reversed in the process); §11 and §13–§17 have not.
+**§1–§12 have been reviewed** (several reversed in the process); §13–§17 have not.
 The ADR's own **Review log** (top of the file) is authoritative for which sections are settled —
 prefer it over any summary, including this one. It records the Phase 4
 engine decision (Temporal), answers all **11** of
@@ -66,6 +66,18 @@ Three things in it that are easy to miss and expensive to rediscover:
   fail-closed allowlist that also reads exception attributes and, in Go, keys on which step raised
   the error. The rule is **the classifier decides; Temporal retries** — terminal verdicts raised as
   non-retryable application errors.
+- **§11 keeps TWO writers on the run-status column, and the precedence rule is load-bearing.**
+  Status reaches the browser as a row write plus `pg_notify` in the same transaction, and **both**
+  the background consumer and the API's own request handlers write and notify — `routers/jobs.py`
+  and `routers/admin.py` do it for cancellation, inside the request. That is preserved into v2 on
+  purpose (routing cancellation through the workflow makes the button appear dead for minutes,
+  since a block is never aborted mid-execution). ⚠️ **The failure mode is silent:** forget the rule
+  and a cancelled run flips back to `completed` with the work done and charged. **The rule — a
+  cancellation written by the API wins, and a mirror write never moves a run out of a terminal
+  state it did not itself set — already exists on the job path and must be re-established, not
+  invented, for pipelines.** Same section: notify payloads carry **identifiers and status only**
+  (`pg_notify` caps at 8000 bytes and shares the row's transaction, so an oversized payload rolls
+  the status write back) and **absolute state, never deltas** (activities are at-least-once).
 - **§5 partially departs from ADR-002 §8** (the MinIO path convention) for the v2 lane only.
 
 It will eventually **supersede parts of ADR-001/002/004** — the NATS subjects, fat-message schema,
