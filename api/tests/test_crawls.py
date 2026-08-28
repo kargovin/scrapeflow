@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.db import AsyncSessionLocal
-from app.models.crawl import Crawl, CrawlQueueItem
+from app.models.crawl import Crawl, CrawlPage, CrawlQueueItem
 
 
 @pytest.fixture
@@ -218,6 +218,48 @@ async def test_list_crawl_pages_other_user_returns_404(client, auth_headers, db_
         if c:
             await db.delete(c)
             await db.commit()
+
+
+async def test_list_crawl_pages_filter_accepts_running(client, auth_headers, bypass_ssrf):
+    """?status=running matches — "running" is what the coordinator writes mid-scrape."""
+    create_resp = await client.post(
+        "/crawls",
+        json={"seed_url": f"https://{uuid.uuid4().hex}.local/"},
+        headers=auth_headers,
+    )
+    crawl_id = create_resp.json()["id"]
+
+    async with AsyncSessionLocal() as db:
+        db.add(
+            CrawlPage(
+                crawl_id=uuid.UUID(crawl_id),
+                url="https://example.local/a",
+                depth=0,
+                status="running",
+            )
+        )
+        await db.commit()
+
+    response = await client.get(
+        f"/crawls/{crawl_id}/pages", params={"status": "running"}, headers=auth_headers
+    )
+    assert response.status_code == 200
+    assert [p["status"] for p in response.json()] == ["running"]
+
+
+async def test_list_crawl_pages_filter_rejects_processing(client, auth_headers, bypass_ssrf):
+    """?status=processing is rejected — nothing ever writes it, so it could only mislead."""
+    create_resp = await client.post(
+        "/crawls",
+        json={"seed_url": f"https://{uuid.uuid4().hex}.local/"},
+        headers=auth_headers,
+    )
+    crawl_id = create_resp.json()["id"]
+
+    response = await client.get(
+        f"/crawls/{crawl_id}/pages", params={"status": "processing"}, headers=auth_headers
+    )
+    assert response.status_code == 422
 
 
 # ---------------------------------------------------------------------------

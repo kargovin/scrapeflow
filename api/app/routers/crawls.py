@@ -21,6 +21,11 @@ logger = structlog.get_logger()
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
+# The values the coordinator actually writes to crawl_pages.status
+# (dispatcher.py sets "pending"; result_handler.py sets the other three).
+# Must track the writer — "processing" was accepted here but never written.
+_PAGE_STATUSES = frozenset({"pending", "running", "completed", "failed"})
+
 
 @router.post("", response_model=CrawlResponse, status_code=http_status.HTTP_201_CREATED)
 async def create_crawl(
@@ -113,7 +118,7 @@ async def list_crawl_pages(
         .offset(offset)
     )
     if page_status is not None:
-        if page_status not in {"pending", "processing", "completed", "failed"}:
+        if page_status not in _PAGE_STATUSES:
             raise HTTPException(
                 status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Page Status not valid",
