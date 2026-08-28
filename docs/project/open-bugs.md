@@ -432,7 +432,7 @@ latent rather than realised.
 
 ---
 
-## BUG-006 — Dependabot scans 3 of 6 dependency manifests; the unscanned half contains the only reachable instance of a live CVE
+## BUG-006 — Dependabot scans 3 of 7 dependency manifests; the unscanned majority contains the only reachable instance of a live CVE
 
 **Severity:** Medium (contained DoS vector — but the coverage gap behind it is the larger problem)
 **Discovered:** 2026-08-05, from a push-time Dependabot banner
@@ -443,9 +443,9 @@ in `phase4-backlog.md` §4)
 
 Two separate problems that were found together and are best fixed together.
 
-**1. Three of six dependency manifests are never scanned.** There is no
+**1. Four of seven dependency manifests are never scanned.** There is no
 `.github/dependabot.yml`, so the repository runs on default auto-setup. Every open alert is filed
-against one of three manifests:
+against one of the three manifests that has a lockfile:
 
 | Manifest | Open alerts |
 |---|---|
@@ -453,10 +453,22 @@ against one of three manifests:
 | `frontend/package-lock.json` | 21 |
 | `http-worker/go.mod` | 1 |
 
-**`coordinator/`, `llm-worker/` and `playwright-worker/` produce zero alerts** — not because they
-are clean, but because nothing looks at them. Each has a `pyproject.toml` carrying floor-only
-constraints (`aiohttp>=3.9.0`, `cryptography>=41.0.0`) and **no lockfile**. Three of the five
-Python services in the platform are unmonitored.
+**`coordinator/`, `llm-worker/`, `playwright-worker/` and `mcp/` produce zero alerts** — not
+because they are clean, but because nothing looks at them. Each has a `pyproject.toml` carrying
+floor-only constraints (`aiohttp>=3.9.0`, `cryptography>=41.0.0`) and **no lockfile**. **Four of
+the five Python services in the platform are unmonitored** — every one except `api/`.
+
+⚠️ **Corrected 2026-08-28 (ADR-009 §13 review): this bug undercounted its own scope.** It was
+filed as "3 of 6" and omitted **`mcp/`**, which has a `pyproject.toml`, no lockfile, and is the
+LLM-callable public surface (`scrape_url`, `get_result`, `list_jobs`). The true figure is **7
+manifests, 3 scanned**:
+
+| | scanned | unscanned |
+|---|---|---|
+| | `api/uv.lock` · `http-worker/go.sum` · `frontend/package-lock.json` | `coordinator/` · `llm-worker/` · `playwright-worker/` · **`mcp/`** |
+
+The undercount is the same shape as the bug itself — a manifest is invisible to the count for
+exactly the reason it is invisible to the scanner.
 
 **2. Because of (1), the one *reachable* instance of a live high-severity CVE is invisible, while
 the visible alert is for an unreachable copy.**
@@ -492,10 +504,11 @@ the image. The same is true of both Python workers.
 Two independent omissions that mask each other:
 
 1. **No `dependabot.yml`.** Default setup discovers a subset of manifests; nothing enumerates the
-   monorepo's six dependency roots.
-2. **No lockfiles outside `api/`.** Without a lock, there is no resolved version for a scanner to
-   compare against an advisory, and no reproducibility for the build either. The floor-only
-   constraints were adequate when these services were new and are not now.
+   monorepo's **seven** dependency roots.
+2. **No lockfiles outside `api/`, `http-worker/` and `frontend/`.** Without a lock, there is no
+   resolved version for a scanner to compare against an advisory, and no reproducibility for the
+   build either. The floor-only constraints were adequate when these services were new and are
+   not now.
 
 ### Severity assessment — deliberately not inflated
 
@@ -773,6 +786,15 @@ takes its bugs along; plumbing is replaced.
 - **P7 / crawl quota** — P7 adds quota counting to a lane that has never successfully completed a
   page. Worth knowing when sequencing: P7's accounting cannot be tested end to end until either
   this is fixed or the crawl migration lands.
+- **BUG-010 / ADR-009 §13a (2026-08-28)** — the blast radius of *this* bug is wider than "one
+  consumer is missing". Traced through for the §13 review: because nothing reads results,
+  `_process_crawl_result`, `_enqueue_url`, `_fetch_minio_bytes`, **link extraction and sitemap
+  discovery have all never run either**. Only `dispatcher.py` plus `check_completion` /
+  `enqueue_crawl_webhook` (which the dispatcher calls directly) have executed in production, so
+  **a crawl has never got past dispatching its seed page**. Two consequences: the crawl migration
+  is a **rewrite, not a port**, with no v1 run to diff against; and **BUG-010** — the unvalidated
+  SSRF path in sitemap discovery — is latent *because this component is dead*, so fixing or
+  replacing it is what exposes it.
 
 ---
 
@@ -859,3 +881,98 @@ unsubscribed is gone; that is another argument for the client-side re-read in §
   its 11b reconnect decision cites this bug as a reason not to use a server keep-alive.
 - **BUG-001 / BUG-005 / BUG-008** — same family: shipped, silently broken or silently degradable,
   found by reading rather than by an alert. The recurring shape is a failure with no log line.
+
+---
+
+## BUG-010 — URLs discovered *during* a crawl are never SSRF-checked, and no worker checks either
+
+**Severity:** High by shape, latent by accident — a crawled site can choose URLs the platform
+fetches from inside the cluster, and the response body is served back to the tenant. It has never
+fired only because the code path that reaches it is dead (**BUG-008**), and **the Temporal
+migration is what switches it on**.
+**Discovered:** 2026-08-28 (reviewing ADR-009 §13, which ports this file into a `CrawlWorkflow`)
+**Status:** Open. Part 1 is decided and lands with the crawl migration (ADR-009 §13d); part 2 is a
+separate cross-lane hardening item, not yet scheduled.
+
+### What happens
+
+The platform's rule is **check the URL once, at the front door.** `validate_no_ssrf` runs exactly
+twice, both inside the crawl-creation request, on the seed URL and the webhook URL
+(`api/app/routers/crawls.py:34-36`). After that:
+
+- the coordinator validates nothing — there is no SSRF check anywhere in `coordinator/`;
+- **no worker validates anything** — no SSRF check, IP-range test or `getaddrinfo` call exists in
+  `http-worker/`, `playwright-worker/` or `llm-worker/`. A worker fetches whatever URL its message
+  names.
+
+Two routes discover new URLs mid-crawl, and only one of them is guarded:
+
+| Route | Guard |
+|---|---|
+| Links extracted from a fetched page | `link_extractor.py:33` discards anything not on the seed's own origin — **guarded, by accident of a different requirement** |
+| Sitemap entries | `sitemap.py:39` takes them **verbatim from the target site's `robots.txt`**, `:45` fetches them, and `result_handler.py:180-185` enqueues them into `crawl_queue` with **no origin filter** (the include/exclude path filters apply only to extracted links) — **unguarded** |
+
+So the crawled site chooses. End to end:
+
+```
+user submits   https://evil.example/            → SSRF-checked, public, allowed
+evil.example/robots.txt says
+    Sitemap: http://169.254.169.254/latest/meta-data/...
+coordinator fetches it                           → unchecked   sitemap.py:45
+coordinator enqueues it                          → unchecked   result_handler.py:183
+a worker scrapes it, uploads the body to MinIO   → unchecked   no worker validates
+user reads it via GET /crawls/{id}/pages         → the response comes back out
+```
+
+The final step is what makes this a **read** primitive rather than a blind fetch: the response is
+persisted to the tenant's bucket and served through the normal API.
+
+### Why it has never fired
+
+`discover_sitemap_urls` is reachable only from `_process_crawl_result`, which runs only in
+`result_handler_loop` — the consumer that **has never existed in production** (BUG-008). No crawl
+has ever got past dispatching its seed page, so sitemap discovery has never executed.
+
+This is the inverse of the usual latent-bug note. The code is not latent because nobody hit the
+input; it is latent because the component is dead, **and reviving it is exactly what the crawl
+migration does.** Anything that fixes BUG-008 — or the `CrawlWorkflow` that replaces it — turns
+this on.
+
+### Fix — two parts
+
+**Part 1 — SSRF-check at frontier admission (decided; ADR-009 §13d).** The check belongs where a
+URL joins the queue, which is the one point all three discovery routes converge on (seed, extracted
+link, sitemap entry). A rejected URL is **skipped and the crawl continues** — not a crawl failure,
+because the user did not choose that URL and cannot fix it. The refusal is **terminal and never
+retried**, matching ADR-009 §10's rule for webhook SSRF refusals: retrying means re-resolving a
+hostname an attacker is actively rebinding.
+
+⚠️ Still open: whether sitemap entries are also restricted to the seed's origin the way extracted
+links are. The SSRF check stops the internal-address case; it does not stop a `robots.txt` pointing
+the crawl at an unrelated *public* site, which is a quota and attribution question rather than a
+security one. Legitimate sitemaps do occasionally cross subdomains, so this is a real trade-off.
+
+**Part 2 — a worker-side check (recommended, not scheduled).** The correct security position is to
+validate at the point of use: the worker is what opens the socket, and a check there covers every
+lane, including ones not yet built. It is **not** a substitute for part 1 — a worker cannot tell
+*"the user typed a bad URL"* (should 400 at creation) from *"a crawl discovered one"* (should skip
+a page and continue). Three things make it larger than it looks:
+
+1. **Two implementations in two languages** that must not drift — the risk
+   `playwright-worker/worker/robots.py`'s *"Mirrors the Go worker's internal/robots package"*
+   already carries.
+2. **DNS rebinding.** Resolving to check and then resolving again to connect leaves a window a
+   naive check narrows but does not close. Closing it means resolving once and connecting to that
+   IP with the `Host` header set — a real change to how the HTTP client is used, twice. This is why
+   webhook delivery re-validates on every attempt rather than trusting creation time.
+3. **A new terminal failure class**, which must be wired into each worker's transient/terminal
+   classifier at the same time, or Temporal will retry a policy refusal for the full retry horizon.
+
+### Interactions
+
+- **ADR-009 §13d** — decided part 1 and recorded part 2 as out of scope for the crawl migration.
+- **BUG-008** — the reason this is latent. Fixing or replacing that component exposes this.
+- **BUG-006** — same file, different problem. That one is the aiohttp dependency (`sitemap.py`
+  must port to `httpx`); this one is what the file *does*. Both must be handled in the same port,
+  and neither substitutes for the other.
+- **BUG-005 / BUG-009** — same family: shipped, silently broken, found by reading.

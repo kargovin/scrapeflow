@@ -34,7 +34,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Draft** | 2026-08-04 | — | — |
 
 **ADR-009 is drafted and its section-by-section review is IN PROGRESS — it is not yet a decision.**
-**§1–§12 have been reviewed** (several reversed in the process); §13–§17 have not.
+**§1–§13 have been reviewed** (several reversed in the process); §14–§17 have not.
 The ADR's own **Review log** (top of the file) is authoritative for which sections are settled —
 prefer it over any summary, including this one. It records the Phase 4
 engine decision (Temporal), answers all **11** of
@@ -45,7 +45,7 @@ Temporal path (**v2**) run side by side. Its inputs were
 `open-questions.md` **Q8** (the incident grounding the decision), and `open-bugs.md` **BUG-005**
 (the batch identity failure that grounds its run-identity and artifact-path decisions).
 
-Three things in it that are easy to miss and expensive to rediscover:
+Four things in it that are easy to miss and expensive to rediscover:
 
 - **§9 was REVERSED on 2026-08-23 — the NATS bridge (option (a)) is rejected**, and the three
   workers become Temporal activity workers in the **first** increment. ⚠️ *This entry previously
@@ -78,6 +78,19 @@ Three things in it that are easy to miss and expensive to rediscover:
   invented, for pipelines.** Same section: notify payloads carry **identifiers and status only**
   (`pg_notify` caps at 8000 bytes and shares the row's transaction, so an oversized payload rolls
   the status write back) and **absolute state, never deltas** (activities are at-least-once).
+- **§13 (reviewed 2026-08-28) — the crawl migration is a REWRITE, not a port, and `crawl_queue`
+  does NOT retire.** Two things there are easy to carry forward wrongly. First, BUG-008 is wider
+  than "one consumer is missing": because nothing reads crawl results, link extraction and sitemap
+  discovery **have never run either**, so a crawl in production has never got past dispatching its
+  seed page — and ⚠️ **§9's diff-against-a-v1-run pre-gate therefore does not exist for crawls and
+  cannot be made to exist.** Second, the draft's clause that the frontier table retires is
+  **withdrawn**: 51,200 history events over a 10,000-page ceiling is ≈5 per page against 3 for the
+  cheapest possible activity, and a 10,000-URL visited set is ≈800 KB against §5's 2 MiB payload
+  limit — so `continue-as-new` is mandatory in **both** candidate designs and **the frontier stays
+  in Postgres**, reached through activities. Also settled: **`crawl_pages` is required** (it is
+  P7's metering unit, §8d's ledger producer link, and the artifact's name), and **every URL
+  entering the frontier is SSRF-checked** — the `httpx` swap this section already required is the
+  smaller half of what is wrong in `sitemap.py` (**BUG-010**).
 - **§5 partially departs from ADR-002 §8** (the MinIO path convention) for the v2 lane only.
 
 It will eventually **supersede parts of ADR-001/002/004** — the NATS subjects, fat-message schema,

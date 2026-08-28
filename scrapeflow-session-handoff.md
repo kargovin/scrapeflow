@@ -66,7 +66,203 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-26, later session) — **ADR-009 review is UNDERWAY. §11 reviewed. Next section: §13 (the crawl coordinator).**
+- ## 📝 START HERE (2026-08-28) — **ADR-009 review is UNDERWAY. §13 reviewed. Next: §14–§17.**
+
+  ### §13 (the crawl coordinator) — reviewed 2026-08-28; the decision holds, but it described a **port** of code that has mostly **never executed**
+
+  Every factual claim the section makes is true — the aiohttp import, the httpx sibling, the
+  missing lockfile, and "a crawl is unbounded fan-out, not a linear step". So the decision stands:
+  the coordinator becomes a `CrawlWorkflow`, the service is deleted, it happens **after** jobs and
+  batches, and a Crawl block is **not** added to the pipeline catalog.
+
+  Four owner calls on what it did not say, one of which **withdraws a clause**.
+
+  #### 🔴 1. It is a rewrite, not a port — and BUG-008 is wider than "one consumer is missing" → **13a**
+
+  Traced through: because nothing reads results, **only the dispatch half of `coordinator/` has
+  ever executed.**
+
+  | file | has run | never run |
+  |---|---|---|
+  | `dispatcher.py` | dispatch loop, stalled-item recovery | — |
+  | `result_handler.py` | `check_completion`, `enqueue_crawl_webhook` (called from `dispatcher.py:156-158`) | `result_handler_loop`, `_process_crawl_result`, `_enqueue_url`, `_fetch_minio_bytes` |
+  | `link_extractor.py` | — | all of it |
+  | `sitemap.py` | — | all of it |
+
+  So **a crawl in production has never got past dispatching its seed page.** Queue items never
+  leave `dispatched`, so `check_completion` never fires either. `crawls`/`crawl_pages` being empty
+  is **what this looks like**, not evidence the feature is unused. The unit tests do not cover it
+  and never claimed to — they mock the DB and MinIO and call `_process_crawl_result` directly,
+  never `result_handler_loop`, which is where the defect lives.
+
+  ✅ **Owner's call: treat it as a rewrite; still last in the phase.** ⚠️ **The consequence worth
+  carrying:** §9's pre-gate — *run the new implementation and diff it against a v1 run of the same
+  URL* — **does not exist for crawls and cannot be made to exist.** There is no v1 crawl result.
+  Every other lane migrates with a reference implementation; this one migrates when the least v1
+  machinery is left to build one from, so **the compensating gate has to be built, not borrowed**,
+  and that belongs in the crawl step's own plan. Only two pieces are genuine ports — link
+  extraction (moves intact) and sitemap discovery (which 13d modifies).
+
+  #### 🔴 2. `crawl_queue` does NOT retire — the clause is withdrawn → **13b**
+
+  The draft deferred the frontier model (visited-set-in-workflow-state + `continue-as-new` vs
+  child-workflow-per-page) on the grounds that history size is the binding constraint and should be
+  measured. The constraint is right; **the deferral was too wide.** §5 already measured the limits
+  and the API already publishes the ceiling (`schemas/crawls.py:13`, `le=10000`):
+
+  ```
+  Temporal history ceiling      51,200 events
+  max_pages ceiling             10,000 pages
+  ⇒ budget per page             ≈5 events
+  cheapest possible page         3 events   (Scheduled / Started / Completed)
+                                            …before workflow-task overhead, timers, signals
+
+  visited set, 10,000 × ~80 B   ≈800 KB
+  §5 payload warn                256 KiB
+  §5 payload hard limit          2 MiB
+  ```
+
+  Two conclusions need no new measurement: **`continue-as-new` is mandatory in *both* candidate
+  designs** — so it never distinguished them and the either/or was already false — and **the
+  visited set cannot ride in a workflow argument.**
+
+  ✅ **Owner's call: the frontier and visited set stay in Postgres.** Temporal owns control flow,
+  durability and retry. Three consequences: the workflow reaches the frontier **through
+  activities** (§6's determinism rule forbids a workflow body reading the DB); the dedup mechanism
+  to preserve is an **index** — `idx_crawl_queue_url UNIQUE (crawl_id, url)` plus
+  `on_conflict_do_nothing` — not a separate "seen" collection; and what stays genuinely open is
+  only the **table's shape**, not the location.
+
+  #### 🔴 3. `crawl_pages` is required, not "may be kept for the UI" → **13c**
+
+  That sentence is untouched original text from `eb78146` (2026-08-04) and predates everything that
+  now leans on the table:
+
+  | date | decision | what it needs |
+  |---|---|---|
+  | 2026-08-08 | **P7** — crawls metered **per page** | a per-page row to meter |
+  | 2026-08-17 | **§8 reversal** — every stored object is charged | a producer for each charged object |
+  | 2026-08-25 | **§8d** — one shared ledger, producer by nullable FK | the FK target for a crawl artifact |
+
+  Plus one older than the ADR: **the artifact's name is the page row's id** —`dispatcher.py:120`
+  puts `crawl_page_id` into the message's `job_id` field so the ADR-002 §8 path convention
+  resolves. And P7's reclaim half needs to enumerate a crawl's objects; `crawl_pages.result_path`
+  is the only enumeration there is.
+
+  ✅ **Owner's call: `crawl_pages` survives.** Note its **missing size column is now correct**
+  rather than a gap — §8d put bytes on the ledger row and gave no lane its own marker.
+  ⚠️ **Deferred past Phase 4, product not architecture:** how a crawl is *presented* in the
+  dashboard. It is not a job and does not fit the job list; likely its own page. Recorded so the
+  table's survival is not mistaken for the UI question being answered.
+
+  #### 🔴 4. The httpx swap is the smaller half of what is wrong in that file → **13d**, and **BUG-010**
+
+  The platform checks a URL **once, at the front door.** `validate_no_ssrf` runs exactly twice,
+  both inside the creation request, on the seed and webhook URLs (`routers/crawls.py:34-36`). After
+  that the coordinator validates nothing, and **no worker validates anything** — no SSRF check,
+  IP-range test or `getaddrinfo` call exists in `http-worker/`, `playwright-worker/` or
+  `llm-worker/`.
+
+  Two routes discover URLs mid-crawl and **only one is guarded**: extracted links survive by
+  accident (`link_extractor.py:33` restricts to the seed origin), while **sitemap entries get
+  nothing** — `sitemap.py:39` takes them verbatim from the target's `robots.txt`, `:45` fetches
+  them, and `result_handler.py:183` enqueues them with no origin filter.
+
+  ```
+  user submits   https://evil.example/           → SSRF-checked, public, allowed
+  evil.example/robots.txt says
+      Sitemap: http://169.254.169.254/latest/meta-data/...
+  coordinator fetches it                          → unchecked   sitemap.py:45
+  coordinator enqueues it                         → unchecked   result_handler.py:183
+  a worker scrapes it, uploads the body           → unchecked   no worker validates
+  user reads it via GET /crawls/{id}/pages        → the response comes back out
+  ```
+
+  The last line makes it a **read** primitive rather than a blind fetch. ⚠️ **It has never fired
+  for exactly one reason: sitemap discovery is only reachable from `_process_crawl_result`, which
+  has never run.** This is the inverse of the usual latent-bug note — the code is not latent
+  because nobody hit the input, it is latent **because the component is dead**, and reviving it is
+  precisely what this section proposes.
+
+  ✅ **Owner's call: every URL entering the frontier is SSRF-checked at admission** — the one point
+  seed, extracted link and sitemap entry all converge on. A rejected URL is **skipped and the crawl
+  continues**; it is not a crawl failure, because the user did not choose that URL and cannot fix
+  it. The refusal is **terminal and never retried**, matching §10's webhook-SSRF rule — retrying
+  means re-resolving a hostname an attacker is actively rebinding.
+
+  ⚠️ **Still open, needed before the crawl step is built:** are sitemap entries also restricted to
+  the seed's origin, the way extracted links are? The SSRF check stops the internal-address case;
+  it does not stop a `robots.txt` pointing the crawl at an unrelated **public** site, which is a
+  quota and attribution question rather than a security one. Legitimate sitemaps do occasionally
+  cross subdomains, so this is a genuine trade-off, not a free tightening.
+
+  ✅ **A worker-side check was raised by the owner and is the correct point-of-use position** — the
+  worker opens the socket, and a check there covers every lane including ones not yet built. It is
+  **not** a substitute for the admission check (a worker cannot tell *"the user typed a bad URL"*,
+  which should 400 at creation, from *"a crawl discovered one"*, which should skip a page and
+  continue). **Filed as separate cross-lane work, not the crawl migration's to carry**, because it
+  is larger than it looks: two implementations in two languages that must not drift (the risk
+  `playwright-worker/worker/robots.py`'s *"mirrors the Go worker's internal/robots package"* already
+  carries); DNS rebinding that a naive check narrows but does not close, needing
+  resolve-once-then-connect-to-that-IP in both languages; and a new terminal failure class that
+  must be wired into each worker's classifier at the same time, or Temporal retries a policy
+  refusal for the full horizon.
+
+  ### 🔴 Filed against live code: BUG-010 — mid-crawl URLs are never SSRF-checked
+
+  Both halves above, in `open-bugs.md` → **BUG-010** and `phase4-backlog.md` **§4**. Part 1 (the
+  admission check) is decided and ships with the crawl migration; part 2 (worker-side) is
+  recommended and unscheduled. **It does not jump the pre-Phase 4 queue**, which is unchanged:
+  **P6/BUG-005 → P8 (ledger) → P7 + BUG-007 together.**
+
+  ### Also corrected, and one live fix shipped
+
+  - **BUG-006 undercounted itself.** Filed as "Dependabot scans 3 of 6 manifests"; the real figure
+    is **7 manifests, 3 scanned** (`api/uv.lock`, `http-worker/go.sum`, `frontend/package-lock.json`).
+    The unscanned set is **four, not three** — **`mcp/` was missing from its own list**, and it is
+    the LLM-callable public surface. The undercount has the same shape as the bug: a manifest is
+    invisible to the count for exactly the reason it is invisible to the scanner. Corrected in
+    `open-bugs.md` and backlog §4.
+  - **✅ Fixed on live code (`5c7fbdf`): the crawl page status filter accepted a value nothing
+    writes.** `routers/crawls.py` allowed `{pending, processing, completed, failed}` while the
+    coordinator writes `{pending, running, completed, failed}` — so `?status=running` returned
+    **422** and `?status=processing` always returned **empty**. Allowlist lifted to `_PAGE_STATUSES`
+    next to a comment naming the writer. 2 tests; **251 passing**. Safe to fix despite backlog §3
+    because §13c keeps `crawl_pages` and its read route.
+
+  ### Session close (2026-08-28)
+
+  | commit | what |
+  |---|---|
+  | `5c7fbdf` | **code** — crawl page status filter fix + 2 tests |
+  | *(this session's docs commit)* | §13 rewritten with 13a–13d; review log + date; BUG-010 filed; BUG-006 scope corrected; backlog, `CLAUDE.md` and this handoff brought level |
+
+  All **105** ADR internal links re-verified after the rewrite — none broken. The checker was
+  written **without whitespace collapsing**, per the trap the last two sessions hit: GitHub
+  lowercases, drops non-alphanumerics except spaces and hyphens, then replaces **each** space with
+  a hyphen — so ` — ` becomes `--`, and a checker that collapses runs calls every `§N. OQ-x — Title`
+  anchor broken.
+
+  **What is blocking: nothing blocks §14.** Outstanding:
+
+  1. **`temporal-full-migration.md` still contradicts the ADR** — step 3 is the worker port (now
+     step 1), the line-314 diagram assumes the rejected NATS bridge, and the 339–351 retry
+     discussion describes a hazard that mostly no longer exists. ✅ Owner's call stands: **redraw in
+     ONE pass after the review closes.** 🔴 markers are in place so nobody implements from it
+     meanwhile. ⚠️ **§13 adds to the redraw list:** that doc's crawl step is written as a port and
+     assumes `crawl_queue` retires — both now wrong.
+  2. **PRD-016 owes three things, all for one PM pass** (the Architect does not edit the PM's doc,
+     which is why they accumulate): (a) **§4's known exclusion** — "two extractions on one fetched
+     page" is *not* fixed by layer A, owed since 2026-08-10; (b) **two more R6 divergences from
+     §10** — a pipeline webhook payload has no `job_id`, and no `diff_detected`/`diff_summary`
+     until Monitors; (c) **two passages still reasoning from §8's reversed storage rule**
+     (`PRD-016:697`, `:802`) — ⚠️ low urgency, the conclusion survives and only the reasoning is
+     stale.
+  3. **One open item from §13 itself**, needed before the crawl step is built but not before
+     §14–§17: whether sitemap entries are **origin-restricted** like extracted links.
+  4. **§14 is next** (conditional execution → its own layer-A PRD), then §15–§17.
+
+  ### Superseded: START HERE (2026-08-26, later session) — §11 review
 
   ### §11 (run state to the SPA) — reviewed 2026-08-26; **the first section with no factual error**
 
