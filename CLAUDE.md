@@ -122,8 +122,11 @@ path (nothing ripped out).
   ⚠️ **Deployed code is `b110591`, and `develop` is now AHEAD of it by one code commit:** `5c7fbdf`
   (the crawl page status-filter fix, 2026-08-28) is **committed but not deployed and not on
   `main`** — the first code change since the last deploy, so "code on develop and main is level"
-  no longer holds. `develop` is **7 ahead of `origin/develop`** and `main` is **23 behind**;
-  everything else on top is docs. Deliberate — push and fast-forward when you want it live.
+  no longer holds. `develop` is **8 ahead of `origin/develop`** and `main` is **23 behind**;
+  everything else on top is docs. ⚠️ **Fast-forwarding `main` starts a push to the prod server — it
+  is a release, not bookkeeping. Do it only when asked.** ✅ Owner's call 2026-08-28: the crawl fix
+  is **held back deliberately**; the next prod deploy should carry Phase 4 work, with `5c7fbdf`
+  riding along.
 - **Engine: Temporal** (chosen over DBOS/Restate for portfolio value + Python/Go SDKs). Grounded in the **Q8** incident — the hand-rolled `result_consumer` state machine that caused a live feedback loop.
 - **Feature (nested layers):** user-defined **Pipelines** (scrape → clean → LLM → validate → deliver) → **Delivery sinks** (S3/DB/Sheet/email, saga rollback) → long-lived **Monitors** (durable sleep + human-approval, absorbing the dormant scheduled-crawl path).
 - **Rollout:** one product, two engines — route new work to v2 (Temporal), drain + cut v1 (NATS) per-flow when proven; reversible each step. End state retires `result_consumer`/`scheduler`/`webhook_loop`/`advisory`/`coordinator` + NATS, and makes the API thin/horizontally scalable.

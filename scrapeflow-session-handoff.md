@@ -242,9 +242,14 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   ⚠️ **Git state changed shape this session.** Every session since 2026-07-28 could say "code on
   `develop` and `main` is level and deployed at `b110591`, docs on top." **That is no longer true:**
   `5c7fbdf` is a code commit sitting on `develop`, **not deployed and not on `main`**. Current
-  state — `develop` is **7 ahead of `origin/develop`**, `main` is **23 behind `develop`**, deployed
-  code is still `b110591`. Deliberate, as in prior sessions; push and fast-forward when you want it
-  live, but note that this time it is not only docs that go live.
+  state — `develop` is **8 ahead of `origin/develop`**, `main` is **23 behind `develop`**, deployed
+  code is still `b110591`.
+
+  ✅ **Owner's call 2026-08-28: `main` is deliberately NOT fast-forwarded, and the crawl fix is
+  held back.** Pushing `main` starts a push to the prod server, so a fast-forward is a **release**,
+  not a bookkeeping step. The owner does not want a one-line status-filter fix deploying on its
+  own; **the next prod deploy should carry Phase 4 work**, with `5c7fbdf` riding along. So do
+  **not** fast-forward `main` as a tidy-up at the end of a session — wait to be asked.
 
   All **105** ADR internal links re-verified after the rewrite — none broken. The checker was
   written **without whitespace collapsing**, per the trap the last two sessions hit: GitHub
