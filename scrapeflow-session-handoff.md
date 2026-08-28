@@ -232,10 +232,19 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
   ### Session close (2026-08-28)
 
+  **Not a docs-only session** — the first code change since `b110591`.
+
   | commit | what |
   |---|---|
-  | `5c7fbdf` | **code** — crawl page status filter fix + 2 tests |
-  | *(this session's docs commit)* | §13 rewritten with 13a–13d; review log + date; BUG-010 filed; BUG-006 scope corrected; backlog, `CLAUDE.md` and this handoff brought level |
+  | `5c7fbdf` | **code** — crawl page status filter fix + 2 tests (full suite **251 passing**) |
+  | `e4a19fc` | §13 rewritten with 13a–13d; review log + date; **BUG-010** filed; **BUG-006** scope corrected (7 manifests, 3 scanned — `mcp/` was missing); backlog, ADR index, `CLAUDE.md` and this handoff brought level |
+
+  ⚠️ **Git state changed shape this session.** Every session since 2026-07-28 could say "code on
+  `develop` and `main` is level and deployed at `b110591`, docs on top." **That is no longer true:**
+  `5c7fbdf` is a code commit sitting on `develop`, **not deployed and not on `main`**. Current
+  state — `develop` is **7 ahead of `origin/develop`**, `main` is **23 behind `develop`**, deployed
+  code is still `b110591`. Deliberate, as in prior sessions; push and fast-forward when you want it
+  live, but note that this time it is not only docs that go live.
 
   All **105** ADR internal links re-verified after the rewrite — none broken. The checker was
   written **without whitespace collapsing**, per the trap the last two sessions hit: GitHub
@@ -1763,7 +1772,7 @@ backlogs under `docs/archive/phase3/`. The still-open deferred items are echoed 
 | 5 | Q1–Q4 close-out | ✅ **done 2026-07-28.** Verified against live code, not taken on trust — **Q2 landed as Option C (Postgres trigger), Q4 as Option B (`PATCH schedule_status`)**, both differing from the doc's recommendation. **Q8 closed alongside as do-not-fix**, so `open-questions.md` has no entry without a STATUS block |
 | 6 | **BUG-005 — batch broken on all three execution paths** | 🔴 **OPEN, filed 2026-08-04.** `job_id` is NULL for batch runs (correct per ADR-006) while both message schemas and the ADR-002 §8 artifact-path convention assume it is not. Playwright batch drops every message and hangs at `pending`; http batch collides all items onto `latest/.html` + `history//{ts}.{ext}` (cross-tenant); batch + LLM hangs at `processing`. Fixed pre-migration on the **Q6 precedent**. `open-bugs.md` → BUG-005 |
 | 7 | **P7 — crawls consume zero of all three quota meters** | 🔴 **OPEN, filed 2026-08-08** (decision ✅ owner-confirmed; implementation not started). Every meter is keyed on `job_runs`; a crawl never creates one, and `routers/crawls.py` has no quota check at all. A 10,000-page crawl costs **zero** runs, **zero** concurrent slots and **zero** counted bytes — 2.8–40 GB of artifacts against a 5 GB default. Nothing frees crawl artifacts either: deleting a user orphans them in MinIO. Per page for runs + storage, per crawl for concurrency; reclaim ships with counting; accounting starts at cutover. **Sequence after P6.** `phase4-backlog.md` §1 P7 · PRD-016 OQ-4 round 3 |
-| — | **§1 queue: 2 open (P6, P7)** | **Next: resume the ADR-009 section review at §8** (metering — already amended twice as a knock-on, and carrying the open multi-Scrape rider). §1–§7 + §12 are done — see the ADR's Review log, which is authoritative |
+| — | **§1 queue: 3 open — P6/BUG-005 → P8 → P7 + BUG-007** | ⚠️ **This table is a snapshot and goes stale first — `phase4-backlog.md` §1 is the source of truth.** P8 (the shared per-object storage ledger) was inserted between P6 and P7 on 2026-08-25. **Next: resume the ADR-009 section review at §14.** §1–§13 are done — see the ADR's Review log, which is authoritative |
 | — | BUG-004 — screenshots orphaned on every path | **new, filed 2026-07-22.** Worker uploads screenshot PNGs + publishes `screenshot_paths`; the API consumer never reads the field — never persisted, surfaced, quota-counted or deleted. Latent (`screenshots/` empty in prod). Parked in backlog §4; facet 1 is a **product call**, not a bug fix |
 
 ---
