@@ -113,6 +113,39 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   says so explicitly, so nobody reads "review complete" as "safe to implement against". Individual
   sections *are* settled; the **Review log** at the top of the ADR remains authoritative for which.
 
+  ### Also this session: ADR-009 condensed — the review log was 14% of the document
+
+  With the review finished, the **review log had become 476 lines of narrative** re-telling findings
+  the sections already state authoritatively. Verified before cutting: **every fact in it also
+  exists in the body** — a token sweep found 29 strings apparently unique to the log, and all 29
+  resolve to the same fact written in a section (`scheduler.py:131`, the three webhook meters,
+  `REJECT_DUPLICATE`, the `30 → 300 → 1800 → 7200` ladder, and so on).
+
+  ✅ **Replaced with a `## Review status` section carrying four tables**, and the metadata header
+  tightened around it:
+
+  | table | rows | what it is for |
+  |---|---|---|
+  | **Review log** | 18 | one row per section — date, verdict, and what changed, each linking into the section |
+  | ⚠️ **Reversed or withdrawn** | 11 | *"what it used to say → what it says now"* — the fastest way to catch a stale note |
+  | ⚠️ **Amended as a knock-on** | 8 | which sections a *later* section's review changed — how an "already reviewed" section still goes stale |
+  | **Left the ADR as filed work** | — | P7, P8, BUG-007…BUG-010, and the one live fix shipped mid-review |
+
+  **3,744 → 3,325 lines (−419, −11%)** with **no information lost**, and internal links went **185 →
+  204** because every table row now links into the section that holds the detail.
+
+  ⚠️ **What was deliberately NOT cut.** The eight `✅ Settled on review` blockquotes total only 103
+  lines and sit directly beneath the detail they summarise — that is the right home for a summary,
+  and they stay. Repeated facts across sections (BUG-005 ×15, the ≈2.6 h horizon ×15, the
+  light-worker rule ×6) were checked and left: each is a **cross-reference doing local work**, and
+  removing them would make sections stop being self-contained, which is worse than the repetition.
+
+  ⚠️ **Same redundancy now exists one level up, and was not touched:** `CLAUDE.md`'s ADR-009 bullet
+  and `phase4-backlog.md`'s ADR-009 row are both single paragraphs that restate the same findings at
+  similar length. `CLAUDE.md` is loaded into **every** session, so its copy has a standing context
+  cost. Both now point at the ADR's Review status block; whether to shrink them to *just* that
+  pointer is an open call, deliberately left to the owner.
+
   ### Session close (2026-09-05)
 
   **Docs-only session — no code changed.**
@@ -123,7 +156,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   | `docs/adr/README.md` | review status → **COMPLETE, still not a decision**; closing blocks flagged as having been the most stale |
   | `docs/project/phase4-backlog.md` | header entry; ADR row → **SECTION REVIEW COMPLETE**, closing-block summary appended |
   | `CLAUDE.md` | bullet header → review complete / still Draft; closing-block summary appended |
-  | this handoff | closing-blocks block; §17 demoted to superseded |
+  | `docs/adr/ADR-009-…` (2nd pass) | **review log 476 → 83 lines**, restructured as `## Review status` with four tables; metadata header tightened; 3,744 → 3,325 lines, no information lost |
+  | `README.md` · `phase4-backlog.md` · `CLAUDE.md` | "Review log" pointers → "Review status", naming the reversed/knock-on tables |
+  | this handoff | closing-blocks block; condensing block; §17 demoted to superseded |
 
   ✅ **Committed as `3e7f32e`.** Working tree clean apart from an untracked `tmp/architecture.md`,
   which predates this session (May) and was deliberately left alone.

@@ -1,523 +1,105 @@
 # ADR-009: Workflow Engine — Temporal, and the v1/v2 Coexistence Contract
 
-**Status:** Draft — **the section-by-section review by @karthik is COMPLETE as of 2026-09-05**
-(§1–§17 and both closing blocks). The document is **still Draft**: promoting it to Accepted is a
+**Status:** **Draft.** The section-by-section review by @karthik is **complete** (§1–§17 and both
+closing blocks, 2026-09-05) — but the document is **still Draft**: promoting it to Accepted is a
 separate owner decision and has not been taken. Until it is, do not implement against it and do not
-cite it as a decision in another document. Individual sections *are* settled — the **Review log**
-below is authoritative for which, and for what each review changed.
-**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed) · 2026-08-26 (§10 and §11 reviewed) · 2026-08-28 (§13 reviewed) · 2026-09-01 (§14 reviewed) · 2026-09-02 (§15 reviewed) · 2026-09-03 (§16 reviewed) · 2026-09-04 (§17 reviewed) · 2026-09-05 (closing blocks reviewed — **the section review is complete**)
-**Review log:** §1 taken as settled (engine decided pre-ADR). **§2 resolved 2026-08-08** — three
-open points closed in place (2a separate Postgres instance · 2b Web UI not exposed · 2c retention
-30 days). **§3 reviewed 2026-08-08** — two factual corrections applied (crawls are already an
-uncounted lane; the `storage_bytes` exemption was wrong — all three meters are blind to crawls,
-not two), plus the recount race named. Crawl metering answered by the PM (PRD-016 OQ-4 round 3)
-and wired into §3/§8 — **✅ confirmed by owner 2026-08-08**; no §3 item remains open.
-The workflow-ID format is **settled**: it stays user-free, and **§12 was reversed** to match
-(its "user identity in the workflow ID" claim is withdrawn — Temporal never parses the ID, so the
-property was never structural).
-**§4 reviewed 2026-08-10** — five corrections, two of them owner calls: **layer A validates a
-single chain in data flow as well as execution order** (data-flow fan-out is wanted but deferred
-post-Phase 4, and the PRD problem it leaves unfixed is now a recorded known exclusion), and **run
-inputs are config bindings restricted to per-type declared fields** (today only Scrape's `url`).
-Also corrected: block identifiers must be **stable across versions**, not merely immutable once
-assigned; the block-state column is **named** (`pipeline_run_blocks.status`) rather than asserted;
-and per-type config-schema versioning is acknowledged as the residual DSL cost. Knock-ons applied
-to **§5** (run-input scalars are an exception to "inputs are references") and **§8** ("final" =
-last block in execution order, pinned before fan-out can make it ambiguous).
-**§5 reviewed 2026-08-10** — decision upheld and strengthened. The payload figures are now
-**measured, not hedged** (256 KiB warn / 2 MiB error), which puts the *entire* BUG-003 page range
-past a threshold; the self-hosted config escape hatch is named as a trap that would undo §5 and
-§2c together. Two owner calls: the catalog splits into **content-producing (Scrape, Clean, LLM)
-and effect (Validate, Webhook)** blocks, with effect blocks passing their input reference through
-unchanged — **"one object per block" was false of two of the five types**, which §4's strict-path
-data flow turned into a correctness question; and **the run's result, and the charged artifact,
-are both the last *content-producing* block's output**, without which **R6's own gate pipeline**
-(ending in a Webhook) has no result and charges zero. *(The second half of that call — the charged
-artifact — was **superseded by the §8 review on 2026-08-17**; the result half stands.)* Second
-call: the intermediate-output
-retention window is **a product promise, not a free dial** — result never collected, collection
-per run not per block, collected renders as *collected*, and per-block status in the app DB
-outlives both Temporal retention and the window. Knock-on applied to **§8** (metering + GC rules).
-**§6 reviewed 2026-08-10** — decision upheld, **its stated reason replaced.** The replay argument
-was factually wrong (Temporal replays workflow *code* against recorded history, and **input
-arguments are part of that history**, so a definition passed in as an argument is pinned
-automatically); the described failure needs a workflow body that loads the definition from
-Postgres, which this section's own determinism rule forbids. The real basis is **semantic**: a run
-that executed the old shape cannot continue into a new one. Four previously unstated things now
-decided: the definition travels as a **workflow input argument**; the pinned version is recorded
-in **`pipeline_runs.pipeline_version_id`**; a pipeline with a run in flight **may be deleted and
-the run finishes** (deleting a definition is not a back-door cancel — the Q4 split again); and
-**run history holds the name** — delete with no runs frees it, delete with runs soft-deletes and
-409s on reuse. **Worker-code versioning promoted from a passing mention to an explicit deferral**
-(Worker Versioning is GA and Temporal's default; needs server-side enablement, so it is infra).
-**§7 reviewed 2026-08-10** — the section **under-covered its hardest case**, and gained a fourth
-mechanism. Mechanism 1 is now explicitly **pipelines-only**: a migrated job keeps its `job_runs`
-row *by requirement* (§3 makes that table a read-model mirror; R5 forbids user-visible change), so
-from **the job cutover** the covering set drops to mechanism 2 alone. Into that gap:
-**`_recover_stale_pending` (`scheduler.py:131`) re-publishes any `job_runs` row stale at `pending`
-past 10 minutes, to NATS, with no lane filter** — so a v2-owned run whose workflow has not started
-is dispatched to a v1 worker, and mechanism 2 never intervenes because no second *workflow* was
-started. Hence **mechanism 4: a lane marker on `job_runs`, written in the insert transaction,
-built at the job cutover** (✅ owner's call). Mechanism 2 also **over-claimed** — the default
-`WorkflowIdReusePolicy` is `ALLOW_DUPLICATE`, which permits a new execution once the prior one
-closes, so **`REJECT_DUPLICATE` must be pinned** for "once, ever". Two smaller: the
-`--retention work` reassurance covered only the safe half (**unacked** messages are the risk, tied
-now to §16's drain gate), and mechanism 3's **rollback ordering** is stated since §16 claims
-reversibility. Carried to §9: mechanism 1 is true of rows, not messages — under option (a) v2
-results land on `scrapeflow.jobs.result` where `result_consumer` is subscribed, with neither FK
-set, which is BUG-005's shape one lane later.
-**§8 reviewed 2026-08-17** — **the storage rule is reversed, and §5 is amended to match.**
-✅ Owner's call: **the meter measures bytes on disk.** Every object a run still holds is charged,
-on every lane, for as long as it is stored — replacing "only the final artifact is charged" and
-withdrawing §5's clause that the result and the charged artifact are the same object. §5 keeps
-*the result* (R3, permanence); §8 owns *what is charged*. The rule is simpler — it needs no notion
-of finality, so fan-out, effect blocks and shared objects stop being special cases — and it makes
-intermediate-output collection a **user-visible refund** rather than housekeeping. Knock-ons:
-screenshots become chargeable (BUG-004's other half), and the parity argument both sections leaned
-on was **factually inverted** — the job path charges the *scraped page*, not the LLM output.
-That trace surfaced **two unfiled defects on live code**, neither touched by the migration:
-hard delete decrements by the JSON while the HTML was what was added, so the counter is
-**permanently inflated by every deleted LLM job**, and **the scraped page is never deleted at
-all**. Root cause named: `_try_increment_storage`'s idempotency stamp is keyed on the **run**
-when it should be keyed on the **stored object**, so a redelivery and a genuinely second artifact
-are indistinguishable. ⚠️ **Left open at the time:** the `latest/` + `history/` dual write stores
-2× what the meter counts, so "charge what is stored" was not implementable until it was decided
-whether the convenience copy is chargeable *(**closed 2026-08-25 — charge one copy**; see the
-2026-08-25 entry below)*.
-Three more owner calls: **one submission = one concurrency slot on every lane** — which makes cost
-and contention disagree *in general* rather than only for crawls, and incidentally fixes
-`batch.py:46-47` admitting a 100-URL batch as 1 while metering it as 100; **a pipeline run parked
-on a durable timer does not hold its slot, while v1 lanes keep today's behaviour** — §3 and §15
-had contradictory definitions of "active" and §15's webhook horizon only survives under one of
-them; and **the PM's multi-Scrape rider is closed** — §4's single-chain data flow plus "Scrape
-consumes nothing" already makes a second Scrape unsatisfiable at Save, so the rider's premise
-("R1 fixes one run to one URL") was wrong even though its conclusion held, and the trigger to
-reopen is **multiple roots, not fan-out**. Because that guarantee is emergent from two rules
-stated pages apart, §8 now asserts it directly: **a layer-A pipeline has exactly one starting
-block, and it is a Scrape block.** Three gaps recorded rather than closed: the unit is now "one
-fetch **attempted**" (the meter never waits for a result, and a failed scrape already costs a run
-today) with **a retry explicitly not a new unit**; **`crawl_pages` has no accounted-at marker**, so
-the "counting starts at cutover, no backfill" promise has no mechanism on two of four lanes; and
-**per-run collection is safe only while no object is shared *between* runs** — v1's content-hash
-dedup already shares them, so Monitors will break it. §8d names two things no section owns: which
-component performs v2 accounting, and what happens when a pipeline hits the storage wall at its
-**last** block, after the user's LLM key has already been billed *(**both closed 2026-08-25** —
-see the entry below)*.
-**§9 reviewed 2026-08-23 — the decision is REVERSED: option (b) first, the NATS bridge rejected.**
-✅ Owner's call. The workers gain native Temporal activity entry points in the **first** increment;
-activities never dispatch through NATS. The draft's argument — keep workers untouched so an R6
-failure is unambiguously the model's fault — was sound in form and failed on four premises.
-**(1)** "Rewriting three workers" overstated the change by an order of magnitude: only ~10–22% of
-two files per worker is transport, and everything expensive (`blocking.py`'s 313 lines of bot-wall
-detection, the Patchright stealth setup, `formatter.go`, `llm.py`, the MinIO clients) touches NATS
-**not at all**. The Go worker's `processJob(ctx, job, fetcher) (string, error)` **already has the
-shape a Temporal activity wants**. **(2)** About half of what option (a) preserved — `ack_wait`,
-the 30s heartbeat, `max_deliver`, the nak ladder — exists *because* JetStream redelivers, so it is
-**deleted, not ported**; §10's genuine carry-forwards port identically under either option, so (a)
-bought nothing and kept the code alive in two places. **(3) The bridge is blocked, with a dead
-service in production proving it:** `SCRAPEFLOW` is `--retention work` (verified on the live
-stream), and a work-queue stream refuses a second consumer overlapping `api-result-consumer`'s
-claim on `scrapeflow.jobs.result`. The coordinator attempts exactly that at
-`result_handler.py:203`, and **`coordinator-result-consumer` has never existed** —
-`result_handler_subscribed` appears zero times in its log while the sibling `dispatch_loop_started`
-logs fine, because `main.py:82`'s `asyncio.gather(..., return_exceptions=True)` swallows the
-exception. The pod is healthy with half of itself dead; **no crawl has ever run in production**, so
-nothing surfaced it (BUG-005's shape — filed as **BUG-008**, disposition **will-not-fix on the NATS path**, backlog §3). The remaining answer, polling for the
-row `result_consumer.py` writes, puts **the Q8 component on the critical path of every pipeline
-run** — the thing this ADR exists to delete. Worse, a v2 result today is **destroyed, not ignored**:
-`db.get(JobRun, run_id)` misses, and the handler acks, which on a work-queue stream deletes it
-(§7 predicted "neither FK set"; the real failure is a step earlier and final). **(4)** "Workers
-unchanged" and "NATS must not retry" are **incompatible** — the retry lives in worker code
-(`worker.go:316`, `llm-worker/worker/worker.py:128`) and in per-consumer `max_deliver`, so
-neutralising it per-message is a worker change either way. The honest comparison was **a new bridge
-plus unchanged workers** vs **a thin permanent adapter plus unchanged worker logic**, where the
-bridge is the larger body of novel code, sits in exactly the area that produced Q5–Q8, and is
-deleted at the next step regardless. The gate survives via a **required pre-gate**: run the Scrape
-activity standalone and diff against a v1 run of the same URL, which is the isolation (a) claimed
-and cannot provide. Costs accepted: each worker runs as **two deployments of one image** during
-coexistence (mode flag, not one process serving both); three integrations rather than one bridge
-(two share a language, and (a)'s "one place" was illusory per premise 4); and ⚠️ **the Playwright
-container contract** — Xvfb then `exec python` as pid 1, never `xvfb-run` — must be preserved
-exactly, the riskiest part of the port. Sequence: **Go http-worker → LLM → Playwright**. Knock-ons:
-§16's sequence moves the worker port **from third to first**, §7's result-path carry-forward is
-**moot**, §2's "not in the first increment" is reversed, and the residual retry hazard is now only
-that §10's ported classifier must raise **non-retryable application errors** for its terminal
-verdicts, not run a loop of its own inside the activity. *(That constraint originally named
-`RetryPolicy` non-retryable error types; corrected on the §10 review — see below.)*
-**§8's two open blockers closed 2026-08-25 — no section review, four owner's calls on items §8
-and §8d had left unresolved.** (1) **The `latest/` copy is not chargeable**: every `history/`
-object is charged once, `latest/` is never charged and is deleted with the artifact it mirrors.
-`latest/` is kept as-is because v2 already drops it. That unblocks §8's storage rule and BUG-007.
-Settling it exposed a second defect — **an LLM job leaves four objects, not two**, since the
-scrape writes the job's format and the LLM always writes `.json`, so the two `latest/` keys differ
-by extension; hard delete derives **one** filename from `job.output_format` and therefore always
-orphans the other. The assumption underneath is *one artifact in one format per job* — the same
-per-run granularity error as the accounting stamp, in the deletion path. (2) **§8d's accountant is
-named: an activity in the workflow worker**, never the scraper workers, which keep ADR-001's
-no-DB rule — enforced by **task-queue routing** rather than by convention, since a scraper pod is
-never offered work on a queue it does not listen to. A periodic sweep was considered and
-**rejected as the primary counter** (it is a new hand-rolled loop, of the class this ADR exists to
-delete; a stale counter breaks the admission buffer; and it cannot attribute bytes without either
-a growing full-bucket join or moving tenant identity into the worker pods, where `user_id` appears
-in **zero** files today). The sweep is retained as **auditor** — reconciliation and §8c
-collection. (3) **The record is one shared per-object ledger, not per-lane**, with the design rule
-that **the meter reads `user_id` and `bytes` only**; the producer link is nullable FKs used solely
-by delete and collection. Per-lane tables were rejected because their failure is *silent* (a
-missing `UNION` arm returns a well-formed, too-small number — **which is P7**), while a shared
-table's failure is a **loud rejected insert**. The precedent cuts both ways and is named:
-`webhook_deliveries` is already a shared table whose closed `CHECK` structurally rejects the
-pipeline lane, which is exactly what the lane-blind meter rule avoids. Knock-ons: **§8b's
-per-lane accounted-at markers are withdrawn** (the ledger row is the marker for every lane, so
-"counting starts at cutover" holds by construction), **§3 is partly superseded for storage** (the
-counting view stays right for `monthly_runs`/`concurrent_jobs`, which count runs living in
-per-lane tables; bytes all land in one table keyed on the owner, so a storage arm of the view
-would be a layer over a table that needs none — **do not build one**), and **BUG-004's screenshots
-need no separate mechanism** — a stored object is a ledger row, so it is charged and deletable by
-the same path. (4) **At the wall: the run finishes and is charged; a headroom buffer refuses to
-start new runs near the limit.** v1's delete-the-result-and-fail is the wrong shape when the
-ceiling is hit at the last block after the user's own LLM key was billed, and admission-time
-checking cannot substitute because output size is not knowable in advance. ⚠️ **The buffer holds
-only while the largest single admitted run is smaller than it** — true for jobs and pipelines,
-**false for crawls**, which need per-page checks; the buffer's number stays an operator dial.
-**Sequencing knock-on recorded outside this ADR:** the ledger is **pre-migration** work, not
-Temporal-era — BUG-007 cannot be fixed without per-object accounting, and P7 needs per-page
-counting plus reclaim, which is the same table. Filed as **P8** in `phase4-backlog.md` §1, ahead
-of P7 and BUG-007.
-**§10 reviewed 2026-08-26 — the porting *mechanism* was not implementable, and the list was
-missing four items.** All findings accepted by the owner. **(1) 🔴 "the classifier becomes
-`RetryPolicy` non-retryable error types" is withdrawn**, in all four places it appeared (this log,
-§9, §10's table, Consequences). Temporal offers only a **denylist** of error type *names*, while
-the classifier is a fail-closed **allowlist** that additionally reads exception attributes
-(`APIStatusError` is transient at 429, terminal at 418; `S3Error` transient on `SlowDown`,
-terminal on `NoSuchBucket`) and, in Go, keys on **which step raised the error** (`*uploadError`,
-because a dead target site and a dead MinIO raise the same type). The cell asserted
-"non-retryable error types" and "fail-closed default preserved" simultaneously, which are mutually
-exclusive. Replaced by **the classifier decides; Temporal retries** — terminal verdicts re-raised
-as `ApplicationError(non_retryable=True)` / `NewNonRetryableApplicationError`, which is not the
-in-activity retry loop §9 warned against because it adds no second backoff, counter or ceiling.
-**(2) 🔴 The timeout figure was wrong.** "180s request timeout" conflated two budgets:
-`llm_warmup_max_wait_seconds` **is** 180, `llm_request_timeout_seconds` is **60 in `config.py`**
-and **180 in production**, set in the infra repo's `llm-worker.yaml`. Sizing start-to-close from
-the repo defaults yields 240s against a real requirement of ≈360s — short by two minutes, and
-failing *only* on cold starts. **(3) The section's risk model was miscalibrated and is now split
-in two.** Its opening claim — "these live inside code the migration removes" — is **false for
-three of five items**: `llm.py`, both `errors.py`, `errors.go` and `blocking.py` contain **zero**
-NATS calls (two comments between them), so nothing points a delete at them. Group A is at risk of
-**deletion**; Group B is at risk of **silent semantic change** under the new retry owner, which is
-a different danger needing a different instruction. **(4) Non-retryable is now an explicit
-three-part obligation**: classifier terminals, **SSRF failures** (today `exhausted` immediately
-and not counted as an attempt — a naive port turns that into ≈2.6 h of re-resolving a hostname an
-attacker is rebinding), and **bot walls / robots disallows**, which ⚠️ **never raise today** —
-`detect_block()` returns a verdict and the worker publishes `failed`, so the classifier has never
-seen a block and the two rows meet for the first time in the port. **(5) Four items added:** the
-**heartbeat obligation** (its NATS mechanism dies, the duty re-homes onto `activity.heartbeat()`;
-forgetting it fails the activity on every cold start, omitting `heartbeat_timeout` hides a dead
-worker for the full start-to-close), the **webhook wire contract** (HMAC-SHA256,
-`X-ScrapeFlow-Signature: sha256=<hex>`, success `< 300`, 10s, header always sent even with an
-empty secret — the most externally visible thing in the migration, and no test in this repo would
-catch a change), the **webhook payload schema** (with two fields that have no v2 source: a
-pipeline run has no `job_id`, and `diff_detected`/`diff_summary` are homeless until Monitors), and
-the **correctly-dissolved list** (terminal-status guard, schedule-drift base, `ack_wait`/
-`max_deliver`/nak ladder) so it is not re-derived. **(6) Two precision fixes:** the content-hash
-and `diff.py` are **not equally at risk** — `diff.py` is its own module and survives its caller's
-deletion intact, the hash is seven lines *inside* `result_consumer.py` — and **"pure logic reused
-verbatim" is false of the dedup branch**, which deletes the new object and repoints `result_path`
-at the **previous run's** object, the cross-run sharing §8 recorded as breaking per-run GC. Also:
-"the Scrape activity" → **"the Playwright scrape activity"**, since bot-wall detection exists on
-one lane only. **Two findings relocated by the owner:** the **scheduled-quota waiting room** to
-**§7** (a Schedule question — `scheduler.py` defers without advancing `next_run_at`, and no
-Temporal overlap policy reproduces that; left as a named open item because it pairs with §8's
-headroom buffer) and the **`httpx` requirement for `sitemap.py`** to **§13** (BUG-006's rider, the
-one do-not-delete item that must be *modified* rather than copied).
-**§11 reviewed 2026-08-26 — no factual error in the decision; four gaps closed and a live bug
-filed.** Every claim the section made was verified and holds: the `job_status` payload really is
-three colon-separated fields whose widening fails *silently* (`job_notifier.py:51` catches the
-`ValueError`, logs "malformed" and drops the update), `batch_status` really does already carry
-JSON, the mirror row really is written anyway, and the Web UI really is write-capable. The
-findings are therefore all things the section did **not** say. **(1) 11a — the section names one
-writer; the contract it preserves has four.** `job_status` is emitted from `result_consumer.py`,
-`quota.py` and **two request handlers** — `routers/jobs.py:419` and `routers/admin.py:354`, both
-cancellation. ✅ **Owner's call: keep two writers, as today.** Routing cancellation through the
-workflow would make the button appear dead for minutes, because the PM's rule is that a block is
-never aborted mid-execution; R5 forbids that regression. ⚠️ The accepted cost is that **two writers
-on one status column fail silently** when the precedence rule is forgotten — a cancelled run
-flipping back to `completed` with the work done and charged — so the rule is now stated in the
-section rather than left to the implementer: **a cancellation written by the API wins; a mirror
-write never moves a run out of a terminal state it did not set.** It already exists on the job
-path (`result_consumer.py:613`) and must be re-established, not invented. **(2) 11b — the socket
-gives up after 300s of silence, and §15 deliberately creates runs silent for ≈2.6 hours.**
-`jobs.py:745` times out and closes; `JobDetail.tsx:81` has **no reconnect and no polling
-fallback**, and the query cache is invalidated only by a terminal message that never arrives — so
-a pipeline parked at its Webhook block goes stale at 6m30s and stays stale, and the eventual
-completion notify fires into an empty room. Monitors extend this to days. ✅ **Owner's call: the
-client reconnects on any non-terminal close; the 300s timeout stays.** A server keep-alive was
-**rejected as the primary fix** — it covers only one cause of a dead socket (not Traefik idle cuts,
-rolling deploys or a closed laptop), it would make BUG-009 *invisible*, and it **cannot self-heal**,
-whereas a reconnect re-reads the row and repairs every update missed while disconnected. Keeping
-the timeout turns it from a defect into a five-minute self-healing re-read. **(3) 11c — a failed
-mirror write.** It is the only activity whose failure does not affect the work, which is why it
-invites best-effort treatment; but this section's "don't stream engine events" and §2b's unexposed
-Web UI compose into **the mirror row being the only window into a run that exists**. ✅ **Owner's
-call: the run fails.** **(4) 11d — the payload has an 8000-byte ceiling and overflowing it destroys
-the status write**, because the notify runs inside the row's transaction, so it raises and rolls
-back. Unreachable today; this section's own JSON decision brings it in range, with a failed LLM
-block's provider error string as the realistic trigger. ✅ **Owner's call: identifiers and status
-only — never error text or content**, which is §5's references-not-payloads rule one layer down;
-plus **absolute state, never deltas**, because activities are at-least-once and `batch_status`'s
-correct precedent is currently correct by accident. **(5)** The zero-frontend-change property is
-**scoped to the job path** and now says so. **Filed against live code: BUG-009 — `JobNotifier`
-never reconnects.** One asyncpg connection opened at startup, no termination handler, no reconnect;
-if it drops, every WebSocket in that process goes deaf permanently and silently. Pre-migration.
-**§13 reviewed 2026-08-28 — the decision holds; one clause withdrawn, and the section was
-describing a port that is really a rewrite.** The crawl still migrates to a `CrawlWorkflow`, still
-migrates last, and is still **not** a block. Four owner calls. **(1) 🔴 It is a rewrite, not a
-port.** BUG-008 is worse than "one consumer is missing": traced through, **only the dispatch half
-of `coordinator/` has ever executed** — `result_handler_loop`, `_process_crawl_result`, link
-extraction and sitemap discovery have all never run, so **a crawl in production has never got past
-dispatching its seed page**, and `crawls`/`crawl_pages` being empty is what that looks like rather
-than evidence of disuse. Its tests mock the DB and MinIO and call `_process_crawl_result` directly,
-never the loop where the defect is. Consequence now stated: **§9's pre-gate — diff the new
-implementation against a v1 run — does not exist for crawls and cannot be made to exist**, so
-"migrates last" costs the one lane with no reference implementation the compensating gate every
-other lane gets for free. **(2) 🔴 `crawl_queue` does NOT retire** — the clause is withdrawn.
-§5's measured limits and the API's own `max_pages` ceiling (`le=10000`) already decide it: 51,200
-history events over 10,000 pages is **≈5 events per page**, against **3** for the cheapest possible
-activity before any overhead, and a 10,000-URL visited set is **≈800 KB** against §5's 256 KiB warn
-/ 2 MiB hard limit. So `continue-as-new` is **mandatory in both** candidate designs (it never
-distinguished them) and the visited set **cannot ride in a workflow argument**. ✅ **The frontier
-and visited set stay in Postgres**; the workflow reaches them through activities, since §6's
-determinism rule forbids a workflow body reading the DB; and the dedup mechanism to preserve is an
-**index** (`idx_crawl_queue_url UNIQUE (crawl_id, url)` + `on_conflict_do_nothing`), not a
-collection. **(3) 🔴 `crawl_pages` is required, not "may be kept for the UI"** — that sentence is
-untouched 2026-08-04 text and predates P7 (per-page metering, 08-08), §8's storage reversal (08-17)
-and §8d's shared ledger (08-25), all three of which need it; it is also the **artifact's name**
-(`dispatcher.py:120` puts `crawl_page_id` in the message's `job_id` field). Its missing size column
-is now **correct**, not a gap, because §8d put bytes on the ledger row. How crawls are *presented*
-is deferred past Phase 4 as a product question. **(4) 🔴 The `httpx` swap is the smaller half of
-what is wrong in `sitemap.py`.** SSRF is validated exactly twice, both at creation
-(`routers/crawls.py:34-36`); the coordinator validates nothing and **no worker validates anything**.
-Extracted links survive that by accident (`link_extractor.py:33` restricts to the seed origin);
-**sitemap entries do not** — `sitemap.py:39` takes them verbatim from the target's `robots.txt`,
-`:45` fetches them, and `result_handler.py:183` enqueues them with no origin filter, after which a
-worker scrapes the target and the body is served back through `GET /crawls/{id}/pages`. A **read**
-primitive, not a blind fetch, and latent only because the component is dead — **the migration is
-what switches it on**. ✅ **Every URL entering the frontier is SSRF-checked at admission**, where
-all three discovery routes converge; a rejected URL is **skipped and the crawl continues**, never a
-crawl failure. Two riders: whether sitemap entries are also restricted to the seed origin is a real
-trade-off and **left open**; and a **worker-side check** — the correct point-of-use position — is
-recommended but **filed as a separate cross-lane item**, not the crawl migration's to carry.
-**Also corrected: BUG-006 undercounts itself** (7 manifests, 3 with lockfiles; `mcp/` missing from
-its list of unscanned services), and **one live fix shipped** — the crawl page status filter
-accepted `processing`, which nothing writes, and rejected `running`, which the coordinator does.
-**§14 reviewed 2026-09-01 — the decision is upheld unchanged; four gaps closed, and the section
-stated a sequencing decision in a notation that could not carry one.** Conditional execution still
-gets its own layer-A PRD, written before PRD-018, not absorbed into B. **(1) The ordering line
-mixed a shipped product, a document and a layer in one arrow chain**, so it could not distinguish
-when the follow-up PRD is *written* from when the feature is *built* — the two orders are now
-separated (14a), the build-after-A answer is moved here from PRD-016's Non-goals, where a
-sequencing fact did not belong, and the reason it is right is stated rather than assumed: **the
-cost gate has no consumer until something makes a pipeline recur, and layer A has no scheduling**,
-so building it in layer A means building for a consumer that does not exist. **(2) "C adds block
-types without extending what a pipeline can express" covered half of C.** The sink half is now
-*verified* rather than assumed — §5's effect blocks pass their input reference through unchanged,
-so multi-destination delivery is a chain and **C needs none of the data-flow fan-out §4 deferred
-past Phase 4**. **Saga rollback was not examined at all**: it is a run shape, not a block type, and
-`pipeline_run_blocks.status` (then `pending`/`running`/`completed`/`failed`/`skipped`; `waiting`
-was added later, by the §15 review, and does not help here) has **no value for "succeeded, then
-undone"** — the schema-change-plus-backfill trap §4 deliberately avoided for
-B, aimed at the layer cleared to start **soonest**. PRD-017 must settle it **before C starts, not
-during**. **(3) The "cost is low" list is entirely about wiring** — named references, stable
-identifiers, graph storage, `skipped` — and says nothing about the follow-up PRD's hardest
-question, **what a condition is allowed to say**, which runs into PRD-016's expression-evaluator
-non-goal and, harder, into replay determinism: branching is an `if` in the workflow body, which is
-the code Temporal replays, so a condition that answers differently on replay corrupts a run at an
-unrelated pod restart. **The Validate block is the precedent** (declarative vocabulary, deterministic
-by construction) and belongs in the brief. Recorded as *not* open: the monitor supplies the gate's
-comparand, and §4 already made widening the bindable-field list additive. **(4) The deliverable this
-section creates has no number, no `phase4-backlog.md` row and no recorded obligations**, while
-PRD-017 and PRD-018 have all three — which is the visibility this section's own argument is made
-of; a nameless PRD is only marginally better off than an absorbed one. ⚠️ Its **number is left
-open**: creation order gives PRD-019, which reads as *after* PRD-018 in every index while being
-required before it. Also flagged, found while checking the ordering claims: **`workflows-scoping.md`
-is stale in three places and its own banner flags two** — §4A still lists `branch` in layer A's block
-catalog, §5's roadmap has no conditional step, and ⚠️ **§6 still recommends option (a)**, the NATS
-bridge **rejected and found blocked** by the §9 review on 2026-08-23. That third one reads as a live
-recommendation to build the rejected design; 🔴 marker now, redraw with `temporal-full-migration.md`
-after the review closes.
-**§15 reviewed 2026-09-02 — the decision is upheld, but two of its supporting statements could
-not be built as written, and four things it did not say are now settled.** Option (c) stands: the
-Webhook block waits for real delivery, and the rejections of (a) and (b) hold — (b)'s two `CHECK`
-constraints and the `run_id` FK into `job_runs` were verified against the model, and the ≈2.6 h
-figure was verified **against production** (`WEBHOOK_MAX_ATTEMPTS: "5"` in the infra repo matches
-`settings.py`), checked deliberately because §10 found exactly that trap on the LLM timeout.
-**(1) 🔴 The concurrency argument that answers the PM's only objection had no column to read.**
-§8's rule — a run parked on a durable timer is not active — has to execute as a SQL predicate,
-and a webhook mid-backoff and an LLM call in flight are **the same row**: §4's block vocabulary
-had no waiting value and its run vocabulary is three terminal outcomes. So the objection arrives
-anyway (five parked runs lock a user out of five slots for 2.6 h). The tempting fix — *"a running
-Webhook block does not count"* — is **wrong, not merely fragile**: every layer-C sink delivers to
-user-owned S3, databases and mail servers, exactly as unavailable as a webhook receiver, so a
-type-aware predicate would count a parked S3 sink and not a parked webhook, failing in the
-direction that locks the user out. ✅ **Owner's call: `waiting` is pre-admitted to
-`pipeline_run_blocks.status` now** (the `skipped` precedent — Monitors will park a run on a sleep
-belonging to *no* block, which the category rule cannot cover), **and §5's content-producing /
-effect split decides which blocks may enter it.** §4 and §8 amended to match. ⚠️ This is the
-**third** missing value found in that vocabulary in three sessions (`skipped`; "succeeded then
-undone" at §14; `waiting` here), and the last two share a cause — the vocabulary describes a
-block's progress while both callers need what the run is doing with resources.
-**(2) 🔴 "Reproduces today's behaviour exactly" is withdrawn** — it contradicts this section's own
-first bullet. Today's backoff is an explicit list (`30 → 300 → 1800 → 7200`, ratios ×10/×6/×4, not
-geometric) and a Temporal retry policy takes four numbers with **no interval list**. Closest fit
-(initial 30s, ×10, ceiling 7200s, 5 attempts) preserves the attempt count and drifts attempts 4–5
-by ~20 min for a ~13% longer horizon; reproducing the list exactly requires explicit sleeps around
-a non-retrying activity, which rebuilds the delivery loop in the workflow — the thing the section
-says it is not doing. Retry policy kept, drift recorded, "exactly" gone, so an unqualified claim
-is not quoted back during the R6 comparison. **(3) The horizon lives in one of four nested
-timeouts set in three files, and the smallest silently wins** — POST 10s < `start_to_close` ~20s <
-`schedule_to_close` ≥ 2.6 h < the run's R4 time budget. Two silent failures named: putting 2.6 h
-on `start_to_close` (one hung POST for 2.6 h, one attempt instead of five) and a reasonable-sounding
-*"no run may exceed one hour"* set elsewhere, which is **Q6's exact shape** — R4 already requires
-budgets to compose, and this is the first concrete place they must. **(4) Cancellation collides
-with the PM's never-abort-mid-execution rule**, which was priced when blocks lasted minutes: a run
-cancelled at 14:05 keeps POSTing until 16:35 and then tells the customer's system it finished.
-✅ **Owner's call: the API sends a cancel to the workflow *in addition* to writing the row**
-(row first, signal best-effort, so §11a's instant UI is untouched), with a re-check at each backoff
-boundary as the fallback — the fallback alone only turns 2.6 h into 2 h. Not webhook-specific:
-Monitors' multi-day sleeps are the same problem. **(5) "No `webhook_deliveries` row for v2" removes
-live capability and blinds three meters.** ✅ The two admin endpoints (`admin.py:367`, `:387` —
-list and manual re-fire) become **job-lane-only by design**, accepted because manual retry mattered
-only while failure was invisible and under (c) the run itself fails in the user's own list. ⚠️ But
-`webhook_deliveries_pending`, `webhook_deliveries_exhausted` and `webhook_delivery_success_rate_7d`
-read that table with **no lane filter**, so the dashboard will report **100% webhook success while
-every pipeline delivery fails** — BUG-005's and P7's shape exactly, and the reason §3 moved run
-counting onto a view. Declining the feature is fine; leaving a lying meter is not, and the fix is
-naming. Also withdrawn: *"and the Web UI shows it"* — §2b does not expose it. **(6) The
-failure-notification obligation has no home.** Today any failure notifies
-(`result_consumer.py:563–575`); in a pipeline an early terminal failure stops the chain and nobody
-is told. PRD-016 handed that to "when conditional execution is settled" — and §14, one session
-earlier, created that PRD and enumerated its obligations **without it**. Sharpest form: a job saved
-with `webhook_events: ["job.failed"]` has **no expressible layer-A pipeline equivalent at all**.
-Added to the conditional-execution PRD's obligations. Plus one rider: **SSRF refusal must be raised
-non-retryable** (§10's second obligation lands here) and now **fails the run**, unlike today.
-**§16 reviewed 2026-09-03 — the decision is upheld; the *instructions* were stale in five
-places, three of them addresses that had silently moved.** Coexistence stands exactly as drafted:
-Temporal comes up alongside NATS, pipelines are v2-only from day one (layer A **adds** a lane
-rather than splitting one), flows cut over individually, deletion is last and gated.
-**(1) 🔴 The sequence was renumbered by the §9 review and the references into it were not.** §16
-said *"migration step 2, when jobs move to `JobWorkflow`"* and twenty lines later listed a sequence
-in which step 2 was the worker port and jobs were step 4; §7 anchors mechanism 4 — the lane marker,
-a schema change — to "step 2" five times, §2d to "steps 2–3", and `temporal-full-migration.md`
-still carries its own unrenumbered 7-item list whose step 2 is the *rejected* NATS bridge. The
-failure is silent in both directions (build the marker where it is inert, or arrive at the job
-cutover believing it was done). ✅ **Owner's call: the sequence is named, not numbered** — engine up
-· worker port · pipeline lane · job cutover · batch and crawl cutover · schedule and webhook
-cutover · consumer deletion · NATS removal · API thinning — and every cross-reference names a step.
-§7 and §2d corrected in place. Also: "four of the seven steps" counted a nine-item list.
-**(2) 🔴 The drain gate was described here as a deletion gate, while §7 already asserts it is a
-cutover gate too** and says so in those words — one section was never amended, and the unamended
-one is the contract an implementer works from. The risk is the **unacked** message: routing a flow
-to v2 does not recall a message already on the stream, so a v1 worker consumes it, scrapes again,
-bills the user's own LLM key again, and its result returns to `result_consumer.py`, which resolves
-the run by id and overwrites the state of the run Temporal is executing. **None of §7's four
-mechanisms reaches it** — mechanism 4 in particular cannot, because workers hold no DB access
-(ADR-001) and cannot read a lane marker. ✅ **The gate now fires at every flow cutover as well as at
-deletion.** Residual recorded, not solved: §11a's precedence rule guards a cancellation and
-`result_consumer.py:613` guards `cancelled`; neither refuses a stale v1 result for a run the other
-lane owns. **(3) 🔴 Obligation 2 borrows a user-facing switch, and a live meter reads it.**
-`schedule_status` is user-writable (`schemas/jobs.py:114` → the generic setattr loop at
-`routers/jobs.py:465`, no lane awareness) and is counted by `admin.py:494` →
-`active_recurring_jobs` → `UsageStats.tsx:67`, rendered today. So migrating recurring jobs makes
-the admin tile count **down toward zero while every one of them still fires** — the fourth
-instance of this defect in this ADR (BUG-005, P7, 15e) and **the first caused by an instruction in
-it** — and a user may `PATCH {"schedule_status": "active"}` at any time, re-arming **both lanes**,
-which is the double scrape and double LLM bill R5 requires be structurally prevented. ✅ Recorded
-as obligations of the schedule and webhook cutover; the meter fix is **naming, not features** (15e
-precedent). ⚠️ Dormant is not safe: there are no scheduled jobs in production, so the tile reads 0
-before and after — 13d's shape — and Monitors is entirely about recurrence. **(4) "Every step is
-reversible" is false for the increment that ships first.** §16's own routing rule says pipelines
-have no v1 implementation, so a broken pipeline falls back to being *switched off*, not to v1. The
-section recorded the favourable half of "adds a lane" (no double-execution risk) and stated a
-blanket promise the same fact contradicts. ✅ **Narrowed: reversibility is a property of migrated
-flows.** Consequence for planning — R6 runs on a lane with no fallback, which makes §9's standalone
-pre-gate a requirement rather than a nicety, and is 13a's crawl exposure arriving one lane earlier.
-**(5) The sequence starts after work this ADR moved in front of it.** P6, **P8** (the shared
-storage ledger — the v2 charging activity has no table without it) and P7 (crawls join the counting
-view — without which pipeline runs consume no meter *by construction*, P7's own bug on a new lane)
-all precede "engine up". §8d moved the ledger to pre-migration on 2026-08-25, two days *after* the
-sequence was last touched. ✅ **The pre-migration queue is the sequence's entry condition**:
-P6 → P8 → P7 + BUG-007, then engine up; `phase4-backlog.md` §1 remains its source of truth.
-**§17 reviewed 2026-09-04** — the **deferral stands** (the earlier contracts keep their authority
-while v1 serves their flow, and the supersession notices wait), and it is now stated as **this
-ADR's own call**: the index defines *how* a notice is written, never *when*, because no previous
-supersession here replaced a contract that stayed live afterwards. Six corrections, none to the
-decision. **(1)** The ADR-001 entry listed *"§2 subjects, §3 schemas, §8 MinIO paths"* — word for
-word the three sections **ADR-002** superseded on 2026-04-02, so it was a copy of that notice
-rather than an assessment, pointing at a document that no longer owns those decisions and missing
-**all four sections of ADR-001 that are still authoritative**. Two are deleted (§5 ack timing, §6
-retry), §7 is **contradicted by name** (it says no cancellation signal is ever sent to NATS or the
-worker; §15d has the API signal the workflow), and §4 is **split** — its retry and status-update
-rows go, while *"Worker dependencies: NATS + MinIO only. No database access."* **survives
-permanently** and is depended on three times in this ADR (§9 keeps it, §8d enforces it through
-task-queue routing, and 16b's residual risk exists *because* a v1 worker cannot read the lane
-marker). ✅ The list is rebuilt per section and §4 gets a **partial** notice naming the surviving
-rule. **(2) 🔴 The §5 departure cited "ADR-002 §8", which is not a section that exists** — ADR-002
-has six sections and its MinIO Path Convention is **§4**; §8 was *ADR-001's* number, carried along
-when ownership moved. Wrong in **16 places across six files**, including `open-bugs.md`, which is
-what P6 is implemented from. ✅ Corrected everywhere it is a live instruction; the archived handoff
-blocks are left as the record. **(3)** *"When the corresponding v1 component is deleted"* does not
-resolve: ADR-004 belongs to the **stream**, not a component, and dies at the **batch and crawl
-cutover** — before either deletion step — while ADR-001 §4's light-worker rule has **no deletion
-event at all**. ✅ The scope table **names a step per row** (16a's lesson, one section later), and
-leaves the cell empty where a contract survives. **(4)** *"For as long as v1 serves traffic"* was
-one global switch on a per-flow migration — after the job cutover ADR-002 is authoritative for
-batch and crawl and not for jobs. ✅ Authority is **per flow**. **(5) ⚠️ ADR-001 §6 and ADR-002 §6
-are already false of live code** — both say there is no application-level retry loop in the worker,
-and all three workers have had one since Q5/UF-003 (`llm-worker/worker/worker.py:107`/`:128`,
-`playwright-worker/worker/worker.py:259`/`:281`, `http-worker/internal/worker/worker.go:308`/`:316`).
-Predates this ADR; recorded as a known divergence rather than protected as accurate, since ADRs are
-not edited to match drifted code. It also reframes §10: the ported classifier moves a retry decision
-that **already lives in the workers** onto a new engine — continuity, not a new hazard. **(6) 🔴
-ADR-005 and ADR-006 appeared nowhere in this ADR**, though §13 decides all four of ADR-005's
-sections — **two of them upheld by name** (`crawl_queue` stays, `crawl_pages` is required), which is
-precisely what 13b found people assume otherwise. ✅ Both in scope; the section is renamed
-*Relationship to the earlier ADRs* so the list is not fixed in the heading, and ADR-003/007/008 are
-stated as unaffected rather than left to inference.
-**Closing blocks reviewed 2026-09-05 — this completes the section review.** Neither block had been
-reviewed in its own right; both had only been amended as knock-ons when other sections happened to
-touch them, so what was stale is exactly what no review reached in passing — **16a's failure mode
-applied to the summary**, which is read far more often than the sections it summarises. Fourteen
-corrections, no decision changed. **Consequences:** *"the Q8 class cannot occur"* is **narrowed** —
-Temporal owns the workflow's state machine, not `pipeline_runs.status`, where §11a keeps **two
-writers** on purpose with a silent failure mode, and 16c found a second overloaded flag created by
-an instruction in this ADR (C1); the Q6 **mechanism** goes with NATS while 15c's four-timeout ladder
-is the same **shape** one layer up (C3); 🔴 the Web UI bullet promised a dashboard **§2b does not
-expose** — the identical overclaim had already been withdrawn from §15's first bullet on review and
-survived here only because this block was never reviewed (C2); 🔴 *"each unit of work is driven by
-exactly one of them"* is narrowed to **migrated** flows, because 16b found the unacked-message window
-where a v1 worker executes a run v2 already owns (C4); the two-language cost is restated at §9's
-actual price — two deployments per worker, three integrations, and the **Playwright container
-contract** as the riskiest item in the port (C5); **§11a's two writers are added to *Paid*** as the
-clearest permanent cost the review produced (C6); the gate is renamed to the **drain gate**, firing
-at cutover as well as deletion (C7); and the single named risk becomes **three**, adding 16d's
-no-fallback first increment and 13a's lane with no reference implementation (C8).
-**Deferrals:** 🔴 the crawl-frontier row described a question 13b closed — the frontier stays in
-**Postgres**, `continue-as-new` is mandatory in *both* candidates so the either/or was already false,
-and only the table's **shape** is open (D1); 🔴 run-failure notification is **no longer unassigned** —
-15f gave it to the conditional-execution PRD (D2); 🔴 **`crawl_pages` is required on the v2 lane**,
-not a v1 audit mirror, so it leaves that row and only `webhook_deliveries` remains (D3); the
-conditional row regains 14a's **written-vs-built** distinction and 14d's missing PRD number (D4);
-**two explicitly-named open items were absent from the table of open items** — §7's scheduled-quota
-waiting room and 13d's sitemap origin question — and are added (D5); and namespace-per-tier's trigger
-widens to **isolation as well as contention**, per §12's reversal (D6).
-**The section review is finished.** §12 was reviewed and reversed. What remains is not review work:
-promoting the document to **Accepted** is an owner decision, and `temporal-full-migration.md` is owed
-its one-pass redraw.
+cite it as a decision elsewhere. Individual sections *are* settled; the review log below says which,
+and what each review changed.
+**Date:** drafted 2026-08-04 · reviewed 2026-08-08 → 2026-09-05 (per-section dates below)
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
 comparison), `docs/project/temporal-full-migration.md` (change inventory + sequence),
 `docs/project/open-questions.md` **Q8** (the incident), `docs/project/open-bugs.md` **BUG-005**
 **Supersedes:** nothing yet — see [§17](#17-relationship-to-the-earlier-adrs).
+
+---
+
+## Review status
+
+**Reviewed:** 2026-08-08 → 2026-09-05, section by section. **Each section holds its own findings**
+— the `#### Na.` subsections and the `✅ Settled on review` block at the end of each reviewed
+section are authoritative, and are the only place the reasoning is written out. This log records
+**what was reviewed, what changed, and what is most likely to be held stale**; it deliberately does
+not restate the findings.
+
+### Review log
+
+| § | date | verdict | what the review changed |
+|---|---|---|---|
+| [1](#1-the-engine-is-temporal) Engine | — | settled pre-ADR | Temporal was chosen before this document was written |
+| [2](#2-topology) Topology | 08-08 | upheld · 4 sub-decisions | **2a** persistence is a *separate* Postgres instance (a second DB on the app instance buys no isolation; Temporal wants two DBs inside it, and its schema is a **second migration mechanism**) · **2b** the Web UI is **not** exposed — it terminates and cancels workflows, so it is a control plane · **2c** retention **30 days** · **2d** the +1.5–2 CPU figure is the *coexistence peak*, and the node's 162% limit overcommit means throttling that looks like a workflow bug |
+| [3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table) Run identity | 08-08 | upheld · 2 corrections | Crawls are **already** an uncounted lane — a live gap, not migration prep (filed **P7**) — and **all three** meters are blind to them, not two. Crawl metering answered by the PM and wired in; ✅ owner-confirmed 08-08 |
+| [4](#4-oq-1b--block-model-fixed-typed-catalog-json-in-postgres-explicit-named-wiring) Block model | 08-10 | upheld · 5 corrections, 2 owner calls | The section **rejected its own motivating example**, because "linear" was doing duty for two properties. ✅ Layer A is a single chain in **data flow as well as execution order**; ✅ run inputs are **config bindings on per-type declared fields** (today only Scrape's `url`), not graph edges. Also: block IDs **stable across versions**; the state column **named**; per-type config-schema versioning is the residual DSL cost |
+| [5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity) References not payloads | 08-10 | upheld · strengthened | Limits are now **measured** (256 KiB warn / 2 MiB error), which puts the *entire* real page range past a threshold. ✅ The catalog splits into **content-producing and effect blocks** — "one object per block" was false of two of five types. ✅ The retention window is **a product promise, not a free dial** |
+| [6](#6-oq-2--in-flight-edits-definitions-are-pinned-and-that-is-a-different-problem-from-code-versioning) Pinning | 08-10 | upheld · **reason replaced** | The replay argument was factually wrong and invited the opposite conclusion; the real basis is **semantic**. Four things newly decided: the definition travels as a **workflow input argument**; the version is `pipeline_runs.pipeline_version_id`; a pipeline with a run in flight **may be deleted and the run finishes**; **run history holds the name** |
+| [7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee) One lane | 08-10 | upheld · **4th mechanism added** | Mechanism 1 is **pipelines-only**, so from the job cutover the covering set drops to mechanism 2 alone — and `_recover_stale_pending` re-publishes to NATS with no lane filter, which mechanism 2 cannot see. ✅ **Mechanism 4: a lane marker on `job_runs`**, built at the job cutover. Mechanism 2 also over-claimed: **pin `REJECT_DUPLICATE`** |
+| [8](#8-oq-4--metering-one-run-is-one-unit-pools-are-shared-and-storage-is-charged-for-what-is-stored) Metering | 08-17 | **REVERSED** · §5 amended | ✅ **The meter measures bytes on disk** — every stored object is charged, on every lane, replacing "only the final artifact is charged". Three more owner calls (one submission = one slot · a parked run holds no slot · the multi-Scrape rider closed) and **two live defects found**, filed as **BUG-007** |
+| [8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25) Ledger + the wall | 08-25 | 4 owner calls (no section review) | ✅ `latest/` is **not chargeable** · the accountant is **an activity in the workflow worker**, enforced by task-queue routing · the record is **one shared, lane-blind per-object ledger** · at the wall the run **finishes and is charged**, with a headroom buffer refusing new runs. Sequencing knock-on: the ledger is **pre-migration**, filed as **P8** |
+| [9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected) Worker integration | 08-23 | 🔴 **REVERSED** | ✅ **The NATS bridge (option a) is rejected**; workers become Temporal activity workers in the **first** increment. Four premises failed, and the bridge was found **blocked** — proven by a dead service in production (**BUG-008**). Knock-on: §16's sequence moves the worker port from third to **first** |
+| [10](#10-oq-6--the-do-not-delete-list) Do-not-delete list | 08-26 | upheld · mechanism **withdrawn** | 🔴 "the classifier becomes `RetryPolicy` non-retryable error **types**" is withdrawn in all four places — replaced by **the classifier decides; Temporal retries**. The timeout figure was wrong (≈360s, not 240s). The risk model splits in two, and **four items were missing** (heartbeat, webhook wire contract, webhook payload schema, the correctly-dissolved list) |
+| [11](#11-oq-7--run-state-to-the-spa-mirror-activity-plus-pg_notify) Run state to the SPA | 08-26 | upheld · **no factual error** | Four gaps closed: ✅ **two writers are kept**, so the precedence rule is load-bearing and fails *silently* · ✅ the socket **reconnects** (a server keep-alive was rejected) · ✅ a failed mirror write **fails the run** · ✅ payloads carry **identifiers and status only**, and **absolute state, never deltas**. Filed: **BUG-009** |
+| [12](#12-oq-8--tenant-isolation-single-namespace-and-the-api-is-the-only-boundary) Tenant isolation | 08-08 | 🔴 **REVERSED** | "User identity in the workflow ID" is withdrawn — Temporal never parses the ID, so the property was never structural. **The API's ownership check is the only tenant boundary**, with nothing backing it at the engine |
+| [13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block) Crawl coordinator | 08-28 | upheld · clause **withdrawn** | 🔴 It is a **rewrite, not a port** — most of `coordinator/` has never executed, so §9's diff-against-v1 pre-gate **cannot exist for crawls**. 🔴 **`crawl_queue` does NOT retire** — the frontier stays in Postgres. 🔴 **`crawl_pages` is required**, not a UI convenience. Filed: **BUG-010** |
+| [14](#14-oq-10-remaining-half--conditional-execution-gets-its-own-layer-a-prd-before-monitors) Conditional execution | 09-01 | upheld unchanged · 4 gaps | The ordering line could not distinguish **written** from **built**. Layer C's **saga rollback** was never examined — `pipeline_run_blocks.status` has no value for *"succeeded, then undone"*. The hard question is **what a condition may say** (replay determinism; the Validate block is the precedent). ⚠️ The PRD still has **no number and no backlog row** |
+| [15](#15-oq-11--webhook-delivery-is-a-step-the-run-waits-for) Webhook delivery | 09-02 | upheld · 2 statements rebuilt | 🔴 The concurrency argument **had no column to read** → ✅ `waiting` pre-admitted to the block vocabulary, with §5's split deciding who may enter it. 🔴 **"reproduces today's behaviour exactly" withdrawn**. Four gaps: the four-timeout ladder · cancellation · three lying meters · **failure notification has no home** |
+| [16](#16-the-v1v2-coexistence-contract) Coexistence | 09-03 | upheld · 5 stale **instructions** | 🔴 **The sequence is named, not numbered** — three sections used "step 2" as an address after it moved. 🔴 **The drain gate is a cutover gate too.** 🔴 Obligation 2 borrows a **user-writable** switch that a live meter reads. Reversibility narrowed to **migrated** flows. The sequence's **entry condition** is P6 → P8 → P7 + BUG-007 |
+| [17](#17-relationship-to-the-earlier-adrs) Earlier ADRs | 09-04 | deferral upheld · 6 corrections | 🔴 The ADR-001 entry listed the sections **ADR-002** superseded and missed all four live ones — including the **light-worker rule, which survives**. 🔴 **`ADR-002 §8` is not a section that exists** (it is §4), wrong in 16 places. ✅ Notices now name a **§16 step**; authority is **per flow**; **ADR-005 and ADR-006 brought into scope** |
+| [Consequences + Deferrals](#consequences) | 09-05 | 14 corrections | Neither block had ever been reviewed in its own right. ✅ The Q8 claim **narrowed**, the Web UI bullet **qualified**, "exactly one engine" narrowed to **migrated** flows, §11a's two writers added to *Paid*, one named risk became **three**; the crawl-frontier and `crawl_pages` deferral rows were **describing questions §13 had closed**, and **two named open items were missing from the table of open items** |
+
+### ⚠️ Reversed or withdrawn — check any note written before these dates
+
+| what it used to say | what it says now | when |
+|---|---|---|
+| Workers stay on NATS; a bridge carries v2 work (§9 option a) | **Rejected, and found blocked.** Workers become activity workers first | 08-23 |
+| The workflow ID carries user identity (§12) | **Withdrawn** — the API's ownership check is the only boundary | 08-08 |
+| Only the final artifact is charged (§8) | **Every stored object is charged**, on every lane | 08-17 |
+| The result and the charged artifact are the same object (§5) | Withdrawn by the §8 reversal; §5 keeps **the result** only | 08-17 |
+| The classifier becomes `RetryPolicy` non-retryable error *types* (§10) | **The classifier decides; Temporal retries** | 08-26 |
+| `crawl_queue` retires with the coordinator (§13) | **Withdrawn** — the frontier stays in Postgres | 08-28 |
+| `crawl_pages` may be kept for the UI (§13) | **Required** — P7's metering unit, §8d's ledger link, the artifact's name | 08-28 |
+| Pinning is needed because replay would break (§6) | Factually wrong; the real basis is **semantic** | 08-10 |
+| Webhook retry "reproduces today's behaviour exactly" (§15) | **Withdrawn** — attempts 4–5 drift ~20 min | 09-02 |
+| Every migration step is reversible (§16) | Narrowed to **migrated** flows; a pipeline falls back to being switched off | 09-03 |
+| ADR-009 supersedes ADR-001 §2/§3/§8 (§17) | Those are **ADR-002's**; ADR-009 replaces ADR-001 **§4–§7** | 09-04 |
+| The Q8 class of bug **cannot occur** (Consequences) | Narrowed — the engine owns *its* transitions, not `pipeline_runs.status` | 09-05 |
+
+### ⚠️ Amended as a knock-on, not by their own review
+
+A note on these sections predating the date is stale even though the section was "already reviewed".
+
+| section | amended by | what changed |
+|---|---|---|
+| §5, §8 | §4 · 08-10 | run-input scalars are an exception to references-only; "final" pinned as the last block in execution order |
+| §8 | §5 · 08-10 | metering and collection rules follow the content-producing / effect split |
+| §5, §3, §15 | §8 · 08-17 | the storage reversal; §3 and §15's contradictory definitions of "active" |
+| §3, §8b | §8d · 08-25 | **do not build a storage arm of the counting view**; per-lane accounted-at markers withdrawn |
+| §2, §7, §16 | §9 · 08-23 | the worker port moves to first; §7's result-path carry-forward is moot |
+| §7, §13 | §10 · 08-26 | the scheduled-quota waiting room and the `httpx` requirement were relocated into them |
+| §4, §8 | §15 · 09-02 | **`waiting` added to the block vocabulary**; the concurrency rule names its column |
+| §7, §2d | §16 · 09-03 | every "step 2" address renamed to a named step |
+| §4, §8 rows in Deferrals | closing blocks · 09-05 | crawl-frontier narrowed; `crawl_pages` removed; two open items added |
+
+### Left the ADR as filed work
+
+Tracked in `phase4-backlog.md` §1 and `open-bugs.md`, not here.
+
+**P7** crawls consume none of the three meters *(08-08)* · **P8** the shared per-object storage
+ledger, **pre-migration** *(08-25)* · **BUG-007** LLM storage accounting is inflated and leaks
+*(08-17)* · **BUG-008** the crawl result consumer has never existed — **will-not-fix on the NATS
+path** *(08-23)* · **BUG-009** `JobNotifier` never reconnects *(08-26)* · **BUG-010** mid-crawl URLs
+are never SSRF-checked *(08-28)*. One live fix shipped during the review: `5c7fbdf`, the crawl page
+status filter. Also corrected outside this ADR: **BUG-006** undercounted itself (7 manifests, 3
+scanned), and `workflows-scoping.md` was stale in three places — including a live recommendation to
+build the **rejected** NATS bridge.
+
+### What remains
+
+The section review is finished. **Promoting this document to `Accepted` is a separate owner
+decision and has not been taken.** `temporal-full-migration.md` is owed its one-pass redraw —
+deferred until the review closed, which it now has; 🔴 markers are in place so nobody implements
+from it meanwhile.
+
 
 ---
 

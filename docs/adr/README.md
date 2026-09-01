@@ -40,8 +40,11 @@ has not been taken. ⚠️ **The closing blocks were the last to be reviewed and
 because they had only ever been amended as knock-ons — fourteen corrections, including a promised
 Web UI dashboard §2b does not expose, a deferral row describing a crawl-frontier question §13
 closed, and **two explicitly-named open items missing from the table of open items**.
-The ADR's own **Review log** (top of the file) is authoritative for which sections are settled —
-prefer it over any summary, including this one. It records the Phase 4
+The ADR's own **Review status** block (top of the file) is authoritative for which sections are
+settled — prefer it over any summary, including this one. It carries three tables worth knowing
+about: the per-section **review log**, a list of everything **reversed or withdrawn** during the
+review, and the sections **amended as a knock-on** by a later section's review (which is how a
+"already reviewed" section still goes stale). It records the Phase 4
 engine decision (Temporal), answers all **11** of
 PRD-016's open questions, and defines the contract under which the NATS path (**v1**) and the
 Temporal path (**v2**) run side by side. Its inputs were
