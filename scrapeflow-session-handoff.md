@@ -240,6 +240,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   | `docs/project/open-bugs.md` | `ADR-002 §8` → `§4` (×3) — **BUG-005's writeup, which P6 is implemented from** |
   | this handoff | §17 block; §16 demoted to superseded |
 
+  ✅ **Committed as `87d2396`.** Working tree clean apart from an untracked `tmp/architecture.md`,
+  which predates this session (May) and was deliberately left alone.
+
   ⚠️ **Knock-on outside §17:** the `ADR-002 §8` → `§4` correction touched **four files beyond the
   ADR**. Anyone holding an earlier note that the MinIO path convention is "ADR-002 §8" should read
   it as **§4**; §8 is ADR-001's superseded version of the same decision.
