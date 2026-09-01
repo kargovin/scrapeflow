@@ -125,6 +125,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   | `CLAUDE.md` | bullet header → review complete / still Draft; closing-block summary appended |
   | this handoff | closing-blocks block; §17 demoted to superseded |
 
+  ✅ **Committed as `3e7f32e`.** Working tree clean apart from an untracked `tmp/architecture.md`,
+  which predates this session (May) and was deliberately left alone.
+
   ⚠️ **Knock-on from the previous session, fixed here:** one `ADR-002 §8` reference was **wrapped
   across a line break** (`ADR-002\n§8`) and survived the §17 pass, which was line-based. Corrected
   in `21fadd2`. If you ever re-run that kind of sweep, match across newlines.
