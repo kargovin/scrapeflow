@@ -66,7 +66,105 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-09-04) — **ADR-009's section review is COMPLETE. §17 reviewed. Only the closing Consequences / Deliberately-not-decided blocks remain.**
+- ## 📝 START HERE (2026-09-05) — **ADR-009's section-by-section review is FINISHED. Still Draft — promoting it to Accepted is your call.**
+
+  ### The closing blocks (Consequences · Deliberately not decided here) — reviewed 2026-09-05; **fourteen corrections, no decision changed**
+
+  These two blocks are the summary a reader reaches for **instead of** the 3,700 lines. Neither had
+  ever been reviewed in its own right — both had only been **amended as knock-ons** when a section
+  review happened to touch them. So what was stale is exactly what no review reached in passing.
+
+  ⚠️ **That is [16a]'s failure mode aimed at the summary**: a later review changes a section,
+  records the change there, and does not carry it back. Every stale item below has that cause —
+  D1 from §13, D2 from §15, D3 from §13, C2 from §2b, C4 and C7 from §16.
+
+  #### Consequences — what changed
+
+  | | finding | correction |
+  |---|---|---|
+  | 🔴 | **C1** *"The Q8 class of bug **cannot occur**, because the engine owns the state machine"* | Contradicted twice by this ADR. **§11a keeps two writers** on the run-status column deliberately, with a **silent** failure mode — a cancelled run flips back to `completed`, work done and charged. And **16c** found a *second* overloaded flag, `schedule_status`, created by an instruction in this ADR. ✅ Narrowed: the engine owns *its* transitions; it does not own `pipeline_runs.status` |
+  | | **C3** *"The ack_wait/redelivery class (Q6) disappears with NATS"* | The **mechanism** goes; the **shape** does not. **15c**: four nested timeouts where the smallest silently wins, and a reasonable *"no pipeline run may exceed one hour"* set in another file — which §15 calls *"Q6's exact shape"*. ✅ Split mechanism from shape |
+  | 🔴 | **C2** *"A per-workflow timeline in the Temporal Web UI **replaces** log-spelunking"* | **§2b does not expose the Web UI** — `kubectl port-forward` only, because it terminates and cancels workflows. ⚠️ **The identical overclaim was already caught and withdrawn from §15's first bullet on review**; it survived here only because this block was never reviewed. ✅ Qualified to operators with cluster access |
+  | 🔴 | **C4** *"each unit of work is driven by **exactly one** of them"* | **16b** found the window where it is false: an unacked NATS message consumed by a v1 worker *after* the flow is routed to v2 — scraped twice, user's LLM key re-billed, and the v1 result **overwrites a live v2 run**. None of §7's four mechanisms reaches it. ✅ Narrowed to **migrated** flows; the flip is what the drain gate buys |
+  | | **C5** *"Two SDKs… a small duplication in activity-worker setup"* | Understates §9's accepted price: **two deployments of one image per worker** through coexistence, **three integrations not one bridge**, any cross-cutting rule written twice without drifting (BUG-010's SSRF check is filed separately for this), and ⚠️ **the Playwright container contract as the riskiest single item in the port** |
+  | | **C6** — missing from *Paid* entirely | **§11a's two writers.** The clearest permanent cost the review produced: correctness rests on a rule an implementer must remember, and forgetting it fails silently. ✅ Added |
+  | 🔴 | **C7** *"the **deletion gate**"* | **16b renamed and rescoped it** — a drain gate firing at **two** points, cutover and deletion. The old name, in the block that summarises the plan |
+  | | **C8** — one risk named, three produced | ✅ Added: **16d** (pipelines have no v1 fallback, so **R6 runs on a lane whose rollback is switching the feature off**) and **13a** (crawls have **no reference implementation**, so the diff-against-a-v1-run pre-gate *cannot be made to exist*, and crawls migrate **last**, when the habit of having it is most established) |
+
+  #### Deliberately not decided — what changed
+
+  | | row | correction |
+  |---|---|---|
+  | 🔴 | **D1** crawl frontier — *"visited-set + `continue-as-new` **vs** child-workflow-per-page… decide against measurements"* | **Every clause wrong.** 13b: `continue-as-new` is **mandatory in both**, so the either/or was already false; the measurements **already existed**; the visited set **cannot ride in workflow state** (≈800 KB vs a 2 MiB limit); ✅ **the frontier stays in Postgres**. As written it invited reopening a settled decision. Only **the table's shape** is open |
+  | 🔴 | **D2** run-failure notification — *"left unassigned on purpose"* | **15f assigned it** to the conditional-execution PRD, noting §14 had enumerated that PRD's obligations one session earlier without it. Sharpest form now recorded: `webhook_events: ["job.failed"]` has **no expressible layer-A equivalent at all** |
+  | 🔴 | **D3** *"whether `webhook_deliveries` / **`crawl_pages`** survive as v1-only audit mirrors"* | **13c settled `crawl_pages`: required, on the v2 lane** — P7's per-page metering unit, §8d's ledger FK target, and **the artifact's own name**. The opposite of a v1 audit mirror. ✅ Removed from the row; `webhook_deliveries` stays, genuinely open |
+  | | **D4** conditional execution — *"before PRD-018"* | Loses **14a's whole finding** — written and built are different dates (written before PRD-018, possibly during A's build; **built after A ships, before B is built**) — and **14d's un-numbered PRD is invisible** in the one table where an un-numbered deliverable should be visible |
+  | | **D5** two named open items missing from the table of open items | ✅ Added: **§7's scheduled-quota waiting room** (*"left as a named open item rather than decided here"* — no Temporal Schedule overlap policy reproduces today's waiting behaviour; `SKIP` loses the firing, which R5 forbids) and **13d's sitemap origin restriction** (*"still open, and needed before the crawl step is built"*) |
+  | | **D6** namespace-per-tier — *"revisit under noisy-neighbour pressure"* | §12's reversal leaves the API's ownership check as the **only** tenant boundary, with nothing at the engine — so namespaces are the only engine-level isolation available. ✅ Trigger widened to **isolation as well as contention** |
+
+  *(One additive, not a defect: the workflow-code-versioning row is accurate, but its trigger —
+  "the first deploy that must survive in-flight runs" — didn't say when that arrives. **§15's ≈2.6 h
+  webhook horizon means it lands in layer A**, not only with Monitors. Added.)*
+
+  ### The review is finished — what that does and does not mean
+
+  ✅ **§1–§17 and both closing blocks are reviewed.** ⚠️ **The document is still `Draft`.** Promoting
+  it to **Accepted** is a separate owner decision and has **not** been taken — the status block now
+  says so explicitly, so nobody reads "review complete" as "safe to implement against". Individual
+  sections *are* settled; the **Review log** at the top of the ADR remains authoritative for which.
+
+  ### Session close (2026-09-05)
+
+  **Docs-only session — no code changed.**
+
+  | file | what |
+  |---|---|
+  | `docs/adr/ADR-009-…` | both closing blocks rewritten (64 → 145 lines) with C1–C8 and D1–D6 applied inline; **two rows added** to the deferral table, **one row split** (`crawl_pages` out); status block rewritten — review complete, still Draft, Accept is a separate decision; review-log entry; date line |
+  | `docs/adr/README.md` | review status → **COMPLETE, still not a decision**; closing blocks flagged as having been the most stale |
+  | `docs/project/phase4-backlog.md` | header entry; ADR row → **SECTION REVIEW COMPLETE**, closing-block summary appended |
+  | `CLAUDE.md` | bullet header → review complete / still Draft; closing-block summary appended |
+  | this handoff | closing-blocks block; §17 demoted to superseded |
+
+  ⚠️ **Knock-on from the previous session, fixed here:** one `ADR-002 §8` reference was **wrapped
+  across a line break** (`ADR-002\n§8`) and survived the §17 pass, which was line-based. Corrected
+  in `21fadd2`. If you ever re-run that kind of sweep, match across newlines.
+
+  ⚠️ **Git state.** Deployed code is still `b110591`; `5c7fbdf` (the crawl page status-filter fix)
+  is still **committed on `develop`, not deployed, not on `main`**. Everything on top is docs.
+  ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** — pushing
+  it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up. Wait to be
+  asked. *(Re-check ahead/behind against the remote before quoting numbers — last `git fetch` was
+  2026-07-13.)*
+
+  **What is blocking: nothing.** The review is done. Outstanding, in rough order:
+
+  1. **🔷 Owner decision — promote ADR-009 to `Accepted`?** Nothing in the document blocks it. Until
+     it happens, the Draft rule holds: do not implement against it, do not cite it as settled.
+  2. **`temporal-full-migration.md` gets its one-pass redraw** — this is the work the owner deferred
+     *until the review closed*, and the review has now closed. It contradicts the ADR in five known
+     places: its seven numbered steps are the stale numbering 16a replaced, its step 3 is the worker
+     port (now second and named), the line-314 diagram assumes the **rejected** NATS bridge, the
+     339–351 retry discussion describes a hazard that mostly no longer exists, and its crawl step
+     assumes `crawl_queue` retires. 🔴 markers are in place so nobody implements from it meanwhile.
+  3. **The conditional-execution PRD needs a number and a backlog row** (14d), and it owes **four**
+     things: the Validate-precedent brief and the replay constraint (14c), the halt-early block B
+     cannot build for itself (§4), and run-level failure notification (15f). ⚠️ The number is an
+     **owner decision, deliberately left open** — creation order gives PRD-019, which sorts *after*
+     the PRD-018 it must precede.
+  4. **PRD-016 owes four things for one PM pass**: §4's known exclusion; two more R6 divergences
+     from §10; two passages still reasoning from §8's reversed storage rule (`PRD-016:697`, `:802`);
+     and §14a's sequencing fact.
+  5. **Four admin meters need lane scoping** — three webhook (15e) plus `active_recurring_jobs`
+     (16c). Not bugs today; migration work, recorded so they are not discovered by a dashboard
+     reporting a number that is well-formed and wrong.
+  6. **Two open items now visible in the ADR's own deferral table** (D5) — §7's scheduled-quota
+     waiting room, and 13d's sitemap origin-restriction question, the latter needed **before the
+     crawl step is built**.
+  7. **The pre-migration queue is the entry condition for any build work** (16e):
+     **P6 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of truth.
+
+  ### Superseded: START HERE (2026-09-04) — §17 review
+
 
   ### §17 (relationship to the earlier ADRs) — reviewed 2026-09-04; the deferral is upheld, and **six of the facts stated around it were wrong**
 

@@ -33,9 +33,13 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-008](ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** | 2026-07-03 | — | — |
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Draft** | 2026-08-04 | — | — |
 
-**ADR-009 is drafted and its section-by-section review is IN PROGRESS — it is not yet a decision.**
-**§1–§17 have all been reviewed** (several reversed in the process); only the closing
-**Consequences** and **Deliberately not decided here** blocks have not.
+**ADR-009's section-by-section review is COMPLETE as of 2026-09-05 — and it is still not a
+decision.** **§1–§17 and both closing blocks have been reviewed** (several reversed in the
+process). The document stays **Draft**: promoting it to Accepted is a separate owner decision that
+has not been taken. ⚠️ **The closing blocks were the last to be reviewed and were the most stale**,
+because they had only ever been amended as knock-ons — fourteen corrections, including a promised
+Web UI dashboard §2b does not expose, a deferral row describing a crawl-frontier question §13
+closed, and **two explicitly-named open items missing from the table of open items**.
 The ADR's own **Review log** (top of the file) is authoritative for which sections are settled —
 prefer it over any summary, including this one. It records the Phase 4
 engine decision (Temporal), answers all **11** of
