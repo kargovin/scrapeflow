@@ -2407,7 +2407,7 @@ on the table:
 
 Plus one that predates the ADR entirely: **the artifact's name is the page row's id.**
 `dispatcher.py:120` puts `crawl_page_id` into the message's `job_id` field precisely so ADR-002
-§8's path convention resolves. And P7's reclaim half — *nothing frees crawl artifacts today* —
+§4's path convention resolves. And P7's reclaim half — *nothing frees crawl artifacts today* —
 needs to enumerate a crawl's objects; `crawl_pages.result_path` is the only enumeration that
 exists.
 
