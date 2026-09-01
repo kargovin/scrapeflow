@@ -66,7 +66,20 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-09-05) — **ADR-009's section-by-section review is FINISHED. Still Draft — promoting it to Accepted is your call.**
+- ## 📝 START HERE (2026-09-05) — **ADR-009's review is FINISHED. Next session starts with one job: strip the redundant ADR-009 summaries out of `CLAUDE.md` and `phase4-backlog.md`.**
+
+  > **▶ FIRST TASK NEXT SESSION (owner's call, 2026-09-05).** The ADR now holds its findings
+  > properly, so `CLAUDE.md`'s ADR-009 bullet (**55,246 chars — ~59% of the file, loaded into every
+  > session, ~14k tokens of standing context**) and `phase4-backlog.md`'s ADR-009 row (**16,813
+  > chars**) are second copies of it. Shrink both to the pointer they already carry plus what a
+  > reader needs *without* opening the ADR. ⚠️ **Verify before cutting** — token-sweep each summary
+  > against `ADR-009` and confirm every fact also exists there, exactly as was done for the review
+  > log — and ⚠️ **keep the project-level facts that are not ADR content** (sequencing, what is
+  > pre-migration, which bugs are do-not-fix) and the **Key decisions table**, which is not
+  > duplication. Full brief: item **1** of the outstanding list below.
+
+  ⚠️ **The ADR itself is done and needs nothing.** Still `Draft` — promoting it to Accepted is a
+  separate owner decision (item 2).
 
   ### The closing blocks (Consequences · Deliberately not decided here) — reviewed 2026-09-05; **fourteen corrections, no decision changed**
 
@@ -160,8 +173,10 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   | `README.md` · `phase4-backlog.md` · `CLAUDE.md` | "Review log" pointers → "Review status", naming the reversed/knock-on tables |
   | this handoff | closing-blocks block; condensing block; §17 demoted to superseded |
 
-  ✅ **Committed as `3e7f32e`.** Working tree clean apart from an untracked `tmp/architecture.md`,
-  which predates this session (May) and was deliberately left alone.
+  ✅ **Committed** — `87d2396` (§17) · `21fadd2` (the wrapped-address fix) · `3e7f32e` (closing
+  blocks) · `3b91bab` (the condensing pass), plus their handoff-hash commits. Working tree clean
+  apart from an untracked `tmp/architecture.md`, which predates this session (May) and was
+  deliberately left alone.
 
   ⚠️ **Knock-on from the previous session, fixed here:** one `ADR-002 §8` reference was **wrapped
   across a line break** (`ADR-002\n§8`) and survived the §17 pass, which was line-based. Corrected
@@ -176,29 +191,52 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
   **What is blocking: nothing.** The review is done. Outstanding, in rough order:
 
-  1. **🔷 Owner decision — promote ADR-009 to `Accepted`?** Nothing in the document blocks it. Until
+  1. **🔷 FIRST — strip the redundant ADR-009 summaries out of `CLAUDE.md` and
+     `phase4-backlog.md`.** ✅ **Owner's call, 2026-09-05: do this before anything else next
+     session.** The ADR now holds its own findings properly (`## Review status`, four tables), so
+     both of these are second copies of the same material:
+
+     | where | size | note |
+     |---|---|---|
+     | `CLAUDE.md` — the ADR-009 bullet (line ~135) | **55,246 chars** | **~59% of the whole file**, and `CLAUDE.md` is loaded into **every** session — roughly **14k tokens of context, permanently** |
+     | `phase4-backlog.md` — the ADR-009 row (line ~116) | **16,813 chars** | one table cell |
+
+     Both already point at the ADR's **Review status** block, so the pointer exists and the
+     content behind it is authoritative. The target is to shrink each to that pointer plus the
+     handful of facts a reader genuinely needs *without* opening the ADR.
+
+     ⚠️ **Use the same method that worked on the review log, in this order — do not shortcut it:**
+     **(a)** token-sweep the summary against `ADR-009` and confirm **every** fact also exists
+     there (last sweep found 29 apparently-unique strings, all 29 resolved); **(b)** only then
+     cut; **(c)** re-verify links. The one thing to watch: `CLAUDE.md`'s bullet may carry
+     **project-level facts that are not ADR content** (sequencing, what is pre-migration, which
+     bugs are do-not-fix) — those must survive the cut, and they are the reason this is a careful
+     edit rather than a delete. **Same care applies to the "Key decisions" table**, which is *not*
+     ADR duplication and should be left alone.
+
+  2. **🔷 Owner decision — promote ADR-009 to `Accepted`?** Nothing in the document blocks it. Until
      it happens, the Draft rule holds: do not implement against it, do not cite it as settled.
-  2. **`temporal-full-migration.md` gets its one-pass redraw** — this is the work the owner deferred
+  3. **`temporal-full-migration.md` gets its one-pass redraw** — this is the work the owner deferred
      *until the review closed*, and the review has now closed. It contradicts the ADR in five known
      places: its seven numbered steps are the stale numbering 16a replaced, its step 3 is the worker
      port (now second and named), the line-314 diagram assumes the **rejected** NATS bridge, the
      339–351 retry discussion describes a hazard that mostly no longer exists, and its crawl step
      assumes `crawl_queue` retires. 🔴 markers are in place so nobody implements from it meanwhile.
-  3. **The conditional-execution PRD needs a number and a backlog row** (14d), and it owes **four**
+  4. **The conditional-execution PRD needs a number and a backlog row** (14d), and it owes **four**
      things: the Validate-precedent brief and the replay constraint (14c), the halt-early block B
      cannot build for itself (§4), and run-level failure notification (15f). ⚠️ The number is an
      **owner decision, deliberately left open** — creation order gives PRD-019, which sorts *after*
      the PRD-018 it must precede.
-  4. **PRD-016 owes four things for one PM pass**: §4's known exclusion; two more R6 divergences
+  5. **PRD-016 owes four things for one PM pass**: §4's known exclusion; two more R6 divergences
      from §10; two passages still reasoning from §8's reversed storage rule (`PRD-016:697`, `:802`);
      and §14a's sequencing fact.
-  5. **Four admin meters need lane scoping** — three webhook (15e) plus `active_recurring_jobs`
+  6. **Four admin meters need lane scoping** — three webhook (15e) plus `active_recurring_jobs`
      (16c). Not bugs today; migration work, recorded so they are not discovered by a dashboard
      reporting a number that is well-formed and wrong.
-  6. **Two open items now visible in the ADR's own deferral table** (D5) — §7's scheduled-quota
+  7. **Two open items now visible in the ADR's own deferral table** (D5) — §7's scheduled-quota
      waiting room, and 13d's sitemap origin-restriction question, the latter needed **before the
      crawl step is built**.
-  7. **The pre-migration queue is the entry condition for any build work** (16e):
+  8. **The pre-migration queue is the entry condition for any build work** (16e):
      **P6 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of truth.
 
   ### Superseded: START HERE (2026-09-04) — §17 review
