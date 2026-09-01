@@ -3,7 +3,7 @@
 **Status:** Draft — under section-by-section review by @karthik. **Nothing here is settled yet**;
 do not implement against it, and do not cite it as a decision in another document until the
 document status is Accepted.
-**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed) · 2026-08-26 (§10 and §11 reviewed) · 2026-08-28 (§13 reviewed) · 2026-09-01 (§14 reviewed) · 2026-09-02 (§15 reviewed)
+**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed) · 2026-08-26 (§10 and §11 reviewed) · 2026-08-28 (§13 reviewed) · 2026-09-01 (§14 reviewed) · 2026-09-02 (§15 reviewed) · 2026-09-03 (§16 reviewed)
 **Review log:** §1 taken as settled (engine decided pre-ADR). **§2 resolved 2026-08-08** — three
 open points closed in place (2a separate Postgres instance · 2b Web UI not exposed · 2c retention
 30 days). **§3 reviewed 2026-08-08** — two factual corrections applied (crawls are already an
@@ -51,12 +51,12 @@ the run finishes** (deleting a definition is not a back-door cancel — the Q4 s
 **§7 reviewed 2026-08-10** — the section **under-covered its hardest case**, and gained a fourth
 mechanism. Mechanism 1 is now explicitly **pipelines-only**: a migrated job keeps its `job_runs`
 row *by requirement* (§3 makes that table a read-model mirror; R5 forbids user-visible change), so
-from migration step 2 the covering set drops to mechanism 2 alone. Into that gap:
+from **the job cutover** the covering set drops to mechanism 2 alone. Into that gap:
 **`_recover_stale_pending` (`scheduler.py:131`) re-publishes any `job_runs` row stale at `pending`
 past 10 minutes, to NATS, with no lane filter** — so a v2-owned run whose workflow has not started
 is dispatched to a v1 worker, and mechanism 2 never intervenes because no second *workflow* was
 started. Hence **mechanism 4: a lane marker on `job_runs`, written in the insert transaction,
-built at step 2** (✅ owner's call). Mechanism 2 also **over-claimed** — the default
+built at the job cutover** (✅ owner's call). Mechanism 2 also **over-claimed** — the default
 `WorkflowIdReusePolicy` is `ALLOW_DUPLICATE`, which permits a new execution once the prior one
 closes, so **`REJECT_DUPLICATE` must be pinned** for "once, ever". Two smaller: the
 `--retention work` reassurance covered only the safe half (**unacked** messages are the risk, tied
@@ -397,7 +397,55 @@ earlier, created that PRD and enumerated its obligations **without it**. Sharpes
 with `webhook_events: ["job.failed"]` has **no expressible layer-A pipeline equivalent at all**.
 Added to the conditional-execution PRD's obligations. Plus one rider: **SSRF refusal must be raised
 non-retryable** (§10's second obligation lands here) and now **fails the run**, unlike today.
-**Next: §16–§17.** §12 was already reviewed and reversed.
+**§16 reviewed 2026-09-03 — the decision is upheld; the *instructions* were stale in five
+places, three of them addresses that had silently moved.** Coexistence stands exactly as drafted:
+Temporal comes up alongside NATS, pipelines are v2-only from day one (layer A **adds** a lane
+rather than splitting one), flows cut over individually, deletion is last and gated.
+**(1) 🔴 The sequence was renumbered by the §9 review and the references into it were not.** §16
+said *"migration step 2, when jobs move to `JobWorkflow`"* and twenty lines later listed a sequence
+in which step 2 was the worker port and jobs were step 4; §7 anchors mechanism 4 — the lane marker,
+a schema change — to "step 2" five times, §2d to "steps 2–3", and `temporal-full-migration.md`
+still carries its own unrenumbered 7-item list whose step 2 is the *rejected* NATS bridge. The
+failure is silent in both directions (build the marker where it is inert, or arrive at the job
+cutover believing it was done). ✅ **Owner's call: the sequence is named, not numbered** — engine up
+· worker port · pipeline lane · job cutover · batch and crawl cutover · schedule and webhook
+cutover · consumer deletion · NATS removal · API thinning — and every cross-reference names a step.
+§7 and §2d corrected in place. Also: "four of the seven steps" counted a nine-item list.
+**(2) 🔴 The drain gate was described here as a deletion gate, while §7 already asserts it is a
+cutover gate too** and says so in those words — one section was never amended, and the unamended
+one is the contract an implementer works from. The risk is the **unacked** message: routing a flow
+to v2 does not recall a message already on the stream, so a v1 worker consumes it, scrapes again,
+bills the user's own LLM key again, and its result returns to `result_consumer.py`, which resolves
+the run by id and overwrites the state of the run Temporal is executing. **None of §7's four
+mechanisms reaches it** — mechanism 4 in particular cannot, because workers hold no DB access
+(ADR-001) and cannot read a lane marker. ✅ **The gate now fires at every flow cutover as well as at
+deletion.** Residual recorded, not solved: §11a's precedence rule guards a cancellation and
+`result_consumer.py:613` guards `cancelled`; neither refuses a stale v1 result for a run the other
+lane owns. **(3) 🔴 Obligation 2 borrows a user-facing switch, and a live meter reads it.**
+`schedule_status` is user-writable (`schemas/jobs.py:114` → the generic setattr loop at
+`routers/jobs.py:465`, no lane awareness) and is counted by `admin.py:494` →
+`active_recurring_jobs` → `UsageStats.tsx:67`, rendered today. So migrating recurring jobs makes
+the admin tile count **down toward zero while every one of them still fires** — the fourth
+instance of this defect in this ADR (BUG-005, P7, 15e) and **the first caused by an instruction in
+it** — and a user may `PATCH {"schedule_status": "active"}` at any time, re-arming **both lanes**,
+which is the double scrape and double LLM bill R5 requires be structurally prevented. ✅ Recorded
+as obligations of the schedule and webhook cutover; the meter fix is **naming, not features** (15e
+precedent). ⚠️ Dormant is not safe: there are no scheduled jobs in production, so the tile reads 0
+before and after — 13d's shape — and Monitors is entirely about recurrence. **(4) "Every step is
+reversible" is false for the increment that ships first.** §16's own routing rule says pipelines
+have no v1 implementation, so a broken pipeline falls back to being *switched off*, not to v1. The
+section recorded the favourable half of "adds a lane" (no double-execution risk) and stated a
+blanket promise the same fact contradicts. ✅ **Narrowed: reversibility is a property of migrated
+flows.** Consequence for planning — R6 runs on a lane with no fallback, which makes §9's standalone
+pre-gate a requirement rather than a nicety, and is 13a's crawl exposure arriving one lane earlier.
+**(5) The sequence starts after work this ADR moved in front of it.** P6, **P8** (the shared
+storage ledger — the v2 charging activity has no table without it) and P7 (crawls join the counting
+view — without which pipeline runs consume no meter *by construction*, P7's own bug on a new lane)
+all precede "engine up". §8d moved the ledger to pre-migration on 2026-08-25, two days *after* the
+sequence was last touched. ✅ **The pre-migration queue is the sequence's entry condition**:
+P6 → P8 → P7 + BUG-007, then engine up; `phase4-backlog.md` §1 remains its source of truth.
+**Next: §17**, then the closing **Consequences** and **Deliberately not decided here** blocks.
+§12 was already reviewed and reversed.
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
@@ -602,7 +650,7 @@ landing near 50% CPU requests, with memory still under 20%. Requests are not the
 
 **This figure already is the coexistence peak, which is the number that matters.** The 28% baseline
 includes NATS, the coordinator and all three workers, so adding Temporal on top describes the
-cluster at migration steps 2–3 (drawn in `temporal-full-migration.md` §9a) — both orchestrators running, both
+cluster from **the worker port** through the flow cutovers (drawn in `temporal-full-migration.md` §9a) — both orchestrators running, both
 worker sets alive, five loops still serving in-flight v1 work. Nothing later in the sequence is
 heavier; every subsequent step *removes* a component. Sizing to steady state would have understated
 it, and the several weeks spent at the peak are exactly when a capacity surprise would land.
@@ -1115,7 +1163,7 @@ between them, and which one applies depends on whether the work is a pipeline or
    [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)
    makes that table a read-model mirror of Temporal state rather than replacing it, because R5
    forbids user-visible change and the job API, SPA, admin views and quota view all read it. So
-   from migration step 2 onward the same row is visible to both lanes **by requirement**, and
+   from **the job cutover** onward the same row is visible to both lanes **by requirement**, and
    mechanism 1 stops applying exactly when the problem becomes real
    ([§16](#16-the-v1v2-coexistence-contract) says the same thing from the sequence side).
 2. **Workflow ID uniqueness, for flows that do migrate.** When jobs move to `JobWorkflow`, the
@@ -1132,13 +1180,15 @@ between them, and which one applies depends on whether the work is a pipeline or
 3. **`schedule_status` is the interlock for recurring work** (cutover gotcha #2). A job moved to
    a Temporal Schedule must be `paused` in v1 or it fires on both lanes. This is what Q4's
    deliberately tri-state flag is for.
-4. **A lane marker on `job_runs`, from migration step 2. ✅ Owner's call, 2026-08-10.** A column
+4. **A lane marker on `job_runs`, from the job cutover. ✅ Owner's call, 2026-08-10.** A column
    written in the **same transaction as the row insert** (a later write leaves a window in which a
    v2 row is indistinguishable from a v1 row), and every v1 background query that dispatches work
    filters on it. This is mechanism 1's disjointness extended to the rows that cannot have it
-   structurally. It is **step-2 work, not day-one work** — §16's routing rule keeps jobs on v1
+   structurally. It is **job-cutover work, not day-one work** — §16's routing rule keeps jobs on v1
    until their flow is explicitly migrated, so layer A ships without it — but it is recorded here
-   because §7 is what someone will consult *at* step 2.
+   because §7 is what someone will consult *at* the job cutover. ⚠️ **Named, not numbered** — this
+   obligation was written as "step 2" and the sequence has since been reordered under it
+   ([§16 16a](#16a-steps-get-names-because-the-numbers-have-already-moved-once)).
 
 **Why mechanism 4 is required and not belt-and-braces.** `_recover_stale_pending`
 (`core/scheduler.py:131`) selects **every** `job_runs` row with `status = 'pending'` older than
@@ -1188,7 +1238,7 @@ gate too**, not only a deletion gate, and the two sections should be read togeth
 
 > **✅ Settled on review (2026-08-10).** The section under-covered its hardest case. **(1)**
 > Mechanism 1 is now explicitly **pipelines-only** — a migrated job keeps its `job_runs` row by
-> requirement, so at step 2 the covering set drops to mechanism 2 alone. **(2)** A **fourth
+> requirement, so at the job cutover the covering set drops to mechanism 2 alone. **(2)** A **fourth
 > mechanism** is added: a lane marker on `job_runs`, because `_recover_stale_pending` is a live v1
 > dispatcher that re-publishes any stale `pending` row with no lane awareness — verified in code,
 > 10-minute default threshold. **(3)** Mechanism 2 **over-claimed**: the default reuse policy
@@ -2982,14 +3032,17 @@ crawls** stay on v1 until their flow is explicitly migrated.
 This is worth stating plainly because it changes the risk profile of the first increment: layer A
 **adds a lane** rather than splitting an existing one. R5's "exactly one lane" and OQ-3's
 structural enforcement are trivially satisfied for pipelines, and become a real problem only at
-migration step 2, when jobs move to `JobWorkflow` and the same unit of work has two possible
-executors.
+**the job cutover**, when jobs move to `JobWorkflow` and the same unit of work has two possible
+executors. ⚠️ The same fact cuts the other way on rollback, which the section originally missed —
+see [16d](#16d-every-step-is-reversible-is-false-for-the-increment-that-ships-first).
 
 **Cutover obligations** (from `phase4-backlog.md` §2, restated as contract terms):
 
 1. A unit of work executes on **exactly one lane**, enforced per [§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee).
 2. A recurring job moved to a Temporal Schedule is **paused in v1 first**, in that order, with
-   the pause verified before the Schedule is created.
+   the pause verified before the Schedule is created. ⚠️ The flag that does this is
+   **user-facing and user-writable**, and one live admin meter counts it — obligations and
+   consequences in [16c](#16c-obligation-2-borrows-a-user-facing-switch-and-one-live-meter-reads-it).
 3. NATS workers stay alive until v1 is drained — but under the reversed
    [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)
    they do so **as a second deployment of the same image**, bound to NATS, alongside a
@@ -2997,27 +3050,51 @@ executors.
    not during, the flow migration.
 
 **Sequence** (`temporal-full-migration.md` §9 is the detailed version; **reordered by the §9
-review, 2026-08-23**): stand up Temporal → **workers gain Temporal activity entry points, Go
-http-worker first** → pipelines run end-to-end on v2 (R6) → jobs onto `JobWorkflow` → batches and
-crawls → scheduling and webhooks → delete `result_consumer.py` → remove NATS → lift the API's
-single-replica/`Recreate` constraint. The worker port moves from third to first: with option (a)
-rejected there is no bridge to carry pipelines in the meantime, so the activity workers *are* the
-first increment's executors.
+review, 2026-08-23**; **named rather than numbered by the §16 review, 2026-09-03** —
+[16a](#16a-steps-get-names-because-the-numbers-have-already-moved-once)):
+
+| step | what it does |
+|---|---|
+| **Engine up** | Temporal server, its own Postgres, one workflow-worker pod. NATS untouched. |
+| **Worker port** | the three workers gain Temporal activity entry points, **Go http-worker first**. |
+| **Pipeline lane** | pipelines run end-to-end on v2; this is where the **R6** acceptance gate is run. |
+| **Job cutover** | jobs move onto `JobWorkflow`. |
+| **Batch and crawl cutover** | batches onto `BatchWorkflow`, crawls onto `CrawlWorkflow` ([§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block)). |
+| **Schedule and webhook cutover** | Temporal Schedules replace `scheduler.py`; delivery becomes an activity. `webhook_loop.py` and `advisory.py` go. |
+| **Consumer deletion** | `result_consumer.py` is deleted once no flow routes through it. |
+| **NATS removal** | the stream, the consumers and the client dependencies go. |
+| **API thinning** | the single-replica / `Recreate` constraint is lifted; horizontal scaling and rolling deploys. |
+
+The **worker port** moves ahead of the **job cutover**: with option (a) rejected there is no
+bridge to carry pipelines in the meantime, so the activity workers *are* the first increment's
+executors. ⚠️ The **pipeline lane** step also has prerequisites that are not on this list at all —
+[16e](#16e-the-sequence-begins-after-three-items-this-adr-moved-in-front-of-it).
 
 **The shape of coexistence is drawn in `temporal-full-migration.md` §9a**, not here: it changes at
-four of the seven steps, so it is sequence material rather than a decision. Two things it shows
-that this contract only states in words — the API keeps `replicas: 1` and all four loops until
-step 5 (the thinning is the *last* payoff, not the first), and the three workers serve **both
-lanes at once**. *(The diagram predates the §9 reversal and needs redrawing: serving both lanes is
-now two deployments of one image rather than one process reading NATS for both, and the
-retry-stacking hazard it illustrates is largely gone with the bridge.)*
+four of these steps, so it is sequence material rather than a decision. Two things it shows that
+this contract only states in words — the API keeps `replicas: 1` and all four loops until the
+**schedule and webhook cutover** (the thinning is the *last* payoff, not the first), and the three
+workers serve **both lanes at once**. *(The diagram predates the §9 reversal and needs redrawing:
+serving both lanes is now two deployments of one image rather than one process reading NATS for
+both, and the retry-stacking hazard it illustrates is largely gone with the bridge.)*
 
-**Reversibility.** Every step is a reversible increment: a misbehaving flow falls back to the v1
-path until fixed. This holds **only while both lanes exist**, which is the reason the deletion
-step is last and gated.
+**Reversibility.** Reversibility is a property of **migrated** flows, not of the plan as a whole.
+A flow that was cut over falls back to its v1 path until it is fixed; a flow that has no v1
+implementation — which is every pipeline, by the routing rule above — falls back to being
+**switched off**. Both are acceptable; they are not the same promise, and
+[16d](#16d-every-step-is-reversible-is-false-for-the-increment-that-ships-first) is why the
+distinction is written down rather than left to be discovered during a rollback.
 
-**Deletion gate.** A v1 component is deleted when its flow is fully drained *and* its NATS
-consumers report zero unprocessed messages and zero outstanding acks. Verify consumer state with
+**Drain gate.** The same check fires at **two** points, not one
+([16b](#16b-the-drain-gate-is-described-here-as-a-deletion-gate-and-the-section-that-depends-on-it-says-otherwise)):
+
+- **at every flow cutover**, before routing that flow to v2 — because an already-published,
+  unacked NATS message is still deliverable to a v1 worker no matter what the routing switch says;
+- **at deletion**, before a v1 component is removed — its flow fully drained *and* its consumers
+  clean.
+
+Both read the same three numbers: the flow is drained, and its NATS consumers report **zero
+unprocessed messages and zero outstanding acks**. Verify consumer state with
 `nats consumer info --json` — the table output omits `Max Deliver` when it is `-1`, so it cannot
 distinguish a capped consumer from an uncapped one.
 
@@ -3025,6 +3102,200 @@ distinguish a capped consumer from an uncapped one.
 ADR-008, the Go fetcher, LLM call logic, formatters, robots handling), MinIO result storage for
 the v1 lane, Clerk auth, Redis rate limiting, Fernet secret encryption, the cross-tenant = 404
 invariant, and the bulk of the existing CRUD test suite.
+
+#### 16a. Steps get names, because the numbers have already moved once
+
+The section said *"a real problem only at **migration step 2**, when jobs move to `JobWorkflow`"*
+and then, twenty lines later, listed a sequence in which step 2 was the **worker port** and jobs
+were step 4. Both were written in this document; the second is correct.
+
+The cause is mechanical. The §9 review (2026-08-23) reordered the sequence and updated **the list**
+without updating **the references into it**, and "step 2" is not prose — three sections use it as
+an address:
+
+| who | what they mean | where "step 2" pointed after the reorder |
+|---|---|---|
+| [§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee), five times | build the lane marker on `job_runs` | the **worker port**, which has no `job_runs` rows to mark |
+| [§2d](#2d-capacity) | "both orchestrators running at steps 2–3" | worker port + pipeline lane, not job cutover + batches |
+| `temporal-full-migration.md` §9 | its own 7-item list, **not renumbered at all** | its step 2 is still the *rejected* NATS bridge |
+
+⚠️ **The failure is silent and lands on the one obligation that is a schema change.** §7's
+mechanism 4 — a lane marker written in the same transaction as the row insert — is required from
+the moment one `job_runs` row is visible to both lanes, which is the **job cutover**. An
+implementer who builds it "at step 2" builds it during the worker port, where it is inert and
+untestable; one who reads §16's list instead concludes step 2 is already done and arrives at the
+job cutover believing the marker was handled. Neither produces an error.
+
+✅ **Owner's call: the sequence is named, not numbered, and every cross-reference names a step.**
+Names do not renumber when a step is inserted, moved or split, and this sequence has already been
+reordered once by a review and will be again. The three references above are corrected in place;
+`temporal-full-migration.md` is on the post-review redraw list and inherits the names there.
+
+Also corrected while counting: the section said the shape *"changes at four of the seven steps"*
+while listing **nine**. The seven was the migration document's list, quoted from before the
+reorder.
+
+#### 16b. The drain gate is described here as a deletion gate, and the section that depends on it says otherwise
+
+This is not a disagreement between two sections; it is one section that was never amended.
+[§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee) already
+records the requirement, in these words:
+
+> The check that does is already written as §16's **deletion gate** … it is a **cutover gate too**,
+> not only a deletion gate, and the two sections should be read together.
+
+§16 said *"A v1 component is deleted when its flow is fully drained and its NATS consumers report
+zero unprocessed messages and zero outstanding acks"* — one firing point, at deletion. So the
+document that an implementer works from carried the deletion-only version, while the section that
+depends on the gate asserted §16 said something it did not.
+
+**What the gate is actually for.** `--retention work` deletes a message once it is **acked**, so
+there is no replayable backlog. The risk is the message that is *not yet acked* at the instant a
+flow is routed to v2:
+
+```
+10:00:00  user submits a job → API writes the job_runs row → publishes to NATS
+10:00:01  the message sits on the stream, unacked
+10:00:02  ✂  the job flow is routed to v2
+10:00:03  Temporal starts JobWorkflow for that run
+10:00:05  the v1 NATS worker — still alive, per obligation 3 — consumes the message
+          it was already handed, and scrapes
+
+          → the target site is scraped twice
+          → the user's own LLM key is billed twice
+          → the v1 result returns to result_consumer.py, which resolves the run
+            by id and overwrites the state of the run Temporal is still executing
+```
+
+**None of §7's four mechanisms reaches this**, and the reasons are worth stating because each one
+looks like it should:
+
+| mechanism | why it misses |
+|---|---|
+| 1 · disjoint identity | operates on **rows**; this is a message already in flight |
+| 2 · workflow-ID uniqueness | v1 started no workflow — it consumed a message |
+| 3 · `schedule_status` interlock | this is a one-off submission, not a schedule |
+| 4 · lane marker on `job_runs` | workers hold **no DB access at all** (ADR-001's light-worker rule, still true in [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)) — a v1 worker cannot read the marker and cannot know it has been sidelined |
+
+Mechanism 4 stops the *dispatcher* re-publishing. Nothing stops a message already handed out. The
+only thing that does is draining before flipping.
+
+✅ **Owner's call: the gate fires at every flow cutover as well as at deletion**, stated in the
+Drain gate paragraph above rather than left as a cross-reference. ⚠️ **The residual is the
+`result_consumer.py` write**, not the wasted scrape: a late v1 result does not merely duplicate
+work, it lands on a live v2 run. [§11a](#11a--two-writers-and-the-precedence-rule-is-the-thing-to-remember)'s
+precedence rule guards a **cancellation** written by the API and `result_consumer.py:613` guards
+`cancelled` specifically; neither refuses a stale v1 result for a run the other lane now owns.
+Recorded here rather than solved: with the gate observed the case does not arise, and the lane
+marker read by the *consumer* (not the worker) would close it if a belt-and-braces guard is later
+wanted.
+
+#### 16c. Obligation 2 borrows a user-facing switch, and one live meter reads it
+
+Obligation 2 pauses a recurring job in v1 before creating its Temporal Schedule. The order is
+right — a missed firing is cheaper than a double one — and
+[§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee) already
+records the mirror ordering for rollback. What neither section noticed is **what
+`schedule_status` is**.
+
+It is not an internal flag. Q4 made it a deliberately tri-state, user-writable field with its own
+endpoint, and two live consumers read it:
+
+```
+schemas/jobs.py:114     JobPatch.schedule_status        ← the user can write it
+routers/jobs.py:465     generic setattr loop            ← no lane awareness, no guard
+admin.py:494            COUNT(*) WHERE schedule_status = 'active'
+schemas/admin.py:61     active_recurring_jobs
+UsageStats.tsx:67       <Stat label="Recurring jobs" …> ← rendered today
+```
+
+**Consequence 1 — a live meter reports the migration as a decline.** As recurring jobs move to
+Temporal Schedules, `active_recurring_jobs` counts down toward zero and `next_run` goes null,
+while every one of those jobs is firing normally on v2. Nothing errors; the number is well-formed
+and wrong. ⚠️ This is the **fourth** instance of one defect in this ADR — batch invisible because
+`job_id` is NULL (BUG-005), crawls invisible because every meter reads `job_runs` (P7), webhook
+success rate blind to the pipeline lane ([15e](#15e-no-webhook_deliveries-row-for-v2-removes-admin-capability-and-blinds-three-meters)) —
+and the first one **caused by an instruction in this ADR** rather than found in existing code.
+
+**Consequence 2 — the interlock is user-reversible in one request.** `PATCH /jobs/{id}` with
+`{"schedule_status": "active"}` is a documented, owner-scoped call that succeeds. A user who
+believes their schedule was paused in error re-arms **both lanes**, which is the double scrape and
+double LLM bill R5 requires be *structurally* prevented rather than avoided by convention.
+Obligation 1 gets structural treatment; obligation 2 rests on a switch the user owns.
+
+*(One mitigation already present, and it is luck rather than design: `schedule_status` is absent
+from `JobResponse`, so the user cannot read the flag back and has nothing prompting them to flip
+it.)*
+
+✅ **Owner's call: both are recorded as migration obligations of the schedule and webhook cutover,
+and neither is fixed on the v1 path.** The meter fix is **naming, not features** — the same
+resolution as [15e](#15e-no-webhook_deliveries-row-for-v2-removes-admin-capability-and-blinds-three-meters):
+the tile counts *v1 recurring jobs*, and a lane-aware count is what the migrated state needs.
+The interlock is the sharper one, and the honest statement is that `schedule_status` is doing two
+unrelated jobs — *the user's intent* and *which engine owns this schedule* — which is the same
+overloading Q8 came from and the same shape as `nats_stream_seq` being "a lane marker in
+disguise". ⚠️ **A dormant meter is not a correct one:** there are no scheduled jobs in production
+today, so the tile reads 0 before and after and the defect is invisible for exactly the reason
+[13d](#13d-ssrf-at-frontier-admission-and-the-sitemap-fetcher-changes-clients)'s was — the feature
+is dormant, not safe. Monitors (layer B) is *entirely* about recurrence, so the population this
+breaks arrives with it.
+
+#### 16d. "Every step is reversible" is false for the increment that ships first
+
+The section's safety net was: *"a misbehaving flow falls back to the v1 path until fixed."* Its
+own opening paragraph says pipelines have **no v1 implementation**. Both cannot hold.
+
+```
+Worker port              broken? → delete the Temporal-bound deployment;
+                                   the NATS-bound one keeps serving        ✅ v1 fallback
+
+Job cutover              broken? → route jobs back to the v1 path          ✅ v1 fallback
+
+Pipeline lane (R6)       broken? → there is no v1 pipeline.
+                                   The fallback is switching the feature off  ❌
+```
+
+The section noticed the **favourable** half of "layer A adds a lane" — no old lane means nothing
+to double-execute, so the top cutover risk is near zero at the first increment — and then stated a
+blanket reversibility promise that the *same fact* makes false. The two halves point opposite ways
+and only one was written down:
+
+| | double-execution risk | rollback target |
+|---|---|---|
+| **adding** a lane (pipelines) | ~none | ~none |
+| **moving** a lane (jobs, batches, crawls) | high | the v1 path |
+
+✅ **Owner's call: the claim is narrowed, not dropped** — reversibility is a property of migrated
+flows; new flows fall back to being switched off. Recorded because the consequence is real for
+planning: the R6 gate is run on a lane with no fallback, which is an argument for §9's standalone
+pre-gate (run the Scrape activity alone and diff it against a v1 run of the same URL) being a
+requirement rather than a nicety, and it is the same exposure
+[13a](#13a-this-is-a-rewrite-not-a-port-and-the-only-lane-with-no-v1-to-compare-against)
+identified for crawls, arriving one lane earlier than that section expected.
+
+#### 16e. The sequence begins after three items this ADR moved in front of it
+
+The sequence opens at **engine up**. Three items sit before it and are not on the list:
+
+| | what | why the pipeline lane needs it |
+|---|---|---|
+| **P6** | BUG-005 — batch broken on all three paths | not a dependency; a live silent defect that the queue puts first |
+| **P8** | the shared per-object storage ledger ([§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25)) | **a dependency.** The v2 charging activity writes ledger rows; without the table a pipeline run stores objects and charges nothing |
+| **P7** | crawls join the run-counting view | same table, and the view is what lets *any* new lane be counted |
+
+Without the counting view, pipeline runs consume none of the three meters **by construction** —
+which is P7's own bug, reproduced on a brand-new lane by a plan that was written to prevent it.
+
+The cause is dating: the sequence was last touched by the §9 review on **2026-08-23**, and
+[§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25) moved the ledger to
+pre-migration on **2026-08-25** — two days later, in a section that recorded the knock-on as
+*"filed as P8 in `phase4-backlog.md` §1"* and did not carry it back into the contract that states
+the order of work.
+
+✅ **Owner's call: the pre-migration queue is named as the sequence's entry condition** —
+**P6 → P8 → P7 + BUG-007**, then **engine up**. It is not restated here item by item;
+`phase4-backlog.md` §1 stays the single source of truth for its contents, and this section owns
+only the fact that the sequence does not start until it is empty.
 
 ### 17. Relationship to ADR-001/002/004
 

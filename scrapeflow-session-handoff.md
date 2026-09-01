@@ -66,7 +66,267 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-09-02) — **ADR-009 review is UNDERWAY. §15 reviewed. Next: §16–§17.**
+- ## 📝 START HERE (2026-09-03) — **ADR-009 review is UNDERWAY. §16 reviewed. Next: §17, then the closing blocks.**
+
+  ### §16 (the v1/v2 coexistence contract) — reviewed 2026-09-03; the decision is upheld, but five of its **instructions** were stale, and three of those were **addresses that had silently moved**
+
+  The plan stands exactly as drafted. Temporal comes up **beside** NATS; **pipelines are v2-only
+  from the day they exist** (there is no v1 pipeline, so layer A **adds** a lane rather than
+  splitting one); jobs, batches and crawls stay on v1 until their flow is explicitly migrated;
+  deletion is last and gated. Nothing about that changed.
+
+  What did not survive is the part of §16 that tells someone **what to do** — the sequence, the
+  gate and two of the three cutover obligations. §16 was 56 lines; it is now 277.
+
+  #### 🔴 1. The sequence was renumbered and the references into it were not → **16a**
+
+  §16 said, at line 2985:
+
+  ```
+  "…become a real problem only at migration step 2, when jobs move to JobWorkflow"
+  ```
+
+  and then, twenty lines later, listed a sequence in which **step 2 was the worker port** and jobs
+  were **step 4**. Both sentences are in the same section, one screen apart.
+
+  The cause is mechanical, not careless: **the §9 review (2026-08-23) reordered the sequence and
+  updated the list without updating the references into it.** And "step 2" is not prose — three
+  places use it as an *address*:
+
+  | who | what they mean | where "step 2" pointed after the reorder |
+  |---|---|---|
+  | **§7**, five times | build the lane marker on `job_runs` — **a schema change** | the **worker port**, which has no `job_runs` rows to mark |
+  | **§2d** | "both orchestrators running at steps 2–3" | worker port + pipeline lane |
+  | `temporal-full-migration.md` §9 | its own 7-item list, **never renumbered** | its step 2 is still the **rejected** NATS bridge |
+
+  ⚠️ **Both failure directions are silent.** Build the marker "at step 2" and you build it during
+  the worker port, where it is inert and untestable. Read §16's list instead and you conclude step
+  2 is done, then reach the job cutover believing the marker was handled. Neither produces an error.
+
+  ✅ **Owner's call: the sequence is NAMED, not numbered.**
+
+  ```
+  engine up → worker port → pipeline lane → job cutover → batch and crawl cutover
+            → schedule and webhook cutover → consumer deletion → NATS removal → API thinning
+  ```
+
+  Names do not renumber when a step is inserted, moved or split — and this sequence has already
+  been reordered once by a review and will be again. §7 and §2d corrected in place;
+  `temporal-full-migration.md` inherits the names in its post-review redraw. Also caught while
+  counting: the section said the shape *"changes at four of the **seven** steps"* while listing
+  **nine** — the seven was the migration doc's list, quoted from before the reorder.
+
+  #### 🔴 2. The drain gate is a **cutover** gate, and §16 described only the deletion half → **16b**
+
+  This is not two sections disagreeing. It is one section that was never amended. **§7 already
+  says it**, in these words:
+
+  > The check that does is already written as §16's **deletion gate** … it is a **cutover gate
+  > too**, not only a deletion gate, and the two sections should be read together.
+
+  §16 said *"A v1 component is **deleted** when its flow is fully drained and its NATS consumers
+  report zero unprocessed and zero outstanding acks."* One firing point, at the very end. So the
+  document an implementer works from carried the deletion-only version while the section that
+  **depends** on the gate asserted §16 said something it did not.
+
+  What the gate is actually for — `--retention work` deletes a message once **acked**, so there is
+  no replayable backlog. The risk is the message not yet acked when a flow is routed to v2:
+
+  ```
+  10:00:00  user submits a job → API writes job_runs row → publishes to NATS
+  10:00:01  the message sits on the stream, unacked
+  10:00:02  ✂  the job flow is routed to v2
+  10:00:03  Temporal starts JobWorkflow for that run
+  10:00:05  the v1 NATS worker — still alive, per obligation 3 — consumes the message
+            it was already handed, and scrapes
+
+            → the target site is scraped twice
+            → the user's own LLM key is billed twice
+            → the v1 result returns to result_consumer.py, which resolves the run by id
+              and OVERWRITES the state of the run Temporal is still executing
+  ```
+
+  🔴 **None of §7's four mechanisms reaches this**, and each one looks like it should:
+
+  | mechanism | why it misses |
+  |---|---|
+  | 1 · disjoint identity | operates on **rows**; this is a message already in flight |
+  | 2 · workflow-ID uniqueness | v1 started no workflow — it consumed a message |
+  | 3 · `schedule_status` interlock | one-off submission, not a schedule |
+  | 4 · lane marker on `job_runs` | ⚠️ **workers hold no DB access at all** (ADR-001's light-worker rule, still true under §9) — a v1 worker cannot read the marker and cannot know it has been sidelined |
+
+  Mechanism 4 stops the *dispatcher* re-publishing. Nothing stops a message already handed out.
+
+  ✅ **Owner's call: the gate fires at every flow cutover as well as at deletion**, written into
+  the gate paragraph rather than left as a cross-reference. ⚠️ **Residual recorded, not solved:**
+  the worse half is not the wasted scrape, it is the **write** — §11a's precedence rule guards a
+  *cancellation* written by the API, and `result_consumer.py:613` guards `cancelled` specifically;
+  neither refuses a stale v1 result for a run the other lane now owns.
+
+  #### 🔴 3. Obligation 2 borrows a user-facing switch, and one live meter reads it → **16c**
+
+  "Pause the recurring job in v1 first" means writing `schedule_status = 'paused'`. That order is
+  right (a missed firing beats a doubled one). What no section noticed is **what that flag is**:
+
+  ```
+  schemas/jobs.py:114   JobPatch.schedule_status        ← the user can write it
+  routers/jobs.py:465   generic setattr loop            ← no lane awareness, no guard
+  admin.py:494          COUNT(*) WHERE schedule_status = 'active'
+  schemas/admin.py:61   active_recurring_jobs
+  UsageStats.tsx:67     <Stat label="Recurring jobs" …> ← rendered today
+  ```
+
+  **Consequence 1 — a live meter reports the migration as a decline.** As recurring jobs move to
+  Temporal Schedules the tile counts down toward **0** and the "next scheduled run" figure goes
+  null, while every one of those jobs fires normally on v2. Nothing errors. ⚠️ This is the
+  **fourth** instance of one defect in this ADR — BUG-005 (batch invisible because `job_id` is
+  NULL), P7 (crawls invisible because every meter reads `job_runs`), 15e (webhook success blind to
+  the pipeline lane) — and **the first caused by an instruction in the ADR** rather than found in
+  existing code.
+
+  **Consequence 2 — the interlock is user-reversible in one request.**
+
+  ```
+  you   :  schedule_status = paused    +  create the Temporal Schedule
+  user  :  PATCH {"schedule_status": "active"}     ← legal, owner-scoped, 200 OK
+  now   :  v1 fires it  AND  v2 fires it
+           → the double scrape and double LLM bill R5 requires be STRUCTURALLY prevented
+  ```
+
+  Obligation 1 gets structural treatment. Obligation 2 rests on a switch the user owns. *(One
+  accidental mitigation: `schedule_status` is absent from `JobResponse`, so the user cannot read
+  it back and has nothing prompting them to flip it.)*
+
+  ✅ **Owner's call: both recorded as obligations of the schedule and webhook cutover; neither
+  fixed on the v1 path.** The meter fix is **naming, not features** (the 15e precedent). The
+  deeper point: `schedule_status` is doing two unrelated jobs — *the user's intent* and *which
+  engine owns this schedule* — which is the overloading Q8 came from, and the same shape as
+  `nats_stream_seq` being "a lane marker in disguise".
+
+  ⚠️ **Dormant is not safe.** There are no scheduled jobs in production, so the tile reads 0
+  before and after and the defect is invisible for exactly 13d's reason — the feature is dormant,
+  not correct. **Monitors (layer B) is entirely about recurrence**, so the population this breaks
+  arrives with it.
+
+  #### 4. "Every step is reversible" is false for the increment that ships first → **16d**
+
+  §16's safety net was *"a misbehaving flow falls back to the v1 path until fixed."* Its own
+  opening paragraph says pipelines have **no v1 implementation**.
+
+  ```
+  Worker port          broken? → delete the Temporal-bound deployment;
+                                 the NATS-bound one keeps serving        ✅ v1 fallback
+  Job cutover          broken? → route jobs back to the v1 path          ✅ v1 fallback
+  Pipeline lane (R6)   broken? → there is no v1 pipeline.
+                                 Fallback = switch the feature off       ❌
+  ```
+
+  The section recorded the **favourable** half of "adds a lane" (nothing to double-execute, so the
+  top cutover risk is near zero at the first increment) and then made a blanket promise the *same
+  fact* contradicts:
+
+  | | double-execution risk | rollback target |
+  |---|---|---|
+  | **adding** a lane (pipelines) | ~none | ~none |
+  | **moving** a lane (jobs, batches, crawls) | high | the v1 path |
+
+  ✅ **Owner's call: narrowed, not dropped** — reversibility is a property of **migrated** flows.
+  Consequence worth carrying: **R6 runs on a lane with no fallback**, which makes §9's standalone
+  pre-gate (run the Scrape activity alone and diff it against a v1 run of the same URL) a
+  **requirement rather than a nicety** — and it is 13a's crawl exposure arriving one lane earlier
+  than that section expected.
+
+  #### 5. The sequence starts after work this ADR moved in front of it → **16e**
+
+  The sequence opens at "stand up Temporal". Three items sit before it and are on no list here:
+
+  | | what | why the pipeline lane needs it |
+  |---|---|---|
+  | **P6** | BUG-005 — batch broken on all three paths | not a dependency; a live silent defect the queue puts first |
+  | **P8** | the shared per-object storage ledger (§8d) | **a dependency** — the v2 charging activity writes ledger rows; without the table a pipeline run stores objects and charges nothing |
+  | **P7** | crawls join the run-counting view | same table, and the view is what lets *any* new lane be counted |
+
+  Without the counting view, pipeline runs consume none of the three meters **by construction** —
+  which is P7's own bug, reproduced on a brand-new lane by a plan written to prevent it.
+
+  The cause is dating: the sequence was last touched by the §9 review on **2026-08-23**, and §8d
+  moved the ledger to pre-migration on **2026-08-25** — two days later, recording the knock-on as
+  *"filed as P8"* without carrying it back into the contract that states the order of work.
+
+  ✅ **Owner's call: the pre-migration queue is the sequence's entry condition** —
+  **P6 → P8 → P7 + BUG-007**, then engine up. Not restated item by item;
+  `phase4-backlog.md` §1 stays the source of truth for its contents.
+
+  ### Owner's note on scale (2026-09-03)
+
+  Raised in session and worth not re-deriving: the platform currently serves **one user, few jobs,
+  and no scheduled jobs at all**. That changes the *urgency ordering* of these findings and
+  **nothing about whether they are recorded** — §16 is the section this migration plan is judged
+  by, and it is written for a system with users.
+
+  | finding | scale-dependent? |
+  |---|---|
+  | 16a step names · 16d reversibility · 16e entry condition | **No** — wrong at any volume, and 16e blocks the first increment |
+  | 16b drain gate | **No in kind, yes in cost** — one unacked message is enough; low volume makes the *fix* nearly free (the queue is empty most of the time), not the risk absent |
+  | 16c meter + interlock | **Yes today, no soon** — dormant because nothing is scheduled, and Monitors is entirely about recurrence |
+
+  ### Session close (2026-09-03)
+
+  **Docs-only session — no code changed.**
+
+  | file | what |
+  |---|---|
+  | `docs/adr/ADR-009-…` | §16 rewritten with 16a–16e (56 → 277 lines); **the sequence is now a named table, not a numbered list**; **§7's five "step 2" references and §2d's "steps 2–3" renamed**; review log entry; date line |
+  | `docs/project/phase4-backlog.md` | header entry; ADR row → §1–§16 reviewed, §16 summary appended |
+  | `docs/project/temporal-full-migration.md` | **three new 🔴 markers** in the banner — its step *numbers* are stale as addresses, its sequence does not begin where work begins (the pre-migration queue is the entry condition), and its crawl step still assumes `crawl_queue` retires |
+  | `docs/adr/README.md` | index progress note was stale at "§1–§13 reviewed" — now §1–§16 |
+  | `CLAUDE.md` | §16 summary appended to the ADR-009 bullet; review progress → §17 |
+  | this handoff | §16 block; §15 demoted to superseded |
+
+  ⚠️ **Note the knock-on edits outside §16** — this session changed **§7 and §2d**. Anyone holding
+  an earlier session's note that mechanism 4 is "step-2 work" should read it as **job-cutover
+  work**; the numbering it referred to no longer exists.
+
+  **All 141 ADR internal links re-verified — none broken.** Slug rule that works: lowercase → drop
+  everything that is not **alphanumeric, underscore, space or hyphen** → replace **each** space
+  with a hyphen. **No whitespace collapsing** (which is why ` — ` becomes `--`), and **keep
+  underscores**.
+
+  ⚠️ **Git state.** Deployed code is still `b110591`; `5c7fbdf` (the crawl page status-filter fix)
+  is still **committed on `develop`, not deployed, not on `main`**. Everything else on top is
+  docs. ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** —
+  pushing it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up.
+  Do not do it at session end; wait to be asked.
+
+  **What is blocking: nothing blocks §17.** Outstanding:
+
+  1. **§17 is next** — Relationship to ADR-001/002/004 — then the closing **Consequences** and
+     **Deliberately not decided here** blocks, which close the review. ⚠️ §17 is short and is
+     mostly a *deferral* (those ADRs stay authoritative while v1 serves traffic; supersession
+     notices are added when each v1 component is deleted), so the thing to check is whether the
+     deletion trigger it names still matches §16's renamed steps.
+  2. **The conditional-execution PRD needs a number and a backlog row** (§14d), and it owes
+     **four** things: the Validate-precedent brief and the replay constraint (14c), the halt-early
+     block B cannot build for itself (§4), and run-level failure notification (15f). ⚠️ The number
+     is an **owner decision, deliberately left open** — creation order gives PRD-019, which sorts
+     *after* the PRD-018 it must precede.
+  3. **PRD-016 owes four things for one PM pass** (unchanged): §4's known exclusion; two more R6
+     divergences from §10; two passages still reasoning from §8's reversed storage rule
+     (`PRD-016:697`, `:802`); and §14a's sequencing fact.
+  4. **Three admin webhook meters need scoping** (15e) — and **now a fourth**, `active_recurring_jobs`
+     (16c). Neither set is a bug today; both are migration work, recorded so they are not
+     discovered by a dashboard reporting a number that is well-formed and wrong.
+  5. **`temporal-full-migration.md` still contradicts the ADR** — and §16 adds to the list: its
+     step 3 is the worker port (now second and named), the line-314 diagram assumes the rejected
+     NATS bridge, the 339–351 retry discussion describes a hazard that mostly no longer exists,
+     its crawl step assumes `crawl_queue` retires, and **its seven numbered steps are now the
+     stale numbering 16a replaced.** ✅ Owner's call stands: **redraw in ONE pass after the review
+     closes.** 🔴 markers are in place so nobody implements from it meanwhile — **three more were
+     added this session** (stale step numbers, the missing entry condition, and the crawl step).
+  6. **One open item from §13**, needed before the crawl step is built: whether sitemap entries are
+     **origin-restricted** like extracted links.
+
+  ### Superseded: START HERE (2026-09-02) — §15 review
 
   ### §15 (webhook delivery) — reviewed 2026-09-02; the decision holds, but **two of its supporting statements could not be built as written**
 

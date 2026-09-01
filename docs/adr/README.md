@@ -34,7 +34,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Draft** | 2026-08-04 | — | — |
 
 **ADR-009 is drafted and its section-by-section review is IN PROGRESS — it is not yet a decision.**
-**§1–§13 have been reviewed** (several reversed in the process); §14–§17 have not.
+**§1–§16 have been reviewed** (several reversed in the process); §17 and the closing blocks have not.
 The ADR's own **Review log** (top of the file) is authoritative for which sections are settled —
 prefer it over any summary, including this one. It records the Phase 4
 engine decision (Temporal), answers all **11** of

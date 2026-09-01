@@ -32,6 +32,20 @@
 >   With no NATS beneath the activity there is one retry layer, Temporal's. The bridge was also
 >   found to be **blocked**: a `--retention work` stream refuses a second consumer overlapping
 >   `api-result-consumer`'s claim, proven by a dead service in production — **BUG-008**.)*
+> - **🔴 §9's step NUMBERS are stale as addresses, not only in content** (ADR-009 §16 review,
+>   2026-09-03). The ADR's sequence is now **named, not numbered** — engine up · worker port ·
+>   pipeline lane · job cutover · batch and crawl cutover · schedule and webhook cutover ·
+>   consumer deletion · NATS removal · API thinning — precisely because this list was reordered
+>   once and every cross-reference into it silently pointed somewhere else. **Do not cite a step
+>   number from this doc**; the redraw adopts the names.
+> - **🔴 §9's sequence does not begin where work begins.** ADR-009 §16e makes the pre-migration
+>   queue the sequence's **entry condition** — **P6 → P8 → P7 + BUG-007**, then engine up. P8 (the
+>   shared per-object storage ledger) is a hard dependency: the v2 charging activity has no table
+>   without it, and without P7's counting view a pipeline run consumes **none** of the three
+>   meters by construction.
+> - **🔴 §9's crawl step assumes `crawl_queue` retires and describes a port.** Both are wrong per
+>   ADR-009 §13 — the frontier and visited set **stay in Postgres**, and the coordinator is a
+>   **rewrite**, because only its dispatch half has ever executed (BUG-008).
 > - **🔴 §4 sends content dedup (`xxhash`) and `diff.py` to "a diff/dedup activity, pure logic
 >   reused verbatim." Both halves of that are wrong.** *Where:* PM review assigned **both halves of
 >   change detection to Monitors (B)**, which is unwritten — so they are **relocated, not deleted,
