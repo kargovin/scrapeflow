@@ -66,7 +66,228 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-09-03) — **ADR-009 review is UNDERWAY. §16 reviewed. Next: §17, then the closing blocks.**
+- ## 📝 START HERE (2026-09-04) — **ADR-009's section review is COMPLETE. §17 reviewed. Only the closing Consequences / Deliberately-not-decided blocks remain.**
+
+  ### §17 (relationship to the earlier ADRs) — reviewed 2026-09-04; the deferral is upheld, and **six of the facts stated around it were wrong**
+
+  §17 was the last numbered section, 12 lines, and mostly a *deferral*: ADR-009 will supersede
+  parts of the earlier contracts, but **not yet** — they stay authoritative while v1 serves
+  traffic, because a `Superseded` header reads as *do not implement against this* to the person
+  maintaining the Go worker next month.
+
+  **That call stands, unchanged.** It is now stated as **this ADR's own call** rather than
+  attributed to the index. The index defines *how* a supersession notice is written (status header
+  + inline `⚠` markers); it says nothing about *when*, because no previous supersession here
+  replaced a contract that stayed live afterwards. §17 said *"per the ADR index's own rule"*, and
+  the index's ADR-009 paragraph said *"per ADR-009 §17"* — **each attributed the rule to the
+  other, and neither stated it.**
+
+  §17 was 12 lines; it is now 220.
+
+  #### 🔴 1. The ADR-001 entry lists the sections **ADR-002** superseded, and misses all four live ones → **17a**
+
+  §17 said ADR-009 will supersede ADR-001 *"§2 subjects, §3 schemas, §8 MinIO paths."* Those are,
+  word for word, ADR-001's own header notice from **2026-04-02**:
+
+  > ADR-002 supersedes §2 (Subjects), §3 (Message Schemas), and §8 (MinIO Path Convention)…
+  > Sections §4, §5, §6, §7 remain authoritative.
+
+  So the entry was **a copy of that notice, not an assessment of what this ADR does** — and it
+  fails in both directions at once. It points at a document that gave those decisions away four
+  months before ADR-009 was drafted (if the migration deletes the subject names, it deletes
+  **ADR-002 §2**), and it names none of the four sections that are still live:
+
+  | ADR-001 | what ADR-009 does |
+  |---|---|
+  | §5 Ack Timing | deleted — on §10's correctly-dissolved list |
+  | §6 Retry Policy | deleted — ⚠️ and already false today, see finding 5 |
+  | §7 Cancellation | **contradicted by name** — §7 says *no cancellation signal is sent to NATS or the worker*; §15d has the API signal the workflow |
+  | §4 Worker Responsibilities | **split** ↓ |
+
+  ```
+  ADR-001 §4
+
+    Retry logic                    │ NATS JetStream (via MaxDeliver)   ← deleted
+    Update job status in Postgres  │ API (result consumer)             ← rewritten by §11
+    Fetch / write MinIO / publish                                      ← unchanged
+
+    "Worker dependencies: NATS + MinIO only. No database access."      ← SURVIVES, permanently
+  ```
+
+  ⚠️ **That last line is the most load-bearing sentence in the ADR set for this migration**, and
+  this ADR leans on it three times: **§9** keeps it under the activity-worker port, **§8d**
+  enforces it *structurally* through task-queue routing rather than convention, and **16b's
+  unfixed residual risk exists because of it** — a v1 worker cannot read the lane marker, because
+  it cannot read the database at all. A blanket "ADR-001 is superseded" stamp asserts the opposite
+  of the rule three sections depend on.
+
+  ✅ **Owner's call: the list is rebuilt per section, and §4 gets a *partial* notice that names the
+  surviving rule.**
+
+  #### 🔴 2. `ADR-002 §8` is not a section that exists → **17b**
+
+  The §5 departure (v2 keys artifacts on the run, drops `latest/`) is real and correctly reasoned.
+  Its **address is not**: ADR-002 has six sections and its MinIO Path Convention is **§4**. §8 was
+  *ADR-001's* number for that decision, carried along when ownership moved in 2026-04-02.
+
+  ```
+  ADR-001:164   "⚠ Superseded by ADR-002 §4."     ← right, written 2026-04-02
+  ADR-003:65    "See ADR-002 §4 …"                ← right
+  … and 16 occurrences of "ADR-002 §8" across SIX files
+  ```
+
+  Including `open-bugs.md` (×3) — **the document P6 will be implemented from**. This is 16a's
+  failure one document layer up: an address that silently moved, still quoted as if it resolved.
+
+  ✅ **Owner's call: corrected to §4 in every live document** (the ADR, the index, `CLAUDE.md`,
+  `open-bugs.md`, `phase4-backlog.md`). ⚠️ **The five occurrences inside this handoff's archived
+  session blocks are deliberately left as written** — they are a record of what past sessions
+  said, and rewriting them would be editing history rather than fixing an address.
+
+  #### 🔴 3. The trigger names an event two of the documents never reach → **17c**
+
+  *"The supersession notices are added when the corresponding v1 component is deleted."* Against
+  §16's now-named steps:
+
+  | document | when it stops being true | a component deletion? |
+  |---|---|---|
+  | ADR-001 §5 / §6 | per flow, finishing at **NATS removal** | spread across cutovers |
+  | **ADR-001 §4's light-worker rule** | **never** | ❌ **no event exists** — and a stamp would assert the opposite of what §9 and §8d rely on |
+  | ADR-002 | subjects + pull consumer at NATS removal; result-consumer clause at consumer deletion; MinIO convention when the v1 lane retires | ❌ three different steps |
+  | ADR-004 | when the last flow stops publishing — **batch and crawl cutover** | ❌ it belongs to the **stream**, and dies *before* either deletion step |
+
+  §16 had just finished converting addresses into names because the numbers moved once already.
+  §17 reintroduced an unnamed one twelve lines later.
+
+  ✅ **Owner's call: every row of the new scope table names a §16 step**, and the cell is left
+  empty where a contract survives.
+
+  #### 4. "For as long as v1 serves traffic" is one global switch on a per-flow migration → **17d**
+
+  After the **job cutover**, ADR-002 is authoritative for batch and crawl and **not** for jobs.
+  All of §16 is per-flow; this deferral was all-or-nothing. Same lane-blindness as 15e's webhook
+  meters and 16c's recurring-jobs tile — in prose rather than SQL, so it fails by being *read*
+  wrongly rather than by returning a wrong number. ✅ **Authority is per flow**; same repair as 17c.
+
+  #### 🔴 5. Two contracts §17 protects as authoritative are already false of live code → **17e**
+
+  §17's stated reason for deferring is that a notice *"would mislead anyone maintaining the live
+  system."* Two of the contracts it protects **already mislead that person**:
+
+  ```
+  ADR-001 §6   "No application-level retry loop is needed in the worker."
+  ADR-002 §6   "NATS-managed retries │ MaxDeliver controls retry count;
+                no application-level retry loop"      ← re-affirmed as Unchanged
+  ```
+
+  Every worker has had one since Q5 / UF-003:
+
+  | worker | where |
+  |---|---|
+  | LLM | `llm-worker/worker/worker.py:107` `num_delivered`, cap at `:122`, `msg.nak(delay=…)` at `:128` |
+  | Playwright | `playwright-worker/worker/worker.py:259`, `:281` |
+  | Go http | `http-worker/internal/worker/worker.go:308` `retryDelay(…)` → `NakWithDelay` `:316` |
+
+  The retry **decision** and the backoff ladder are in worker code; `max_deliver` is only the
+  backstop. Predates ADR-009 and is not caused by it — but §17 is the section asserting these
+  documents are currently authoritative, so it is the section that has to qualify the claim.
+
+  ✅ **Owner's call: recorded here, not fixed on the v1 documents** — ADRs are immutable once
+  accepted and are not edited to match drifted code (the index's first rule). The correction rides
+  with the supersession notice at NATS removal. ⚠️ It also **reframes §10**: the ported classifier
+  is not moving retry *into* the workers, it is moving a retry decision that **already lives
+  there** onto a different engine. *The classifier decides; Temporal retries* is continuity, not a
+  new hazard.
+
+  #### 🔴 6. ADR-005 and ADR-006 appear nowhere in ADR-009 → **17f**
+
+  Zero occurrences in 3,300 lines, while the ADR decides the fate of both lanes they describe.
+
+  **ADR-005 (crawl BFS coordinator)** is a textbook partial supersession whose four sections **§13
+  has already decided** — including two it **upholds by name**:
+
+  | ADR-005 | §13's verdict |
+  |---|---|
+  | §1 dedicated coordinator process | **deleted** → `CrawlWorkflow` |
+  | §2 Postgres `crawl_queue` | ✅ **upheld** — the retire clause was withdrawn |
+  | §3 `crawls` / `crawl_pages` | ✅ **upheld** — `crawl_pages` is *required* |
+  | §4 crawl NATS subjects | superseded |
+
+  Leaving that unrecorded means the next reader re-derives a **withdrawn** clause — which is
+  exactly what 13b found people assume.
+
+  **ADR-006 (batch data model)** loses only §3 (result-consumer routing). Its data model is cited
+  as **correct** in BUG-005's root cause — *`job_id` is NULL for batch runs (correct, per
+  ADR-006)* — and P6 changes the artifact path, not the tables.
+
+  The heading *"Relationship to ADR-001/002/004"* was itself the defect: a reader concludes 003,
+  005, 006, 007 and 008 are unaffected, and for 005 that is wrong.
+
+  ✅ **Owner's call: both brought into scope; the section is renamed *Relationship to the earlier
+  ADRs* so the list is not fixed in the heading; and ADR-003 / ADR-007 / ADR-008 are stated as
+  unaffected rather than left to inference.**
+
+  ### Session close (2026-09-04)
+
+  **Docs-only session — no code changed.**
+
+  | file | what |
+  |---|---|
+  | `docs/adr/ADR-009-…` | §17 rewritten with 17a–17f (12 → 220 lines); **section renamed** *Relationship to the earlier ADRs* (anchor changed, the one inbound link updated); a **scope table naming a §16 step per row**; `ADR-002 §8` → **§4** at the three live citations; review log entry; date line |
+  | `docs/adr/README.md` | progress → §1–§17 all reviewed; the supersession paragraph rewritten — five ADRs in scope, per-flow authority, named steps, and the four easy-to-get-wrong facts (ADR-001 §2/§3/§8 are ADR-002's; §4's light-worker rule survives; ADR-005's two upheld sections; ADR-006's data model is correct); `§8` → `§4` |
+  | `docs/project/phase4-backlog.md` | header entry; ADR row → **section review COMPLETE**, §17 summary appended; `§8` → `§4` (×2) |
+  | `CLAUDE.md` | §17 summary appended to the ADR-009 bullet; review progress → closing blocks only; `§8` → `§4` |
+  | `docs/project/open-bugs.md` | `ADR-002 §8` → `§4` (×3) — **BUG-005's writeup, which P6 is implemented from** |
+  | this handoff | §17 block; §16 demoted to superseded |
+
+  ⚠️ **Knock-on outside §17:** the `ADR-002 §8` → `§4` correction touched **four files beyond the
+  ADR**. Anyone holding an earlier note that the MinIO path convention is "ADR-002 §8" should read
+  it as **§4**; §8 is ADR-001's superseded version of the same decision.
+
+  ⚠️ **Git state.** Deployed code is still `b110591`; `5c7fbdf` (the crawl page status-filter fix)
+  is still **committed on `develop`, not deployed, not on `main`**. Everything on top is docs.
+  ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** — pushing
+  it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up. Do not do
+  it at session end; wait to be asked. *(Re-check the ahead/behind counts against the remote before
+  quoting them — the last `git fetch` was 2026-07-13, and two consecutive handoffs carried stale
+  numbers.)*
+
+  **What is blocking: nothing.** The section review is finished. Outstanding:
+
+  1. **The closing blocks close the review** — **Consequences** and **Deliberately not decided
+     here**. ⚠️ They are the two blocks most likely to be stale, because they were written
+     **before** the reviews that reversed §8, §9 and §12 and amended §4, §5, §7, §2d and §16.
+     Things to check against the sections rather than re-read in isolation: the Deliberately-not-
+     decided table still lists the **crawl frontier model** as open when 13b decided the frontier
+     stays in Postgres and `continue-as-new` is mandatory either way (only the table's *shape* is
+     open); **run-failure notification** is listed as unassigned when 15f assigned it to the
+     conditional-execution PRD; and the Consequences' *"two orchestration systems… no longer sit on
+     top of each other"* bullet should be checked against 16b's unacked-message hazard.
+  2. **The conditional-execution PRD needs a number and a backlog row** (§14d), and it owes
+     **four** things: the Validate-precedent brief and the replay constraint (14c), the halt-early
+     block B cannot build for itself (§4), and run-level failure notification (15f). ⚠️ The number
+     is an **owner decision, deliberately left open** — creation order gives PRD-019, which sorts
+     *after* the PRD-018 it must precede.
+  3. **PRD-016 owes four things for one PM pass** (unchanged): §4's known exclusion; two more R6
+     divergences from §10; two passages still reasoning from §8's reversed storage rule
+     (`PRD-016:697`, `:802`); and §14a's sequencing fact.
+  4. **Four admin meters need lane scoping** — three webhook (15e) plus `active_recurring_jobs`
+     (16c). Not bugs today; migration work, recorded so they are not discovered by a dashboard
+     reporting a number that is well-formed and wrong.
+  5. **`temporal-full-migration.md` still contradicts the ADR** — its seven numbered steps are the
+     stale numbering 16a replaced, step 3 is the worker port (now second and named), the line-314
+     diagram assumes the rejected NATS bridge, the 339–351 retry discussion describes a hazard that
+     mostly no longer exists, and its crawl step assumes `crawl_queue` retires. ✅ Owner's call
+     stands: **redraw in ONE pass after the review closes** — which is now one step away. 🔴
+     markers are in place so nobody implements from it meanwhile.
+  6. **One open item from §13**, needed before the crawl step is built: whether sitemap entries are
+     **origin-restricted** like extracted links.
+  7. **A §17 obligation for implementation time, not now:** each supersession notice is pinned to a
+     named §16 step, so **whoever executes that step writes the notice** — including the *partial*
+     one on ADR-001 §4 that must name the surviving light-worker rule rather than stamping the
+     section.
+
+  ### Superseded: START HERE (2026-09-03) — §16 review
 
   ### §16 (the v1/v2 coexistence contract) — reviewed 2026-09-03; the decision is upheld, but five of its **instructions** were stale, and three of those were **addresses that had silently moved**
 

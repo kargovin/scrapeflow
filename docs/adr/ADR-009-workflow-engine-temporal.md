@@ -3,7 +3,7 @@
 **Status:** Draft — under section-by-section review by @karthik. **Nothing here is settled yet**;
 do not implement against it, and do not cite it as a decision in another document until the
 document status is Accepted.
-**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed) · 2026-08-26 (§10 and §11 reviewed) · 2026-08-28 (§13 reviewed) · 2026-09-01 (§14 reviewed) · 2026-09-02 (§15 reviewed) · 2026-09-03 (§16 reviewed)
+**Date:** 2026-08-04 (drafted) · 2026-08-08 (review in progress) · 2026-08-25 (§8's two blockers closed) · 2026-08-26 (§10 and §11 reviewed) · 2026-08-28 (§13 reviewed) · 2026-09-01 (§14 reviewed) · 2026-09-02 (§15 reviewed) · 2026-09-03 (§16 reviewed) · 2026-09-04 (§17 reviewed)
 **Review log:** §1 taken as settled (engine decided pre-ADR). **§2 resolved 2026-08-08** — three
 open points closed in place (2a separate Postgres instance · 2b Web UI not exposed · 2c retention
 30 days). **§3 reviewed 2026-08-08** — two factual corrections applied (crawls are already an
@@ -444,14 +444,49 @@ view — without which pipeline runs consume no meter *by construction*, P7's ow
 all precede "engine up". §8d moved the ledger to pre-migration on 2026-08-25, two days *after* the
 sequence was last touched. ✅ **The pre-migration queue is the sequence's entry condition**:
 P6 → P8 → P7 + BUG-007, then engine up; `phase4-backlog.md` §1 remains its source of truth.
-**Next: §17**, then the closing **Consequences** and **Deliberately not decided here** blocks.
-§12 was already reviewed and reversed.
+**§17 reviewed 2026-09-04** — the **deferral stands** (the earlier contracts keep their authority
+while v1 serves their flow, and the supersession notices wait), and it is now stated as **this
+ADR's own call**: the index defines *how* a notice is written, never *when*, because no previous
+supersession here replaced a contract that stayed live afterwards. Six corrections, none to the
+decision. **(1)** The ADR-001 entry listed *"§2 subjects, §3 schemas, §8 MinIO paths"* — word for
+word the three sections **ADR-002** superseded on 2026-04-02, so it was a copy of that notice
+rather than an assessment, pointing at a document that no longer owns those decisions and missing
+**all four sections of ADR-001 that are still authoritative**. Two are deleted (§5 ack timing, §6
+retry), §7 is **contradicted by name** (it says no cancellation signal is ever sent to NATS or the
+worker; §15d has the API signal the workflow), and §4 is **split** — its retry and status-update
+rows go, while *"Worker dependencies: NATS + MinIO only. No database access."* **survives
+permanently** and is depended on three times in this ADR (§9 keeps it, §8d enforces it through
+task-queue routing, and 16b's residual risk exists *because* a v1 worker cannot read the lane
+marker). ✅ The list is rebuilt per section and §4 gets a **partial** notice naming the surviving
+rule. **(2) 🔴 The §5 departure cited "ADR-002 §8", which is not a section that exists** — ADR-002
+has six sections and its MinIO Path Convention is **§4**; §8 was *ADR-001's* number, carried along
+when ownership moved. Wrong in **16 places across six files**, including `open-bugs.md`, which is
+what P6 is implemented from. ✅ Corrected everywhere it is a live instruction; the archived handoff
+blocks are left as the record. **(3)** *"When the corresponding v1 component is deleted"* does not
+resolve: ADR-004 belongs to the **stream**, not a component, and dies at the **batch and crawl
+cutover** — before either deletion step — while ADR-001 §4's light-worker rule has **no deletion
+event at all**. ✅ The scope table **names a step per row** (16a's lesson, one section later), and
+leaves the cell empty where a contract survives. **(4)** *"For as long as v1 serves traffic"* was
+one global switch on a per-flow migration — after the job cutover ADR-002 is authoritative for
+batch and crawl and not for jobs. ✅ Authority is **per flow**. **(5) ⚠️ ADR-001 §6 and ADR-002 §6
+are already false of live code** — both say there is no application-level retry loop in the worker,
+and all three workers have had one since Q5/UF-003 (`llm-worker/worker/worker.py:107`/`:128`,
+`playwright-worker/worker/worker.py:259`/`:281`, `http-worker/internal/worker/worker.go:308`/`:316`).
+Predates this ADR; recorded as a known divergence rather than protected as accurate, since ADRs are
+not edited to match drifted code. It also reframes §10: the ported classifier moves a retry decision
+that **already lives in the workers** onto a new engine — continuity, not a new hazard. **(6) 🔴
+ADR-005 and ADR-006 appeared nowhere in this ADR**, though §13 decides all four of ADR-005's
+sections — **two of them upheld by name** (`crawl_queue` stays, `crawl_pages` is required), which is
+precisely what 13b found people assume otherwise. ✅ Both in scope; the section is renamed
+*Relationship to the earlier ADRs* so the list is not fixed in the heading, and ADR-003/007/008 are
+stated as unaffected rather than left to inference.
+**Next: the closing Consequences and Deliberately-not-decided blocks**, which close the review. §12 was already reviewed and reversed.
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
 comparison), `docs/project/temporal-full-migration.md` (change inventory + sequence),
 `docs/project/open-questions.md` **Q8** (the incident), `docs/project/open-bugs.md` **BUG-005**
-**Supersedes:** nothing yet — see [§17](#17-relationship-to-adr-001002004).
+**Supersedes:** nothing yet — see [§17](#17-relationship-to-the-earlier-adrs).
 
 ---
 
@@ -1025,7 +1060,7 @@ pipelines/{pipeline_run_id}/{block_id}.{ext}   — one immutable object per cont
   "there is exactly one tenant boundary, and nothing at the engine backs it up," at the storage
   layer, where BUG-005 proved no 404 guard reaches.
 
-Two deliberate departures from ADR-002 §8:
+Two deliberate departures from ADR-002 §4:
 
 - **Keyed on the run, not on a definition.** `history/{job_id}/…` assumes a stable parent that a
   pipeline with run inputs does not have. This is the same assumption BUG-005 broke.
@@ -1034,7 +1069,7 @@ Two deliberate departures from ADR-002 §8:
   the cost gate cannot live in layer A (OQ-10). Writing a `latest/` object anyway would recreate
   BUG-005's shared-object collision exactly.
 
-This **partially supersedes ADR-002 §8 for the v2 lane only**. v1 keeps its convention until
+This **partially supersedes ADR-002 §4 for the v2 lane only**. v1 keeps its convention until
 retired. Note that BUG-005's fix re-keys the v1 batch path on `run_id`, which converges the two
 conventions rather than forking them further.
 
@@ -1460,7 +1495,7 @@ backlog §3 does not cover these** — they are pre-migration fixes on live code
 why the metering decision depends on it.
 
 **✅ The dual write is settled (owner's call, 2026-08-25): charge one copy.** Every worker writes
-each result **twice** — `latest/{job_id}.{ext}` and `history/{job_id}/{ts}.{ext}` (ADR-002 §8) —
+each result **twice** — `latest/{job_id}.{ext}` and `history/{job_id}/{ts}.{ext}` (ADR-002 §4) —
 while `result_size` reports one copy, so MinIO holds 2× what the meter counts on every v1 lane.
 Read literally, "charge for what is stored" charges both. It does not. The rule is:
 
@@ -3297,18 +3332,226 @@ the order of work.
 `phase4-backlog.md` §1 stays the single source of truth for its contents, and this section owns
 only the fact that the sequence does not start until it is empty.
 
-### 17. Relationship to ADR-001/002/004
+### 17. Relationship to the earlier ADRs
 
-ADR-009 **will** supersede parts of ADR-001 (§2 subjects, §3 schemas, §8 MinIO paths), ADR-002
-(the Phase 2 worker contract), and ADR-004 (fat message schema v2) — but **not yet**. Those
-contracts remain authoritative for as long as v1 serves traffic, and marking them superseded now
-would mislead anyone maintaining the live system.
+ADR-009 **will** supersede parts of ADR-001, ADR-002, ADR-004, ADR-005 and ADR-006 — but **not
+yet**. Those contracts remain authoritative for the flows still served by v1, and marking them
+superseded now would mislead anyone maintaining the live system.
 
-The one partial exception is recorded in [§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity):
-the v2 artifact path convention departs from ADR-002 §8, for the v2 lane only.
+That deferral is this ADR's own call, not a rule inherited from anywhere. The ADR index says
+**how** a supersession notice is written (status header, plus inline `⚠` markers at the sections
+that changed); it says nothing about **when**, because every previous supersession here replaced a
+contract that stopped being true the moment the new one was accepted. This one does not: the whole
+point of [§16](#16-the-v1v2-coexistence-contract)'s strangler-fig sequence is that v1 keeps serving
+real traffic for the entire migration, and a `Superseded` header reads as *do not implement against
+this* to the person maintaining the Go worker next month. There is no status value for *"replaced
+on the new lane, still binding on the old one"*, so the stamp waits.
 
-The supersession notices are added when the corresponding v1 component is deleted, per the ADR
-index's own rule.
+**What is superseded, and at which named step.** [§16](#16-the-v1v2-coexistence-contract) named its
+sequence rather than numbering it; this table names a step per row for the same reason
+([16a](#16a-steps-get-names-because-the-numbers-have-already-moved-once)). "Component deletion" is
+not usable as a trigger here — three of these contracts die at a **cutover**, before anything is
+deleted ([17c](#17c-when-the-corresponding-v1-component-is-deleted-is-an-address-two-of-these-documents-do-not-have)).
+
+| document | section | verdict | notice added at |
+|---|---|---|---|
+| **ADR-001** | §2 Subjects · §3 Message Schemas · §8 MinIO paths | already superseded **by ADR-002** in 2026-04-02 — not ADR-009's to supersede ([17a](#17a-the-adr-001-entry-lists-the-sections-adr-002-already-superseded)) | — |
+| | §4 Worker Responsibilities | **split.** The retry row and the status-update row are replaced; **"Worker dependencies: NATS + MinIO only. No database access." survives permanently** | NATS removal, as a **partial** notice that names the surviving rule |
+| | §5 Acknowledgment Timing | superseded — ack timing is on [§10](#10-oq-6--the-do-not-delete-list)'s correctly-dissolved list | NATS removal |
+| | §6 Retry Policy | superseded — and ⚠️ already false of live code ([17e](#17e-two-of-the-contracts-held-authoritative-here-are-already-false-of-live-code)) | NATS removal |
+| | §7 Cancellation | superseded — [§15d](#15d-cancellation-now-takes-up-to-26-hours-and-a-cancelled-run-still-delivers) has the API send a cancel **to the workflow**, where §7 says no signal is ever sent | schedule and webhook cutover |
+| **ADR-002** | §1 Stream Subject Change · §2 Updated Subjects · §5 Pull Consumer | superseded | NATS removal |
+| | §3 Updated Message Schemas | superseded | last flow cutover — **batch and crawl cutover** |
+| | §4 MinIO Path Convention | **partially superseded already**, v2 lane only, by [§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity) — the live exception | job cutover for the rest |
+| | §6 Unchanged from ADR-001 | superseded — and ⚠️ its retry row is already false ([17e](#17e-two-of-the-contracts-held-authoritative-here-are-already-false-of-live-code)) | NATS removal |
+| **ADR-004** | all — fat message schema v2 | superseded. ⚠️ It belongs to the **stream**, not to a component, so it stops being used when the last flow stops publishing | **batch and crawl cutover** |
+| **ADR-005** | §1 dedicated coordinator process | superseded — [§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block) replaces it with `CrawlWorkflow` | batch and crawl cutover |
+| | §2 Postgres `crawl_queue` | ✅ **upheld by name** — the draft's clause that it retires was withdrawn on review | — |
+| | §3 `crawls` / `crawl_pages` | ✅ **upheld by name** — `crawl_pages` is *required*, not optional | — |
+| | §4 crawl NATS subjects | superseded | NATS removal |
+| **ADR-006** | §1 `batches` / `batch_items` · §2 nullable `job_id` + `batch_item_id` | ✅ **upheld** — cited as correct in BUG-005's analysis; P6 changes the artifact path, not the data model | — |
+| | §3 Result consumer routing | superseded | consumer deletion |
+| | §4 Workers are unchanged | superseded — [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected) gives every worker a Temporal entry point | worker port |
+
+**Not affected.** **ADR-003** (job/run split) — `job_runs` survives as the job lane's own table and
+as [§3](#3-oq-1a--run-identity-pipeline-runs-get-their-own-table-and-quota-counting-stops-naming-a-table)'s
+read-model mirror. **ADR-007** (Fernet secret storage) and **ADR-008** (Patchright/headed-Chrome
+stealth) are both on §16's *what explicitly does not change* list; ADR-008 in particular is the
+behaviour the transport change must leave untouched.
+
+#### 17a. The ADR-001 entry lists the sections ADR-002 already superseded
+
+The section said ADR-009 will supersede ADR-001 *"§2 subjects, §3 schemas, §8 MinIO paths."* Those
+are, word for word, the three sections **ADR-002 superseded on 2026-04-02**. ADR-001's own header
+notice says so:
+
+> ADR-002 supersedes §2 (Subjects), §3 (Message Schemas), and §8 (MinIO Path Convention) of this
+> document. Sections §4 (Worker Responsibilities), §5 (Acknowledgment Timing), §6 (Retry Policy),
+> and §7 (Cancellation) remain authoritative.
+
+So the entry was **a copy of the 2026-04-02 notice, not an assessment of what this ADR does**, and
+it fails in both directions at once.
+
+**It points at the wrong document.** Those decisions moved to ADR-002 four months before this ADR
+was drafted. If the migration deletes the subject names it deletes **ADR-002 §2**; re-superseding
+ADR-001 §2 is a no-op on a section that is already history, and it leaves the live one unstamped.
+
+**It misses every section of ADR-001 that is still authoritative** — which is where the content is.
+Two are deleted outright (§5 ack timing, §6 retry), one is **contradicted by name** (§7 says *"No
+cancellation signal is sent to NATS or the worker"* and *"the API result consumer is the single
+enforcement point"*, while [§15d](#15d-cancellation-now-takes-up-to-26-hours-and-a-cancelled-run-still-delivers)
+has the API signal the workflow directly), and §4 is **split**:
+
+```
+ADR-001 §4, Worker Responsibilities
+
+  Retry logic                    │ NATS JetStream (via MaxDeliver)   ← deleted
+  Update job status in Postgres  │ API (result consumer)             ← rewritten by §11
+  Fetch URL / write MinIO / publish result                           ← unchanged
+
+  "Worker dependencies: NATS + MinIO only. No database access."      ← SURVIVES, permanently
+```
+
+That last line is the most load-bearing sentence in the entire ADR set for this migration, and
+this ADR leans on it three times: [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)
+keeps it under the activity-worker port,
+[§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25) enforces it *structurally*
+through task-queue routing rather than convention, and
+[16b](#16b-the-drain-gate-is-described-here-as-a-deletion-gate-and-the-section-that-depends-on-it-says-otherwise)'s
+unfixed residual risk **exists because of it** — a v1 worker cannot read the lane marker, because
+it cannot read the database at all.
+
+⚠️ **So the section most needing an explicit "this part survives" was the one section §17 did not
+name**, and a blanket "ADR-001 is superseded" stamp would assert the opposite of the rule three
+other sections depend on.
+
+✅ **Owner's call: the list is rebuilt per section, and §4 gets a partial notice that names the
+surviving rule rather than a section-level one.** The table above is that list.
+
+#### 17b. ADR-002 has no §8 — and the wrong address is in six files
+
+The departure recorded in [§5](#5-oq-1c--blocks-pass-references-artifacts-are-keyed-on-run-identity)
+is real and correctly reasoned. Its address is not: **ADR-002 has six sections, and its MinIO Path
+Convention is §4.** §8 was *ADR-001's* number for that decision, and the number was carried along
+when ownership moved to ADR-002 in 2026-04-02 — the same document-level slip as
+[16a](#16a-steps-get-names-because-the-numbers-have-already-moved-once), one layer up.
+
+The correct spelling exists in the repo and lost:
+
+```
+ADR-001:164   "⚠ Superseded by ADR-002 §4."          ← right, written 2026-04-02
+ADR-003:65    "See ADR-002 §4 for the full …"        ← right
+… and 16 occurrences of "ADR-002 §8" across six files, including this ADR (×4),
+  open-bugs.md (×3) — which is the document P6 will be implemented from — README.md,
+  phase4-backlog.md and CLAUDE.md
+```
+
+✅ **Owner's call: corrected to §4 everywhere it is a live instruction** — this ADR, the ADR index,
+`CLAUDE.md`, `open-bugs.md`, `phase4-backlog.md`. The occurrences inside the session handoff's
+**archived** session blocks are left as written: they are a record of what past sessions said, and
+rewriting them would be editing history rather than fixing an address.
+
+#### 17c. "When the corresponding v1 component is deleted" is an address two of these documents do not have
+
+The trigger assumed each ADR maps to one component whose deletion stamps it. Against §16's named
+steps, none of them cleanly does:
+
+| document | when it actually stops being true | is that a component deletion? |
+|---|---|---|
+| ADR-001 §5 / §6 | per flow, finishing at **NATS removal** | spread across cutovers, not one event |
+| **ADR-001 §4's light-worker rule** | **never** | ❌ **there is no event at all** — and a stamp would assert the opposite of what [§9](#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected) and [§8d](#8d-who-charges-and-what-happens-at-the-wall--settled-2026-08-25) rely on |
+| ADR-002 | subjects and pull consumer at **NATS removal**; the result-consumer clause at **consumer deletion**; the MinIO convention when the v1 lane retires | ❌ three different steps |
+| ADR-004 | when the last flow stops publishing — the **batch and crawl cutover** | ❌ it belongs to the stream, not a component, and it dies **before** either deletion step |
+
+§16 had just finished converting addresses into names because the numbers had moved once already;
+this section reintroduced an unnamed one twelve lines later.
+
+✅ **Owner's call: every row of the scope table names a step**, and where a contract survives, the
+"notice added at" cell is empty rather than deferred to an event that will never arrive.
+
+#### 17d. "For as long as v1 serves traffic" is one global switch on a per-flow migration
+
+After the **job cutover**, ADR-002 is authoritative for batch and crawl and **not** for jobs. The
+whole of §16 is per-flow; this deferral was all-or-nothing, so the two documents describe different
+migrations in the same breath. It is the lane-blindness this ADR keeps finding —
+[15e](#15e-no-webhook_deliveries-row-for-v2-removes-admin-capability-and-blinds-three-meters)'s webhook meters
+and [16c](#16c-obligation-2-borrows-a-user-facing-switch-and-one-live-meter-reads-it)'s recurring-jobs
+tile are the same shape — with the difference that here it is prose rather than a query, and it
+fails by being **read** wrongly rather than by returning a wrong number.
+
+✅ **Owner's call: authority is per flow, and the scope table is what states it.** Same fix as
+[17c](#17c-when-the-corresponding-v1-component-is-deleted-is-an-address-two-of-these-documents-do-not-have);
+recorded separately because the two were separate mistakes with one repair.
+
+#### 17e. Two of the contracts held authoritative here are already false of live code
+
+This section's stated reason for deferring is that a supersession notice *"would mislead anyone
+maintaining the live system."* Two of the contracts it protects already mislead that person:
+
+```
+ADR-001 §6   "NATS JetStream handles retries automatically via MaxDeliver …
+              No application-level retry loop is needed in the worker."
+
+ADR-002 §6   "NATS-managed retries │ MaxDeliver controls retry count;
+              no application-level retry loop"          ← re-affirmed as Unchanged
+```
+
+Every worker has had one since the Q5 / UF-003 work:
+
+| worker | where |
+|---|---|
+| LLM | `llm-worker/worker/worker.py:107` reads `msg.metadata.num_delivered`, caps at `llm_max_delivery_attempts:122`, `msg.nak(delay=…)` at `:128` |
+| Playwright | `playwright-worker/worker/worker.py:259`, `:281` — same shape |
+| Go http | `http-worker/internal/worker/worker.go:308` `retryDelay(attempt, …)` → `NakWithDelay` at `:316` |
+
+The retry **decision** and the backoff ladder are in worker code; `max_deliver` is only the
+consumer-side backstop. This predates ADR-009 and is not caused by it — but §17 is the section that
+asserts these documents are currently authoritative, so it is the section that has to qualify the
+claim rather than restate it.
+
+⚠️ It also sharpens what the migration inherits: [§10](#10-oq-6--the-do-not-delete-list)'s ported
+classifier is not moving retry *into* the workers, it is moving a retry decision that **already
+lives there** onto a different engine. The rule *the classifier decides; Temporal retries* is
+continuity, not a new hazard.
+
+✅ **Owner's call: recorded here, not fixed on the v1 documents.** ADRs are immutable once accepted
+and are not edited to match drifted code — that is the index's first rule. The correction rides
+with the supersession notice at NATS removal, and until then this row is the record that the
+divergence is known.
+
+#### 17f. ADR-005 and ADR-006 are not mentioned anywhere in this ADR
+
+Zero occurrences in 3,300 lines, while this ADR decides the fate of both lanes they describe.
+
+**ADR-005 (crawl BFS coordinator)** is a textbook partial supersession whose four sections
+[§13](#13-oq-9--the-crawl-coordinator-migrates-last-and-a-crawl-is-not-a-block) has *already*
+decided — including two it **upholds by name**, which is exactly the fact an index reader needs,
+since 13b's finding was that the draft wrongly assumed the frontier table retires. Leaving that
+unrecorded means the next reader re-derives a withdrawn clause.
+
+**ADR-006 (batch data model)** loses only its result-consumer routing section. Its data model is
+cited as **correct** in BUG-005's root cause — *`job_id` is NULL for batch runs (correct, per
+ADR-006)* — and P6 changes the artifact path convention, not the tables.
+
+The heading *"Relationship to ADR-001/002/004"* is itself the defect: a reader concludes 003, 005,
+006, 007 and 008 are unaffected, and for 005 that is wrong.
+
+✅ **Owner's call: both are brought into scope, and the section is renamed *Relationship to the
+earlier ADRs* so the list is not fixed in the heading.** The three genuinely unaffected ADRs are
+now stated as unaffected rather than left to inference.
+
+> **✅ Settled on review (2026-09-04).** The deferral stands and is now stated as this ADR's own
+> call rather than attributed to an index rule that does not exist. Six corrections, none of them
+> to the decision: the ADR-001 entry named the three sections **ADR-002** superseded in 2026-04-02
+> and missed all four live ones, including the light-worker rule that **survives** and that §9, §8d
+> and 16b all depend on (17a); the recorded §5 departure cited **ADR-002 §8, which is not a section
+> that exists** — the convention is §4 — an address wrong in six files (17b); the "component
+> deletion" trigger does not resolve for ADR-004 or for ADR-001 §4, so the scope table now **names
+> a step per row** (17c) and states authority **per flow** rather than globally (17d); ADR-001 §6
+> and ADR-002 §6 are **already false of live code** and are recorded as a known divergence rather
+> than protected as accurate (17e); and **ADR-005 and ADR-006 appeared nowhere in this ADR** though
+> §13 decides all four of ADR-005's sections — two of them upheld by name — so both are in scope
+> and the section is renamed (17f).
 
 ---
 

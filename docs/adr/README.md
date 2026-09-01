@@ -34,7 +34,8 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Draft** | 2026-08-04 | — | — |
 
 **ADR-009 is drafted and its section-by-section review is IN PROGRESS — it is not yet a decision.**
-**§1–§16 have been reviewed** (several reversed in the process); §17 and the closing blocks have not.
+**§1–§17 have all been reviewed** (several reversed in the process); only the closing
+**Consequences** and **Deliberately not decided here** blocks have not.
 The ADR's own **Review log** (top of the file) is authoritative for which sections are settled —
 prefer it over any summary, including this one. It records the Phase 4
 engine decision (Temporal), answers all **11** of
@@ -91,12 +92,35 @@ Four things in it that are easy to miss and expensive to rediscover:
   P7's metering unit, §8d's ledger producer link, and the artifact's name), and **every URL
   entering the frontier is SSRF-checked** — the `httpx` swap this section already required is the
   smaller half of what is wrong in `sitemap.py` (**BUG-010**).
-- **§5 partially departs from ADR-002 §8** (the MinIO path convention) for the v2 lane only.
+- **§5 partially departs from ADR-002 §4** (the MinIO path convention) for the v2 lane only.
 
-It will eventually **supersede parts of ADR-001/002/004** — the NATS subjects, fat-message schema,
-and worker result contract are all deleted at the migration's end state. Those rows stay empty
-until then, per ADR-009 §17: the contracts remain authoritative for as long as v1 serves traffic,
-and the supersession notices are added when each v1 component is actually deleted.
+It will eventually **supersede parts of ADR-001, ADR-002, ADR-004, ADR-005 and ADR-006** — the
+NATS subjects, the fat-message schema, the worker result contract, the crawl coordinator process
+and the batch result-consumer routing are all deleted at the migration's end state. Those
+`Superseded by` rows stay empty until then, per **ADR-009 §17**: a contract keeps its authority
+for **the flows still served by v1** (authority is per flow, not one global switch — after the job
+cutover ADR-002 is authoritative for batch and crawl and not for jobs), and each notice is added at
+a **named step of §16's sequence**, not at a vague "component deletion" — ADR-004 belongs to the
+stream rather than to any component and dies at the *batch and crawl cutover*, before anything is
+deleted. Four things there are easy to get wrong and are settled in that section's table:
+
+- **ADR-001 §2/§3/§8 are not ADR-009's to supersede** — ADR-002 took them on 2026-04-02. What
+  ADR-009 replaces is ADR-001 **§4–§7**, and **§4 only in part**: its retry and status-update rows
+  go, while ⚠️ **"Worker dependencies: NATS + MinIO only. No database access." survives the whole
+  migration** and is relied on by §9, §8d and 16b. A section-level "superseded" stamp on §4 would
+  assert the opposite.
+- **ADR-005 is partially superseded, and two of its four sections are UPHELD BY NAME** — §13 keeps
+  the Postgres `crawl_queue` frontier (the draft's clause that it retires was withdrawn) and makes
+  `crawl_pages` **required**. Only the dedicated coordinator process and the crawl NATS subjects go.
+- **ADR-006 keeps its data model** — `batches`/`batch_items` and the nullable `job_id` are cited as
+  *correct* in BUG-005's root cause; only its result-consumer routing section is superseded.
+- ⚠️ **ADR-001 §6 and ADR-002 §6 are already false of live code** — both state there is no
+  application-level retry loop in the worker, and all three workers have had one since Q5/UF-003.
+  Recorded in §17e as a known divergence; ADRs are not edited to match drifted code, so the
+  correction rides with the supersession notice.
+
+**ADR-003, ADR-007 and ADR-008 are unaffected** and stay fully Accepted — ADR-008's scraping
+behaviour is explicitly the thing the transport change must leave untouched.
 
 ---
 

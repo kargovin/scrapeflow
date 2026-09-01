@@ -342,7 +342,7 @@ What was not carried through is that **two contracts still assume `job_id` alway
 1. **The fat-message and LLM-message schemas** type it as a required string, so a legitimately
    absent job id is indistinguishable from a malformed message — and the malformed-message
    handler's job is to discard.
-2. **The MinIO path convention** (ADR-002 §8) keys every artifact on `job_id`:
+2. **The MinIO path convention** (ADR-002 §4) keys every artifact on `job_id`:
    `latest/{job_id}.{ext}` and `history/{job_id}/{ts}.{ext}`. With no job id there is no distinct
    path, so all artifacts pile into one.
 
@@ -382,7 +382,7 @@ once. Without it, the same class of gap reopens the next time a message field ch
    optional — never default.
 2. **Key the artifact path on something that always exists.** `run_id` is the natural candidate:
    every run has one, it is unique, and it is already the handle the result consumer and result
-   endpoint work from. This changes the ADR-002 §8 path convention, so it belongs in an ADR
+   endpoint work from. This changes the ADR-002 §4 path convention, so it belongs in an ADR
    amendment rather than a quiet edit — and it needs a decision on what happens to `latest/`,
    whose whole purpose ("the newest result for this thing") is job-shaped and has no meaning for a
    one-shot batch item.
@@ -417,7 +417,7 @@ latent rather than realised.
   otherwise. Pipelines are the second, larger instance of the same shape: no `job_id`, multiple
   artifacts per run, a second consumer of the quota meters. This bug is what OQ-1 looks like when
   it is answered implicitly instead of decided.
-- **ADR-002 §8** — the MinIO path convention is the thing that has to change; do not let the fix
+- **ADR-002 §4** — the MinIO path convention is the thing that has to change; do not let the fix
   bypass the ADR.
 - **ADR-006** — not wrong, but its "workers are unchanged" claim needs a footnote: routing was
   unchanged, identity was not.
