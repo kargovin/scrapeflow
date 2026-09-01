@@ -66,7 +66,134 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-09-05) — **ADR-009's review is FINISHED. Next session starts with one job: strip the redundant ADR-009 summaries out of `CLAUDE.md` and `phase4-backlog.md`.**
+- ## 📝 START HERE (2026-09-06) — **the duplicated ADR-009 summaries are gone, and `CLAUDE.md` had a full cleanup pass. `CLAUDE.md` is 70% smaller. Nothing is blocking.**
+
+  The 2026-09-05 first task is **done**, and the owner extended it: not just the ADR-009 bullet, but
+  `CLAUDE.md` as a whole — *"keep only facts that are relevant now; remove stale and explanatory
+  comments."*
+
+  | file | before | after | |
+  |---|---|---|---|
+  | `CLAUDE.md` | 93,141 chars · 206 lines | **27,527 · 132** | **−70%** — roughly ~14k → ~4k tokens of standing context in **every** session |
+  | `phase4-backlog.md` — the ADR-009 row | 16,500 chars | **914** | −94% |
+
+  ### The verification came first, and it is the part worth trusting
+
+  Same method as the review-log condensing, in the prescribed order — sweep, then cut, then
+  re-verify links.
+
+  **Forward sweep (is the summary safe to delete?).** 664 distinctive tokens in `CLAUDE.md`'s
+  bullet + 235 in the backlog row — code identifiers, `file:line` refs, figures, IDs. **15 apparent
+  misses, all 15 resolved**, every one a formatting difference: `30 → 300 → 1800 → 7200` against the
+  ADR's `[0, 30, 300, 1800, 7200]`, `ApplicationError(non_retryable=True)` against
+  `ApplicationError(..., non_retryable=True)`, an abbreviated `processJob(...)` signature, `<300`
+  against `status_code < 300`, `§11b`/`§14a` against the ADR's un-prefixed `11b`/`14a`. Of 290 bold
+  prose claims not matching verbatim, **289 carried ≥70% of their content words into the ADR**; the
+  one below threshold was the heading *"Two precision fixes:"*.
+
+  ⚠️ **Two forward-sweep results worth keeping:** `mcp/` resolves to **`open-bugs.md`, not the
+  ADR** — correctly, since ADR-009 itself says BUG-006 was *"corrected outside this ADR"*. And
+  `result_consumer.py:81` (in `CLAUDE.md`) vs `:85` (in the ADR) is **not** a conflict: live code
+  has the idempotency guard at `:81` and the increment at `:85`, so both were right about different
+  lines of the same function.
+
+  **Reverse sweep (did the cut drop anything homeless?).** 185 code/ID tokens left `CLAUDE.md`;
+  **173 have a home elsewhere in `docs/`.** Of the 12 that did not: 4 were formatting
+  false-positives, **2 were restored** (the SPA route globs `/app/admin/jobs*` · `/app/dashboard/jobs*`
+  · `/admin/jobs*`, and `RequireAdmin`), and 6 were dropped on purpose — see the three findings
+  below. All 30 path references in the new file resolve; the only non-resolving one is
+  `llm-worker.yaml`, which is correct because the text says it lives in the **infra repo**.
+
+  ### 🔴 Three defects found by the sweep, not by reading
+
+  1. **A stale fact that the cut would have promoted to the only surviving statement.** The Backlog
+     bullet said Dependabot scans **"3 of 6 manifests"**; the ADR-009 bullet later corrected it to
+     **7** (`mcp/` was missing from its own list of unscanned services). Deleting the ADR-009 bullet
+     alone would have left the wrong number standing with its correction gone. ✅ Fixed to **3 of 7**
+     in the surviving text. ⚠️ **This is the general hazard in de-duplicating: the copy being cut may
+     be the one holding the correction.**
+  2. **The `prephase4` tag hash was wrong.** `CLAUDE.md` cited the tag as `1965953`; it actually
+     resolves to **`473fb68`**. ✅ Hash dropped, tag name kept — the name is the durable reference.
+  3. **`result_consumer.py:125`** (the API's terminal-status guard) **had already drifted** — the
+     guard now sits at ~`:126`. ✅ Fact kept, line number dropped. That class of pointer rots faster
+     than anyone re-checks it.
+
+  ### What was kept, deliberately — read this before trimming further
+
+  ⚠️ **All 41 Key-decisions rows survive.** The rationale column there is *not* explanatory padding;
+  it is the trap that stops the bug returning, and cutting it is the one edit that would make this
+  file worse. Specifically preserved in full: `xvfb-run`-as-pid-1, the **`nats consumer info --json`**
+  requirement (the table output omits `Max Deliver` entirely when it is `-1`, so a capped and an
+  uncapped consumer look identical), the `llm_max_retries=0` pin and why the Q6 pin and the timeout
+  bump are *safe together and unsafe apart*, the aiohttp-vs-`S3Error.code` exception-class split,
+  the Go `*uploadError` scoping, and bot-wall posture being the **inverse** of the LLM classifier.
+
+  **Cut:** the ADR-009 review narrative (verified duplicate → now a pointer to the ADR's
+  `## Review status` block plus the Draft rule); Phase 1–3 feature lists compressed to one line per
+  phase; the superseded fixed-window rate-limiting row; status-only rows (`Proxy rotation | Skip for
+  MVP`, `Change detection | Yes, Phase 2`); commit-hash provenance; the persona prose paragraph.
+
+  Also: the title is now `# ScrapeFlow` (was `# ScrapeFlow - Apify Clone`), per the standing
+  preference not to name competitors.
+
+  ### ⚠️ Not touched — two deliberate omissions
+
+  - **`phase4-backlog.md`'s header changelog (line 13, 8,248 chars)** restates the same closing-block
+    findings at length. Left alone because it is a *dated log* rather than a duplicate summary, and
+    trimming it was not asked for. It is the obvious next candidate if the standing-context cost
+    matters again.
+  - **This handoff.** Its archived session blocks are the record and are not rewritten.
+
+  ### Session close (2026-09-06)
+
+  **Docs-only session — no code changed.**
+
+  | file | what |
+  |---|---|
+  | `CLAUDE.md` | ADR-009 bullet 55,246 → ~1,400 chars; full cleanup pass; **3 of 6 → 3 of 7** fix; `prephase4` hash and drifted line refs dropped; title renamed. 93,141 → 27,527 chars |
+  | `docs/project/phase4-backlog.md` | ADR-009 row 16,500 → 914 chars; the artifact-chain line's stale *"pending review"* → *"section review complete 2026-09-05, still Draft"* |
+  | this handoff | this block; 2026-09-05 demoted to superseded |
+
+  ✅ **Committed** — `530fca3` (the cleanup), plus this handoff commit. Working tree clean apart
+  from an untracked `tmp/architecture.md`, which predates this session (May) and was deliberately
+  left alone.
+
+  **What is blocking: nothing.** Outstanding, in rough order — item 1 of the previous list is now
+  done, so the numbering has shifted up by one:
+
+  1. **🔷 Owner decision — promote ADR-009 to `Accepted`?** Nothing in the document blocks it. Until
+     it happens the Draft rule holds: do not implement against it, do not cite it as settled.
+  2. **`temporal-full-migration.md` gets its one-pass redraw** — deferred until the review closed,
+     and the review has closed. It contradicts the ADR in five known places: the stale seven-step
+     numbering 16a replaced, its step 3 worker port (now second and named), the line-314 diagram
+     assuming the **rejected** NATS bridge, the 339–351 retry discussion describing a hazard that
+     mostly no longer exists, and a crawl step assuming `crawl_queue` retires. 🔴 markers are in
+     place so nobody implements from it meanwhile.
+  3. **The conditional-execution PRD needs a number and a backlog row** (14d), and owes **four**
+     things: the Validate-precedent brief and the replay constraint (14c), the halt-early block B
+     cannot build for itself (§4), and run-level failure notification (15f). ⚠️ The number is an
+     **owner decision, deliberately left open** — creation order gives PRD-019, which sorts *after*
+     the PRD-018 it must precede.
+  4. **PRD-016 owes four things for one PM pass**: §4's known exclusion; two more R6 divergences
+     from §10; two passages still reasoning from §8's reversed storage rule (`PRD-016:697`, `:802`);
+     and §14a's sequencing fact.
+  5. **Four admin meters need lane scoping** — three webhook (15e) plus `active_recurring_jobs`
+     (16c). Not bugs today; migration work, recorded so they are not discovered by a dashboard
+     reporting a number that is well-formed and wrong.
+  6. **Two open items in the ADR's own deferral table** (D5) — §7's scheduled-quota waiting room,
+     and 13d's sitemap origin-restriction question, the latter needed **before the crawl step is
+     built**.
+  7. **The pre-migration queue is the entry condition for any build work** (16e):
+     **P6 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of truth.
+
+  ⚠️ **Git state unchanged by this session.** Deployed code is still `b110591`; `5c7fbdf` (the crawl
+  page status-filter fix) is still **committed on `develop`, not deployed, not on `main`**.
+  Everything on top is docs. ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT
+  fast-forwarded** — pushing it starts a push to the prod server, so a fast-forward is a **release**,
+  not a tidy-up. Wait to be asked. *(Re-check ahead/behind against the remote before quoting
+  numbers — last `git fetch` was 2026-07-13.)*
+
+  ### Superseded: START HERE (2026-09-05) — the ADR-009 summary strip; **ADR-009's review is FINISHED. Next session starts with one job: strip the redundant ADR-009 summaries out of `CLAUDE.md` and `phase4-backlog.md`.**
 
   > **▶ FIRST TASK NEXT SESSION (owner's call, 2026-09-05).** The ADR now holds its findings
   > properly, so `CLAUDE.md`'s ADR-009 bullet (**55,246 chars — ~59% of the file, loaded into every
