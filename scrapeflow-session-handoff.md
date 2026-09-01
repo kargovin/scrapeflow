@@ -283,6 +283,9 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   | `CLAUDE.md` | §16 summary appended to the ADR-009 bullet; review progress → §17 |
   | this handoff | §16 block; §15 demoted to superseded |
 
+  ✅ **Committed as `400cda7`.** Working tree clean apart from an untracked `tmp/architecture.md`,
+  which predates this session (May) and was deliberately left alone.
+
   ⚠️ **Note the knock-on edits outside §16** — this session changed **§7 and §2d**. Anyone holding
   an earlier session's note that mechanism 4 is "step-2 work" should read it as **job-cutover
   work**; the numbering it referred to no longer exists.
