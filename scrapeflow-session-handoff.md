@@ -78,7 +78,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ---
 
-## Current state — as of 2026-09-06
+## Current state — as of 2026-09-07
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** No build work has started;
@@ -168,6 +168,7 @@ live in ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-07 | This handoff condensed 250,550 → ~15,000 chars (−94%); `phase4-backlog.md`'s header change log 9,882 → ~2,500. Corrected the `prephase4` hash back to `1965953` | `2404193` |
 | 2026-09-06 | `CLAUDE.md` cleanup — the duplicated ADR-009 summary stripped, 93,141 → 27,527 chars (−70%); backlog's ADR-009 row 16,500 → 914 | `530fca3`, `e201980` |
 | 2026-09-05 | Both closing blocks reviewed (14 corrections, no decision changed) — **the section review closes**; then ADR-009 condensed, review log 476 → 83 lines as `## Review status` | `3e7f32e`, `21fadd2`, `3b91bab` |
 | 2026-09-04 | §17 reviewed; `ADR-002 §8` → **§4** corrected across five live docs | `87d2396` |
@@ -252,7 +253,6 @@ verification is the part worth trusting, not the reading.**
   light-worker rule ×6) were checked and left. Each is a **cross-reference doing local work**;
   removing them would make sections stop being self-contained, which is worse than the repetition.
 
-**Next candidate if standing-context cost matters again:** `phase4-backlog.md`'s header changelog
-(line 13, ~8,200 chars) restates the same closing-block findings at length. It is a *dated log*
-rather than a duplicate summary, so it was left alone — and unlike this file and `CLAUDE.md`, it
-is not loaded into every session.
+**Done, in order:** ADR-009's review log (2026-09-05) → `CLAUDE.md` (09-06) → this handoff and
+`phase4-backlog.md`'s header change log (09-07). Nothing obvious is left; the remaining large
+documents are load-bearing content rather than duplicated summary.
