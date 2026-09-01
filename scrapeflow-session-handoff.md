@@ -302,7 +302,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
   | `CLAUDE.md` | §15 summary appended to the ADR-009 bullet; review progress → §16–§17 |
   | this handoff | §15 block; §14 demoted to superseded |
 
-  ✅ **Committed as `d6f9ce6`** — one commit covering **two** sessions, because the §14 session
+  ✅ **Committed as `9b2df55`** — one commit covering **two** sessions, because the §14 session
   (2026-09-01) closed without committing and its edits sit in the same files. That commit
   therefore also carries **`docs/project/workflows-scoping.md`** (banner amended, 🔴 markers on
   §4A, §5 and §6), which is §14's work, not §15's. Nothing in either session is code.
