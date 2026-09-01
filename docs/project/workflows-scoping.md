@@ -20,9 +20,28 @@
 >   `webhook_loop` / `advisory` / `coordinator` and NATS all retire at the end state. The
 >   strangler-fig sequence in `temporal-full-migration.md` §9 is how, and coexistence is still
 >   real at every intermediate step — but the end state is a replacement, not an addition.
-> - **Still load-bearing — §4 and §6.** The three nested layers (Pipelines → Delivery →
->   Monitors) and the state-ownership split (engine owns execution state, thin Postgres mirror
->   backs the UI) are the shape **PRD-016** was written against.
+> - **Still load-bearing — §4's layer split and §6's state-ownership split.** The three nested
+>   layers (Pipelines → Delivery → Monitors) and the state-ownership split (engine owns execution
+>   state, thin Postgres mirror backs the UI) are the shape **PRD-016** was written against.
+>
+> **⚠️ AMENDED 2026-09-01 (ADR-009 §14 review) — three further passages are superseded, and this
+> banner previously endorsed two of them.**
+>
+> - 🔴 **Superseded — §6's integration recommendation.** *"Recommendation: (a) for Phase 1"* —
+>   activities dispatching to the existing workers over NATS — was **rejected** by
+>   [ADR-009 §9](../adr/ADR-009-workflow-engine-temporal.md#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)
+>   on 2026-08-23, and found **blocked**: the `SCRAPEFLOW` stream is `--retention work`, which
+>   refuses the second consumer overlapping `api-result-consumer`'s claim that option (a)
+>   requires — proven by a dead service in production (**BUG-008**). Option **(b)** is the
+>   decision, in the **first** increment. §6's *state-ownership* half is untouched and still
+>   load-bearing. **Do not implement from §6's option comparison.**
+> - 🔴 **Superseded — §4A's block catalog lists `branch`.** Branching is **not** in layer A.
+>   [ADR-009 §14](../adr/ADR-009-workflow-engine-temporal.md#14-oq-10-remaining-half--conditional-execution-gets-its-own-layer-a-prd-before-monitors)
+>   gives conditional execution its **own follow-up layer-A PRD**, built after PRD-016 ships and
+>   before Monitors. PRD-016 lists branching as an explicit non-goal.
+> - 🔴 **Superseded — §5's phased roadmap.** It has no row for the conditional-execution step,
+>   which sits **between Delivery (C) and Monitors (B)** — B cannot ship without the cost gate,
+>   and the gate consumes that step's primitive. §14 carries the current order.
 > - **§10's next step is done:** PRD-016 exists at
 >   `phase4-prd/PRD-016-workflows-pipelines.md`, scoped to layer **A** only.
 >   **[ADR-009](../adr/ADR-009-workflow-engine-temporal.md) is now drafted** (2026-08-04, pending
@@ -144,6 +163,9 @@ things is exactly what a monitor *is*.
 > *"Scrape this product page → strip nav/ads → run the LLM to pull {price, title, rating} →
 > check price is a valid number → then save to my Google Sheet **and** email me."*
 
+> 🔴 **`branch` is superseded — see the banner.** Branching is not in layer A; it gets its own
+> follow-up PRD (ADR-009 §14). The rest of this subsection stands.
+
 Users wire **blocks** into a chain (scrape / clean / LLM / validate / branch / deliver),
 instead of being stuck with our one hard-coded recipe. This is the foundation everything
 else sits on: it turns ScrapeFlow from "runs one fixed recipe" into "a platform where users
@@ -193,6 +215,10 @@ pipeline is "crawl the site" — the gap closes as a special case of B.
 
 ## 5. Phased roadmap
 
+> 🔴 **Superseded — this table has no conditional-execution step.** It belongs between Delivery
+> and Monitors; ADR-009 §14 carries the current order. The "nothing existing is removed" framing
+> is also superseded — see the banner on §1.
+
 Ordered so each phase stands on the previous one, and so **nothing existing is removed**:
 
 | Phase | Delivers | Notes |
@@ -218,6 +244,12 @@ actual work. Two integration options:
   Minimal risk; honors "don't rip anything out."
 - **(b) Workers become engine activity workers directly** — cleaner long-term, but rewrites
   the worker entry points and their NATS consumers.
+
+> 🔴 **SUPERSEDED — do not implement from the two options above.** ADR-009 §9 (2026-08-23)
+> **rejected option (a)** and found it **blocked** on a work-queue stream that refuses the second
+> consumer it needs. Option **(b)** is the decision, and it lands in the **first** increment, not
+> as an optional later step. The paragraph below is kept as the record of what was originally
+> recommended and why.
 
 **Recommendation: (a) for Phase 1.** It lets us prove the workflow layer with zero worker
 churn. Migrating to (b) — or migrating the crawl coordinator onto the engine — becomes an

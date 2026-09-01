@@ -66,7 +66,505 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ## Current state
 
-- ## 📝 START HERE (2026-08-28) — **ADR-009 review is UNDERWAY. §13 reviewed. Next: §14–§17.**
+- ## 📝 START HERE (2026-09-02) — **ADR-009 review is UNDERWAY. §15 reviewed. Next: §16–§17.**
+
+  ### §15 (webhook delivery) — reviewed 2026-09-02; the decision holds, but **two of its supporting statements could not be built as written**
+
+  Option (c) stands unchanged: the Webhook block **waits for real delivery** on its own ≈2.6 hour
+  durable horizon, and there is **no `webhook_deliveries` row on the v2 lane**. Both rejections
+  hold, and one was verified at the database — a pipeline delivery row is refused by **two `CHECK`
+  constraints plus a `run_id` foreign key into `job_runs`**, so option (b) was never the cheap
+  reuse it looked like.
+
+  ✅ **The ≈2.6 h figure was verified against production**, not just the repo:
+  `WEBHOOK_MAX_ATTEMPTS: "5"` in the infra repo's `app/api.yaml` matches `settings.py`. Checked
+  deliberately, because the §10 review found `llm_request_timeout_seconds` overridden in
+  production (60 in code, 180 deployed) and the repo default therefore misleading. **That trap
+  does not repeat here.**
+
+  Six findings. §15 was 47 lines; it is now 342.
+
+  #### 🔴 1. The argument that answers the PM's only objection has no column to read → **15a**
+
+  §15's third bullet is what makes option (c) survivable: *a run asleep on a timer doesn't hold a
+  concurrency slot.* §8 made that an owner's call on 2026-08-17. **But it has to execute as a SQL
+  predicate**, because the concurrency check runs in the API when a run starts. So: what does that
+  query read?
+
+  ```
+  run A — inside a 4-minute LLM call
+    pipeline_run_blocks  [Scrape ✅][Clean ✅][LLM  running][Webhook pending]
+
+  run B — 40 minutes into a 2.6-hour webhook backoff
+    pipeline_run_blocks  [Scrape ✅][Clean ✅][LLM ✅][Webhook  running]
+  ```
+
+  **Indistinguishable.** One holds a worker and a paid API key; the other is a timer. And the
+  vocabulary cannot separate them: §4 fixed block state at
+  `pending`/`running`/`completed`/`failed`/`skipped` — no waiting value — and run outcome at
+  `completed`/`failed`/`cancelled`, three *terminal* values with no in-flight value enumerated at
+  all. So the objection arrives anyway: **five runs parked on a dead receiver lock a user out of
+  five slots for two and a half hours.**
+
+  🔴 **The owner's question is what settles it.** The tempting predicate is *"a running Webhook
+  block doesn't count"* — special-case the one type that waits. That is **wrong, not merely
+  fragile**, and layer C is where it breaks: its sinks deliver to **the user's own S3, the user's
+  own database, the user's own mail server** — infrastructure exactly as unavailable as a webhook
+  receiver, wanting exactly the same long horizon.
+
+  ```
+  run A   [ S3 sink  running ]   parked 40 min, holding nothing  →  counts
+  run B   [ Webhook  running ]   parked 40 min, holding nothing  →  does not count
+  ```
+
+  Same situation, opposite answer, no explanation a user could be given — and it fails in the
+  worse direction, with the sink locking the user out of their own quota. **The distinction is not
+  which block it is; it is whether the run holds worker capacity at this instant** — which flips
+  back and forth *inside* one block (holding during each 10s POST, holding nothing across each
+  backoff sleep).
+
+  ✅ **Owner's call, both halves:**
+
+  | | |
+  |---|---|
+  | **which blocks may wait** | §5's existing **content-producing / effect** split — no block type is ever enumerated, so a new layer-C sink inherits the behaviour by being an effect block |
+  | **how it is recorded** | **`waiting` is pre-admitted to `pipeline_run_blocks.status` now**, for the reason §4 pre-admitted `skipped`: Monitors will park a run on a sleep belonging to **no block at all**, which the category rule cannot cover. A value today is a line in a `CHECK`; a value later is a migration plus a backfill |
+
+  The counting view's v2 arm becomes **"a run with at least one block in `running`."** §4 and §8
+  amended to match.
+
+  ⚠️ **Third missing value found in that one vocabulary in three review sessions** — `skipped`
+  (pre-admitted by §4), *"succeeded then undone"* (§14, saga rollback), `waiting` (here). The last
+  two share a cause: the vocabulary describes a block's **progress**, while both callers need what
+  the run is **doing with resources**.
+
+  ⚠️ One accepted interaction: whoever writes `waiting` writes it at every timer boundary, and
+  §11c decided **a failed mirror write fails the run** — so a delivery that would have succeeded
+  can fail because a status write failed mid-backoff. Accepted, not special-cased.
+
+  #### 🔴 2. "Reproduces today's behaviour exactly" contradicts §15's own first bullet → **15b**
+
+  The first bullet says the delivery loop **is the activity's retry policy**. The second says the
+  horizon reproduces today's reach **exactly**. Both cannot be true, because today's backoff is an
+  explicit list and **not a curve**:
+
+  ```
+  today          30s  →  300s  →  1800s  →  7200s
+  ratio                 ×10      ×6        ×4        ← not geometric
+  ```
+
+  A Temporal retry policy takes four numbers — first interval, multiplier, ceiling, maximum
+  attempts. **There is no way to hand it a list.** Best fit, and what should be configured:
+
+  ```
+  initial 30s · ×10 · ceiling 7200s · maximum_attempts 5
+
+                attempt 1   attempt 2   attempt 3   attempt 4   attempt 5
+  today            0s         30s        5m 30s     35m 30s     2h 35m
+  retry policy     0s         30s        5m 30s     55m 30s     2h 55m
+                   same       same       same       ✗ +20m      ✗ +20m
+  ```
+
+  Same number of POSTs, ~13% longer horizon, attempts 4–5 displaced. The exact alternative —
+  explicit durable sleeps around a **non-retrying** activity — **rebuilds the delivery loop in the
+  workflow**, which is the thing this section says it is not doing.
+
+  ✅ **Owner's call: keep the retry policy, drop "exactly", record the drift** — so an unqualified
+  claim is not quoted back during the R6 comparison as a failed gate.
+
+  #### 3. The horizon lives in one of four nested timeouts, set in three files → **15c**
+
+  Today there is one number (`timeout=10.0`) plus a loop we wrote. Temporal replaces the loop with
+  configuration, and **the smallest of four nested limits silently wins**:
+
+  | | measures | value | set in |
+  |---|---|---|---|
+  | 1 · POST timeout | one HTTP request | **10s** | the activity's own code |
+  | 2 · `start_to_close` | **one attempt** | **~20s** | the workflow, at the call site |
+  | 3 · `schedule_to_close` | **all attempts + all the sleeping between them** | **≥ 2.6 h** ← *the horizon* | the workflow, one line later |
+  | 4 · the run's R4 time budget | the whole pipeline run | **> 2.6 h + every other block** | pipeline / operator config |
+
+  Two silent failures, both named in the section now. **The natural one:** you want 2.6 hours, so
+  you set it on `start_to_close` — the timeout everyone reaches for — and a single POST to a
+  receiver that never answers is allowed to hang for 2.6 hours, one attempt instead of five.
+  **The Q6 one:** somebody sets *"no pipeline run may exceed one hour"* in a different file, for a
+  different reason, knowing nothing about webhooks; four attempts happen, the reach becomes ~56
+  minutes, and nothing errors. That is Q6's exact shape — NATS `ack_wait` at 30s under a 60s+ LLM
+  call, where the symptom pointed nowhere near the setting. R4 already requires budgets to
+  compose; **this is the first concrete place they must.**
+
+  #### 🔴 4. Cancel now takes up to 2.6 hours, and a cancelled run still delivers → **15d**
+
+  Two decisions collide, neither written knowing about the other: the PM's rule that
+  **cancellation never aborts a block mid-execution** (priced when blocks lasted minutes), and
+  §15 introducing **the first block measured in hours**.
+
+  ```
+  14:00  Webhook block starts; receiver down; retries begin
+  14:05  user clicks Cancel → API writes cancelled, page greys out instantly   (§11a)
+                            → the workflow is not told
+  14:35  attempt 4  ← POSTing for a run cancelled thirty minutes ago
+  16:35  attempt 5 succeeds → the customer's system is told the run finished
+  ```
+
+  Impossible today, and not by luck: the delivery row is created **when the run completes**, so a
+  cancelled run has no delivery. Note §11a's precedence rule protects the **status column** — it
+  says nothing about the outbound HTTP request, which is what the user's customer sees.
+
+  ✅ **Owner's call: the API sends a cancel to the workflow *in addition to* writing the row** —
+  row first, signal best-effort, so §11a's instant-UI property is untouched and a Temporal outage
+  degrades gracefully. Temporal interrupts durable sleeps natively at await points, so this is
+  nearly free **once the workflow is told**. The backoff-boundary re-check is the fallback, not
+  the primary: alone it only turns 2.6 hours into 2 hours, because the last backoff step is
+  7200s. **Not webhook-specific** — Monitors' multi-day sleeps are the identical problem.
+
+  #### 🔴 5. "No delivery table on v2" removes live capability and blinds three meters → **15e**
+
+  The section treats `webhook_deliveries` as a *record*. It is also the backing store of live API
+  surface:
+
+  ```
+  GET  /admin/webhooks/deliveries              list, filter by status   (admin.py:367)
+  POST /admin/webhooks/deliveries/{id}/retry   attempts = 0, re-queue   (admin.py:387)
+  ```
+
+  ✅ **Owner's call: both become job-lane-only, deliberately and permanently.** The reasoning is
+  recorded so it does not read as an omission: manual retry mattered **because failure was
+  invisible** — today a delivery exhausts at 3 a.m. into a table nobody watches. Under (c) the
+  **run itself fails**, in the user's own run list, and they can re-trigger it. Visibility moves
+  from a hidden admin table to the person who cares. The endpoints are **not deleted** — they keep
+  serving the job lane — so the accurate statement is *"job lane only, by design"*, which stops a
+  later reader filing the gap as a bug and closing it by widening the table.
+
+  ⚠️ **What may not simply be left.** Three meters read that table with **no lane filter**:
+
+  ```
+  webhook_deliveries_pending          ← rendered on the admin Usage page today
+  webhook_deliveries_exhausted
+  webhook_delivery_success_rate_7d
+  ```
+
+  After pipelines ship the dashboard reports **webhook success rate 100%** while every pipeline
+  delivery fails. Nothing errors; the number is well-formed and wrong. **That is this project's
+  recurring defect** — a meter keyed on a table a new lane doesn't write to. It is BUG-005 (batch
+  invisible because `job_id` is NULL), it is P7 (crawls invisible because every meter reads
+  `job_runs`), and it is why §3 moved run counting onto a view. Declining to build pipeline
+  delivery stats is fine; leaving a lying meter is not, and **the fix is naming, not features**.
+
+  Also withdrawn from the first bullet: *"and the Web UI shows it"* — §2b does not expose it. To
+  be fair to the section, per-attempt **detail** is parity (today's row also keeps only `attempts`
+  and `last_error`); the real losses are **retention** (a row lives until its parent is deleted;
+  Temporal history is 30 days per §2c) and **reach**.
+
+  #### 🔴 6. The failure-notification obligation has no home → **15f**
+
+  Today **any** failure notifies — dead scrape, bad LLM key, anything
+  (`result_consumer.py:563–575`) — because delivery is triggered by the run's *outcome*, not by a
+  position in the recipe. In a pipeline the Webhook block is a step in a chain: an earlier
+  terminal failure stops the chain, the block never runs, **and nobody is told.**
+
+  PRD-016 records this and passes it on — settled *"when conditional execution is settled"*. Then
+  §14, reviewed **one session earlier**, created that PRD and enumerated exactly what it owes —
+  the Validate precedent, the replay constraint, the halt-early block — **and failure notification
+  is not on the list.** Handed to a document whose obligations were written down a week later
+  without it. ✅ Now added.
+
+  The sharpest form is a configuration, not a behaviour. `webhook_events` is a live user-facing
+  setting validated against `{job.completed, job.failed, crawl.completed, batch.completed}`, so a
+  user may save:
+
+  ```json
+  { "webhook_events": ["job.failed"] }        "only tell me when it breaks"
+  ```
+
+  **That job has no expressible pipeline equivalent in layer A at all.** Not a divergence in
+  outcome — an entire configuration that cannot be migrated.
+
+  #### Rider: the SSRF refusal
+
+  §15 keeps SSRF re-validation **per attempt** (DNS rebinding is why), which is right and
+  unchanged by the transport. Two things added: it must be raised **non-retryable** — this is
+  §10's second non-retryable obligation, and it lands here, because a retryable SSRF refusal
+  becomes ≈2.6 hours of re-resolving a hostname an attacker is actively rebinding — and its
+  **consequence is larger on this lane**: today it marks the delivery `exhausted` and never
+  touches the job's outcome; under (c) **the run fails**, because a URL saved weeks ago resolves
+  somewhere new today. Inside the recorded R6 divergence, but the one failure a user cannot fix by
+  bringing their server back up.
+
+  ### Session close (2026-09-02)
+
+  **Docs-only session — no code changed.**
+
+  | file | what |
+  |---|---|
+  | `docs/adr/ADR-009-…` | §15 rewritten with 15a–15f (47 → 342 lines); **§4 gains `waiting` in the block vocabulary**; **§8's v2 concurrency rule amended** to name the column it reads; two stale vocabulary enumerations marked as of-their-date (the §14 review-log entry, and 15a's own narrative); review log entry; date line |
+  | `docs/project/phase4-backlog.md` | header entry; ADR row → §1–§15 reviewed, §15 summary appended |
+  | `CLAUDE.md` | §15 summary appended to the ADR-009 bullet; review progress → §16–§17 |
+  | this handoff | §15 block; §14 demoted to superseded |
+
+  ✅ **Committed as `d6f9ce6`** — one commit covering **two** sessions, because the §14 session
+  (2026-09-01) closed without committing and its edits sit in the same files. That commit
+  therefore also carries **`docs/project/workflows-scoping.md`** (banner amended, 🔴 markers on
+  §4A, §5 and §6), which is §14's work, not §15's. Nothing in either session is code.
+  Working tree is clean apart from an untracked `tmp/architecture.md`, which predates both
+  sessions (May) and was deliberately left alone.
+
+  ⚠️ **Note the two knock-on edits inside the ADR** — this session changed **§4 and §8**, not only
+  §15. §4's block-state vocabulary is now six values (`waiting` added), and §8's v2 concurrency
+  bullet no longer asserts a rule with no column behind it. Anyone reading §4 or §8 from an
+  earlier session's notes has a stale vocabulary.
+
+  **All 121 ADR internal links re-verified — none broken.** The slug rule that works: lowercase →
+  drop everything that is not **alphanumeric, underscore, space or hyphen** → replace **each**
+  space with a hyphen. **No whitespace collapsing** (which is why ` — ` becomes `--`), and
+  **keep underscores** (a checker that drops them reports `#13c-crawl_pages-…` as broken when it
+  is fine).
+
+  ⚠️ **Git state — the counts carried by the last two handoffs were stale; corrected here.**
+  Deployed code is still `b110591`, and `5c7fbdf` (the crawl page status-filter fix) is still
+  **committed on `develop`, not deployed, not on `main`** — those two facts are unchanged. But the
+  local `origin/develop` ref stands at **`205acd4`**, so `develop` is **1 ahead of it**
+  (`d6f9ce6`), not the "8 ahead" the last two sessions recorded; `main` is **26 behind**.
+  *(Last `git fetch` was 2026-07-13, so that remote ref reflects pushes rather than a recent
+  fetch — re-check against the remote before relying on it.)* ✅ **The owner's call of 2026-08-28
+  stands: `main` is deliberately NOT fast-forwarded** — pushing it starts a push to the prod
+  server, so a fast-forward is a **release**, not a tidy-up. Do not do it at session end; wait to
+  be asked.
+
+  **What is blocking: nothing blocks §16.** Outstanding:
+
+  1. **The conditional-execution PRD needs a number and a backlog row** (§14d) — and it now owes
+     **four** things, not three: the Validate-precedent brief and the replay constraint (14c), the
+     halt-early block B cannot build for itself (§4), and **NEW — run-level failure notification**
+     (15f), which PRD-016 assigned to it and §14 enumerated without. ⚠️ The number is still an
+     **owner decision, deliberately left open** — creation order gives PRD-019, which sorts *after*
+     the PRD-018 it must precede.
+  2. **PRD-016 owes four things for one PM pass** (unchanged from last session): §4's known
+     exclusion; two more R6 divergences from §10; two passages still reasoning from §8's reversed
+     storage rule (`PRD-016:697`, `:802`); and §14a's sequencing fact, which does not belong in
+     that PRD's Non-goals.
+  3. **Three admin webhook meters need scoping** (15e) — `webhook_deliveries_pending`,
+     `webhook_deliveries_exhausted`, `webhook_delivery_success_rate_7d`. **Not a bug today** and
+     not filed as one: they are correct until the pipeline lane exists. It is migration work, and
+     it is recorded in §15e so it is not discovered by a dashboard reporting 100%.
+  4. **`temporal-full-migration.md` still contradicts the ADR** — step 3 is the worker port (now
+     step 1), the line-314 diagram assumes the rejected NATS bridge, the 339–351 retry discussion
+     describes a hazard that mostly no longer exists, and its crawl step assumes `crawl_queue`
+     retires. ✅ Owner's call stands: **redraw in ONE pass after the review closes.** 🔴 markers
+     are in place so nobody implements from it meanwhile.
+  5. **One open item from §13**, needed before the crawl step is built but not before §16–§17:
+     whether sitemap entries are **origin-restricted** like extracted links.
+  6. **§16 is next** (the v1/v2 coexistence contract) — `ADR-009` line ~2972, running to §17
+     (Relationship to ADR-001/002/004) and then the closing **Consequences** /
+     **Deliberately not decided here** blocks. Two things already point *into* §16 and should be
+     checked against it rather than rediscovered: **§9's reversal moved the worker port from third
+     to first in the sequence**, and **§7's mechanism 4** (a lane marker on `job_runs`, written in
+     the insert transaction) is owed at **migration step 2**. §16 is also where the drain gate
+     lives, which §7 established is a **cutover** gate too, because `--retention work` only covers
+     acked messages.
+
+  ### Superseded: START HERE (2026-09-01) — §14 review
+
+  ### §14 (conditional execution) — reviewed 2026-09-01; the decision holds, but the section stated a **sequencing** decision in a notation that could not carry one
+
+  The call is upheld exactly as drafted: conditional execution gets **its own follow-up layer-A
+  PRD, written before PRD-018 (Monitors), not absorbed into B.** The argument for it is sound and
+  is the whole point of the section — *if B absorbs it, the reviewer of B's PRD is redesigning
+  layer A's block model under a heading that does not say so.* The work does not disappear; it
+  gets renamed and hidden.
+
+  Four gaps, none of them in the decision itself. §14 was 26 lines; it is now 206.
+
+  #### 🔴 1. The order is two orders → **14a**
+
+  The section's ordering line was:
+
+  ```
+  A ships  →  C (Delivery) in parallel  →  conditional-execution PRD  →  B
+  ```
+
+  That chain mixes a **shipped product**, a **document** and a **layer** in one sequence of
+  arrows — and a sequencing decision has exactly one job, which is telling *written* apart from
+  *built*. It could not answer "when do we actually build this?", which is the first question
+  anyone reading it asks.
+
+  | | when |
+  |---|---|
+  | conditional PRD **written** | before PRD-018 is written; **may be written during A's build** — writing it early is what tests whether the four forward-compatibility choices actually suffice |
+  | conditional execution **built** | **after layer A ships.** This was only ever stated in PRD-016's Non-goals ("the first thing to add after it ships") — a sequencing fact in a list of exclusions |
+  | …and **before B is built** | forced, not chosen: the PM made the cost gate a **launch requirement** of Monitors, and the gate consumes this primitive |
+  | PRD-017 (C) | independent of the chain — but see finding 2 for what "independent" was *not* checked against |
+
+  ✅ **The defence of "after, not alongside" is now stated rather than assumed.** The cost gate's
+  purpose is to skip the LLM call and the webhook when the page is byte-identical to last time.
+  That saves nothing unless the same pipeline runs against the same URL repeatedly — and **layer A
+  has no scheduling**; recurrence, durable sleeps and timers are all Monitors. So building it into
+  layer A means building for a consumer that does not exist yet. It is the same fact that makes
+  the accepted repeat-run cost delta (one LLM call + one stored artifact) near zero in layer A and
+  painful in B, which is why B is where the PM made it a launch requirement.
+
+  #### 🔴 2. "C only adds block types" covered half of layer C → **14b**
+
+  The section waved Delivery through to run in parallel because it *"adds block types without
+  extending what a pipeline can express."* Layer C is **two** deliverables:
+
+  | part of C | a block type? |
+  |---|---|
+  | sink blocks — S3, database, Sheet, email | ✅ yes |
+  | **saga rollback** — one delivery fails, so the ones that already succeeded are undone | ❌ no — nobody authors a rollback block |
+
+  ✅ **The sink half now *verified* rather than assumed**, and worth recording: §5 split the
+  catalog into content-producing and **effect** blocks, and effect blocks pass their input
+  reference through unchanged. So "one result, several destinations" is a **chain** of effect
+  blocks under §4's single-chain data flow — **C needs none of the data-flow fan-out §4 deferred
+  past Phase 4.** That is the real content of the parallelism claim, and it holds.
+
+  🔴 **The rollback half was not examined at all.** It is not a block; it is a **run shape** — the
+  run turning around and executing work the user never wrote down:
+
+  ```
+  layer A today     Scrape → Clean → LLM → Webhook → done          (forward only)
+
+  layer C           Scrape → Clean → LLM → S3 ✅ → BigQuery ✅ → Email ❌
+                                              undo BigQuery ← undo S3
+  ```
+
+  Which lands on layer A as a concrete, checkable question: **what status does the S3 block have
+  after it has been compensated?** §4 fixed the vocabulary as `pending` / `running` / `completed`
+  / `failed` / `skipped`. It is **not `completed`** (the object is gone), **not `failed`** (it
+  worked — BigQuery failed), **not `skipped`** (it ran). There is no value for *"succeeded, then
+  undone."*
+
+  ⚠️ **This is precisely the trap §4 spent effort avoiding, aimed at the nearer layer.** `skipped`
+  was admitted on day one though nothing in today's catalog produces it, expressly *"so that B is
+  a new block type rather than a schema change plus a backfill."* The identical exposure for C
+  went unnoticed because the sentence clearing C only looked at the sinks — **and C is the layer
+  cleared to start soonest.** ✅ Recorded as an obligation on **PRD-017: settle how a compensated
+  block is recorded before C starts building, not during.** Until then, "C may proceed in
+  parallel" is a claim about the sinks only.
+
+  #### 🔴 3. The cheap part is the wiring; the hard part went unmentioned → **14c**
+
+  The four things that make the follow-up PRD additive — named input references, identifiers
+  stable across versions, graph storage behind a linear validator, and `skipped` — share a
+  property: **every one is about how blocks are connected.** None says anything about the question
+  a conditional exists to ask, which is **"if *what*?"**
+
+  And that runs straight into a hard rule: PRD-016 excludes **user-authored code as a block**, and
+  says in as many words that *"an expression evaluator would cross the line."* A condition is, on
+  its face, an expression. So the follow-up PRD's first and hardest job — let a user say *"if the
+  price changed"* without handing them a programming language — gets **nothing** from the four
+  choices the "cost is low" claim rests on.
+
+  ✅ **The Validate block is the precedent, and belongs in the follow-up PRD's brief rather than
+  being rediscovered.** PRD-016 already fought and won this: Validate rules are a fixed
+  declarative vocabulary, for three reasons — the expression-evaluator non-goal, the fact that
+  validation is terminal and fires after the user has been billed, and **replay determinism**.
+
+  ⚠️ **Determinism binds a conditional harder than it binds Validate**, because branching is an
+  `if` in the **workflow body** — which is exactly the code Temporal replays:
+
+  ```
+  16:58  run starts; condition "hour < 17" is TRUE  → LLM block runs, user is billed
+  17:03  workflow worker pod restarts (a routine deploy)
+  17:03  Temporal replays the history; the same condition now evaluates FALSE
+         → recorded history and re-executed code disagree; the run is corrupt
+         → nothing was wrong at 16:58, and nothing logs a cause at 17:03
+  ```
+
+  Recorded as **not** open, so it is not re-litigated: the **monitor** supplies the gate's
+  comparand, and §4 already settled that **widening the bindable-field list is additive** (declare
+  one more field bindable); only narrowing breaks saved pipelines.
+
+  #### 4. The PRD this section creates has no name → **14d**
+
+  §14's own argument is that absorbing the work into B *"renames it and hides it inside a PRD
+  nobody will read as a layer-A change."* Measured against the doc set:
+
+  | | PRD-017 (C) | PRD-018 (B) | the conditional PRD |
+  |---|---|---|---|
+  | has a number | ✅ | ✅ | ❌ |
+  | has a `phase4-backlog.md` §2 row | ✅ | ✅ | ❌ — one line of prose in the artifact chain |
+  | records what it **owes** | ✅ multi-sink fan-out with rollback | ✅ does not ship without the cost gate | ❌ nothing |
+
+  The one deliverable this section *creates*, and the only one that **blocks** another PRD, is the
+  only one with no number, no row and no obligations. **A nameless PRD is only marginally more
+  visible than an absorbed one** — which is the entire property §14 exists to buy.
+
+  ⚠️ **Left open deliberately: the number.** Creation order gives **PRD-019**, which reads as
+  *after* PRD-018 in every index while being required *before* it. That is a real choice, not
+  bookkeeping — **owner's to make**, and the backlog row goes in with it.
+
+  ### ✅ Fixed this session: `workflows-scoping.md` was stale in three places and its own banner endorsed two of them
+
+  Found while checking §14's ordering claims. The banner flagged §7 and §1 and declared *"§4 and
+  §6 still load-bearing"* — which was half right in a way that mattered:
+
+  | passage | still said | actually decided |
+  |---|---|---|
+  | §4A, layer A's block catalog | `scrape / clean / LLM / validate / `**`branch`**` / deliver` | branch is **not** in layer A — §14 is why |
+  | §5, phased roadmap | Phase 1 = A · Phase 2 = C · Phase 3 = B | no row for the **conditional step between C and B** |
+  | 🔴 §6, worker integration | *"**Recommendation: (a) for Phase 1**"* | ⚠️ **reversed 2026-08-23** by §9 — option (a) is rejected **and blocked** (a work-queue stream refuses the second consumer it needs, proven by a dead service in prod, BUG-008) |
+
+  The third is the one that mattered: a **live recommendation to build the design that was
+  rejected**, five days old and unmarked — same class as the known staleness in
+  `temporal-full-migration.md`. Banner amended, 🔴 markers added inline at all three, original
+  text kept as the record of what was recommended and why. §6's *state-ownership* half is
+  untouched and still load-bearing.
+
+  ### Session close (2026-09-01)
+
+  **Docs-only session — no code changed.** Nothing committed yet; `git status` shows the four
+  files below modified.
+
+  | file | what |
+  |---|---|
+  | `docs/adr/ADR-009-…` | §14 rewritten with 14a–14d (26 → 206 lines); review log entry; date line |
+  | `docs/project/workflows-scoping.md` | banner amended + 🔴 markers on §4A, §5, §6 |
+  | `CLAUDE.md` | §14 summary appended to the ADR-009 bullet; review progress → §15–§17 |
+  | this handoff | §14 block; §13 demoted to superseded |
+
+  **All 112 ADR internal links re-verified — none broken.** ⚠️ **The slug rule recorded in the
+  last two sessions is itself slightly wrong, and it produces a false positive.** GitHub keeps
+  **underscores**, so a checker written as *"drop non-alphanumerics except spaces and hyphens"*
+  reports `#13c-crawl_pages-is-required-not-a-ui-convenience` as broken when it is fine. The
+  correct rule: lowercase → drop everything that is not **alphanumeric, underscore, space or
+  hyphen** → replace **each** space with a hyphen (**still no whitespace collapsing** — that part
+  of the earlier note stands, and is why ` — ` becomes `--`).
+
+  ⚠️ **Git state unchanged from the last session.** Deployed code is still `b110591`; `5c7fbdf`
+  (the crawl page status-filter fix) is **committed on `develop`, not deployed, not on `main`**.
+  `develop` is **8 ahead of `origin/develop`**, `main` is **23 behind**. ✅ **The owner's call of
+  2026-08-28 stands: `main` is deliberately NOT fast-forwarded** — pushing it starts a push to the
+  prod server, so a fast-forward is a **release**, not a tidy-up. The next prod deploy should carry
+  Phase 4 work with `5c7fbdf` riding along. Do not fast-forward at session end; wait to be asked.
+
+  **What is blocking: nothing blocks §15.** Outstanding:
+
+  1. **The conditional-execution PRD needs a number and a backlog row** (§14d). ⚠️ The number is
+     an **owner decision, deliberately left open** — creation order gives PRD-019, which sorts
+     *after* PRD-018 everywhere while being required before it. The row carries three commitments:
+     the Validate-precedent brief and the replay constraint (14c), and the halt-early block B
+     cannot build for itself (§4).
+  2. **PRD-016 now owes four things, all for one PM pass** (the Architect does not edit the PM's
+     doc, which is why they accumulate): (a) **§4's known exclusion** — "two extractions on one
+     fetched page" is *not* fixed by layer A, owed since 2026-08-10; (b) **two more R6 divergences
+     from §10** — a pipeline webhook payload has no `job_id`, and no `diff_detected`/`diff_summary`
+     until Monitors; (c) **two passages still reasoning from §8's reversed storage rule**
+     (`PRD-016:697`, `:802`) — low urgency, the conclusion survives and only the reasoning is
+     stale; **(d) NEW — §14a moves a sequencing fact out of PRD-016's Non-goals**, where "the first
+     thing to add after it ships" did not belong.
+  3. **`temporal-full-migration.md` still contradicts the ADR** — step 3 is the worker port (now
+     step 1), the line-314 diagram assumes the rejected NATS bridge, the 339–351 retry discussion
+     describes a hazard that mostly no longer exists, and its crawl step is written as a port that
+     assumes `crawl_queue` retires (both now wrong, per §13). ✅ Owner's call stands: **redraw in
+     ONE pass after the review closes.** 🔴 markers are in place so nobody implements from it
+     meanwhile.
+  4. **One open item from §13**, needed before the crawl step is built but not before §15–§17:
+     whether sitemap entries are **origin-restricted** like extracted links.
+  5. **§15 is next** (OQ-11 — webhook delivery is a step the run waits for), then §16–§17.
+
+  ### Superseded: START HERE (2026-08-28) — §13 review
 
   ### §13 (the crawl coordinator) — reviewed 2026-08-28; the decision holds, but it described a **port** of code that has mostly **never executed**
 
