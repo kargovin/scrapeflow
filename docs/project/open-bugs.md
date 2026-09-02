@@ -429,6 +429,10 @@ latent rather than realised.
   "discard." Worth noting that the malformed-message branch is the one remaining place where a
   worker still acks unconditionally on failure, which is the shape of bug UF-003 spent three
   commits removing everywhere else.
+- **BUG-011 — this fix does NOT close it.** ⚠️ Path A's "stuck batch runs are unrecoverable" has two
+  halves: messages being dropped (fixed here) and stale-pending recovery not knowing how to rebuild
+  a batch dispatch (**not** fixed here). Closing BUG-005 leaves the recovery net holed. Filed
+  separately as **P9**, sequenced immediately after this.
 
 ---
 
@@ -667,8 +671,8 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
   screenshot is a stored object, so it is a ledger row, so it is charged and deletable by the same
   path with no separate mechanism.
 - **P7 / crawl quota** — same family again: a whole lane storing objects nothing counts. Both are
-  now **consumers of P8**, so the sequence is **P6 → P8 → P7 + BUG-007 together** rather than P6 →
-  P7 with this trailing behind.
+  now **consumers of P8**, so the sequence is **P6 → P9 → P8 → P7 + BUG-007 together** rather than
+  P6 → P7 with this trailing behind.
 
 ---
 
@@ -976,3 +980,91 @@ a page and continue). Three things make it larger than it looks:
   must port to `httpx`); this one is what the file *does*. Both must be handled in the same port,
   and neither substitutes for the other.
 - **BUG-005 / BUG-009** — same family: shipped, silently broken, found by reading.
+
+---
+
+## BUG-011 — Stale-pending recovery silently skips every batch run, under a comment saying the case is impossible
+
+**Severity:** Low — latent by construction once P6 ships, and the fix is small. Filed rather than
+folded into BUG-005 because the net it holes is the platform's **only** recovery path for a lost
+dispatch, and the current code hides the gap rather than recording it.
+**Discovered:** 2026-09-03, tracing BUG-005's fix scope against [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md)
+**Status:** Open — **pre-migration**, sequenced immediately after **P6**.
+
+### What happens
+
+`_recover_stale_pending` (`api/app/core/scheduler.py`) is the only guard against
+**crash-after-commit-before-publish**: a `job_runs` row is committed as `pending`, the NATS publish
+then fails or the process dies, and nothing would ever run it. Every scheduler tick it re-publishes
+runs that have sat in `pending` past the threshold.
+
+Its `SELECT` filters on `status` and `created_at` only — **no lane filter** — so batch runs are
+selected along with everything else. Then:
+
+```python
+job = await db.get(Job, run.job_id)
+if job is None:
+    continue  # orphaned run — should not happen with CASCADE deletes
+```
+
+`run.job_id` is `None` for a batch run **by design** (ADR-006), so `db.get` returns `None` and the
+run is skipped — every tick, for every batch run, with **no log line**, under a comment asserting
+the case cannot occur.
+
+Recovery therefore covers the job and scheduled lanes and silently excludes batch. Crawls are
+excluded too, but honestly: they create no `job_runs` rows at all, so the query never sees them.
+
+### Why this is not part of BUG-005
+
+BUG-005 Path A mentions it in passing — stuck batch items "cannot be rescued via this path" — but
+as a *symptom* of messages being dropped, not as a defect in its own right. **ADR-011 removes the
+cause and leaves this untouched.** Once messages stop being discarded as malformed, batch items
+stop getting stuck, so nothing needs recovering. The hole in the net remains exactly as it is,
+because it is not a parsing problem — it is the recovery function having only one payload shape.
+
+Latent is not the same as fixed. It goes live the first time a batch dispatch is genuinely lost,
+which is the precise scenario the function exists for.
+
+### The fix is small — everything it needs is already persisted
+
+Checked before filing, because "recovery needs data the batch lane never stored" would have made
+this a data-model change:
+
+| field | source for a batch run |
+|---|---|
+| `url` | `batch_items.url` |
+| `output_format`, `engine`, `respect_robots`, `llm_config` | `batches` — all four are columns |
+| `credentials`, `actions`, `playwright_options` | not applicable — `POST /batch` dispatches these as `None` |
+
+So recovery resolves the parent by **whichever FK is set** and builds the payload from
+`job_runs → batch_items → batches` instead of `job_runs → jobs`. That is the same
+route-by-which-FK-is-set shape the result consumer already uses.
+
+Three things ship with it:
+
+1. The batch payload shape in `_recover_stale_pending`.
+2. **The misleading comment goes.** `job is None` genuinely does mean "orphaned" for a job-lane run
+   and must keep skipping; the batch case is a different branch, not the same one.
+3. A log line on the branch that still skips. A silent `continue` inside the only recovery path is
+   how this stayed invisible.
+
+### Sequencing
+
+**Immediately after P6.** Not before: ADR-011 changes the dispatch payload (`job_id` leaves the
+wire, `artifact_id` arrives), so writing a second payload builder first means writing it twice.
+
+⚠️ **P6 already edits this exact function** — `_recover_stale_pending` builds a payload containing
+`job_id` and must change regardless. Doing both in one pass is materially cheaper than two visits,
+even though they are tracked separately.
+
+### Interactions
+
+- **BUG-005** — the parent finding. Its Path A is this gap's symptom; the gap itself survives its fix.
+- **BUG-001** — same function, different defect. That one is the `WHERE jobs.id IS NULL` query
+  noise; this is the silent skip that follows it. Neither closes the other.
+- **ADR-006** — nullable `job_id` is correct and not in question. This is the third place that
+  assumed it never happens, after the message schemas and the artifact-path convention.
+- **Dissolved by Temporal?** Partly — `_recover_stale_pending` exists because NATS dispatch can be
+  lost, and a Temporal workflow does not lose its own steps. But it is fixed pre-migration for the
+  same reason BUG-005 is: it is on a live, shipped path with the migration months out, and P6 is
+  already in the file.
