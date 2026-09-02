@@ -2,10 +2,12 @@
 
 **Priority:** P1 — the foundation layer of Phase 4
 **Source:** `docs/project/workflows-scoping.md` §4A (feature), `phase4-backlog.md` §2 (engine decision)
-**Status:** Ready for Architect
-**Last updated:** 2026-08-08 (PM review round 3 — **OQ-4 gains a decided section**: the crawl lane
+**Status:** Architect pass complete — [ADR-009](../../adr/ADR-009-workflow-engine-temporal.md)
+is **Accepted** (2026-09-08) and answers all 11 open questions. Next consumer is the Tech Lead.
+**Last updated:** 2026-09-08 (ADR-009 carry-back pass — four items owed to this PRD, no decision changed)
+*Previously: 2026-08-08 (PM review round 3 — **OQ-4 gains a decided section**: the crawl lane
 joins the quota meters, at page granularity. Still **11** open questions; OQ-4's *pipeline* metering
-question remains the Architect's, but *which lanes the meter covers* is now answered.)
+question remains the Architect's, but *which lanes the meter covers* is now answered.)*
 *Previously: 2026-08-04 (PM review round 2 — three Architect escalations decided; see the
 revision note below. **OQ-10 is half-answered** — change detection is assigned, conditional
 execution is not — and **OQ-4**'s PM constraint is narrowed. No OQ is fully closed.)*
@@ -50,6 +52,22 @@ execution is not — and **OQ-4**'s PM constraint is narrowed. No OQ is fully cl
 > forces us to name, and it would be correct even if Phase 4 were cancelled. Rollout, storage
 > reclaim (a hard precondition), and sequencing are all settled in OQ-4.
 
+> **Revision note — ADR-009 carry-back pass (2026-09-08) — pending owner review.** Not a PM review round:
+> **no decision in this PRD changed.** ADR-009 is now Accepted, and its review left four things
+> owed *to this document*. All four are carried in, in place:
+>
+> | Carried in | From | Where it landed |
+> |---|---|---|
+> | *"Run two extractions on one fetched page"* is a Problem-statement item **layer A does not fix** — data-flow fan-out is deferred post-Phase 4, cheaply (the stored shape is already a graph, so lifting it is a validator change) | ADR-009 §4 | **Problem** (marked at the bullet) + **R6** exclusions |
+> | **Two payload-shape divergences**: a pipeline run has no `job_id`, and `diff_detected`/`diff_summary` have no producer while change detection is homeless | ADR-009 §10 | **R6** — attached to the payload-shape criterion they are exceptions to, and listed apart from the four capability divergences |
+> | **§8 was reversed** — the meter measures bytes on disk and charges *every* stored object, replacing "only the final artifact is charged". Two OQ-4 passages still argued from the old rule | ADR-009 §8 (08-17) | **OQ-4**, both passages. ⚠️ **The conclusion did not change** — every stored crawl page is still charged; it now follows from the general rule instead of by crawl-specific exception |
+> | **Written and built are different dates** for conditional execution | ADR-009 §14a | **Non-goals**, with the PRD's number: **PRD-019** |
+>
+> ⚠️ **The one worth re-reading is the third.** A reversed premise under an unchanged conclusion is
+> the failure mode this project keeps finding: the passages read as sound because their *answer* was
+> right, and nothing would have flagged them until someone reused the stale rule for a lane where it
+> gives a different answer.
+
 ---
 
 ## Problem
@@ -68,7 +86,8 @@ see, reorder, extend, or branch on. Concretely, a user today **cannot**:
 - validate an extracted field before it is stored, so bad extractions land silently in the
   data pipeline they are feeding;
 - run two extractions on one fetched page — a second extraction means a second scrape, which
-  means paying for a second render and hitting the target site twice;
+  means paying for a second render and hitting the target site twice. ⚠️ **Layer A does not fix
+  this one** — see R6's exclusions; data-flow fan-out is deferred to post-Phase 4;
 - control *when* a step runs. Exactly one conditional exists — an exact-byte hash of the
   scrape output is compared with the previous run's, and an identical page skips the LLM, the
   diff and the webhook (`result_consumer.py:376`). It is hard-coded, always on, invisible in
@@ -120,9 +139,15 @@ owns run state; Q8 is the operational one.
   later.
 - **Migrating existing jobs/batches/crawls onto pipelines.** Users are not asked to move,
   and nothing auto-converts. Retiring the old lane is a separate, later decision.
-- **Branching and parallel fan-out.** Chains are linear in this PRD. (Conditional execution
-  is the *first* thing to add after it ships — see **OQ-10**, which also records that
-  Monitors depends on it.)
+- **Branching and parallel fan-out.** Chains are linear in this PRD. Conditional execution is the
+  *first* thing to add after it ships — see **OQ-10**, which also records that Monitors depends on
+  it. ⚠️ **Written and built are different dates** (ADR-009 §14a, carried here 2026-09-08): its PRD is
+  **PRD-019**, which may be **written while layer A is still being built** — writing it early is
+  what tests whether this PRD's four forward-compatibility choices actually suffice — while the
+  feature is **built after layer A ships and before Monitors is built**. The second half is forced,
+  not chosen: the cost gate is a *launch requirement* of Monitors and consumes PRD-019's primitive.
+  So "the first thing to add after it ships" is true of the **feature** and misleading about the
+  **document**.
 - **Change detection — neither the cost gate nor the reporting diff.** Now an explicit non-goal
   rather than an unassigned gap: both belong to **Monitors (B)**, because "the previous run of
   this same thing" is only well defined once a monitor supplies the identity (**OQ-10**). Layer A
@@ -386,7 +411,9 @@ the pipeline model, which is the only thing under test. Equivalence therefore me
 - the same blocks ran, in the expected order, with the expected per-block outcomes;
 - the extracted result satisfies the **same schema**, with the same field set populated;
 - the artifact is stored in the same place and retrievable by the same means;
-- the webhook fired with a payload of the same **shape**, field for field.
+- the webhook fired with a payload of the same **shape**, field for field — ⚠️ **with two known
+  field-level exceptions, below.** They are exceptions to *this criterion*, not to a capability,
+  which is why they are listed apart from the four divergences that follow.
 
 **Not claimed: behavioural parity with today's job path**, which has four things this pipeline
 does not:
@@ -415,9 +442,35 @@ does not:
   that is not a block at all. Which of those it becomes is settled when conditional execution is
   settled; **it is not layer A in this PRD** (see OQ-10).
 
-All four are stated here so a divergence found during the comparison is read as a **known
+**Two further divergences, in the webhook payload itself** (ADR-009 §10, carried here 2026-09-08). These
+are narrower than the four above and easy to miss because they sit *inside* a field list rather
+than being a missing capability — which is exactly why they are written down rather than
+discovered when the gate is run:
+
+- **`job_id` has no v2 source.** Today's payload carries `job_id` (`webhooks.py:41-49`); a
+  pipeline run is not a job and has no `job_id` to put there. What the field becomes — omitted,
+  null, or replaced by `pipeline_id` — is a wire-contract decision, and it is the **first** field
+  a receiver's integration would break on.
+- **`diff_detected` / `diff_summary` have nothing to fill them.** The reporting diff is Monitors'
+  (divergence 2 above), so on the pipeline lane these fields have no producer at all while change
+  detection is homeless. Sending them as constant `false`/`null` is a choice, not a default.
+
+⚠️ **These do not make R6 fail.** The gate is judged on structure and mechanics; both are recorded
+so the payload-shape criterion is read with its exceptions attached, rather than the gate being
+argued about when the diff is noticed.
+
+**Plus one thing this PRD's own Problem statement raises and layer A does not answer** (ADR-009 §4,
+carried here 2026-09-08): *"run two extractions on one fetched page."* Layer A validates a single chain in
+**data flow as well as execution order**, so a second extraction still means a second Scrape block —
+hence a second render and a second hit on the target site, which is the cost the Problem section
+names. **Data-flow fan-out is wanted and deferred to post-Phase 4**, and the deferral is cheap: the
+stored shape is already a graph, so lifting the restriction is a validator change against unchanged
+saved definitions. Recorded here because a problem statement the design does not answer must be
+**visible, not implied by the absence of a feature**.
+
+All of the above are stated here so a divergence found during the comparison is read as a **known
 exclusion** — not as a failed gate, and not as licence to add a diff block outside R2's catalog,
-which is the exact move this gate exists to prevent. Each now names the layer that owns it, so
+which is the exact move this gate exists to prevent. Each names the layer that owns it, so
 "nothing picked it up" cannot recur.
 
 **Multi-destination delivery is likewise out of the comparison.** The R6 recipe has one webhook,
@@ -694,9 +747,14 @@ batch, not a precedent to copy; if it is ever normalised it should move **toward
 away from it.)
 
 **6. `storage_bytes_used`: every stored crawl page is charged — and this ships in the same change,
-not separately.** ADR-009 §8's "only the final artifact is charged" needs **no exception** here: a
-crawl has no intermediates, every page result is a deliverable the user retrieves via
-`GET /crawls/{id}/pages`. In scope because it is the axis where crawls are most dangerous —
+not separately.** ⚠️ **Reasoning updated 2026-09-08; the conclusion is unchanged.** This originally argued
+that ADR-009 §8's *"only the final artifact is charged"* needs **no exception** for crawls, since a
+crawl has no intermediates and every page result is a deliverable the user retrieves via
+`GET /crawls/{id}/pages`. **§8 was reversed on 2026-08-17: the meter measures bytes on disk, and
+every stored object is charged, on every lane.** So there is no final-artifact rule left to take an
+exception to — charging every page now follows *directly* from the general rule rather than by
+argument, and the crawl-specific case is no longer load-bearing. In scope because it is the axis
+where crawls are most dangerous —
 10,000 pages at the BUG-003-measured 291 KiB–4.1 MiB range is **2.8 GB–40 GB from a single API
 call**, against an enforced 5 GB default — and because shipping "crawls now cost quota" while the
 largest axis stays free means announcing a **second** pricing change to the same feature later. One
@@ -801,8 +859,10 @@ three meters have the defect, in two different ways.
 > batch size and the one-active-crawl-per-origin rule. Revisit when `CrawlWorkflow` makes throttling
 > a config value rather than new code.
 >
-> **`storage_bytes_used`: every stored crawl page is charged.** "Only the final artifact is charged"
-> needs no exception — a crawl has no intermediates; every page result is a deliverable.
+> **`storage_bytes_used`: every stored crawl page is charged.** ⚠️ *Reasoning updated 2026-09-08:* this
+> read *"'only the final artifact is charged' needs no exception — a crawl has no intermediates."*
+> **ADR-009 §8 was reversed** — every stored object is charged on every lane — so the conclusion now
+> follows from the general rule and needs no crawl-specific argument at all.
 > **Precondition:** crawl artifacts must first become reclaimable (no path frees them today, and the
 > job/admin delete paths enumerate `job_runs.result_path` only — even user deletion orphans them).
 > **Accounting starts at cutover; history is not reconciled** — pre-cutover artifacts stay uncounted
