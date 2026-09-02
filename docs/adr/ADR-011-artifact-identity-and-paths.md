@@ -1,8 +1,8 @@
 # ADR-011: Artifact Identity — Run-keyed Paths, Stage-named Objects, and the Removal of `latest/`
 
-**Status:** **Draft.** The decisions below were taken by the owner on 2026-09-08; this document is
+**Status:** **Draft.** The decisions below were taken by the owner on 2026-09-03; this document is
 my write-up of them and has not been reviewed. Promoting it to Accepted is a separate step.
-**Date:** 2026-09-08
+**Date:** 2026-09-03
 **Deciders:** @karthik
 **Supersedes:** [ADR-002](./ADR-002-phase2-worker-contract.md) **§4** (the MinIO path convention)
 only. ADR-002 remains authoritative for NATS subjects and message schemas.
@@ -80,7 +80,7 @@ removes, committed a second time under a better-looking name.
 **Decision: the fat message carries one identifier field naming what the artifacts are keyed on.
 The dispatcher fills it; the worker uses it verbatim and never interprets it.**
 
-Field name: **`artifact_id`** — settled 2026-09-08.
+Field name: **`artifact_id`** — settled 2026-09-03.
 
 This preserves the light-worker rule exactly. A worker does not know which lane it is on, does not
 branch, and does not consult the database — it receives a string and builds a path from it. The
@@ -324,5 +324,5 @@ activity inputs, and PRD-016's pipeline blocks are the next producer/consumer pa
    alternative is leaving the lie in place for a lane the `CrawlWorkflow` port will read as
    precedent — but it is worth confirming that spending the change on a dead v1 path is intended.
 
-**Settled 2026-09-08 in review:** the field name `artifact_id`, and the removal of the crawl
+**Settled 2026-09-03 in review:** the field name `artifact_id`, and the removal of the crawl
 lane's fabricated `run_id` (§2).

@@ -28,7 +28,8 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 scope — single source of truth** | `docs/project/phase4-backlog.md` |
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
-| Open bugs (BUG-004 → BUG-010) | `docs/project/open-bugs.md` |
+| **Artifact identity — P6's design dependency (Draft)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
+| Open bugs (BUG-004 → BUG-011) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -79,7 +80,7 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ---
 
-## Current state — as of 2026-09-08
+## Current state — as of 2026-09-03
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** No build work has started —
@@ -99,12 +100,23 @@ sitemap entries scoped to the seed's registrable domain. **Both decisions are ow
 dated; the write-up is unreviewed.** Written as a separate ADR rather than an edit because ADR-009
 is Accepted and immutable.
 
-⚠️ **The design phase is effectively closed. Everything still open is code, plus one PRD.** Every
-documentation debt ADR-009's review created has been discharged: both stale companions redrawn,
-PRD-016's four carry-backs landed, the conditional PRD numbered, the lane-blind meters recorded,
-D5 closed. What is left is the pre-migration queue and PRD-019.
+**ADR-011 is `Draft` (2026-09-03)** (`docs/adr/ADR-011-artifact-identity-and-paths.md`). It is
+**P6's design dependency** and the last one it had: BUG-005's fix could not be built until the
+artifact-path convention was decided, because half the paths stay broken if the message contract
+and the path convention do not change together. It **supersedes ADR-002 §4 on acceptance**, and
+answers **PRD-016 OQ-1** in passing. Decisions taken by the owner this session; write-up unreviewed.
 
-**What is blocking: nothing.**
+⚠️ **The design phase is effectively closed. Everything still open is code, one PRD, and two Draft
+ADRs to promote.** Every documentation debt ADR-009's review created has been discharged: both
+stale companions redrawn, PRD-016's four carry-backs landed, the conditional PRD numbered, the
+lane-blind meters recorded, D5 closed.
+
+⚠️ **A Draft is not a decision** (`docs/adr/README.md`) — *"do not implement against it, and do not
+cite it as settled in another document."* So **P6 is not actually unblocked until ADR-011 is
+promoted**, and ADR-002 does not get its supersession notice until then either. That promotion is
+the first thing on the list below, not a formality to do later.
+
+**What is blocking: ADR-011's promotion, for P6 only.** Nothing else.
 
 ### Outstanding, in rough order
 
@@ -115,8 +127,19 @@ D5 closed. What is left is the pre-migration queue and PRD-019.
    last and is required first** — before PRD-018, which cannot ship without its primitive. The
    sort-order cost was accepted rather than engineered around; index order is not build order in
    this chain.
-2. **The pre-migration queue is the entry condition for any build work** (16e):
-   **P6 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of truth.
+2. **Review and promote ADR-011.** One open item is left in it by name: the crawl lane gains an
+   honest artifact key and loses its fabricated `run_id`, but crawl results are still acked and
+   dropped on v1 (BUG-008, will-not-fix) — so the work lands on a path that cannot yet exercise it.
+   Deliberate, and worth confirming. On promotion, ADR-002 needs its supersession notice and
+   `CLAUDE.md`'s MinIO path-convention row flips from "authoritative" to "superseded".
+3. **The pre-migration queue is the entry condition for any build work** (16e):
+   **P6 → P9 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of truth.
+   ⚠️ **P9 (BUG-011) is new this session** and sits immediately after P6 because **P6 already edits
+   the same function** — `_recover_stale_pending` builds a payload containing `job_id`, which
+   ADR-011 removes from the wire. Two visits cost more than one.
+   ⚠️ **P6's first task is not in the fix at all**: the API has **10 publish sites building raw
+   dicts and no message schema**, and ADR-011 §6's contract test is meaningless until one exists —
+   a hand-written test payload is the same guess the worker fixtures already make.
 
 ### Git / deploy state
 
@@ -126,8 +149,15 @@ D5 closed. What is left is the pre-migration queue and PRD-019.
 - ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** —
   pushing it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up.
   Do not do it at session end; wait to be asked.
-- **As of 2026-09-08, freshly fetched:** `develop` is **20 ahead** of `origin/develop` and 0 behind;
-  `main` is **45 behind** `develop` and 0 ahead. Nothing pushed this session.
+- **As of 2026-09-03, freshly fetched:** `develop` is **1 ahead** of `origin/develop` and 0 behind;
+  `main` is **48 behind** `develop` and 0 ahead. ⚠️ **`develop` WAS pushed this session** (through
+  `fa3c18d`) — the first push since 2026-08-28. The trailing commit is `b00e0f2`.
+- ⚠️ **The document timeline runs ahead of git, and has for several sessions.** Work dated
+  2026-09-04 → 2026-09-08 across the ADRs, backlog and this file was committed on **2026-09-02**.
+  Everything created on 2026-09-03 (ADR-011, BUG-011) is dated from the clock, so ADR-011 (09-03)
+  sorts *after* ADR-010 (09-08) in the registry while carrying an earlier date. That is the
+  pre-existing drift showing, not a mistake in either record — **do not "correct" one into the
+  other.** Decide which timeline is real before dating the next artifact. ⚠️ The session log now has **two `2026-09-03` rows** for this reason — the top one is the clock, the lower one is the doc timeline.
 - ⚠️ **Re-check ahead/behind against the remote before quoting numbers** — two consecutive handoffs
   once carried counts stale by two months. Fetch first, quote second.
 - Untracked `tmp/architecture.md` predates all current work (May) and is deliberately left alone.
@@ -170,12 +200,13 @@ live in ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-03 ⬅ *clock* | **🔷 Owner decisions taken on artifact identity, written up as ADR-011 (Draft)** — artifacts key on the producing row via a lane-neutral `artifact_id`; `job_id` leaves the wire; objects named by **stage**; **`latest/` removed**; the crawl lane's fabricated `run_id` removed. **This closes P6's last design dependency.** Two findings that changed the design mid-session, neither from reading the docs: a flat `history/{artifact_id}.{ext}` would have **silently reintroduced the collision** (the LLM worker hardcodes `ext="json"`, so an `output_format=json` job's extraction overwrites its own scraped page — only the timestamp prevents it today, and only because LLM calls are slow); and **`run_id` cannot be the universal key**, because the coordinator fabricates one with `uuid4()` for a lane that creates no `job_runs` rows, so `crawl_pages.id` is in the message twice — once honestly, once as `job_id`. **BUG-011 filed as P9**: stale-pending recovery silently skips every batch run, under a comment asserting the case is impossible — **BUG-005's fix does not close it**, since that removes the cause of stuck items rather than the hole in the net. A contracts package was weighed and **not taken**, recorded in ADR-011 §6 with the trigger to revisit (pipelines). Also verified: change detection is **path-agnostic** — "which run came before" is a SQL query and the differs take opaque paths, so the convention change needs **no backfill** | `fa3c18d`, `b00e0f2` |
 | 2026-09-08 | **🔷 Two owner decisions taken: ADR-009 promoted to `Accepted`, and the conditional-execution PRD numbered `PRD-019`** (sort-order cost accepted; index order is not build order). **Both stale companions redrawn** — `temporal-full-migration.md` (five 🔴 divergences resolved, plus three the redraw found: Web UI exposure, tenancy, the SPA contract) and `workflows-scoping.md` (six 🔴 cleared, §9's open questions turned into a table of answers). ADR-009's three pre-redraw notes **corrected in place**, which is what surfaced that the second document was owed a redraw at all. **PRD-016 carry-back pass** — four items ADR-009 owed it, no decision changed. Draft caveat cleared from the ADR header and eight downstream documents. **The four lane-blind admin meters recorded** as cutover gotchas — which also caught gotcha 3 still describing the rejected NATS bridge. **ADR-009's D5 closed**: both deferrals decided by the owner and written up as **ADR-010** (Draft), which opens one new item — a Schedule overlap policy | `1d94d5d`, `041921d`, `33d58f2`, `c76edf8`, `c8f381f` |
 | 2026-09-07 | This handoff condensed 250,550 → ~15,000 chars (−94%); `phase4-backlog.md`'s header change log 9,882 → ~2,500. Corrected the `prephase4` hash back to `1965953` | `2404193` |
 | 2026-09-06 | `CLAUDE.md` cleanup — the duplicated ADR-009 summary stripped, 93,141 → 27,527 chars (−70%); backlog's ADR-009 row 16,500 → 914 | `530fca3`, `e201980` |
 | 2026-09-05 | Both closing blocks reviewed (14 corrections, no decision changed) — **the section review closes**; then ADR-009 condensed, review log 476 → 83 lines as `## Review status` | `3e7f32e`, `21fadd2`, `3b91bab` |
 | 2026-09-04 | §17 reviewed; `ADR-002 §8` → **§4** corrected across five live docs | `87d2396` |
-| 2026-09-03 | §16 reviewed — the sequence becomes **named, not numbered** | `400cda7` |
+| 2026-09-03 *(doc timeline — see the drift note above; this row is an earlier session)* | §16 reviewed — the sequence becomes **named, not numbered** | `400cda7` |
 | 2026-09-01 → 09-02 | §14 and §15 reviewed | `9b2df55` |
 | 2026-08-28 | §13 reviewed; BUG-010 filed; one live fix shipped | `e4a19fc`, `5c7fbdf`, `205acd4` |
 | 2026-08-26 | §10 and §11 reviewed; BUG-009 filed; consistency sweep for the §8/§9 reversals | `4d27475`, `7b9f9d5`, `1770b70`, `a40b89b` |
