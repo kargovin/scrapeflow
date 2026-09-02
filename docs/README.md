@@ -18,7 +18,7 @@ ADRs are the primary record of *why* the system is built the way it is. They are
 | [`adr/ADR-006`](adr/ADR-006-batch-scraping-data-model.md) | Batch Scraping Data Model | **Accepted** |
 | [`adr/ADR-007`](adr/ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** |
 | [`adr/ADR-008`](adr/ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** — Patchright + headed Chrome under Xvfb |
-| [`adr/ADR-009`](adr/ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | 📝 **Draft (2026-08-04), pending review** — engine decision + answers to all 11 of PRD-016's open questions. **Not yet a decision** |
+| [`adr/ADR-009`](adr/ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Accepted** — drafted 2026-08-04, reviewed §1–§17 to 2026-09-05, accepted 2026-09-08. Engine decision + answers to all 11 of PRD-016's open questions. ⚠️ Its `## Review status` block is authoritative per section |
 
 See [`adr/README.md`](adr/README.md) for full ADR index, status definitions, and how to write a new ADR.
 

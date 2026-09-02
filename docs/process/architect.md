@@ -407,13 +407,17 @@ Carry all of these into Phase 4.
 
 ## 9. What Phase 4 Will Require From You
 
-> **⚠️ Addendum 2026-08-04 — ADR-009 is drafted and awaiting review; it is not yet accepted.**
+> **⚠️ Addendum — ADR-009 is `Accepted` (2026-09-08).**
 >
 > **[ADR-009](../adr/ADR-009-workflow-engine-temporal.md) — Workflow Engine: Temporal + the v1/v2
-> coexistence contract — is written in DRAFT** and answers all **11** of PRD-016's open questions.
-> Review it before doing anything else; nothing in it is settled. **If you are picking up after it
-> is Accepted, your next artifact is the conditional-execution PRD** that ADR-009 §14 places before
-> PRD-018 (Monitors) — layer A, additive to the block model, not absorbed into B.
+> coexistence contract — is the decision of record** and answers all **11** of PRD-016's open
+> questions. Read it before doing anything else, and read its **`## Review status`** block first:
+> the section-by-section review reversed or withdrew several positions, and that block's
+> **Reversed or withdrawn** and **Amended as a knock-on** tables are how you avoid designing
+> against a superseded one. **Your next artifact is the conditional-execution PRD** that ADR-009
+> §14 places before PRD-018 (Monitors) — layer A, additive to the block model, not absorbed into
+> B. ⚠️ It still has **no number**: an open owner decision, because creation order gives PRD-019,
+> which sorts *after* the PRD-018 it must precede.
 >
 > *Original addendum (2026-07-28), still the correct reading order for the inputs:*
 > 1. **`docs/project/phase4-backlog.md`** — single source of truth for Phase 4 scope. **Read §3

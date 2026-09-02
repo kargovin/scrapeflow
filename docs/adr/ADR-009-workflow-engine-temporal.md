@@ -1,11 +1,15 @@
 # ADR-009: Workflow Engine — Temporal, and the v1/v2 Coexistence Contract
 
-**Status:** **Draft.** The section-by-section review by @karthik is **complete** (§1–§17 and both
-closing blocks, 2026-09-05) — but the document is **still Draft**: promoting it to Accepted is a
-separate owner decision and has not been taken. Until it is, do not implement against it and do not
-cite it as a decision elsewhere. Individual sections *are* settled; the review log below says which,
-and what each review changed.
-**Date:** drafted 2026-08-04 · reviewed 2026-08-08 → 2026-09-05 (per-section dates below)
+**Status:** **Accepted (2026-09-08).** The section-by-section review by @karthik is **complete**
+(§1–§17 and both closing blocks, 2026-09-05), and the owner has taken the promotion decision. This
+is the decision of record for the Phase 4 workflow engine and the v1/v2 coexistence contract:
+implement against it, and cite it as settled. ⚠️ **Accepted does not mean uniform** — the review
+reversed or withdrew several positions, so the `## Review status` block below stays authoritative
+for what any given section now says. Read its **Reversed or withdrawn** and **Amended as a
+knock-on** tables before relying on a section. Two rows in the deferral table (**D5**) are still
+open; those are deferrals *inside* an accepted decision, not gaps in it.
+**Date:** drafted 2026-08-04 · reviewed 2026-08-08 → 2026-09-05 (per-section dates below) ·
+accepted 2026-09-08
 **Deciders:** @karthik
 **Inputs:** [PRD-016](../project/phase4-prd/PRD-016-workflows-pipelines.md) (11 open questions),
 `docs/project/phase4-backlog.md` §2/§3, `docs/project/workflows-scoping.md` §7 (engine
@@ -95,10 +99,23 @@ build the **rejected** NATS bridge.
 
 ### What remains
 
-The section review is finished. **Promoting this document to `Accepted` is a separate owner
-decision and has not been taken.** `temporal-full-migration.md` is owed its one-pass redraw —
-deferred until the review closed, which it now has; 🔴 markers are in place so nobody implements
-from it meanwhile.
+The section review is finished and the document is **Accepted (2026-09-08)**.
+`temporal-full-migration.md` had its one-pass redraw on **2026-09-08**, against this document: the five
+known contradictions are resolved and its 🔴 markers are gone. Where the two still disagree, this
+ADR wins — that is a standing rule, not a staleness warning. The three notes that described its
+pre-redraw state ([16a](#16a-steps-get-names-because-the-numbers-have-already-moved-once)'s table
+row and closing sentence, §16's parenthetical about the peak diagram, and §14's shared-disposition
+paragraph) are **corrected in place, dated 2026-09-08** — owner's call; the finding is kept and its
+resolution recorded beside it, rather than the text being rewritten to look as though the problem
+never existed.
+
+✅ **`workflows-scoping.md` was redrawn the same day**, closing §14's disposition, which had
+covered *two* stale documents under one instruction and been acted on for only one. Both are now
+free of 🔴 markers. Neither document decides anything: this ADR and PRD-016 do, and where the three
+disagree these two win.
+
+Two rows in the deferral table (**D5**) remain open — §7's scheduled-quota waiting room, and 13d's
+sitemap origin-restriction question, which is needed **before the crawl step is built**.
 
 
 ---
@@ -2276,7 +2293,8 @@ bookkeeping:** creation order gives PRD-019, which reads as *after* PRD-018 in e
 being required *before* it. Left open.
 
 ⚠️ **`workflows-scoping.md` is now stale in three places, and its status banner flags only two of
-its own.** Found while checking this section's ordering claims:
+its own.** Found while checking this section's ordering claims. *(✅ All three fixed by that
+document's redraw, 2026-09-08; the table below is the finding as filed.)*
 
 | passage | still says | actually decided |
 |---|---|---|
@@ -2288,6 +2306,14 @@ The third is unrelated to §14 and is the urgent one: it reads as a live recomme
 design that was rejected, in the same class as the known staleness in
 `temporal-full-migration.md`. Same disposition — 🔴 markers now, one redraw after the review
 closes.
+
+> ✅ **Closed 2026-09-08. Both halves of this disposition are done.** `temporal-full-migration.md` was
+> redrawn, and `workflows-scoping.md` followed the same day — its six 🔴 markers are gone because
+> the passages under them were rewritten, including §6's *"Recommendation: (a) for Phase 1"*, §9's
+> six open questions (now a table of answers) and §10's recommendation. ⚠️ **The lesson worth
+> keeping: this instruction covered two documents and was acted on for one**, and nothing in the
+> marker itself would ever have surfaced the other — marked-but-not-fixed is the state that
+> outlives the marker.
 
 **Resulting order** (specification and implementation separated per [14a](#14a-the-order-is-two-orders-and-the-section-stated-them-in-one-notation)):
 
@@ -2722,9 +2748,10 @@ executors. ⚠️ The **pipeline lane** step also has prerequisites that are not
 four of these steps, so it is sequence material rather than a decision. Two things it shows that
 this contract only states in words — the API keeps `replicas: 1` and all four loops until the
 **schedule and webhook cutover** (the thinning is the *last* payoff, not the first), and the three
-workers serve **both lanes at once**. *(The diagram predates the §9 reversal and needs redrawing:
-serving both lanes is now two deployments of one image rather than one process reading NATS for
-both, and the retry-stacking hazard it illustrates is largely gone with the bridge.)*
+workers serve **both lanes at once**. *(✅ **Redrawn 2026-09-08.** The diagram predated the §9 reversal.
+It now draws the two lanes disjoint all the way down to the pods, shows "serving both lanes" as
+**two deployments of one image** rather than one process reading NATS for both, and the
+retry-stacking hazard it used to illustrate is gone with the bridge.)*
 
 **Reversibility.** Reversibility is a property of **migrated** flows, not of the plan as a whole.
 A flow that was cut over falls back to its v1 path until it is fixed; a flow that has no v1
@@ -2765,7 +2792,7 @@ an address:
 |---|---|---|
 | [§7](#7-oq-3--one-lane-disjoint-identity-plus-an-engine-level-uniqueness-guarantee), five times | build the lane marker on `job_runs` | the **worker port**, which has no `job_runs` rows to mark |
 | [§2d](#2d-capacity) | "both orchestrators running at steps 2–3" | worker port + pipeline lane, not job cutover + batches |
-| `temporal-full-migration.md` §9 | its own 7-item list, **not renumbered at all** | its step 2 is still the *rejected* NATS bridge |
+| `temporal-full-migration.md` §9 | its own 7-item list, **not renumbered at all** | its step 2 was still the *rejected* NATS bridge — ✅ **resolved by the 2026-09-08 redraw**, which adopts the names |
 
 ⚠️ **The failure is silent and lands on the one obligation that is a schema change.** §7's
 mechanism 4 — a lane marker written in the same transaction as the row insert — is required from
@@ -2776,8 +2803,8 @@ job cutover believing the marker was handled. Neither produces an error.
 
 ✅ **Owner's call: the sequence is named, not numbered, and every cross-reference names a step.**
 Names do not renumber when a step is inserted, moved or split, and this sequence has already been
-reordered once by a review and will be again. The three references above are corrected in place;
-`temporal-full-migration.md` is on the post-review redraw list and inherits the names there.
+reordered once by a review and will be again. The three references above are corrected in place,
+and `temporal-full-migration.md` inherited the names in its **2026-09-08 redraw**.
 
 Also corrected while counting: the section said the shape *"changes at four of the seven steps"*
 while listing **nine**. The seven was the migration document's list, quoted from before the

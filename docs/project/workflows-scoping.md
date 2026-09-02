@@ -2,55 +2,38 @@
 
 > **Consolidated Phase 4 view: [`phase4-backlog.md`](./phase4-backlog.md)** (item **WF**).
 
-> Exploratory scoping for a new capability layer: user-defined, durable, multi-step
-> **Workflows**, powered by a workflow-orchestration engine (Temporal or similar).
-> This doc frames the feature, ranks the options, compares engines, and recommends a
-> starting point. It does **not** commit to a build — it is meant to start the discussion
-> with something concrete, and can later spawn a PRD + ADR.
+> The **origin artifact** for Phase 4. It framed the durable-workflows capability, ranked the
+> options, compared the engines, and recommended a starting point. Everything it opened has since
+> been decided: **[PRD-016](./phase4-prd/PRD-016-workflows-pipelines.md)** is the product spec for
+> layer A, and **[ADR-009](../adr/ADR-009-workflow-engine-temporal.md)** (Accepted 2026-09-08) is
+> the engine decision and the v1/v2 coexistence contract.
 
-> **⚠️ STATUS UPDATE — 2026-07-28. The exploratory framing below is settled; two parts of
-> this doc are superseded, and one is load-bearing.**
+> **What this doc is still for, now that those exist.** Three things, and nothing else:
 >
-> - **Superseded — §7's recommendation.** "Prototype Phase 0/1 on DBOS, treat Temporal as a
->   later step" is **not** what was decided. The engine is **Temporal**, chosen for portfolio
->   value + first-class Python *and* Go SDKs. The comparison table itself is still the honest
->   record of *why*, and feeds **ADR-009** — but do not act on the DBOS-first suggestion.
-> - **Superseded — §1's "not a rip-out" non-goal.** True of the *feature*, no longer true of
->   the *phase*. Phase 4 **is** the full migration: `result_consumer` / `scheduler` /
->   `webhook_loop` / `advisory` / `coordinator` and NATS all retire at the end state. The
->   strangler-fig sequence in `temporal-full-migration.md` §9 is how, and coexistence is still
->   real at every intermediate step — but the end state is a replacement, not an addition.
-> - **Still load-bearing — §4's layer split and §6's state-ownership split.** The three nested
->   layers (Pipelines → Delivery → Monitors) and the state-ownership split (engine owns execution
->   state, thin Postgres mirror backs the UI) are the shape **PRD-016** was written against.
+> - **§2 and §3** — the plain-English account of what a durable engine is, and the row-by-row
+>   inventory of where ScrapeFlow already hand-rolls it. Neither has an owner elsewhere.
+> - **§4's four nested layers** and **§6's state-ownership split** — still load-bearing. PRD-016
+>   was written against this shape.
+> - **§7's comparison table** — the honest record of *why* Temporal, and ADR-009 §1's raw material.
 >
-> **⚠️ AMENDED 2026-09-01 (ADR-009 §14 review) — three further passages are superseded, and this
-> banner previously endorsed two of them.**
->
-> - 🔴 **Superseded — §6's integration recommendation.** *"Recommendation: (a) for Phase 1"* —
->   activities dispatching to the existing workers over NATS — was **rejected** by
->   [ADR-009 §9](../adr/ADR-009-workflow-engine-temporal.md#9-oq-5--workers-become-temporal-activity-workers-directly-the-nats-bridge-is-rejected)
->   on 2026-08-23, and found **blocked**: the `SCRAPEFLOW` stream is `--retention work`, which
->   refuses the second consumer overlapping `api-result-consumer`'s claim that option (a)
->   requires — proven by a dead service in production (**BUG-008**). Option **(b)** is the
->   decision, in the **first** increment. §6's *state-ownership* half is untouched and still
->   load-bearing. **Do not implement from §6's option comparison.**
-> - 🔴 **Superseded — §4A's block catalog lists `branch`.** Branching is **not** in layer A.
->   [ADR-009 §14](../adr/ADR-009-workflow-engine-temporal.md#14-oq-10-remaining-half--conditional-execution-gets-its-own-layer-a-prd-before-monitors)
->   gives conditional execution its **own follow-up layer-A PRD**, built after PRD-016 ships and
->   before Monitors. PRD-016 lists branching as an explicit non-goal.
-> - 🔴 **Superseded — §5's phased roadmap.** It has no row for the conditional-execution step,
->   which sits **between Delivery (C) and Monitors (B)** — B cannot ship without the cost gate,
->   and the gate consumes that step's primitive. §14 carries the current order.
-> - **§10's next step is done:** PRD-016 exists at
->   `phase4-prd/PRD-016-workflows-pipelines.md`, scoped to layer **A** only.
->   **[ADR-009](../adr/ADR-009-workflow-engine-temporal.md) is now drafted** (2026-08-04, pending
->   review) and answers all 11 of its open questions.
+> For anything else — scope, sequencing, what gets deleted — **PRD-016 and ADR-009 are
+> authoritative, and where they disagree with this doc, they win.**
 
-**Status:** Draft — for discussion (see status update above)
-**Date:** 2026-07-14
+> **Status:** redrawn **2026-09-08** against the Accepted ADR — pending owner review. The six 🔴
+> markers this file carried are gone because the passages under them were rewritten, not because
+> the findings were waived. **What the redraw changed, so a note written before it can be checked:**
+> §1's "not a rip-out" non-goal is **reversed** (Phase 4 *is* the migration); §4A's block catalog
+> no longer lists `branch`; §5's roadmap gains the **conditional-execution step between C and B**
+> and drops "nothing existing is removed"; §6 now recommends **option (b)**, with option (a)
+> recorded as rejected *and blocked*; §7's DBOS-first prototype path is recorded as the road not
+> taken; §8's "we add; we don't rewrite" is withdrawn; §9's six open questions are **all answered**
+> and now point at their answers; §10 is restated as what was actually built.
+
+**Date:** 2026-07-14 · redrawn 2026-09-08
 **Author:** @karthik
 **Source:** exploratory (came across Temporal in a job description)
+**Superseded by, for anything it decides:** [PRD-016](./phase4-prd/PRD-016-workflows-pipelines.md),
+[ADR-009](../adr/ADR-009-workflow-engine-temporal.md)
 
 ---
 
@@ -71,9 +54,15 @@ clean fix "aligns with how Temporal/Airflow/Prefect model task-level vs workflow
 state." That is the strongest possible internal signal that a durable-execution engine would
 naturally *own* logic we are currently maintaining by hand.
 
-**Non-goal (important):** this is **not** a rip-out or refactor of anything that exists. The
-current NATS-based job path stays exactly as it is. Workflows are a **new layer that
-coexists** with it. Nothing shipped and hardened gets re-platformed.
+**⚠️ The non-goal this doc opened with was reversed, and it is the single biggest change since.**
+It originally read: *"this is **not** a rip-out or refactor of anything that exists… Workflows are
+a new layer that coexists with it. Nothing shipped and hardened gets re-platformed."* That is still
+true of **the feature** — layer A adds a lane rather than splitting one — but it is **no longer
+true of the phase**. **Phase 4 *is* the full migration**: `result_consumer.py`, `scheduler.py`,
+`webhook_loop.py`, `advisory.py` and the `coordinator/` service all retire, and NATS is removed at
+the end state. Coexistence is real at every intermediate step and the strangler-fig sequence
+(`temporal-full-migration.md` §9) is how — but the end state is a **replacement, not an
+addition**.
 
 **What exists today, for reference.** A user submits **one URL + options** and we run a
 single, hard-coded pipeline:
@@ -86,8 +75,10 @@ The user cannot change the steps, add steps, branch, or send output anywhere exc
 single webhook. Output only ever lands in two places: MinIO (internal storage) and one
 webhook URL. There is no pause/human-in-the-loop step anywhere. And there is a live
 half-built gap: a **schedule on a crawl is accepted and persisted** (`schemas/crawls.py`,
-`models/crawl.py:32`, `routers/crawls.py:70`) but the scheduler only ever queries `Job`,
-never `Crawl` (`api/app/core/scheduler.py:54`) — so **scheduled crawls silently never run.**
+`models/crawl.py`, `routers/crawls.py` all carry `schedule_cron`) but the scheduler only ever
+selects `Job`, never `Crawl` (`api/app/core/scheduler.py`) — so **scheduled crawls silently never
+run.** *(Line numbers dropped in the 2026-09-08 redraw: the crawls-router pointer had already
+drifted by five lines, and this file is not where they are maintained.)*
 
 ---
 
@@ -131,7 +122,7 @@ Every row below is code we wrote and maintain, that an engine provides as a prim
 | Webhook backoff loop `BACKOFF_SECONDS=[0,30,300,1800,7200]` | `api/app/core/webhook_loop.py:31` | Activity retry policy (exponential backoff) |
 | MaxDeliver advisory → mark run failed when NATS exhausts retries | `api/app/core/advisory.py` | Dead-letter / retry-exhausted handling |
 | The `scrape → LLM → diff → webhook` state machine, disambiguated by `(worker_status, source, current_status)` | `api/app/core/result_consumer.py` | A linear workflow function — the branching collapses to top-to-bottom code |
-| BFS crawl frontier persisted in `crawl_queue`, dispatched by a poll loop | `coordinator/` (ADR-005) | Workflow state *is* the durable frontier |
+| BFS crawl frontier persisted in `crawl_queue`, dispatched by a poll loop | `coordinator/` (ADR-005) | A workflow drives the frontier — but ⚠️ **it stays in Postgres**, reached through activities. ADR-009 §13b measured it: ≈5 history events per page at our 10,000-page ceiling, and ≈800 KB of visited set against a 2 MiB payload limit. The engine replaces the **poll loop**, not the table |
 | Idempotency guards (`if run.status in ("completed","failed"): return`) on every handler branch | `result_consumer.py` | Exactly-once activity results — guards disappear |
 
 **The anchor is Q8.** The overloaded status machine didn't just look fragile — it *fired* in
@@ -155,24 +146,33 @@ feature with a natural build order. Each layer is built on the one below it:
    DELIVERY (C)  — send a result to S3 + DB + Sheet + email; roll back if one fails (saga)
 ```
 
-Scheduled crawls (the §1 gap) fall out for free once **B** exists — scheduling long-lived
-things is exactly what a monitor *is*.
+Scheduled crawls (the §1 gap) are absorbed by **B** — scheduling long-lived things is exactly what
+a monitor *is*. ⚠️ *"For free"* was the original wording and is too strong: a crawl migrates as its
+own `CrawlWorkflow`, not as a block, and ADR-009 §13a found it is a **rewrite** rather than a port,
+since only the dispatch half of `coordinator/` has ever executed. B closes the scheduling gap; it
+does not make the crawl work free.
+
+**Where conditional execution sits.** It is a **layer-A extension**, not a fifth nesting layer —
+which is why it does not appear in the diagram above but does have a phase of its own in §5. It is
+built after A ships and before B, because B's cost gate consumes its primitive.
 
 ### A — Pipelines (the framework)
 
 > *"Scrape this product page → strip nav/ads → run the LLM to pull {price, title, rating} →
 > check price is a valid number → then save to my Google Sheet **and** email me."*
 
-> 🔴 **`branch` is superseded — see the banner.** Branching is not in layer A; it gets its own
-> follow-up PRD (ADR-009 §14). The rest of this subsection stands.
+Users wire **blocks** into a chain (scrape / clean / LLM / validate / deliver), instead of being
+stuck with our one hard-coded recipe. This is the foundation everything else sits on: it turns
+ScrapeFlow from "runs one fixed recipe" into "a platform where users build recipes."
 
-Users wire **blocks** into a chain (scrape / clean / LLM / validate / branch / deliver),
-instead of being stuck with our one hard-coded recipe. This is the foundation everything
-else sits on: it turns ScrapeFlow from "runs one fixed recipe" into "a platform where users
-build recipes."
+⚠️ **`branch` was in this catalog and is not in layer A.** Conditional execution gets its own
+follow-up layer-A PRD (ADR-009 §14), built after A ships and before B; PRD-016 lists branching as
+an explicit non-goal. The reason is not that it is hard — it is an `if` in workflow code — but that
+*what a condition is allowed to say* is constrained by replay determinism, and that question wants
+its own spec.
 
 - **Engine fit:** high — a pipeline is the textbook workflow; each block is a retryable
-  activity; branching is an `if` in workflow code.
+  activity.
 - **User value:** high — the single biggest product leap.
 - **Effort:** **L** (defines the whole framework + block model + a builder UI later).
 
@@ -215,45 +215,54 @@ pipeline is "crawl the site" — the gap closes as a special case of B.
 
 ## 5. Phased roadmap
 
-> 🔴 **Superseded — this table has no conditional-execution step.** It belongs between Delivery
-> and Monitors; ADR-009 §14 carries the current order. The "nothing existing is removed" framing
-> is also superseded — see the banner on §1.
-
-Ordered so each phase stands on the previous one, and so **nothing existing is removed**:
+Ordered so each layer stands on the previous one. ⚠️ **Two things changed here since the first
+draft:** a **conditional-execution step** was inserted between Delivery and Monitors, and the
+framing *"nothing existing is removed"* is withdrawn — see §1.
 
 | Phase | Delivers | Notes |
 |---|---|---|
-| **0** | Stand up the engine *alongside* the current stack | New workflows run on the engine; the NATS job path is untouched. Infra + one "hello workflow" as a proving ground. |
-| **1** | **Pipelines (A)** — block framework + core blocks (scrape, clean, LLM, validate) | Existing Go/Playwright/LLM workers become the *muscle* behind the scrape/LLM blocks — reused, not rewritten (see §6). |
-| **2** | **Delivery (C)** — sink blocks (S3/DB/Sheet/email) + saga rollback | New block types on the Phase-1 framework; reuse `webhooks.py` + SSRF guard. |
-| **3** | **Monitors (B)** — durable loop + human approval; scheduled crawls come free | Needs A to exist first. |
+| **0** | Stand up the engine *alongside* the current stack | Infra + one "hello workflow" as a proving ground. ⚠️ Not the true start — ADR-009 §16e makes the pre-migration queue (**P6 → P8 → P7 + BUG-007**) the entry condition, and the worker port lands here too, not later. |
+| **1** | **Pipelines (A)** — block framework + core blocks (scrape, clean, LLM, validate) | The existing Go/Playwright/LLM workers become the *muscle* behind the scrape/LLM blocks — their **domain logic** is reused; their **transport** is rewritten in this same increment (see §6). |
+| **2** | **Delivery (C)** — sink blocks (S3/DB/Sheet/email) + saga rollback | New block types on the Phase-1 framework; reuse `webhooks.py` + SSRF guard. Unblocked once A ships, and may proceed in parallel with Phase 3. |
+| **3** | **Conditional execution** — branching inside a pipeline | Its own layer-A PRD (ADR-009 §14), still unnumbered. **Forced into this slot:** Monitors cannot ship without the change-detection cost gate, and the gate consumes this step's primitive. |
+| **4** | **Monitors (B)** — durable loop + human approval; scheduled crawls come free | Needs A, and needs Phase 3's primitive. |
 
-A sensible **MVP** is Phase 0 + a thin Phase 1: pipelines with 2–3 blocks (scrape → LLM →
-webhook) reusing existing workers — i.e. reproduce *today's* pipeline as a *workflow*, proving
-the model end-to-end before adding new blocks.
+A sensible **MVP** is Phase 0 + a thin Phase 1: pipelines with 2–3 blocks (scrape → LLM → webhook)
+— i.e. reproduce *today's* pipeline as a *workflow*, proving the model end-to-end before adding new
+blocks. That is now formalised as PRD-016's **R6 acceptance gate**, judged on structure and
+mechanics rather than byte-equality.
 
 ---
 
 ## 6. How it coexists with today's stack
 
-The engine **orchestrates**; it does not scrape. Our existing thin workers keep doing the
-actual work. Two integration options:
+The engine **orchestrates**; it does not scrape. Our existing workers keep doing the actual work.
+Two integration options were posed:
 
 - **(a) Activities call existing workers over NATS** — a workflow activity dispatches the
-  same fat NATS message we send today and awaits the result. **Workers are 100% unchanged.**
-  Minimal risk; honors "don't rip anything out."
-- **(b) Workers become engine activity workers directly** — cleaner long-term, but rewrites
-  the worker entry points and their NATS consumers.
+  same fat NATS message we send today and awaits the result. Workers 100% unchanged.
+- **(b) Workers become engine activity workers directly** — their entry points and NATS
+  consumers are rewritten; the scraping code is not.
 
-> 🔴 **SUPERSEDED — do not implement from the two options above.** ADR-009 §9 (2026-08-23)
-> **rejected option (a)** and found it **blocked** on a work-queue stream that refuses the second
-> consumer it needs. Option **(b)** is the decision, and it lands in the **first** increment, not
-> as an optional later step. The paragraph below is kept as the record of what was originally
-> recommended and why.
+**Decision: (b), in the first increment** (ADR-009 §9, 2026-08-23). Option (a) is **rejected, and
+was found blocked.** Both halves matter:
 
-**Recommendation: (a) for Phase 1.** It lets us prove the workflow layer with zero worker
-churn. Migrating to (b) — or migrating the crawl coordinator onto the engine — becomes an
-optional later decision, not a prerequisite.
+- **Rejected**, because its premises failed. Only ~10–22% of each worker file touches NATS, and
+  none of the expensive parts do — bot-wall detection, the Patchright stealth setup, the
+  formatters, robots handling, the MinIO clients are plain functions that a different caller
+  invokes unchanged. Roughly half of what (a) preserves is *compensation for NATS* (`ack_wait`, the
+  in-progress heartbeat, `max_deliver` caps, the nak ladder) and is deleted rather than ported.
+- **Blocked**, because the bridge needs a result path it cannot have. `SCRAPEFLOW` is
+  `--retention work`, and a work-queue stream refuses a second consumer whose filter overlaps an
+  existing one — `api-result-consumer` already claims `scrapeflow.jobs.result` in full. This is
+  not theoretical: the crawl coordinator attempts exactly that addition, and **that consumer has
+  never existed on the stream** (BUG-008). The pod reports itself healthy with half of it dead.
+
+*Record of what this doc originally recommended, and why it is worth keeping:* **"(a) for Phase 1 —
+prove the workflow layer with zero worker churn, treat (b) as an optional later decision."* The
+reasoning was sound in form — don't confound a new model with a simultaneous rewrite — and it
+failed on facts that were not known when it was written. It is kept because the *shape* of that
+argument recurs at every cutover, and because BUG-008 was found by testing it.
 
 **State ownership:** the engine owns *execution* state (history, timers, retries). We keep a
 **thin Postgres mirror** (`workflows` = user's saved definitions; `workflow_runs` = one row
@@ -277,22 +286,27 @@ k3s homelab, Python-heavy services + one Go worker, single-operator maintenance)
 | **Windmill** | Scripts/flows platform + UI | Medium | Python/TS/Go scripts | Partial — great built-in UI/flows; less a pure durable-exec model | Medium | Low | Product-y, less systems signal |
 | **Extend NATS+Postgres** (status quo) | Keep hand-rolling | **Zero new infra** | N/A | We'd rebuild each by hand (the very thing that caused Q8) | Zero infra / **high code** | N/A (we know it) | Low — "reinvented a workflow engine" |
 
-> **⚠️ The recommendation in the next two paragraphs is SUPERSEDED — see the status update at
-> the top.** The engine decision is **Temporal**, made outright; the DBOS-first prototype path
-> was not taken. The table above stands as the comparison that justifies the choice and is the
-> raw material for **ADR-009**.
+**Decision: Temporal, outright** — taken before ADR-009 was written, and recorded in its §1. The
+table above is the comparison that justifies it and the reason this section survives the redraw.
 
-**Recommendation:** if the goals include a strong **learning/portfolio outcome** *and* we
-accept the operational weight, **Temporal** — it's the name in the JD, has first-class Python
-**and** Go SDKs (fits both our service languages), and its durable-timer + signal + saga
-support is exactly what Monitors (B) needs. If we want the **lightest path to the same
-guarantees on this homelab**, **DBOS** is the pragmatic pick: it's a library on the Postgres
-we already run — near-zero new infra — and would still let us delete the Q8-class code.
+The case: first-class Python **and** Go SDKs, fitting both our service languages where every
+lighter option is Python-only or Python-first; durable timers + signals + saga, which is precisely
+what Monitors (B) needs and where Prefect and Windmill are only partial; and the strongest
+portfolio signal, which is an explicit goal of this project. The accepted cost is operational
+weight — it is the heaviest dependency this homelab runs, and ADR-009 §2 sizes it (**+1.5–2 CPU**,
+landing near 50% CPU requests, with **limit** overcommit rather than requests as the real
+constraint).
 
-A reasonable both-worlds plan: **prototype Phase 0/1 on DBOS** (cheap to stand up, proves the
-model), and treat a **Temporal migration** as a deliberate later step once the workflow layer
-earns its keep. Extending NATS+Postgres is explicitly **not** recommended — it means
-re-solving retries/timers/idempotency by hand, which is what produced the Q8 incident.
+*The road not taken, kept because the reasoning still holds on its own terms:* the original
+recommendation was **prototype Phase 0/1 on DBOS** — a library on the Postgres we already run, so
+near-zero new infra — and treat a Temporal migration as a deliberate later step once the workflow
+layer earned its keep. It was not taken because it optimises for the cost this project deliberately
+accepts and pays a real price against the goal it does not: a second migration, and the Go worker
+left out. **If operational weight ever becomes the binding constraint, this is the shape of the
+fallback**, and the table above is where to restart the argument.
+
+Extending NATS+Postgres remains explicitly **not** recommended — it means re-solving
+retries/timers/idempotency by hand, which is what produced the Q8 incident.
 
 ---
 
@@ -304,49 +318,67 @@ re-solving retries/timers/idempotency by hand, which is what produced the Q8 inc
 - **Determinism constraint / versioning.** Workflow code can't do I/O, call `datetime.now()`,
   or `random()` directly — those go in activities. Changing workflow code while runs are
   in-flight requires versioning discipline. Real learning curve, mostly one-time.
-- **Re-platforming risk — mitigated by design.** Because this is a **greenfield layer** that
-  leaves the existing NATS path intact, we are not re-opening the hard-won edge cases already
-  absorbed by `result_consumer.py`. We add; we don't rewrite.
+- **⚠️ Re-platforming risk — the mitigation this doc claimed no longer applies.** It read: *"a
+  greenfield layer that leaves the existing NATS path intact… we add; we don't rewrite."*
+  **Withdrawn.** Phase 4 is the full migration, so the hard-won edge cases inside
+  `result_consumer.py` and the workers *are* re-opened — deliberately, and ADR-009 §10's
+  do-not-delete list is the instrument: the LLM cold-start handling, the transient/terminal
+  classifier, bot-wall detection, the SSRF check, the heartbeat obligation and the webhook wire
+  contract are business logic that must be **ported into the activities**, not deleted with the
+  plumbing that houses them. What replaces the mitigation is sequencing: strangler-fig, one flow
+  at a time, with a drain gate at each cutover.
+- **The first increment has no fallback.** Every other lane can be routed back to v1 if it
+  misbehaves. Pipelines have no v1 implementation, so the rollback is switching the feature off —
+  which is exactly the lane the acceptance gate runs on.
 - **When NOT to bother:** if we only ever want today's fixed pipeline, an engine is overkill —
   the value appears specifically once we want user-defined steps, extra sinks, or long-lived
   human-in-the-loop monitors.
 
 ---
 
-## 9. Open questions for a follow-on PRD / ADR
+## 9. Open questions for a follow-on PRD / ADR — all six answered
 
-1. **Engine final pick** — Temporal (portfolio + power) vs DBOS (lightest on this homelab)?
-   Possibly DBOS-now / Temporal-later.
-2. **How are blocks defined and stored?** A fixed catalog of typed blocks vs a general DAG
-   schema; JSON in Postgres vs a small DSL.
-3. **Per-tenant isolation** — Temporal namespaces per user/tier, or one namespace keyed by
-   `user_id` in workflow IDs?
-4. **How does workflow state surface in the SPA?** Poll the Postgres mirror vs stream engine
-   events; reuse the existing `pg_notify` → WebSocket pattern?
-5. **Does the crawl coordinator eventually migrate onto the engine** (retiring `crawl_queue`
-   + `reenqueue_stalled`), or stay as-is? ADR-005 calls it "the template for future multi-step
-   coordination" — a natural second candidate, but not a Phase-1 dependency.
-6. **Reuse-vs-rewrite of workers** — stay on integration option (a) indefinitely, or plan a
-   move to (b)?
+This section did its job: every question it raised is now decided. Kept as the record of what the
+follow-on artifacts were commissioned to answer, with each answer's home.
+
+| # | The question | The answer | Where |
+|---|---|---|---|
+| 1 | **Engine final pick** — Temporal vs DBOS, possibly DBOS-now/Temporal-later | **Temporal, outright.** No prototype detour | ADR-009 §1 · §7 above |
+| 2 | **How are blocks defined and stored?** Typed catalog vs general DAG; JSON vs a DSL | **Fixed typed catalog, JSON in Postgres, explicit named wiring.** Layer A is a single chain in *data flow as well as execution order*; per-type config-schema versioning is the residual DSL cost | ADR-009 §4 |
+| 3 | **Per-tenant isolation** — namespaces per user/tier, or `user_id` in workflow IDs? | **Neither. One namespace, and the API's ownership check is the *only* boundary.** Identity in the workflow ID was proposed, then withdrawn — Temporal never parses the ID, so the property was never structural | ADR-009 §12 |
+| 4 | **How does workflow state surface in the SPA?** Poll the mirror vs stream engine events | **Mirror activity + `pg_notify`**, preserving today's contract. Pipelines get their **own JSON channel** — `job_status` is a positional three-field string that silently drops a fourth | ADR-009 §11 |
+| 5 | **Does the crawl coordinator migrate, retiring `crawl_queue` + `reenqueue_stalled`?** | **It migrates, last — but as a rewrite, and `crawl_queue` does *not* retire.** The question embedded an assumption that turned out false twice over: the frontier stays in Postgres (the history budget is ≈5 events per page at our 10,000-page ceiling), and most of `coordinator/` has never executed, so there is nothing to port | ADR-009 §13 |
+| 6 | **Reuse-vs-rewrite of workers** — stay on (a), or move to (b)? | **(b), in the first increment.** See §6 | ADR-009 §9 |
+
+⚠️ **Question 5 is the one worth re-reading.** It was framed as a scheduling question — *migrate
+now or later* — and the answer changed what "migrate" means. ADR-005 called the coordinator "the
+template for future multi-step coordination"; it is in fact the only lane with **no working
+reference implementation to migrate from**.
 
 ---
 
 ## 10. Recommendation & next step
 
-Build **ScrapeFlow Workflows** as one feature in the four nested layers, starting with a
-**Phase 0 + thin Phase 1 MVP**: stand up the engine alongside the current stack and reproduce
-*today's* scrape→LLM→webhook pipeline as a *workflow*, reusing the existing workers via
-integration option (a). That proves the model end-to-end with near-zero risk to what's
-shipped, and unlocks Delivery (C) and Monitors (B) as additive layers.
+**Approved, and built out as follows.** ScrapeFlow Workflows is one feature in the nested layers
+of §4, starting with a Phase 0 + thin Phase 1 MVP: stand up the engine alongside the current stack
+and reproduce *today's* scrape→LLM→webhook pipeline as a workflow, which is now PRD-016's **R6
+acceptance gate**. That unlocks Delivery (C) and Monitors (B) as additive layers.
 
-If this direction is approved, the house-style next artifacts are:
+⚠️ **One clause of the original recommendation did not survive:** *"reusing the existing workers via
+integration option (a)… with near-zero risk to what's shipped."* The workers are ported to Temporal
+activity workers in the **first** increment (§6), and the risk profile is not near-zero but
+*differently shaped* — the pipeline lane adds a lane rather than splitting one, so double-execution
+risk is ~none, and in exchange it is the one lane with no v1 fallback.
+
+The house-style next artifacts, both now done:
 
 1. ✅ **Done — [PRD-016](./phase4-prd/PRD-016-workflows-pipelines.md)** (2026-07-28), scoped to
    layer **A (Pipelines)** only so C and B don't move the target under the Architect.
-2. 📝 **Drafted (2026-08-04, pending review) — [ADR-009](../adr/ADR-009-workflow-engine-temporal.md)**,
-   recording the **engine decision** and the v1/v2 coexistence contract. It answers all **11** of
-   PRD-016's open questions (nine when this line was written; PM review added two). **Not accepted
-   yet — do not cite it as settled.** §1 of it is where this doc's §7 comparison table ends up.
+2. ✅ **Done — [ADR-009](../adr/ADR-009-workflow-engine-temporal.md)** (drafted 2026-08-04,
+   reviewed §1–§17 to 2026-09-05, **Accepted 2026-09-08**), recording the **engine decision** and the
+   v1/v2 coexistence contract. It answers all **11** of PRD-016's open questions (nine when this
+   line was written; PM review added two). §1 of it is where this doc's §7 comparison table ends
+   up.
 
 ---
 

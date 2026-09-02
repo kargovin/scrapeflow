@@ -31,8 +31,8 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
-| Feature scoping + engine comparison | `docs/project/workflows-scoping.md` |
-| Migration sequence (⚠️ awaiting redraw — do not implement from it) | `docs/project/temporal-full-migration.md` |
+| Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
+| Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
 | Multi-persona process starter prompts | `docs/process/` |
 | Anti-bot hardening record (ADR-008 companion) | `docs/guides/anti-bot-hardening.md` |
 | Phase 1–3 history (specs, backlogs, reviews, audits) | `docs/archive/` |
@@ -78,45 +78,39 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ---
 
-## Current state — as of 2026-09-07
+## Current state — as of 2026-09-08
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** No build work has started;
 the project is still in its design phase.
 
-**ADR-009's section-by-section review is COMPLETE** — §1–§17 and both closing blocks, reviewed
-2026-08-08 → 2026-09-05. ⚠️ **The document is still `Draft`. Do not implement against it and do
-not cite it as settled.** Its `## Review status` block (top of file) is authoritative for what is
-settled and what changed; its **Reversed or withdrawn** and **Amended as a knock-on** tables are
-the fastest way to catch a stale note.
+**ADR-009 is `Accepted` (2026-09-08).** Its section-by-section review completed 2026-09-05 — §1–§17
+and both closing blocks, reviewed from 2026-08-08 — and the owner took the promotion decision on
+2026-09-08. It is the decision of record: implement against it and cite it as settled. Its
+`## Review status` block (top of file) stays authoritative for what each section says and what
+changed; its **Reversed or withdrawn** and **Amended as a knock-on** tables are the fastest way to
+catch a stale note. ⚠️ **An accepted ADR is immutable** (`docs/adr/README.md`) — a change of
+decision from here is a new, superseding ADR, not an edit to this one.
 
 **What is blocking: nothing.**
 
 ### Outstanding, in rough order
 
-1. **🔷 Owner decision — promote ADR-009 to `Accepted`?** Nothing in the document blocks it. Until
-   it happens the Draft rule holds.
-2. **`temporal-full-migration.md` gets its one-pass redraw** — deferred until the review closed,
-   and the review has closed. It contradicts the ADR in five known places: the stale seven-step
-   numbering that 16a replaced, its step 3 worker port (now second and named), the line-314
-   diagram assuming the **rejected** NATS bridge, the 339–351 retry discussion describing a hazard
-   that mostly no longer exists, and a crawl step assuming `crawl_queue` retires. 🔴 markers are in
-   place so nobody implements from it meanwhile.
-3. **The conditional-execution PRD needs a number and a backlog row** (14d), and owes **four**
+1. **The conditional-execution PRD needs a number and a backlog row** (14d), and owes **four**
    things: the Validate-precedent brief and the replay constraint (14c), the halt-early block B
    cannot build for itself (§4), and run-level failure notification (15f). ⚠️ The number is an
    **owner decision, deliberately left open** — creation order gives PRD-019, which sorts *after*
    the PRD-018 it must precede.
-4. **PRD-016 owes four things for one PM pass**: §4's known exclusion; two more R6 divergences
+2. **PRD-016 owes four things for one PM pass**: §4's known exclusion; two more R6 divergences
    from §10; two passages still reasoning from §8's reversed storage rule (`PRD-016:697`, `:802`
    — both verified live 2026-09-06); and §14a's sequencing fact.
-5. **Four admin meters need lane scoping** — three webhook (15e) plus `active_recurring_jobs`
+3. **Four admin meters need lane scoping** — three webhook (15e) plus `active_recurring_jobs`
    (16c). Not bugs today; migration work, recorded so they are not discovered by a dashboard
    reporting a number that is well-formed and wrong.
-6. **Two open items in the ADR's own deferral table** (D5) — §7's scheduled-quota waiting room,
+4. **Two open items in the ADR's own deferral table** (D5) — §7's scheduled-quota waiting room,
    and 13d's sitemap origin-restriction question, the latter needed **before the crawl step is
    built**.
-7. **The pre-migration queue is the entry condition for any build work** (16e):
+5. **The pre-migration queue is the entry condition for any build work** (16e):
    **P6 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of truth.
 
 ### Git / deploy state
@@ -168,6 +162,7 @@ live in ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-08 | **🔷 Owner decision taken: ADR-009 promoted to `Accepted`**, and **`temporal-full-migration.md` redrawn** against it in one pass — the five 🔴 divergences resolved, plus three the redraw found (Web UI exposure, tenancy, the SPA contract). Draft caveat cleared from the ADR header and eight downstream documents. ADR-009's three pre-redraw notes then **corrected in place** (owner's call), which surfaced that `workflows-scoping.md` was owed the same redraw — **also done**: six 🔴 markers cleared, §9's six open questions turned into a table of answers | — |
 | 2026-09-07 | This handoff condensed 250,550 → ~15,000 chars (−94%); `phase4-backlog.md`'s header change log 9,882 → ~2,500. Corrected the `prephase4` hash back to `1965953` | `2404193` |
 | 2026-09-06 | `CLAUDE.md` cleanup — the duplicated ADR-009 summary stripped, 93,141 → 27,527 chars (−70%); backlog's ADR-009 row 16,500 → 914 | `530fca3`, `e201980` |
 | 2026-09-05 | Both closing blocks reviewed (14 corrections, no decision changed) — **the section review closes**; then ADR-009 condensed, review log 476 → 83 lines as `## Review status` | `3e7f32e`, `21fadd2`, `3b91bab` |

@@ -33,8 +33,8 @@ execution is not — and **OQ-4**'s PM constraint is narrowed. No OQ is fully cl
 
 > **Revision note — PM review round 3 (2026-08-08) — ✅ owner-confirmed 2026-08-08.** The round-3
 > decision below is ratified and carried into ADR-009 §3/§8. (Rounds 1 and 2 above are also
-> settled.) Note the ADR *as a whole* remains Draft — this decision is settled within it, and is
-> tracked for implementation as backlog **§1 P7**. ADR-009 §3 moves quota counting off
+> settled.) The ADR *as a whole* is now **Accepted** (2026-09-08); this decision is settled within it,
+> and is tracked for implementation as backlog **§1 P7**. ADR-009 §3 moves quota counting off
 > hardcoded table names and onto a **view** that is the single definition of *"a run this user
 > started."* That raises a product question the Architect cannot answer alone — **which lanes are
 > in the view** — and it is answered in place, in **OQ-4**:
