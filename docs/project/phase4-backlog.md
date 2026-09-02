@@ -19,7 +19,7 @@
 
 | Date | Change to this backlog |
 |---|---|
-| 2026-09-08 | **ADR-009 promoted to `Accepted`** (owner decision), and **`temporal-full-migration.md` redrawn** against it; ADR-009's pre-redraw notes corrected in place. No backlog items filed or moved; the artifact-chain line and the ADR-009 row restated. **`workflows-scoping.md` redrawn** the same day (six 🔴 markers cleared), closing ADR-009 §14's two-document disposition. **PRD-019 numbered** (owner's call) and given its §2 row with four obligations, closing 14d |
+| 2026-09-08 | **ADR-009 promoted to `Accepted`** (owner decision), and **`temporal-full-migration.md` redrawn** against it; ADR-009's pre-redraw notes corrected in place. No backlog items filed or moved; the artifact-chain line and the ADR-009 row restated. **`workflows-scoping.md` redrawn** the same day (six 🔴 markers cleared), closing ADR-009 §14's two-document disposition. **PRD-019 numbered** (owner's call) and given its §2 row with four obligations, closing 14d. **PRD-016's ADR-009 carry-back pass** — four owed items carried in, no decision changed. **Cutover gotchas expanded 3 → 5**: the four lane-blind admin meters (15e/16c) with their symptoms, the drain gate's two firing points, and gotcha 3 corrected — it still described the **rejected** NATS bridge |
 | 2026-09-07 | Header change log condensed — the ADR-009 review narratives removed (verified duplicates of ADR-009 `## Review status`; 46-token sweep, 0 misses) |
 | 2026-09-01 → 09-05 | ADR-009 §14–§17 + both closing blocks reviewed. **The section review is COMPLETE; the document is still `Draft`.** No backlog items filed or moved |
 | 2026-08-28 | **BUG-010 filed → §4** (mid-crawl URLs never SSRF-checked). **BUG-006 corrected: 3 of 7 manifests, not 3 of 6** — `mcp/` was missing from its own list |
@@ -135,10 +135,44 @@ PRD-017 (C) / PRD-018 (B). ⚠️ **Index order is not build order here.** ADR-0
 
 **Cutover gotchas to handle at migration time (not deferred):**
 1. A job must run on **exactly one lane** — never both (double-scrape / double-LLM-bill risk).
+   Enforced by ADR-009 §7's four mechanisms; the lane marker on `job_runs` is built **at the job
+   cutover**, not earlier, where it would be inert and untestable.
 2. Moving a recurring job to a Temporal Schedule requires **disabling it in v1**
-   (`schedule_status`) or it fires on both.
-3. Keep NATS workers alive (integration option **a**) until v1 is drained — worker cutover to
-   activities (option **b**) is what removes v1's executors.
+   (`schedule_status`) or it fires on both. ⚠️ That flag is **user-writable**: one
+   `PATCH /jobs/{id}` with `{"schedule_status": "active"}` re-arms both lanes. Gotcha 1 gets
+   structural treatment; this one rests on a switch the user owns.
+3. **Keep NATS workers alive until v1 is drained** — as a **second deployment of the same image**,
+   one bound to NATS and one to a Temporal task queue. *(Corrected 2026-09-08: this read "integration
+   option **a**… worker cutover to option **b** is what removes v1's executors." ADR-009 §9
+   **rejected option (a)**; there is no bridge. The workers port to Temporal in the **first**
+   increment, and removing v1's executors is deleting the NATS-bound deployment — after the flow
+   migration, not during it.)*
+4. **Run the drain gate at every flow cutover, not only at deletion.** Both firings read the same
+   three numbers: the flow is drained, and its NATS consumers report **zero unprocessed messages
+   and zero outstanding acks**. ⚠️ Verify with **`nats consumer info --json`** — the table output
+   omits `Max Deliver` when it is `-1`. An already-published, unacked message is still deliverable
+   to a v1 worker no matter what the routing switch says, and **none of gotcha 1's four mechanisms
+   reaches it** (the workers hold no DB access and cannot read a lane marker). ADR-009 16b.
+5. **Four admin meters read a table or flag one lane stops writing, and will report numbers that
+   are well-formed and wrong.** ⚠️ **The fix is naming, not features:** scope them to the job lane
+   in their own identifiers, or return them absent for the pipeline lane. Declining to build
+   pipeline delivery stats is a legitimate choice; leaving a meter that lies is not.
+
+   | meter | reads | breaks at | symptom |
+   |---|---|---|---|
+   | `webhook_deliveries_pending` | `webhook_deliveries`, no lane filter (`admin.py:517`) | pipeline lane ships | ⚠️ rendered on the Usage page (`UsageStats.tsx:66`) |
+   | `webhook_deliveries_exhausted` | same (`admin.py:518`) | pipeline lane ships | undercounts silently |
+   | `webhook_delivery_success_rate_7d` | same (`admin.py:675`) | pipeline lane ships | reports **100%** while every pipeline delivery fails |
+   | `active_recurring_jobs` | `schedule_status = 'active'` (`admin.py:519`) | schedule and webhook cutover | ⚠️ rendered (`UsageStats.tsx:67`); counts **down toward zero** as schedules move to Temporal and fire normally on v2 |
+
+   The first three are ADR-009 **15e**, the fourth **16c**. ⚠️ **A dormant meter is not a correct
+   one** — there are no scheduled jobs in production today, so `active_recurring_jobs` reads 0
+   before and after and the defect is invisible for the same reason 13d's was. Monitors (layer B)
+   is *entirely* about recurrence, so the population this breaks arrives with it.
+   ⚠️ **This is the project's recurring defect, for the fourth and fifth time**: a meter keyed on a
+   table a new lane does not write to — BUG-005 (batch invisible, `job_id` NULL), P7 (crawls
+   invisible, every meter reads `job_runs`), and it is why ADR-009 §3 moved run counting onto a
+   **view** instead of naming a table.
 
 ---
 
