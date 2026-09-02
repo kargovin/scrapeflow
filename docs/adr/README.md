@@ -32,6 +32,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-007](ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** | 2026-04-15 | — | — |
 | [ADR-008](ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** | 2026-07-03 | — | — |
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Accepted** | 2026-08-04 | — | — |
+| [ADR-010](ADR-010-crawl-admission-and-scheduled-quota.md) | Scheduled-run Quota Admission, and Sitemap Origin Scope | **Draft** | 2026-09-08 | — | — |
 
 **ADR-009 is Accepted as of 2026-09-08.** Its section-by-section review completed 2026-09-05 —
 **§1–§17 and both closing blocks**, several reversed in the process — and the owner took the

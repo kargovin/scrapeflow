@@ -19,7 +19,7 @@
 
 | Date | Change to this backlog |
 |---|---|
-| 2026-09-08 | **ADR-009 promoted to `Accepted`** (owner decision), and **`temporal-full-migration.md` redrawn** against it; ADR-009's pre-redraw notes corrected in place. No backlog items filed or moved; the artifact-chain line and the ADR-009 row restated. **`workflows-scoping.md` redrawn** the same day (six 🔴 markers cleared), closing ADR-009 §14's two-document disposition. **PRD-019 numbered** (owner's call) and given its §2 row with four obligations, closing 14d. **PRD-016's ADR-009 carry-back pass** — four owed items carried in, no decision changed. **Cutover gotchas expanded 3 → 5**: the four lane-blind admin meters (15e/16c) with their symptoms, the drain gate's two firing points, and gotcha 3 corrected — it still described the **rejected** NATS bridge |
+| 2026-09-08 | **ADR-009 promoted to `Accepted`** (owner decision), and **`temporal-full-migration.md` redrawn** against it; ADR-009's pre-redraw notes corrected in place. No backlog items filed or moved; the artifact-chain line and the ADR-009 row restated. **`workflows-scoping.md` redrawn** the same day (six 🔴 markers cleared), closing ADR-009 §14's two-document disposition. **PRD-019 numbered** (owner's call) and given its §2 row with four obligations, closing 14d. **PRD-016's ADR-009 carry-back pass** — four owed items carried in, no decision changed. **Cutover gotchas expanded 3 → 5**: the four lane-blind admin meters (15e/16c) with their symptoms, the drain gate's two firing points, and gotcha 3 corrected — it still described the **rejected** NATS bridge. **ADR-009's two D5 deferrals decided** (owner) and written up as **ADR-010** (Draft): per-meter quota parking, and sitemap entries scoped to the seed's registrable domain. ⚠️ ADR-010 opens a **new** pre-cutover item — the Schedule overlap policy |
 | 2026-09-07 | Header change log condensed — the ADR-009 review narratives removed (verified duplicates of ADR-009 `## Review status`; 46-token sweep, 0 misses) |
 | 2026-09-01 → 09-05 | ADR-009 §14–§17 + both closing blocks reviewed. **The section review is COMPLETE; the document is still `Draft`.** No backlog items filed or moved |
 | 2026-08-28 | **BUG-010 filed → §4** (mid-crawl URLs never SSRF-checked). **BUG-006 corrected: 3 of 7 manifests, not 3 of 6** — `mcp/` was missing from its own list |
@@ -173,6 +173,15 @@ PRD-017 (C) / PRD-018 (B). ⚠️ **Index order is not build order here.** ADR-0
    table a new lane does not write to — BUG-005 (batch invisible, `job_id` NULL), P7 (crawls
    invisible, every meter reads `job_runs`), and it is why ADR-009 §3 moved run counting onto a
    **view** instead of naming a table.
+6. **Choose the Temporal Schedule overlap policy before the first Schedule is created.**
+   ADR-010 §1 has a quota-blocked scheduled run **park on a durable timer**. A Schedule fires on
+   every cron tick regardless, and a parked workflow is still *running* — so without an overlap
+   policy a run parked for an hour under an hourly schedule accumulates **one parked workflow per
+   tick**, all released at once when the meter clears, each then consuming a monthly run. Today's
+   waiting room cannot stack (one `Job` row stays `due`); this is a behaviour the migration
+   introduces. **`BUFFER_ONE` is the recommendation** — at most one firing queued behind the parked
+   one. `SKIP` drops firings, which is the regression ADR-010 §1 rejected; `BUFFER_ALL` reproduces
+   the pile-up. ⚠️ **Not decided** — surfaced while writing ADR-010, after its decision was taken.
 
 ---
 
