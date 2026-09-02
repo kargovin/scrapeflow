@@ -82,8 +82,8 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 ## Current state — as of 2026-09-08
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
-progress, and Phase 4 *is* the Temporal durable-workflows migration.** No build work has started;
-the project is still in its design phase.
+progress, and Phase 4 *is* the Temporal durable-workflows migration.** No build work has started —
+but the design phase that was blocking it has now closed (below).
 
 **ADR-009 is `Accepted` (2026-09-08).** Its section-by-section review completed 2026-09-05 — §1–§17
 and both closing blocks, reviewed from 2026-08-08 — and the owner took the promotion decision on
@@ -92,6 +92,17 @@ and both closing blocks, reviewed from 2026-08-08 — and the owner took the pro
 changed; its **Reversed or withdrawn** and **Amended as a knock-on** tables are the fastest way to
 catch a stale note. ⚠️ **An accepted ADR is immutable** (`docs/adr/README.md`) — a change of
 decision from here is a new, superseding ADR, not an edit to this one.
+
+**ADR-010 is `Draft` (2026-09-08)** (`docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md`). It
+resolves the two items ADR-009 deferred by name — per-meter quota parking for scheduled runs, and
+sitemap entries scoped to the seed's registrable domain. **Both decisions are owner-taken and
+dated; the write-up is unreviewed.** Written as a separate ADR rather than an edit because ADR-009
+is Accepted and immutable.
+
+⚠️ **The design phase is effectively closed. Everything still open is code, plus one PRD.** Every
+documentation debt ADR-009's review created has been discharged: both stale companions redrawn,
+PRD-016's four carry-backs landed, the conditional PRD numbered, the lane-blind meters recorded,
+D5 closed. What is left is the pre-migration queue and PRD-019.
 
 **What is blocking: nothing.**
 
@@ -115,8 +126,10 @@ decision from here is a new, superseding ADR, not an edit to this one.
 - ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** —
   pushing it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up.
   Do not do it at session end; wait to be asked.
-- ⚠️ **Re-check ahead/behind against the remote before quoting numbers** — the last `git fetch`
-  was 2026-07-13, and two consecutive handoffs carried stale counts.
+- **As of 2026-09-08, freshly fetched:** `develop` is **20 ahead** of `origin/develop` and 0 behind;
+  `main` is **45 behind** `develop` and 0 ahead. Nothing pushed this session.
+- ⚠️ **Re-check ahead/behind against the remote before quoting numbers** — two consecutive handoffs
+  once carried counts stale by two months. Fetch first, quote second.
 - Untracked `tmp/architecture.md` predates all current work (May) and is deliberately left alone.
 
 **Tags** (annotated; the older `v1.0.0` / `v2.0.0` are lightweight):
@@ -145,6 +158,7 @@ somewhere else, and a second copy here is how they go stale:
 | Phase 4 scope, sequencing, what is do-not-fix | `phase4-backlog.md` (§1 queue · §2 migration · §3 **do NOT fix** · §4 survives) |
 | A bug's root cause and fix plan | `open-bugs.md` |
 | Why a production trap exists | `CLAUDE.md` → Key decisions (41 rows; the rationale column *is* the trap) |
+| The two deferrals ADR-009 named and did not answer | `ADR-010` (Draft) — and the Schedule overlap policy it opened, in `phase4-backlog.md` §2 gotcha 6 |
 | What shipped when | `git log` |
 
 ---
@@ -156,7 +170,7 @@ live in ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
-| 2026-09-08 | **🔷 Two owner decisions taken: ADR-009 promoted to `Accepted`, and the conditional-execution PRD numbered `PRD-019`** (sort-order cost accepted; index order is not build order). **Both stale companions redrawn** — `temporal-full-migration.md` (five 🔴 divergences resolved, plus three the redraw found: Web UI exposure, tenancy, the SPA contract) and `workflows-scoping.md` (six 🔴 cleared, §9's open questions turned into a table of answers). ADR-009's three pre-redraw notes **corrected in place**, which is what surfaced that the second document was owed a redraw at all. **PRD-016 carry-back pass** — four items ADR-009 owed it, no decision changed. Draft caveat cleared from the ADR header and eight downstream documents. **The four lane-blind admin meters recorded** as cutover gotchas — which also caught gotcha 3 still describing the rejected NATS bridge. **ADR-009's D5 closed**: both deferrals decided by the owner and written up as **ADR-010** (Draft), which opens one new item — a Schedule overlap policy | `1d94d5d`, `041921d`, `33d58f2`, `c76edf8` |
+| 2026-09-08 | **🔷 Two owner decisions taken: ADR-009 promoted to `Accepted`, and the conditional-execution PRD numbered `PRD-019`** (sort-order cost accepted; index order is not build order). **Both stale companions redrawn** — `temporal-full-migration.md` (five 🔴 divergences resolved, plus three the redraw found: Web UI exposure, tenancy, the SPA contract) and `workflows-scoping.md` (six 🔴 cleared, §9's open questions turned into a table of answers). ADR-009's three pre-redraw notes **corrected in place**, which is what surfaced that the second document was owed a redraw at all. **PRD-016 carry-back pass** — four items ADR-009 owed it, no decision changed. Draft caveat cleared from the ADR header and eight downstream documents. **The four lane-blind admin meters recorded** as cutover gotchas — which also caught gotcha 3 still describing the rejected NATS bridge. **ADR-009's D5 closed**: both deferrals decided by the owner and written up as **ADR-010** (Draft), which opens one new item — a Schedule overlap policy | `1d94d5d`, `041921d`, `33d58f2`, `c76edf8`, `c8f381f` |
 | 2026-09-07 | This handoff condensed 250,550 → ~15,000 chars (−94%); `phase4-backlog.md`'s header change log 9,882 → ~2,500. Corrected the `prephase4` hash back to `1965953` | `2404193` |
 | 2026-09-06 | `CLAUDE.md` cleanup — the duplicated ADR-009 summary stripped, 93,141 → 27,527 chars (−70%); backlog's ADR-009 row 16,500 → 914 | `530fca3`, `e201980` |
 | 2026-09-05 | Both closing blocks reviewed (14 corrections, no decision changed) — **the section review closes**; then ADR-009 condensed, review log 476 → 83 lines as `## Review status` | `3e7f32e`, `21fadd2`, `3b91bab` |
@@ -245,3 +259,26 @@ verification is the part worth trusting, not the reading.**
 **Done, in order:** ADR-009's review log (2026-09-05) → `CLAUDE.md` (09-06) → this handoff and
 `phase4-backlog.md`'s header change log (09-07). Nothing obvious is left; the remaining large
 documents are load-bearing content rather than duplicated summary.
+
+### The same discipline, applied to reconciling rather than trimming (2026-09-08)
+
+Redrawing two documents against the Accepted ADR turned up four things, **none of them by reading
+the passages that were marked**:
+
+- 🔴 **A 🔴 marker is not a fix, and it outlives the thing it was meant to prompt.** The rejected
+  NATS bridge survived in **five** places — `temporal-full-migration.md`, `workflows-scoping.md`
+  (twice), ADR-009's own §14 table, and `phase4-backlog.md`'s cutover gotcha 3. Some were marked;
+  the marked ones still read as live recommendations underneath the marker, and the gotcha was not
+  marked at all. **Search for the rejected thing by name, not for its markers.**
+- ⚠️ **One instruction covering two documents gets acted on for one.** §14's disposition said
+  *"🔴 markers now, one redraw after the review closes"* about `temporal-full-migration.md` **and**
+  `workflows-scoping.md`. Only the first was on any list. Nothing in either marker would ever have
+  surfaced the other.
+- ⚠️ **A reversed premise under an unchanged conclusion is invisible.** Two PRD-016 passages argued
+  from ADR-009 §8's *"only the final artifact is charged"* — reversed 2026-08-17 — and reached the
+  right answer anyway. They read as sound because they *are* sound; nothing flags them until
+  someone reuses the stale rule on a lane where it gives a different answer. **Grep for the
+  withdrawn wording, not for wrong conclusions.**
+- ⚠️ **Line pointers rotted again**, second confirmed instance: `routers/crawls.py:70` had drifted
+  to `:75`. Five of six spot-checked refs were exact, which is the trap — a mostly-accurate set
+  invites trusting the rest. Dropped the numbers, kept the fact, per the standing rule.
