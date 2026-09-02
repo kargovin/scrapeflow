@@ -416,8 +416,9 @@ Carry all of these into Phase 4.
 > **Reversed or withdrawn** and **Amended as a knock-on** tables are how you avoid designing
 > against a superseded one. **Your next artifact is the conditional-execution PRD** that ADR-009
 > §14 places before PRD-018 (Monitors) — layer A, additive to the block model, not absorbed into
-> B. ⚠️ It still has **no number**: an open owner decision, because creation order gives PRD-019,
-> which sorts *after* the PRD-018 it must precede.
+> B. **It is PRD-019** (owner's call, 2026-09-08), and its four obligations are on its
+> `phase4-backlog.md` §2 row. ⚠️ **It sorts last in every index and is required first** — read the
+> row, not the number.
 >
 > *Original addendum (2026-07-28), still the correct reading order for the inputs:*
 > 1. **`docs/project/phase4-backlog.md`** — single source of truth for Phase 4 scope. **Read §3

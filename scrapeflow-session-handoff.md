@@ -96,11 +96,13 @@ decision from here is a new, superseding ADR, not an edit to this one.
 
 ### Outstanding, in rough order
 
-1. **The conditional-execution PRD needs a number and a backlog row** (14d), and owes **four**
-   things: the Validate-precedent brief and the replay constraint (14c), the halt-early block B
-   cannot build for itself (§4), and run-level failure notification (15f). ⚠️ The number is an
-   **owner decision, deliberately left open** — creation order gives PRD-019, which sorts *after*
-   the PRD-018 it must precede.
+1. **Write PRD-019 — conditional execution (layer A).** ✅ Numbered 2026-09-08 (owner's call) and given
+   its `phase4-backlog.md` §2 row; **the document itself is unwritten.** It owes **four** things,
+   all on that row: the Validate-precedent brief and the replay constraint (14c), the halt-early
+   block B cannot build for itself (§4), and run-level failure notification (15f). ⚠️ **It sorts
+   last and is required first** — before PRD-018, which cannot ship without its primitive. The
+   sort-order cost was accepted rather than engineered around; index order is not build order in
+   this chain.
 2. **PRD-016 owes four things for one PM pass**: §4's known exclusion; two more R6 divergences
    from §10; two passages still reasoning from §8's reversed storage rule (`PRD-016:697`, `:802`
    — both verified live 2026-09-06); and §14a's sequencing fact.

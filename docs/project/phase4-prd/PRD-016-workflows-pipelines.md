@@ -753,8 +753,10 @@ call site sits inside `coordinator/`, which does not. After the migration, `Craw
 the rule unchanged.
 
 **No new PRD.** This is a metering-policy answer to OQ-4 on an existing shipped feature, with no new
-user-facing capability. It belongs in the document under review, not in a PRD-019 that would restate
-OQ-4 under a new number — duplicated tracking docs have already caused drift twice on this project.
+user-facing capability. It belongs in the document under review, not in a separate PRD that would
+restate OQ-4 under a new number — duplicated tracking docs have already caused drift twice on this
+project. *(This passage originally named "a PRD-019" as the hypothetical. **PRD-019 is now taken**:
+it is the conditional-execution PRD, owner's call 2026-09-08, and has nothing to do with OQ-4 metering.)*
 
 ---
 

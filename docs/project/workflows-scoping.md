@@ -224,7 +224,7 @@ framing *"nothing existing is removed"* is withdrawn — see §1.
 | **0** | Stand up the engine *alongside* the current stack | Infra + one "hello workflow" as a proving ground. ⚠️ Not the true start — ADR-009 §16e makes the pre-migration queue (**P6 → P8 → P7 + BUG-007**) the entry condition, and the worker port lands here too, not later. |
 | **1** | **Pipelines (A)** — block framework + core blocks (scrape, clean, LLM, validate) | The existing Go/Playwright/LLM workers become the *muscle* behind the scrape/LLM blocks — their **domain logic** is reused; their **transport** is rewritten in this same increment (see §6). |
 | **2** | **Delivery (C)** — sink blocks (S3/DB/Sheet/email) + saga rollback | New block types on the Phase-1 framework; reuse `webhooks.py` + SSRF guard. Unblocked once A ships, and may proceed in parallel with Phase 3. |
-| **3** | **Conditional execution** — branching inside a pipeline | Its own layer-A PRD (ADR-009 §14), still unnumbered. **Forced into this slot:** Monitors cannot ship without the change-detection cost gate, and the gate consumes this step's primitive. |
+| **3** | **Conditional execution** — branching inside a pipeline | **PRD-019** (ADR-009 §14), not yet written. **Forced into this slot:** Monitors cannot ship without the change-detection cost gate, and the gate consumes this step's primitive. ⚠️ It sorts *after* PRD-018 and is required *before* it. |
 | **4** | **Monitors (B)** — durable loop + human approval; scheduled crawls come free | Needs A, and needs Phase 3's primitive. |
 
 A sensible **MVP** is Phase 0 + a thin Phase 1: pipelines with 2–3 blocks (scrape → LLM → webhook)
