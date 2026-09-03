@@ -108,7 +108,8 @@ Read these in the order listed when picking up a new session.
 |------|-----|
 | `docs/adr/README.md` | ADR index — current status of every decision record, supersession relationships |
 | `docs/adr/ADR-001-worker-job-contract.md` | Phase 1 worker contract — §4, §5, §6, §7 still authoritative; §2, §3, §8 superseded by ADR-002 |
-| `docs/adr/ADR-002-phase2-worker-contract.md` | Current worker contract — subjects, message schemas, MinIO paths, pull consumer pattern |
+| `docs/adr/ADR-002-phase2-worker-contract.md` | Current worker contract — subjects, message schemas, pull consumer pattern. ⚠️ **§4 (MinIO paths) superseded by ADR-011** |
+| `docs/adr/ADR-011-artifact-identity-and-paths.md` | The live artifact-path convention — run-keyed paths, stage-named objects, no `latest/` |
 | `docs/phase2/phase2-engineering-spec-v3.md` | Full Phase 2 engineering spec — the implementation source of truth |
 | `docs/project/COMMANDS.md` | All runnable commands — Docker, tests, Alembic, NATS, Redis, API examples |
 

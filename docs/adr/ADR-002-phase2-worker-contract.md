@@ -1,9 +1,10 @@
 # ADR-002: Phase 2 Worker Contract
 
-**Status:** Accepted
+**Status:** **Partially Superseded** — §4 (the MinIO path convention) is superseded by [ADR-011](./ADR-011-artifact-identity-and-paths.md) as of 2026-09-03. **§1, §2, §3 and §5 remain authoritative** for the v1 lane: NATS subjects, message schemas, and the pull-consumer model. ⚠️ **§6 is authoritative as a decision but has drifted from live code** — its "no application-level retry loop in the worker" claim has been false on all three workers since Q5/UF-003; recorded as a known divergence in ADR-009 §17e, and ADRs are not edited to match drifted code.
 **Date:** 2026-04-02
 **Deciders:** @karthik
 **Supersedes:** ADR-001 (subjects and message schemas only — ack timing, retry policy, and cancellation principles are unchanged)
+**Superseded by:** [ADR-011](./ADR-011-artifact-identity-and-paths.md) — **§4 only**
 
 ---
 
@@ -140,6 +141,16 @@ NATS_JOBS_RESULT_SUBJECT         = "scrapeflow.jobs.result"   # unchanged
 ---
 
 ### 4. MinIO Path Convention
+
+> ⚠️ **Superseded by [ADR-011](./ADR-011-artifact-identity-and-paths.md) (Accepted 2026-09-03).**
+> Kept for historical context; it no longer describes the intended convention. ADR-011 keys
+> artifacts on **the row that produced them** — `job_runs.id` for the job and batch lanes,
+> `crawl_pages.id` for crawl — carried in one lane-neutral `artifact_id` field; names objects by
+> **producing stage** (`history/{artifact_id}/scrape.{fmt}`, `history/{artifact_id}/llm.json`); and
+> **removes `latest/` entirely**. The key could not stay `job_id` because two of the three lanes
+> have no honest value for it — see [BUG-005](../project/open-bugs.md#bug-005).
+> **`result_path` is unaffected**: it stores an opaque `history/` string, so existing objects keep
+> their old-format paths and no backfill is required.
 
 **Before (Phase 1):**
 ```

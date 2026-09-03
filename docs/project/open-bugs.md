@@ -282,7 +282,9 @@ product decision. The migration neither fixes nor worsens it.
 **Severity:** High (two paths hang forever with no error; the third silently returns the wrong
 content and breaks tenant isolation)
 **Discovered:** 2026-08-04, reviewing inputs for ADR-009
-**Status:** Open — **fix before the migration** (triage reasoning below)
+**Status:** Open — **fix before the migration** (triage reasoning below).
+**Design settled 2026-09-03**: [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md) is Accepted
+and answers fix part (2). **P6 has no remaining design dependency** and covers **all three lanes**.
 
 ### What happens
 
@@ -380,13 +382,26 @@ once. Without it, the same class of gap reopens the next time a message field ch
    missing id, because "quietly defaulted to empty string" is what converted Path A's loud failure
    into Path B's silent corruption. A missing identifier should fail loudly or be explicitly
    optional — never default.
-2. **Key the artifact path on something that always exists.** `run_id` is the natural candidate:
-   every run has one, it is unique, and it is already the handle the result consumer and result
-   endpoint work from. This changes the ADR-002 §4 path convention, so it belongs in an ADR
-   amendment rather than a quiet edit — and it needs a decision on what happens to `latest/`,
-   whose whole purpose ("the newest result for this thing") is job-shaped and has no meaning for a
-   one-shot batch item.
+2. **Key the artifact path on something that always exists.** ✅ **Decided — see
+   [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md), Accepted 2026-09-03.** Artifacts key on
+   **the row that produced them** (`job_runs.id` for job and batch, `crawl_pages.id` for crawl),
+   carried in a lane-neutral **`artifact_id`**; objects are named by **producing stage**
+   (`history/{artifact_id}/scrape.{fmt}`, `llm.json`); **`latest/` is removed**; and `job_id` leaves
+   the wire entirely.
+   ⚠️ **This paragraph previously proposed `run_id`, and ADR-011 §1 rejects it by name.** Every run
+   has one only if every lane has runs, and the crawl lane does not: `coordinator/dispatcher.py`
+   fabricates a `uuid4()` for a lane that creates no `job_runs` row, so keying on it would name
+   objects after a row that does not exist — untraceable, and unlinkable from P8's ledger. The same
+   `crawl_pages.id` is already in the message twice today, once honestly and once as `job_id`.
+   ⚠️ ADR-011 also rejects a **flat** `history/{artifact_id}.{ext}`: `llm-worker` hardcodes
+   `ext="json"`, so an `output_format=json` job's extraction would overwrite its own scraped page.
+   The stage segment is what prevents it; today only the timestamp does, and only because LLM calls
+   are slow.
 3. **Add the cross-service contract test**, and delete the assertion that currently pins the bug.
+   ⚠️ **This has a precondition ADR-011 §6 names**: there are **ten publish sites building raw
+   dicts and zero producer-side schemas**, so the API must get one typed message model *first* — a
+   contract test that hand-writes the payload is the same guess the worker fixtures already make,
+   one layer up.
 
 Note that fixing only (1) leaves Path B's collisions intact, and fixing only (2) leaves Paths A
 and C dropping messages. They ship together or not at all.
@@ -417,8 +432,14 @@ latent rather than realised.
   otherwise. Pipelines are the second, larger instance of the same shape: no `job_id`, multiple
   artifacts per run, a second consumer of the quota meters. This bug is what OQ-1 looks like when
   it is answered implicitly instead of decided.
-- **ADR-002 §4** — the MinIO path convention is the thing that has to change; do not let the fix
-  bypass the ADR.
+- **ADR-002 §4** — the MinIO path convention was the thing that had to change, and the fix did not
+  bypass the ADR: **ADR-011 supersedes it, Accepted 2026-09-03.** ADR-002 keeps its subjects and
+  message schemas; only §4 moved.
+- **[ADR-011](../adr/ADR-011-artifact-identity-and-paths.md)** — P6's design dependency, now
+  closed. It also settles two things that are not obviously part of this bug: `latest/` is deleted
+  (which removes BUG-007's fourth symptom by construction), and the crawl lane loses its fabricated
+  `run_id` — in scope by explicit confirmation at promotion, even though BUG-008 means nothing on
+  v1 reads a crawl result.
 - **ADR-006** — not wrong, but its "workers are unchanged" claim needs a footnote: routing was
   unchanged, identity was not.
 - **BUG-001** — its "harmless log noise" reading stands for the log spam itself, but the sentence
@@ -595,7 +616,10 @@ server, and the coverage work is bounded and self-contained whenever it is picke
 **Severity:** Medium (billing accuracy + unbounded storage leak; no data corruption, no cross-tenant exposure)
 **Discovered:** 2026-08-17 (tracing ADR-009 §8's metering-parity claim against live code)
 **Status:** Open — **unblocked 2026-08-25** (the `latest/` decision landed), now **sequenced behind
-P8**, the shared per-object storage ledger that is the actual fix vehicle
+P8**, the shared per-object storage ledger that is the actual fix vehicle.
+⚠️ **Its fourth symptom is deleted upstream:** ADR-011 removes `latest/` in **P6**, so the two
+orphaned `latest/` keys stop existing before this bug is reached. What remains for P8 is the
+`history/` half — the wrong object charged, and the scraped page never deleted.
 
 ### What happens
 
@@ -648,8 +672,14 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
   trace; this bug is the tracker entry it points at.
 - **✅ Unblocked 2026-08-25 — the dual-write question is decided: charge one copy.** Every
   `history/` object is charged, once; **`latest/` is never charged**, and is deleted with the
-  artifact it mirrors. `latest/` is kept as-is (v2 drops it anyway, so the 2× discrepancy is v1-only
-  with a known end date). ADR-009 §8a carries the call.
+  artifact it mirrors. ADR-009 §8a carries the call, and **the charging rule stands unchanged.**
+  ⚠️ **Corrected 2026-09-03 — the second half of that call is reversed.** This bullet used to add
+  *"`latest/` is kept as-is (v2 drops it anyway, so the 2× discrepancy is v1-only with a known end
+  date)."* [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md) §4 (Accepted 2026-09-03)
+  **removes `latest/` on v1**, inside **P6** — because P6 rewrites the path convention anyway, so
+  keeping it would mean carrying a dead concept into a brand-new convention and through P8's ledger
+  as an *uncharged mirror* class, then deleting it. **The 2× discrepancy therefore ends at P6, not
+  at the v2 cutover.**
 - **The same pass found a fourth symptom, in the deletion path.** An LLM job leaves **four**
   objects, not two: the scrape writes the job's own format and the LLM always writes `.json`, so
   `latest/{job}.{fmt}` and `latest/{job}.json` are **different keys** and neither overwrites the

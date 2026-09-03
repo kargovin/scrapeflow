@@ -11,7 +11,7 @@ ADRs are the primary record of *why* the system is built the way it is. They are
 | ADR | Title | Status |
 |-----|-------|--------|
 | [`adr/ADR-001`](adr/ADR-001-worker-job-contract.md) | Worker Job Contract | Partially Superseded by ADR-002 |
-| [`adr/ADR-002`](adr/ADR-002-phase2-worker-contract.md) | Phase 2 Worker Contract | **Accepted** — authoritative NATS subjects, schemas, MinIO paths |
+| [`adr/ADR-002`](adr/ADR-002-phase2-worker-contract.md) | Phase 2 Worker Contract | **Partially Superseded** — still authoritative for NATS subjects and message schemas; **§4 (MinIO paths) superseded by ADR-011** |
 | [`adr/ADR-003`](adr/ADR-003-job-run-split.md) | Job/Run Data Model Split | **Accepted** |
 | [`adr/ADR-004`](adr/ADR-004-phase3-fat-message-schema.md) | Phase 3 Fat Message Schema v2 | **Accepted** |
 | [`adr/ADR-005`](adr/ADR-005-site-crawl-bfs-coordinator.md) | Site Crawl BFS Coordinator | **Accepted** |
@@ -20,6 +20,7 @@ ADRs are the primary record of *why* the system is built the way it is. They are
 | [`adr/ADR-008`](adr/ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** — Patchright + headed Chrome under Xvfb |
 | [`adr/ADR-010`](adr/ADR-010-crawl-admission-and-scheduled-quota.md) | Scheduled-run Quota Admission, and Sitemap Origin Scope | 📝 **Draft (2026-09-08)** — resolves ADR-009's two open deferrals; both decisions owner-taken, the write-up is unreviewed |
 | [`adr/ADR-009`](adr/ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Accepted** — drafted 2026-08-04, reviewed §1–§17 to 2026-09-05, accepted 2026-09-08. Engine decision + answers to all 11 of PRD-016's open questions. ⚠️ Its `## Review status` block is authoritative per section |
+| [`adr/ADR-011`](adr/ADR-011-artifact-identity-and-paths.md) | Artifact Identity — Run-keyed Paths, Stage-named Objects, and the Removal of `latest/` | **Accepted (2026-09-03)** — supersedes **ADR-002 §4**. Artifacts key on the producing row via `artifact_id`; `job_id` leaves the wire; objects named by stage; `latest/` removed. P6/BUG-005's design dependency |
 
 See [`adr/README.md`](adr/README.md) for full ADR index, status definitions, and how to write a new ADR.
 

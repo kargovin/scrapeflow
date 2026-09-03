@@ -1,11 +1,16 @@
 # ADR-011: Artifact Identity — Run-keyed Paths, Stage-named Objects, and the Removal of `latest/`
 
-**Status:** **Draft.** The decisions below were taken by the owner on 2026-09-03; this document is
-my write-up of them and has not been reviewed. Promoting it to Accepted is a separate step.
-**Date:** 2026-09-03
+**Status:** **Accepted** — reviewed and promoted by the owner on 2026-09-03. It is the decision of
+record for artifact identity: implement against it and cite it as settled.
+⚠️ **An accepted ADR is immutable** — a change of decision from here is a new, superseding ADR, not
+an edit to this one.
+**Date:** 2026-09-03 (drafted and accepted the same day)
 **Deciders:** @karthik
 **Supersedes:** [ADR-002](./ADR-002-phase2-worker-contract.md) **§4** (the MinIO path convention)
-only. ADR-002 remains authoritative for NATS subjects and message schemas.
+— in force from acceptance, 2026-09-03. ADR-002 remains authoritative for NATS subjects and
+message schemas. Also displaces **one clause** of [ADR-009](./ADR-009-workflow-engine-temporal.md)
+**§8d**: its *"`latest/` is kept as-is"* sequencing call (2026-08-25). ⚠️ **§8d's charging rule is
+NOT reversed and still stands** — see §4 below for exactly what moved.
 **Resolves:** [BUG-005](../project/open-bugs.md#bug-005) fix part (2) — *"key the artifact path on
 something that always exists"* — and with it the entry condition for **P6**. Also answers
 **PRD-016 OQ-1** (*what a run that is not a job is keyed on*), which pipelines ask next.
@@ -186,6 +191,25 @@ counter is incremented from the `history/` object, and `routers/jobs.py` removes
 without decrementing. Volume is bounded: the bucket was emptied at the Clerk production cutover
 (2026-07-03), so only objects written since then exist.
 
+⚠️ **This reverses one clause of ADR-009 §8d, and only one.** That section's owner call of
+2026-08-25 settled two separate things, and they are easy to conflate:
+
+| §8d said | status |
+|---|---|
+| **Charge one copy** — every `history/` object is charged once; `latest/` is **never** charged, and is deleted with the artifact it mirrors | ✅ **Upheld.** Nothing here changes it, and the sweep is consistent with it precisely *because* `latest/` was never counted |
+| **`latest/` is kept as-is** — "the v2 artifact path already drops it, so the discrepancy is v1-only with a known end date, and removing it early costs work for a convenience that expires on its own" | ❌ **Reversed.** It is removed now, on v1, as part of P6 |
+
+The reasoning that reversed it is not new information about `latest/` — it is that **P6 rewrites the
+path convention anyway.** §8d weighed removal as standalone work against an expiry date; inside a
+change that already touches all three workers' storage code, the comparison is different. Keeping it
+would mean porting a concept agreed to be dead into a brand-new convention, carrying it through P8's
+ledger as an **uncharged mirror** class — rows that exist so delete can find them but that the meter
+must skip — and then deleting it anyway. That mirror class is the "the meter must know about
+categories" property per-lane tables were rejected for in §8d itself.
+
+⚠️ **The 2× discrepancy §8d accepted as v1-only therefore ends at P6, not at the v2 cutover.**
+Anything reading that clause for a date is now wrong by several months.
+
 ---
 
 ## 5. A missing identifier is an error on every worker
@@ -316,13 +340,20 @@ activity inputs, and PRD-016's pipeline blocks are the next producer/consumer pa
 
 ---
 
-## Open for review
+## Settled in review
 
-1. **The crawl lane gains correctness it cannot yet exercise.** This ADR gives crawls an honest
-   artifact key and removes their fabricated `run_id`, but crawl results are still acked and
-   dropped by the API consumer (BUG-008, will-not-fix on v1). The work is deliberate — the
-   alternative is leaving the lie in place for a lane the `CrawlWorkflow` port will read as
-   precedent — but it is worth confirming that spending the change on a dead v1 path is intended.
+Reviewed and accepted by the owner on 2026-09-03. Three things were confirmed by name:
 
-**Settled 2026-09-03 in review:** the field name `artifact_id`, and the removal of the crawl
-lane's fabricated `run_id` (§2).
+1. **The field name `artifact_id`** (§2).
+2. **The removal of the crawl lane's fabricated `run_id`** (§2).
+3. **The crawl lane is in scope, despite gaining correctness it cannot yet exercise.** This ADR
+   gives crawls an honest artifact key and removes their fabricated `run_id`, while crawl results
+   are still acked and dropped by the API consumer (BUG-008, will-not-fix on v1) — so the change
+   lands on a path nothing currently reads. **Confirmed intended.** The alternative leaves
+   `str(page.id)` sitting in a field named `job_id` on the lane the `CrawlWorkflow` port will read
+   as precedent, which means either porting the lie into Temporal or rediscovering it during the
+   rewrite. The cost is one dispatcher plus the result-consumer parse-order change §2 already
+   requires — and that parse-order change has to happen at the same point regardless.
+
+**Consequence for P6: the fix covers all three lanes.** Scoping it to job + batch is not an option
+this ADR leaves open.

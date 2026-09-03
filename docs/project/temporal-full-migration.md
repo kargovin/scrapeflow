@@ -551,8 +551,15 @@ here"** table is the complete list; each item below is dated to a step rather th
 
 - The **scraping muscle** — Patchright/headed-Chrome stealth (ADR-008), the Go fetcher, the LLM
   call logic, formatters, robots handling. Only the transport wrapper changes.
-- **MinIO** result storage, and its `latest/` + `history/` convention **for the v1 lane**. The v2
-  lane keys artifacts on run and block instead — the one live exception to ADR-002 §4.
+- **MinIO** result storage itself — the bucket, the `history/` prefix, and `result_path` staying an
+  opaque string neither lane parses.
+  ⚠️ **Corrected 2026-09-03.** This entry used to read *"its `latest/` + `history/` convention for
+  the v1 lane. The v2 lane keys artifacts on run and block instead — the one live exception to
+  ADR-002 §4."* Both halves are now wrong. **ADR-011** (Accepted 2026-09-03) supersedes ADR-002 §4
+  and re-keys **v1** on the producing row with stage-named objects, and **deletes `latest/`
+  outright** — so the path convention *does* change, on the v1 lane, before the migration, as part
+  of **P6**. And ADR-009 §5's v2 shape (keyed on run + block) is no longer an exception to the live
+  convention: it is the same convention one lane ahead, with "block" where v1 says "stage".
 - **The light-worker rule** — scraper workers reach NATS/Temporal and MinIO, never a database.
   This survives the whole migration and is what makes several other decisions work.
 - **Auth** (Clerk JWT), **Redis** rate limiting, **secrets** encryption (Fernet), and the bulk of
