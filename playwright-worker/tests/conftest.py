@@ -30,8 +30,9 @@ def mock_minio():
 
 
 def make_nats_msg(
-    job_id: str = "job-aaa",
-    run_id: str = "run-bbb",
+    artifact_id: str = "artifact-aaa",
+    run_id: str | None = "run-bbb",
+    schema_version: int = 3,
     url: str = "https://example.com",
     output_format: str = "html",
     playwright_options: dict | None = None,
@@ -48,11 +49,14 @@ def make_nats_msg(
     num_delivered drives the transient-retry attempt cap (UF-003 3a).
     """
     payload: dict = {
-        "job_id": job_id,
-        "run_id": run_id,
+        "schema_version": schema_version,
+        "artifact_id": artifact_id,
         "url": url,
         "output_format": output_format,
     }
+    # Omitted rather than nulled when absent — that is how the crawl lane sends it.
+    if run_id is not None:
+        payload["run_id"] = run_id
     if playwright_options is not None:
         payload["playwright_options"] = playwright_options
     if credentials is not None:

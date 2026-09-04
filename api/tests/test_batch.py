@@ -54,9 +54,12 @@ async def test_create_batch_dispatches_per_url(client, auth_headers, mock_jetstr
     for call in mock_jetstream.publish.call_args_list:
         subject, payload_bytes = call.args
         payload = json.loads(payload_bytes.decode())
-        assert payload["schema_version"] == 2
-        assert "run_id" in payload
-        assert payload["job_id"] is None  # batch runs never carry job_id in message
+        assert payload["schema_version"] == 3
+        # A batch item is not a job (ADR-006), and the message no longer has a field
+        # that wants one. Artifacts key on the item's own run — a row that exists —
+        # rather than on the null that broke all three execution paths (BUG-005).
+        assert "job_id" not in payload
+        assert payload["artifact_id"] == payload["run_id"]
 
     # Verify batch_items exist in DB.
     batch_id = uuid.UUID(data["id"])
@@ -448,7 +451,8 @@ async def test_result_consumer_batch_scrape_complete_dispatches_to_llm():
     assert subject == NATS_JOBS_LLM_SUBJECT
     payload = json.loads(payload_bytes.decode())
     assert payload["run_id"] == str(run_id)
-    assert payload["job_id"] is None
+    assert payload["artifact_id"] == str(run_id)
+    assert "job_id" not in payload
     assert payload["raw_minio_path"] == "scrapeflow-results/history/x.html"
 
     async with AsyncSessionLocal() as db:

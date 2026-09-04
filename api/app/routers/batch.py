@@ -1,9 +1,7 @@
 import asyncio
-import json
 import secrets
 import uuid
 from asyncio import get_running_loop
-from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
@@ -23,6 +21,7 @@ from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit_n
 from app.core.redis import get_redis
 from app.core.security import validate_no_ssrf
+from app.messages import MessageOptions, ScrapeMessage
 from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
@@ -119,18 +118,18 @@ async def create_batch(
         else NATS_JOBS_RUN_HTTP_SUBJECT
     )
     for item, run in zip(items, runs, strict=True):
-        payload: dict[str, Any] = {
-            "schema_version": 2,
-            "job_id": None,
-            "run_id": str(run.id),
-            "url": item.url,
-            "output_format": body.output_format.value,
-            "engine": body.engine.value,
-            "credentials": None,
-            "options": {"respect_robots": body.respect_robots, "actions": None},
-            "crawl_context": None,
-        }
-        await js.publish(subject, json.dumps(payload).encode())
+        # A batch item is not a job (ADR-006), so there is no job id to send and the
+        # message no longer has a field that wants one. Artifacts key on the item's
+        # own run — the row that exists — rather than on a null (ADR-011 §1).
+        message = ScrapeMessage(
+            artifact_id=str(run.id),
+            run_id=str(run.id),
+            url=item.url,
+            output_format=body.output_format.value,
+            engine=body.engine.value,
+            options=MessageOptions(respect_robots=body.respect_robots),
+        )
+        await js.publish(subject, message.to_nats_bytes())
 
     # Transition batch to "running" after first dispatch.
     await db.execute(update(Batch).where(Batch.id == batch.id).values(status="running"))

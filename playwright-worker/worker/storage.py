@@ -1,12 +1,23 @@
 """
-MinIO dual-write — mirrors the Go worker's storage.Upload().
-Writes latest/{job_id}.{ext} (overwritten each run) and
-history/{job_id}/{unix_ts}.{ext} (immutable per-run record).
-Returns the history path as the canonical minio_path stored on job_runs.
+MinIO upload — mirrors the Go worker's storage.Upload() and the LLM worker's.
+
+Objects are keyed on the row that produced the execution and named by the producing
+stage (ADR-011 §1, §3):
+
+    history/{artifact_id}/scrape.{ext}      the scraped page, in the job's format
+    screenshots/{artifact_id}/{index}.png   one per action-driven screenshot
+
+The stage segment is load-bearing, not decoration. A flat history/{artifact_id}.{ext}
+would silently reintroduce the collision this convention exists to remove: the LLM
+worker hardcodes ext="json", so an output_format=json job's extraction would resolve
+to the same key as its own scraped page and overwrite it.
+
+`latest/` is gone (ADR-011 §4). It was write-only in the entire codebase — three
+workers wrote it, one route deleted it, and nothing ever read it. Results are served
+from job_runs.result_path, which holds the history/ path.
 """
 
 import io
-import time
 
 from miniopy_async import Minio
 
@@ -20,39 +31,37 @@ _CONTENT_TYPES: dict[str, str] = {
 }
 
 
-async def upload(minio: Minio, job_id: str, ext: str, data: bytes) -> str:
-    """Upload data to MinIO; return the fully-qualified history path."""
+async def upload(minio: Minio, artifact_id: str, ext: str, data: bytes) -> str:
+    """Upload the scraped page; return the fully-qualified object path."""
     bucket = settings.minio_bucket
     content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
 
-    latest_key = f"latest/{job_id}.{ext}"
-    history_key = f"history/{job_id}/{int(time.time())}.{ext}"
+    key = f"history/{artifact_id}/scrape.{ext}"
 
-    # Write both paths independently (no copy API call needed — data is already in memory)
-    for key in (latest_key, history_key):
-        await minio.put_object(
-            bucket,
-            key,
-            io.BytesIO(data),
-            len(data),
-            content_type=content_type,
-        )
+    await minio.put_object(
+        bucket,
+        key,
+        io.BytesIO(data),
+        len(data),
+        content_type=content_type,
+    )
 
-    # Return bucket-qualified path matching the Go worker's convention:
-    # "{bucket}/history/{job_id}/{ts}.{ext}"
-    return f"{bucket}/{history_key}"
+    # Bucket-qualified, matching the Go worker: "{bucket}/history/{artifact_id}/scrape.{ext}"
+    return f"{bucket}/{key}"
 
 
-async def upload_screenshot(minio: Minio, job_id: str, index: int, data: bytes) -> str:
+async def upload_screenshot(
+    minio: Minio, artifact_id: str, index: int, data: bytes
+) -> str:
     """
-    Upload a screenshot PNG to MinIO; return the bucket-qualified path.
+    Upload a screenshot PNG; return the bucket-qualified path.
 
-    Screenshots are not overwritten on re-runs (no latest/ write) — each
-    screenshot is immutable at its timestamped path.
+    The key carries no timestamp: artifact_id is unique per execution, so a NATS
+    redelivery overwrites the previous attempt's screenshots in place instead of
+    leaving a fresh orphaned set behind on every retry.
     """
     bucket = settings.minio_bucket
-    ts = int(time.time())
-    key = f"screenshots/{job_id}/{ts}_{index}.png"
+    key = f"screenshots/{artifact_id}/{index}.png"
 
     await minio.put_object(
         bucket,

@@ -144,13 +144,13 @@ def make_result_data(
     crawl_page_id: str,
     depth: int = 0,
     status: str = "completed",
-    minio_path: str = "scrapeflow-results/history/abc/123.html",
+    minio_path: str = "scrapeflow-results/history/abc/scrape.html",
     error: str | None = None,
 ) -> dict:
     """Build a worker result message dict with crawl_context present."""
+    # No job_id, and no run_id: a crawl page has no job_runs row, so the worker has
+    # none to echo back (ADR-011 §2). The crawl_context is what routes this message.
     data: dict = {
-        "job_id": crawl_page_id,
-        "run_id": str(uuid.uuid4()),
         "status": status,
         "crawl_context": {
             "crawl_id": crawl_id,

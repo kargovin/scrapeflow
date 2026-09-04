@@ -1,0 +1,14 @@
+{
+  "artifact_id": "3f8b7a12-0c44-4e7a-9a1e-1b2c3d4e5f60",
+  "credentials": {
+    "encrypted_proxy_url": "gAAAAAB_proxy"
+  },
+  "engine": "http",
+  "options": {
+    "respect_robots": true
+  },
+  "output_format": "json",
+  "run_id": "3f8b7a12-0c44-4e7a-9a1e-1b2c3d4e5f60",
+  "schema_version": 3,
+  "url": "https://example.com/"
+}

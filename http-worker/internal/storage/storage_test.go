@@ -32,8 +32,8 @@ func newTestClient(t *testing.T, bucket string) *Client {
 	return c
 }
 
-func uniqueJobID() string {
-	return fmt.Sprintf("test-job-%d", time.Now().UnixNano())
+func uniqueArtifactID() string {
+	return fmt.Sprintf("test-artifact-%d", time.Now().UnixNano())
 }
 
 func TestNew(t *testing.T) {
@@ -68,15 +68,16 @@ func TestUpload(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			jobID := uniqueJobID()
+			artifactID := uniqueArtifactID()
 
-			path, err := c.Upload(context.Background(), jobID, tc.ext, []byte(tc.content))
+			path, err := c.Upload(context.Background(), artifactID, tc.ext, []byte(tc.content))
 			if err != nil {
 				t.Fatalf("Upload: %v", err)
 			}
 
-			// Path must follow the ADR-001 convention: {bucket}/{jobID}.{ext}
-			expectedPath := fmt.Sprintf("%s/%s.%s", bucket, jobID, tc.ext)
+			// Path must follow the ADR-011 convention:
+			// {bucket}/history/{artifactID}/scrape.{ext}
+			expectedPath := fmt.Sprintf("%s/history/%s/scrape.%s", bucket, artifactID, tc.ext)
 			if path != expectedPath {
 				t.Errorf("path: got %q, want %q", path, expectedPath)
 			}
@@ -84,7 +85,7 @@ func TestUpload(t *testing.T) {
 			// Verify the object is retrievable using the underlying mc client.
 			// Since the test is in the same package (package storage), we can
 			// access the unexported mc field directly.
-			objectName := fmt.Sprintf("%s.%s", jobID, tc.ext)
+			objectName := fmt.Sprintf("history/%s/scrape.%s", artifactID, tc.ext)
 			obj, err := c.mc.GetObject(context.Background(), bucket, objectName, minio.GetObjectOptions{})
 			if err != nil {
 				t.Fatalf("GetObject: %v", err)

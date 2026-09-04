@@ -27,9 +27,10 @@ def mock_minio():
 
 
 def make_nats_msg(
-    job_id: str = "job-aaa",
+    artifact_id: str = "artifact-aaa",
     run_id: str = "run-bbb",
-    raw_minio_path: str = "scrapeflow-results/history/job-aaa/1234567890.html",
+    schema_version: int = 3,
+    raw_minio_path: str = "scrapeflow-results/history/artifact-aaa/scrape.html",
     provider: str = "anthropic",
     encrypted_api_key: str = "gAAAAAB_placeholder_encrypted_key",
     base_url: str | None = None,
@@ -52,7 +53,8 @@ def make_nats_msg(
         output_schema = {"type": "object", "properties": {"name": {"type": "string"}}}
 
     payload: dict = {
-        "job_id": job_id,
+        "schema_version": schema_version,
+        "artifact_id": artifact_id,
         "run_id": run_id,
         "raw_minio_path": raw_minio_path,
         "provider": provider,

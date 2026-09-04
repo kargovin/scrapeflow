@@ -190,7 +190,7 @@ async def test_multiple_screenshots_indexed():
     with patch(
         "worker.actions.upload_screenshot", new_callable=AsyncMock
     ) as mock_upload:
-        mock_upload.side_effect = lambda m, job_id, idx, data: f"path/{idx}.png"
+        mock_upload.side_effect = lambda m, artifact_id, idx, data: f"path/{idx}.png"
         _, screenshot_paths = await execute_actions(
             page,
             AsyncMock(),

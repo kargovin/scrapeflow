@@ -69,9 +69,9 @@ func TestHandleMessage_RobotsDisallowed(t *testing.T) {
 	w := &Worker{js: js, fetcher: fetcher.New(5), storage: &mockStorage{}}
 
 	msg := makeMsg(t, ScrapeMessage{
-		SchemaVersion: 2,
-		JobID:         "job-robots-1",
-		RunID:         "run-robots-1",
+		SchemaVersion: 3,
+		ArtifactID:    "artifact-robots-1",
+		RunID:         strPtr("run-robots-1"),
 		URL:           srv.URL + "/secret/data",
 		OutputFormat:  "html",
 		Options:       &Options{RespectRobots: true},
@@ -91,8 +91,8 @@ func TestHandleMessage_RobotsDisallowed(t *testing.T) {
 	if result.Error != "robots_txt_disallowed" {
 		t.Errorf("error: got %q, want %q", result.Error, "robots_txt_disallowed")
 	}
-	if result.JobID != "job-robots-1" {
-		t.Errorf("job_id: got %q, want %q", result.JobID, "job-robots-1")
+	if result.RunID == nil || *result.RunID != "run-robots-1" {
+		t.Errorf("run_id: got %v, want %q", result.RunID, "run-robots-1")
 	}
 }
 
@@ -107,9 +107,9 @@ func TestHandleMessage_RobotsAllowed_Proceeds(t *testing.T) {
 	w := &Worker{js: js, fetcher: fetcher.New(5), storage: &mockStorage{}}
 
 	msg := makeMsg(t, ScrapeMessage{
-		SchemaVersion: 2,
-		JobID:         "job-robots-2",
-		RunID:         "run-robots-2",
+		SchemaVersion: 3,
+		ArtifactID:    "artifact-robots-2",
+		RunID:         strPtr("run-robots-2"),
 		URL:           srv.URL + "/public/page",
 		OutputFormat:  "html",
 		Options:       &Options{RespectRobots: true},
@@ -140,9 +140,9 @@ func TestHandleMessage_RespectRobotsFalse_SkipsCheck(t *testing.T) {
 	w := &Worker{js: js, fetcher: fetcher.New(5), storage: &mockStorage{}}
 
 	msg := makeMsg(t, ScrapeMessage{
-		SchemaVersion: 2,
-		JobID:         "job-robots-3",
-		RunID:         "run-robots-3",
+		SchemaVersion: 3,
+		ArtifactID:    "artifact-robots-3",
+		RunID:         strPtr("run-robots-3"),
 		URL:           srv.URL + "/any/path",
 		OutputFormat:  "html",
 		// Options nil (respect_robots defaults to false)
@@ -183,9 +183,9 @@ func TestHandleMessage_MalformedProxyURL_FailsWithoutRetry(t *testing.T) {
 	w := &Worker{js: js, fetcher: fetcher.New(5), storage: &mockStorage{}, credentialsKey: &testKey}
 
 	msg := makeMsg(t, ScrapeMessage{
-		SchemaVersion: 2,
-		JobID:         "job-proxy-bad",
-		RunID:         "run-proxy-bad",
+		SchemaVersion: 3,
+		ArtifactID:    "artifact-proxy-bad",
+		RunID:         strPtr("run-proxy-bad"),
 		URL:           srv.URL,
 		OutputFormat:  "html",
 		Credentials:   &Credentials{EncryptedProxyURL: string(token)},

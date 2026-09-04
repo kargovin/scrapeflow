@@ -204,7 +204,7 @@ async def test_dispatch_batch_payload_contains_crawl_context():
     assert payload["crawl_context"]["crawl_id"] == str(crawl_id)
     assert payload["crawl_context"]["depth"] == 2
     assert payload["output_format"] == "html"
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
 
 
 async def test_dispatch_batch_skips_cancelled_crawl():

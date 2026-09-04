@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -44,43 +43,39 @@ func New(endpoint, accessKey, secretKey, bucket string, secure bool) (*Client, e
 	return &Client{mc: mc, bucket: bucket}, nil
 }
 
-// Upload writes data to MinIO at the path {bucket}/{jobID}.{ext}
-// and returns the full object path (e.g. "scrapeflow-results/abc123.html").
-// This path is included in the result event so the API can store it in jobs.result_path.
-func (c *Client) Upload(ctx context.Context, jobID, ext string, data []byte) (string, error) {
-
-	// {bucket}/latest/{job_id}.{extension}
-	objectNameLatest := fmt.Sprintf("latest/%s.%s", jobID, ext)
+// Upload writes the scraped page to {bucket}/history/{artifactID}/scrape.{ext} and
+// returns the full object path (e.g. "scrapeflow-results/history/abc123/scrape.html").
+// This path is included in the result event so the API can store it in job_runs.result_path.
+//
+// Objects are keyed on the row that produced the execution and named by the producing
+// stage (ADR-011 §1, §3). The stage segment is load-bearing rather than decorative: a
+// flat history/{artifactID}.{ext} would collide with the LLM worker's output, which
+// hardcodes a .json extension, so an output_format=json job's extraction would
+// overwrite its own scraped page.
+//
+// There is no latest/ write (ADR-011 §4). It was write-only across the entire
+// codebase — three workers wrote it and nothing ever read it — and dropping it also
+// removes a round-trip here, because the history object used to be produced by
+// CopyObject *from* latest/ rather than written directly.
+func (c *Client) Upload(ctx context.Context, artifactID, ext string, data []byte) (string, error) {
+	objectName := fmt.Sprintf("history/%s/scrape.%s", artifactID, ext)
 
 	// bytes.NewReader wraps a byte slice to implement io.Reader,
 	// which is what MinIO's PutObject expects. Think of it as io.BytesIO() in Python.
 	reader := bytes.NewReader(data)
 
-	_, err := c.mc.PutObject(ctx, c.bucket, objectNameLatest, reader, int64(len(data)),
+	_, err := c.mc.PutObject(ctx, c.bucket, objectName, reader, int64(len(data)),
 		minio.PutObjectOptions{
 			ContentType: contentType(ext),
 		},
 	)
 	if err != nil {
-		return "", fmt.Errorf("uploading %s to MinIO: %w", objectNameLatest, err)
-	}
-
-	// Creating a history path with timestamp allows us to keep old results without overwriting.
-	objectNameHistory := fmt.Sprintf("history/%s/%d.%s", jobID, time.Now().Unix(), ext)
-	_, err = c.mc.CopyObject(ctx, minio.CopyDestOptions{
-		Bucket: c.bucket,
-		Object: objectNameHistory,
-	}, minio.CopySrcOptions{
-		Bucket: c.bucket,
-		Object: objectNameLatest,
-	})
-	if err != nil {
-		return "", fmt.Errorf("copying %s to history path in MinIO: %w", objectNameLatest, err)
+		return "", fmt.Errorf("uploading %s to MinIO: %w", objectName, err)
 	}
 
 	// Return the full path including bucket name — matches what the Python
-	// result consumer stores in jobs.result_path.
-	return fmt.Sprintf("%s/%s", c.bucket, objectNameHistory), nil
+	// result consumer stores in job_runs.result_path.
+	return fmt.Sprintf("%s/%s", c.bucket, objectName), nil
 }
 
 // contentType maps file extensions to MIME types for MinIO metadata.

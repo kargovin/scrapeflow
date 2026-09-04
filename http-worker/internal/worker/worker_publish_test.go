@@ -9,6 +9,10 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// strPtr returns a pointer to s. run_id is a *string on the wire because absent and
+// present-but-empty are different states on the crawl lane (ADR-011 §5).
+func strPtr(s string) *string { return &s }
+
 // mockJS implements jetStreamClient for testing.
 // publishErr controls whether Publish returns an error.
 // published captures every payload sent to Publish for inspection.
@@ -35,7 +39,7 @@ func TestPublishResult_Success(t *testing.T) {
 	js := &mockJS{}
 	w := &Worker{js: js}
 
-	err := w.publishResult(resultMessage{JobID: "job-1", Status: "completed", MinIOPath: "bucket/job-1.html"})
+	err := w.publishResult(resultMessage{RunID: strPtr("run-1"), Status: "completed", MinIOPath: "bucket/history/artifact-1/scrape.html"})
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -49,7 +53,7 @@ func TestPublishResult_PublishError(t *testing.T) {
 	js := &mockJS{publishErr: publishErr}
 	w := &Worker{js: js}
 
-	err := w.publishResult(resultMessage{JobID: "job-2", Status: "completed"})
+	err := w.publishResult(resultMessage{RunID: strPtr("run-2"), Status: "completed"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

@@ -57,8 +57,8 @@ func newVerifyClient(t *testing.T) *minio.Client {
 	return mc
 }
 
-func uniqueJobID() string {
-	return fmt.Sprintf("test-job-%d", time.Now().UnixNano())
+func uniqueArtifactID() string {
+	return fmt.Sprintf("test-artifact-%d", time.Now().UnixNano())
 }
 
 // sampleHTML is served by the httptest.Server in all processJob tests.
@@ -86,6 +86,7 @@ func TestProcessJob(t *testing.T) {
 	tests := []struct {
 		name         string
 		outputFormat string
+		wantExt      string
 		url          string
 		wantErr      bool
 		checkContent func(t *testing.T, body string)
@@ -93,6 +94,7 @@ func TestProcessJob(t *testing.T) {
 		{
 			name:         "html format stores raw HTML",
 			outputFormat: "html",
+			wantExt:      "html",
 			url:          srv.URL,
 			checkContent: func(t *testing.T, body string) {
 				if !strings.Contains(body, "Hello from the test server") {
@@ -103,6 +105,7 @@ func TestProcessJob(t *testing.T) {
 		{
 			name:         "markdown format stores markdown without HTML tags",
 			outputFormat: "markdown",
+			wantExt:      "md",
 			url:          srv.URL,
 			checkContent: func(t *testing.T, body string) {
 				if strings.Contains(body, "<html>") || strings.Contains(body, "<body>") {
@@ -116,6 +119,7 @@ func TestProcessJob(t *testing.T) {
 		{
 			name:         "json format stores valid JSON with title and text",
 			outputFormat: "json",
+			wantExt:      "json",
 			url:          srv.URL,
 			checkContent: func(t *testing.T, body string) {
 				var out map[string]string
@@ -150,11 +154,11 @@ func TestProcessJob(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newTestWorker(t, bucket)
-			jobID := uniqueJobID()
+			artifactID := uniqueArtifactID()
 
 			job := &ScrapeMessage{
-				SchemaVersion: 2,
-				JobID:         jobID,
+				SchemaVersion: 3,
+				ArtifactID:    artifactID,
 				URL:           tc.url,
 				OutputFormat:  tc.outputFormat,
 			}
@@ -172,13 +176,15 @@ func TestProcessJob(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			expectedPrefix := fmt.Sprintf("%s/history/%s/", bucket, jobID)
-			if !strings.HasPrefix(minioPath, expectedPrefix) {
-				t.Errorf("minioPath: got %q, want prefix %q", minioPath, expectedPrefix)
+			// Stage-named and fully determined by the artifact id — no timestamp
+			// segment to make the assertion a prefix check (ADR-011 §3).
+			expectedPath := fmt.Sprintf("%s/history/%s/scrape.%s", bucket, artifactID, tc.wantExt)
+			if minioPath != expectedPath {
+				t.Errorf("minioPath: got %q, want %q", minioPath, expectedPath)
 			}
 
 			// Retrieve the object from MinIO using the verification client.
-			// minioPath = "{bucket}/{jobID}.{ext}" — extract just the object name.
+			// minioPath = "{bucket}/history/{artifactID}/scrape.{ext}" — drop the bucket.
 			parts := strings.SplitN(minioPath, "/", 2)
 			if len(parts) != 2 {
 				t.Fatalf("unexpected minioPath format: %q", minioPath)

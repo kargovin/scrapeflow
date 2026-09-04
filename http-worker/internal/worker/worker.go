@@ -6,6 +6,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -25,6 +26,10 @@ const (
 	jobsRunSubject    = "scrapeflow.jobs.run.http"
 	jobsResultSubject = "scrapeflow.jobs.result"
 	durableName       = "go-worker"
+
+	// The wire version this worker speaks (ADR-011). Versions 1 and 2 keyed artifacts
+	// on job_id, which two of the three dispatch lanes could not honestly supply.
+	supportedSchemaVersion = 3
 )
 
 // Credentials carries per-job secrets from the API. Values are Fernet ciphertexts —
@@ -48,26 +53,38 @@ type CrawlContext struct {
 	Depth       int    `json:"depth"`
 }
 
-// ScrapeMessage is the schema_version 2 incoming message shape (ADR-004).
+// ScrapeMessage is the schema_version 3 incoming message shape (ADR-011).
 // Fields not used by the HTTP worker (llm_config, playwright_options, credentials.cookies,
 // options.actions) are not defined here — json.Unmarshal silently ignores unknown fields.
 type ScrapeMessage struct {
-	SchemaVersion int           `json:"schema_version"`
-	JobID         string        `json:"job_id"`
-	RunID         string        `json:"run_id"`
-	URL           string        `json:"url"`
-	OutputFormat  string        `json:"output_format"`
-	Engine        string        `json:"engine"`
-	Credentials   *Credentials  `json:"credentials"`
-	Options       *Options      `json:"options"`
-	CrawlContext  *CrawlContext `json:"crawl_context"`
+	SchemaVersion int `json:"schema_version"`
+
+	// ArtifactID names what this execution's artifacts are keyed on: job_runs.id on
+	// the job and batch lanes, crawl_pages.id on the crawl lane. The worker uses it
+	// verbatim and never interprets it — it does not know which lane it is on.
+	// Validated non-empty in handleMessage; see the note there for why.
+	ArtifactID string `json:"artifact_id"`
+
+	// RunID is the result-routing key, and is absent on the crawl lane, which creates
+	// no job_runs row (ADR-011 §2). It is a *pointer* deliberately: a plain string
+	// cannot distinguish "absent" from "present and empty", and treating the second
+	// as the first is precisely the defaulting behaviour ADR-011 §5 forbids.
+	RunID *string `json:"run_id"`
+
+	URL          string        `json:"url"`
+	OutputFormat string        `json:"output_format"`
+	Engine       string        `json:"engine"`
+	Credentials  *Credentials  `json:"credentials"`
+	Options      *Options      `json:"options"`
+	CrawlContext *CrawlContext `json:"crawl_context"`
 }
 
 // resultMessage is the outgoing message shape published back to the API (ADR-002 §3).
 // Omitempty means the field is omitted from JSON if it is the zero value (empty string / 0).
 type resultMessage struct {
-	JobID         string        `json:"job_id"`
-	RunID         string        `json:"run_id"`
+	// job_id has left the wire (ADR-011 §2): the API reads it from the job_runs row it
+	// already loads, so there is one source for it rather than two that could disagree.
+	RunID         *string       `json:"run_id,omitempty"`
 	Status        string        `json:"status"`
 	Source        string        `json:"source,omitempty"`
 	MinIOPath     string        `json:"minio_path,omitempty"`
@@ -86,7 +103,7 @@ type jetStreamClient interface {
 // storageClient is the subset of storage.Client used by Worker.
 // The narrow interface lets unit tests inject a mock without a real MinIO connection.
 type storageClient interface {
-	Upload(ctx context.Context, jobID, ext string, data []byte) (string, error)
+	Upload(ctx context.Context, artifactID, ext string, data []byte) (string, error)
 }
 
 // Worker holds the dependencies needed to process scrape jobs.
@@ -173,27 +190,34 @@ func (w *Worker) Run(ctx context.Context, maxDeliver int, workerPoolSize int) er
 }
 
 // handleMessage implements the full ADR-002 job lifecycle:
-//  1. Parse message (schema_version 2 — ADR-004)
+//  1. Parse and validate the message (schema_version 3 — ADR-011)
 //  2. Resolve per-job fetcher (proxy transport if credentials.proxy_url is set)
 //  3. Enforce robots.txt if options.respect_robots is true (TODO: Step 14 — wire internal/robots)
 //  4. Publish "running" progress event (with nats_stream_seq)
 //  5. Fetch URL
 //  6. Format output
-//  7. Upload to MinIO (latest/ + history/)
+//  7. Upload to MinIO (history/{artifact_id}/scrape.{ext})
 //  8. Publish "completed" or "failed" result event
 //  9. Ack the NATS message (only after MinIO write succeeds)
 func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver int) {
-	// --- Step 1: Parse the incoming job message (schema_version 2) ---
+	// --- Step 1: Parse and validate the incoming job message (schema_version 3) ---
 	var job ScrapeMessage
 	if err := json.Unmarshal(msg.Data, &job); err != nil {
-		slog.Error("Malformed job message, discarding", "error", err, "data", string(msg.Data))
-		if err := msg.Ack(); err != nil {
-			slog.Error("Failed to ack malformed message", "error", err)
-		}
+		rejectMessage(msg, "Malformed job message, discarding", "error", err)
 		return
 	}
 
-	slog.Info("Received job", "job_id", job.JobID, "run_id", job.RunID, "url", job.URL,
+	if err := validateMessage(&job); err != nil {
+		rejectMessage(msg, "Invalid job message, discarding", "error", err)
+		return
+	}
+
+	runID := ""
+	if job.RunID != nil {
+		runID = *job.RunID
+	}
+
+	slog.Info("Received job", "artifact_id", job.ArtifactID, "run_id", runID, "url", job.URL,
 		"format", job.OutputFormat, "schema_version", job.SchemaVersion)
 
 	// --- Step 2: Resolve per-job fetcher ---
@@ -205,43 +229,41 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 	if job.Credentials != nil && job.Credentials.EncryptedProxyURL != "" {
 		plaintext := fernet.VerifyAndDecrypt([]byte(job.Credentials.EncryptedProxyURL), 0, []*fernet.Key{w.credentialsKey})
 		if plaintext == nil {
-			slog.Error("Failed to decrypt proxy URL, failing run", "job_id", job.JobID, "run_id", job.RunID)
+			slog.Error("Failed to decrypt proxy URL, failing run", "artifact_id", job.ArtifactID, "run_id", runID)
 			if pubErr := w.publishResult(resultMessage{
-				JobID:        job.JobID,
 				RunID:        job.RunID,
 				Status:       "failed",
 				Source:       "scrape",
 				Error:        "proxy_decryption_failed",
 				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
-				slog.Error("Failed to publish decrypt-error result", "job_id", job.JobID, "error", pubErr)
+				slog.Error("Failed to publish decrypt-error result", "artifact_id", job.ArtifactID, "error", pubErr)
 			}
 			if ackErr := msg.Ack(); ackErr != nil {
-				slog.Error("Failed to ack after decrypt error", "job_id", job.JobID, "error", ackErr)
+				slog.Error("Failed to ack after decrypt error", "artifact_id", job.ArtifactID, "error", ackErr)
 			}
 			return
 		}
 		proxyURL := string(plaintext)
 		pf, err := w.fetcher.WithProxy(proxyURL)
 		if err != nil {
-			slog.Error("Malformed proxy URL, failing run", "job_id", job.JobID, "run_id", job.RunID, "error", err)
+			slog.Error("Malformed proxy URL, failing run", "artifact_id", job.ArtifactID, "run_id", runID, "error", err)
 			if pubErr := w.publishResult(resultMessage{
-				JobID:        job.JobID,
 				RunID:        job.RunID,
 				Status:       "failed",
 				Source:       "scrape",
 				Error:        "malformed_proxy_url: " + err.Error(),
 				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
-				slog.Error("Failed to publish proxy-error result", "job_id", job.JobID, "error", pubErr)
+				slog.Error("Failed to publish proxy-error result", "artifact_id", job.ArtifactID, "error", pubErr)
 			}
 			if ackErr := msg.Ack(); ackErr != nil {
-				slog.Error("Failed to ack after proxy error", "job_id", job.JobID, "error", ackErr)
+				slog.Error("Failed to ack after proxy error", "artifact_id", job.ArtifactID, "error", ackErr)
 			}
 			return
 		}
 		f = pf
-		slog.Info("Using proxy for job", "job_id", job.JobID)
+		slog.Info("Using proxy for job", "artifact_id", job.ArtifactID)
 	}
 
 	// --- Step 3: robots.txt enforcement ---
@@ -250,22 +272,21 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 	if job.Options != nil && job.Options.RespectRobots {
 		disallowed, err := robots.IsDisallowed(ctx, job.URL)
 		if err != nil {
-			slog.Warn("robots.txt check error, proceeding", "job_id", job.JobID, "url", job.URL, "error", err)
+			slog.Warn("robots.txt check error, proceeding", "artifact_id", job.ArtifactID, "url", job.URL, "error", err)
 		}
 		if disallowed {
-			slog.Info("robots.txt disallows URL, failing run", "job_id", job.JobID, "url", job.URL)
+			slog.Info("robots.txt disallows URL, failing run", "artifact_id", job.ArtifactID, "url", job.URL)
 			if pubErr := w.publishResult(resultMessage{
-				JobID:        job.JobID,
 				RunID:        job.RunID,
 				Status:       "failed",
 				Source:       "scrape",
 				Error:        "robots_txt_disallowed",
 				CrawlContext: job.CrawlContext,
 			}); pubErr != nil {
-				slog.Error("Failed to publish robots-blocked result", "job_id", job.JobID, "error", pubErr)
+				slog.Error("Failed to publish robots-blocked result", "artifact_id", job.ArtifactID, "error", pubErr)
 			}
 			if ackErr := msg.Ack(); ackErr != nil {
-				slog.Error("Failed to ack after robots block", "job_id", job.JobID, "error", ackErr)
+				slog.Error("Failed to ack after robots block", "artifact_id", job.ArtifactID, "error", ackErr)
 			}
 			return
 		}
@@ -276,7 +297,6 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 	// The MaxDeliver advisory subscriber (Step 22) uses it to identify stalled runs —
 	// NATS advisory messages carry only stream_seq, no job_id or run_id.
 	runningMsg := resultMessage{
-		JobID:        job.JobID,
 		RunID:        job.RunID,
 		Status:       "running",
 		Source:       "scrape",
@@ -286,7 +306,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 		runningMsg.NATSStreamSeq = meta.Sequence.Stream
 	}
 	if err := w.publishResult(runningMsg); err != nil {
-		slog.Error("Failed to publish 'running' result", "job_id", job.JobID, "run_id", job.RunID, "error", err)
+		slog.Error("Failed to publish 'running' result", "artifact_id", job.ArtifactID, "run_id", runID, "error", err)
 	}
 
 	// --- Steps 5–7: Fetch, format, upload ---
@@ -307,14 +327,14 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 		if kind == transient && attempt < maxDeliver {
 			delay := retryDelay(attempt, transientBaseDelay, transientMaxDelay)
 			slog.Warn("Transient failure, naking for redelivery",
-				"job_id", job.JobID, "run_id", job.RunID,
+				"artifact_id", job.ArtifactID, "run_id", runID,
 				"attempt", attempt, "max_attempts", maxDeliver, "retry_in", delay, "error", err)
 			// Deliberately no "failed" publish: the API's terminal-status guard
 			// would lock the run as failed and then discard the retry's "completed".
 			// Only the final attempt reports an outcome. Redelivery re-runs the whole
 			// scrape — there is no partial-progress checkpoint.
 			if nakErr := msg.NakWithDelay(delay); nakErr != nil {
-				slog.Error("Failed to nak after transient failure", "job_id", job.JobID, "error", nakErr)
+				slog.Error("Failed to nak after transient failure", "artifact_id", job.ArtifactID, "error", nakErr)
 			}
 			return
 		}
@@ -325,40 +345,38 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 		if kind == transient {
 			errText = fmt.Sprintf("%s (gave up after %d attempts)", errText, attempt)
 		}
-		slog.Error("Job failed", "job_id", job.JobID, "run_id", job.RunID,
+		slog.Error("Job failed", "artifact_id", job.ArtifactID, "run_id", runID,
 			"kind", kind, "attempt", attempt, "error", errText)
 		if pubErr := w.publishResult(resultMessage{
-			JobID:        job.JobID,
 			RunID:        job.RunID,
 			Status:       "failed",
 			Source:       "scrape",
 			Error:        errText,
 			CrawlContext: job.CrawlContext,
 		}); pubErr != nil {
-			slog.Error("Failed to publish 'failed' result", "job_id", job.JobID, "run_id", job.RunID, "error", pubErr)
+			slog.Error("Failed to publish 'failed' result", "artifact_id", job.ArtifactID, "run_id", runID, "error", pubErr)
 			if nakErr := msg.NakWithDelay(30 * time.Second); nakErr != nil {
-				slog.Error("Failed to nak message", "job_id", job.JobID, "error", nakErr)
+				slog.Error("Failed to nak message", "artifact_id", job.ArtifactID, "error", nakErr)
 			}
 			return
 		}
 		if ackErr := msg.Ack(); ackErr != nil {
-			slog.Error("Failed to ack message after failed job", "job_id", job.JobID, "error", ackErr)
+			slog.Error("Failed to ack message after failed job", "artifact_id", job.ArtifactID, "error", ackErr)
 		}
 		return
 	}
 
 	// --- Step 8: Publish "completed" result event ---
 	if err := w.publishResult(resultMessage{
-		JobID:        job.JobID,
 		RunID:        job.RunID,
 		Status:       "completed",
 		Source:       "scrape",
 		MinIOPath:    minioPath,
 		CrawlContext: job.CrawlContext,
 	}); err != nil {
-		slog.Error("Failed to publish 'completed' result", "job_id", job.JobID, "run_id", job.RunID, "error", err)
+		slog.Error("Failed to publish 'completed' result", "artifact_id", job.ArtifactID, "run_id", runID, "error", err)
 		if nakErr := msg.NakWithDelay(30 * time.Second); nakErr != nil {
-			slog.Error("Failed to nak message", "job_id", job.JobID, "error", nakErr)
+			slog.Error("Failed to nak message", "artifact_id", job.ArtifactID, "error", nakErr)
 		}
 		return
 	}
@@ -367,9 +385,9 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 	// If the worker crashes before this line, NATS redelivers the message.
 	// Acking here means: "I have durably stored the result; stop tracking this message."
 	if err := msg.Ack(); err != nil {
-		slog.Error("Failed to ack message", "job_id", job.JobID, "run_id", job.RunID, "error", err)
+		slog.Error("Failed to ack message", "artifact_id", job.ArtifactID, "run_id", runID, "error", err)
 	}
-	slog.Info("Job completed", "job_id", job.JobID, "run_id", job.RunID, "minio_path", minioPath)
+	slog.Info("Job completed", "artifact_id", job.ArtifactID, "run_id", runID, "minio_path", minioPath)
 }
 
 // processJob runs the fetch → format → upload pipeline and returns the MinIO history path.
@@ -385,7 +403,7 @@ func (w *Worker) processJob(ctx context.Context, job *ScrapeMessage, f *fetcher.
 		return "", fmt.Errorf("format failed: %w", err)
 	}
 
-	minioPath, err := w.storage.Upload(ctx, job.JobID, ext, formatted)
+	minioPath, err := w.storage.Upload(ctx, job.ArtifactID, ext, formatted)
 	if err != nil {
 		// Wrap in *uploadError so handleMessage can tell a MinIO write fault (a
 		// transient-retry candidate) apart from a net error raised by the fetcher
@@ -400,12 +418,49 @@ func (w *Worker) processJob(ctx context.Context, job *ScrapeMessage, f *fetcher.
 func (w *Worker) publishResult(result resultMessage) error {
 	data, err := json.Marshal(result)
 	if err != nil {
-		slog.Error("Failed to marshal result", "job_id", result.JobID, "error", err)
+		slog.Error("Failed to marshal result", "status", result.Status, "error", err)
 		return err
 	}
 	if _, err := w.js.Publish(jobsResultSubject, data); err != nil {
-		slog.Error("Failed to publish result", "job_id", result.JobID, "error", err)
+		slog.Error("Failed to publish result", "status", result.Status, "error", err)
 		return err
 	}
 	return nil
+}
+
+// validateMessage enforces the one rule that made BUG-005 Path B possible: a missing
+// identifier fails loudly, and is never defaulted (ADR-011 §5).
+//
+// This is the exact spot that bug lived. encoding/json unmarshals a JSON null into a
+// string field as "" and returns no error — a no-op per the spec Go implements, not a
+// fault — so the worker proceeded with an empty job id and wrote every batch item of
+// every tenant to one shared object. A hard failure on the Python workers became
+// silent cross-tenant corruption here purely from the two languages' defaults on a
+// missing value. Checking explicitly is what closes the class; fixing only the field
+// it happened to hit would not.
+func validateMessage(job *ScrapeMessage) error {
+	if job.SchemaVersion != supportedSchemaVersion {
+		return fmt.Errorf("unsupported schema_version %d (want %d)",
+			job.SchemaVersion, supportedSchemaVersion)
+	}
+	if job.ArtifactID == "" {
+		return errors.New("missing artifact_id")
+	}
+	// Absent run_id is valid — the crawl lane creates no job_runs row. Present but
+	// empty is a producer bug, and a plain string field could not tell them apart.
+	if job.RunID != nil && *job.RunID == "" {
+		return errors.New("empty run_id")
+	}
+	return nil
+}
+
+// rejectMessage logs a structurally invalid message and acks it. Redelivery cannot
+// repair a producer bug, so the message is dropped — but loudly, which is the whole
+// point: the alternative this replaces was proceeding with a defaulted value and
+// corrupting storage in silence (ADR-011 §5).
+func rejectMessage(msg *nats.Msg, reason string, args ...any) {
+	slog.Error(reason, append(args, "data", string(msg.Data))...)
+	if err := msg.Ack(); err != nil {
+		slog.Error("Failed to ack rejected message", "error", err)
+	}
 }

@@ -2,7 +2,6 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
 import structlog
 import xxhash
@@ -21,6 +20,7 @@ from app.core.quota import (
 )
 from app.core.storage import delete_minio_object, stat_minio_size
 from app.core.webhooks import create_batch_webhook_delivery, create_webhook_delivery
+from app.messages import LLMMessage
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -202,17 +202,17 @@ async def _handle_batch_result(
                     ).one()
                 else:
                     run.status = "processing"
-                    llm_payload: dict[str, Any] = {
-                        "job_id": None,
-                        "run_id": str(run.id),
-                        "raw_minio_path": minio_path,
-                        "provider": llm_key.provider,
-                        "encrypted_api_key": llm_key.encrypted_api_key,
-                        "base_url": llm_key.base_url,
-                        "model": batch.llm_config["model"],
-                        "output_schema": batch.llm_config["output_schema"],
-                    }
-                    await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
+                    llm_message = LLMMessage(
+                        artifact_id=str(run.id),
+                        run_id=str(run.id),
+                        raw_minio_path=minio_path,
+                        provider=llm_key.provider,
+                        encrypted_api_key=llm_key.encrypted_api_key,
+                        base_url=llm_key.base_url,
+                        model=batch.llm_config["model"],
+                        output_schema=batch.llm_config["output_schema"],
+                    )
+                    await js.publish(NATS_JOBS_LLM_SUBJECT, llm_message.to_nats_bytes())
                     await db.execute(
                         text("SELECT pg_notify('batch_status', :p)"),
                         {
@@ -420,17 +420,23 @@ async def _handle_scrape_completed(
                         )
                     return
             run.status = "processing"
-            llm_payload: dict[str, Any] = {
-                "job_id": job_id,
-                "run_id": run_id,
-                "raw_minio_path": minio_path,
-                "provider": llm_key.provider,
-                "encrypted_api_key": llm_key.encrypted_api_key,
-                "base_url": llm_key.base_url,
-                "model": job.llm_config["model"],
-                "output_schema": job.llm_config["output_schema"],
-            }
-            await js.publish(NATS_JOBS_LLM_SUBJECT, json.dumps(llm_payload).encode())
+            # artifact_id and run_id are the same value on this lane — both are the
+            # run's id — but they are set from the run explicitly rather than aliased,
+            # because they answer different questions (ADR-011 §2). The LLM stage
+            # writes history/{artifact_id}/llm.json alongside the scrape's
+            # history/{artifact_id}/scrape.{fmt}; the stage segment is what keeps an
+            # output_format=json job from overwriting its own scraped page.
+            llm_message = LLMMessage(
+                artifact_id=run_id,
+                run_id=run_id,
+                raw_minio_path=minio_path,
+                provider=llm_key.provider,
+                encrypted_api_key=llm_key.encrypted_api_key,
+                base_url=llm_key.base_url,
+                model=job.llm_config["model"],
+                output_schema=job.llm_config["output_schema"],
+            )
+            await js.publish(NATS_JOBS_LLM_SUBJECT, llm_message.to_nats_bytes())
             await db.execute(
                 text("SELECT pg_notify('job_status', :p)"),
                 {"p": f"{job_id}:{run_id}:processing"},
@@ -585,7 +591,24 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
     """Process a single job result message from the worker (ADR-002)."""
     try:
         data = json.loads(msg.data.decode())
-        job_id = data.get("job_id")  # None for batch runs (ADR-006 §4)
+    except json.JSONDecodeError as e:
+        logger.error("Malformed result message, discarding", error=str(e), data=msg.data)
+        await msg.ack()
+        return
+
+    # Crawl result messages carry crawl_context — coordinator handles those via its
+    # own durable consumer. Ack here to prevent double-processing.
+    #
+    # This check MUST stay above the required-field parse below. A crawl page has no
+    # job_runs row, so ADR-011 §2 stops the coordinator fabricating a run_id for one —
+    # and run_id is parsed as a required key. Checking after the parse would send every
+    # crawl page down the malformed branch: the same end state, but an ERROR-level
+    # "Malformed result message" line per page for traffic that is not malformed.
+    if data.get("crawl_context") is not None:
+        await msg.ack()
+        return
+
+    try:
         run_id = data["run_id"]
         worker_status = data["status"]
         minio_path = data.get("minio_path")
@@ -593,14 +616,8 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         nats_seq = data.get("nats_stream_seq")
         warnings = data.get("warnings")
         source = data.get("source", "scrape")
-    except (KeyError, json.JSONDecodeError) as e:
+    except KeyError as e:
         logger.error("Malformed result message, discarding", error=str(e), data=msg.data)
-        await msg.ack()
-        return
-
-    # Crawl result messages carry crawl_context — coordinator handles those via its
-    # own durable consumer. Ack here to prevent double-processing.
-    if data.get("crawl_context") is not None:
         await msg.ack()
         return
 
@@ -610,6 +627,12 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
             logger.warning("Received result for unknown run, discarding", run_id=run_id)
             await msg.ack()
             return
+
+        # Read the job id from the row, not the wire (ADR-011 §2). The message used to
+        # carry its own copy while the cancellation and pg_notify paths below already
+        # read run.job_id — two sources for one fact, which could disagree. It is None
+        # on the batch lane, where a run belongs to a batch item rather than a job.
+        job_id = str(run.job_id) if run.job_id is not None else None
 
         if run.status == "cancelled":
             logger.info("Run was cancelled, discarding worker result", run_id=run_id)

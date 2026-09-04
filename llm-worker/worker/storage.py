@@ -1,34 +1,36 @@
 """
-MinIO dual-write — mirrors the Go worker's storage.Upload() and the playwright-worker.
-Writes latest/{job_id}.json (overwritten each run) and
-history/{job_id}/{unix_ts}.json (immutable per-run record).
-Returns the history path as the canonical minio_path stored on job_runs.
+MinIO upload — mirrors the Go worker's storage.Upload() and the playwright worker's.
+
+    history/{artifact_id}/llm.json
+
+Objects are keyed on the row that produced the execution and named by the producing
+stage (ADR-011 §1, §3). The stage segment is what keeps this worker's output from
+overwriting the scraped page it was derived from: ext is hardcoded "json" here, so a
+flat history/{artifact_id}.{ext} would collide with the scrape of any job whose
+output_format is already json. Today only the timestamp prevents that, and only
+because LLM calls are slow.
+
+`latest/` is gone (ADR-011 §4) — it was write-only across the whole codebase.
 """
 
 import io
-import time
 
 from miniopy_async import Minio
 
 from .config import settings
 
 
-async def upload(minio: Minio, job_id: str, data: bytes) -> str:
-    """Upload JSON result to MinIO; return the fully-qualified history path."""
+async def upload(minio: Minio, artifact_id: str, data: bytes) -> str:
+    """Upload the structured JSON result; return the fully-qualified object path."""
     bucket = settings.minio_bucket
-    ext = "json"
-    content_type = "application/json"
+    key = f"history/{artifact_id}/llm.json"
 
-    latest_key = f"latest/{job_id}.{ext}"
-    history_key = f"history/{job_id}/{int(time.time())}.{ext}"
+    await minio.put_object(
+        bucket,
+        key,
+        io.BytesIO(data),
+        len(data),
+        content_type="application/json",
+    )
 
-    for key in (latest_key, history_key):
-        await minio.put_object(
-            bucket,
-            key,
-            io.BytesIO(data),
-            len(data),
-            content_type=content_type,
-        )
-
-    return f"{bucket}/{history_key}"
+    return f"{bucket}/{key}"

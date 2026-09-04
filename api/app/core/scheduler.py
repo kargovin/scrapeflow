@@ -9,7 +9,6 @@ pending JobRun that the stale-pending recovery will re-publish on the next cycle
 """
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -21,11 +20,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.credentials import resolve_credentials
 from app.core.quota import is_quota_exceeded
+from app.messages import Credentials, MessageOptions, ScrapeMessage
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.settings import settings
 
 logger = structlog.get_logger()
+
+
+def _build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> ScrapeMessage:
+    """Build the dispatch message for a scheduled job run.
+
+    Shared by _dispatch_due_jobs and _recover_stale_pending: recovery re-publishes an
+    existing run as-is, so the two must produce the same message or a recovered run
+    would not be the run that was lost.
+    """
+    return ScrapeMessage(
+        artifact_id=str(run.id),
+        run_id=str(run.id),
+        url=job.url,
+        output_format=job.output_format.value,
+        engine=job.engine,
+        credentials=Credentials(**credentials) if credentials else None,
+        options=MessageOptions(respect_robots=job.respect_robots, actions=job.playwright_actions),
+    )
 
 
 async def scheduler_loop(
@@ -92,26 +110,13 @@ async def _dispatch_due_jobs(
             await db.commit()  # commit per job — releases row lock immediately
 
             credentials = await resolve_credentials(job, db)
-            payload: dict = {
-                "schema_version": 2,
-                "job_id": str(job.id),
-                "run_id": str(run.id),
-                "url": job.url,
-                "output_format": job.output_format.value,
-                "engine": job.engine,
-                "credentials": credentials,
-                "options": {
-                    "respect_robots": job.respect_robots,
-                    "actions": job.playwright_actions,
-                },
-                "crawl_context": None,
-            }
+            message = _build_scrape_message(job, run, credentials)
             try:
                 if job.engine == "playwright":
-                    payload["playwright_options"] = job.playwright_options  # already a dict (JSONB)
-                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, json.dumps(payload).encode())
+                    message.playwright_options = job.playwright_options  # already a dict (JSONB)
+                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, message.to_nats_bytes())
                 else:
-                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, json.dumps(payload).encode())
+                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, message.to_nats_bytes())
             except Exception:
                 logger.exception(
                     "scheduler: NATS publish failed after DB commit — stale-pending recovery will retry",
@@ -156,26 +161,13 @@ async def _recover_stale_pending(
                 continue  # orphaned run — should not happen with CASCADE deletes
 
             credentials = await resolve_credentials(job, db)
-            payload: dict = {
-                "schema_version": 2,
-                "job_id": str(job.id),
-                "run_id": str(run.id),
-                "url": job.url,
-                "output_format": job.output_format.value,
-                "engine": job.engine,
-                "credentials": credentials,
-                "options": {
-                    "respect_robots": job.respect_robots,
-                    "actions": job.playwright_actions,
-                },
-                "crawl_context": None,
-            }
+            message = _build_scrape_message(job, run, credentials)
             try:
                 if job.engine == "playwright":
-                    payload["playwright_options"] = job.playwright_options
-                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, json.dumps(payload).encode())
+                    message.playwright_options = job.playwright_options
+                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, message.to_nats_bytes())
                 else:
-                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, json.dumps(payload).encode())
+                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, message.to_nats_bytes())
             except Exception:
                 logger.exception(
                     "scheduler: NATS publish failed for stale-pending recovery — will retry next cycle",

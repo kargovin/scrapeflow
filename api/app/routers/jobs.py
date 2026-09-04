@@ -4,7 +4,6 @@ import secrets
 import uuid
 from asyncio import get_running_loop
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import structlog
 from croniter import croniter
@@ -35,6 +34,7 @@ from app.core.nats import get_jetstream
 from app.core.quota import check_user_quota, decrement_storage_bytes
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
+from app.messages import Credentials, MessageOptions, ScrapeMessage
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.job_secrets import JobSecrets, JobSecretType
@@ -53,8 +53,6 @@ from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = structlog.get_logger()
-
-_FORMAT_EXT: dict[str, str] = {"html": "html", "markdown": "md", "json": "json"}
 
 
 async def check_job_quota(
@@ -253,25 +251,26 @@ async def create_job(
 
     # Publish to NATS after successful DB insert (ADR-001)
     # If NATS is unavailable, job stays as `pending` and can be retried later
-    payload: dict[str, Any] = {
-        "schema_version": 2,
-        "job_id": str(job.id),
-        "run_id": str(job_run.id),
-        "url": job.url,
-        "output_format": job.output_format.value,
-        "engine": body.engine.value,
-        "credentials": credentials,
-        "options": {"respect_robots": job.respect_robots, "actions": job.playwright_actions},
-        "crawl_context": None,
-    }
+    # artifact_id is the *run's* id, not the job's (ADR-011 §1): artifacts are keyed
+    # on the row that produced them, so each run of a recurring job owns its objects
+    # outright instead of sharing a job-keyed prefix disambiguated by a timestamp.
+    message = ScrapeMessage(
+        artifact_id=str(job_run.id),
+        run_id=str(job_run.id),
+        url=job.url,
+        output_format=job.output_format.value,
+        engine=body.engine.value,
+        credentials=Credentials(**credentials) if credentials else None,
+        options=MessageOptions(respect_robots=job.respect_robots, actions=job.playwright_actions),
+    )
 
     if body.engine == Engine.http:
-        await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, json.dumps(payload).encode())
+        await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, message.to_nats_bytes())
     elif body.engine == Engine.playwright:
-        payload["playwright_options"] = (
+        message.playwright_options = (
             body.playwright_options.model_dump() if body.playwright_options else None
         )
-        await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, json.dumps(payload).encode())
+        await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, message.to_nats_bytes())
     logger.info("job_created", job_id=str(job.id), user_id=str(user.id), url=job.url)
 
     return JobResponse(
@@ -391,12 +390,6 @@ async def cancel_job(
                     await decrement_storage_bytes(user.id, db, file_size)
             except Exception:
                 pass
-
-        ext = _FORMAT_EXT.get(job.output_format.value, job.output_format.value)
-        try:
-            await minio_client.remove_object(settings.minio_bucket, f"latest/{job.id}.{ext}")
-        except Exception:
-            pass
 
         await db.delete(job)
         await db.commit()

@@ -121,7 +121,8 @@ async def test_scheduler_dispatches_due_job(due_job):
     subject, raw = mock_js.publish.call_args.args
     assert subject == NATS_JOBS_RUN_HTTP_SUBJECT
     payload = json.loads(raw.decode())
-    assert payload["job_id"] == str(due_job.id)
+    assert payload["artifact_id"] == str(run.id)
+    assert "job_id" not in payload
     assert payload["run_id"] == str(run.id)
     assert payload["url"] == due_job.url
 

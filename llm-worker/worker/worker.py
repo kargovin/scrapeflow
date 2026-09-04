@@ -29,7 +29,7 @@ async def publish_result(js: Any, result: ResultMessage) -> None:
 async def fetch_content(minio: Minio, raw_minio_path: str) -> str:
     """Read raw scrape content from MinIO; return as a UTF-8 string.
 
-    raw_minio_path is bucket-qualified: "{bucket}/history/{job_id}/{ts}.{ext}"
+    raw_minio_path is bucket-qualified: "{bucket}/history/{artifact_id}/scrape.{ext}"
     """
     bucket = settings.minio_bucket
     object_key = raw_minio_path[len(bucket) + 1 :]
@@ -52,14 +52,15 @@ async def handle_message(msg: Any, js: Any, minio: Minio) -> None:
         await msg.ack()
         return
 
-    log.info("job_received", job_id=job.job_id, run_id=job.run_id, model=job.model)
+    log.info(
+        "job_received", artifact_id=job.artifact_id, run_id=job.run_id, model=job.model
+    )
 
     # --- Step 2: Publish "running" with nats_stream_seq (ADR-002 §3) ---
     nats_seq = msg.metadata.sequence.stream
     await publish_result(
         js,
         ResultMessage(
-            job_id=job.job_id,
             run_id=job.run_id,
             status="running",
             nats_stream_seq=nats_seq,
@@ -82,13 +83,12 @@ async def handle_message(msg: Any, js: Any, minio: Minio) -> None:
 
         # --- Step 5: Upload structured JSON result to MinIO ---
         result_bytes = json.dumps(result_dict).encode()
-        minio_path = await upload(minio, job.job_id, result_bytes)
+        minio_path = await upload(minio, job.artifact_id, result_bytes)
 
         # --- Step 6: Publish "completed" ---
         await publish_result(
             js,
             ResultMessage(
-                job_id=job.job_id,
                 run_id=job.run_id,
                 status="completed",
                 minio_path=minio_path,
@@ -96,7 +96,12 @@ async def handle_message(msg: Any, js: Any, minio: Minio) -> None:
         )
         # --- Step 7: Ack after MinIO write succeeds (ADR-002 §6) ---
         await msg.ack()
-        log.info("job_completed", job_id=job.job_id, run_id=job.run_id, path=minio_path)
+        log.info(
+            "job_completed",
+            artifact_id=job.artifact_id,
+            run_id=job.run_id,
+            path=minio_path,
+        )
 
     except Exception as exc:
         # Q5 option B. This branch used to ack unconditionally, which made every
@@ -115,7 +120,7 @@ async def handle_message(msg: Any, js: Any, minio: Minio) -> None:
             )
             log.warning(
                 "job_transient_failure",
-                job_id=job.job_id,
+                artifact_id=job.artifact_id,
                 run_id=job.run_id,
                 error=detail,
                 attempt=attempt,
@@ -134,7 +139,7 @@ async def handle_message(msg: Any, js: Any, minio: Minio) -> None:
             detail = f"{detail} (gave up after {attempt} attempts)"
         log.error(
             "job_failed",
-            job_id=job.job_id,
+            artifact_id=job.artifact_id,
             run_id=job.run_id,
             error=detail,
             kind=kind,
@@ -143,7 +148,6 @@ async def handle_message(msg: Any, js: Any, minio: Minio) -> None:
         await publish_result(
             js,
             ResultMessage(
-                job_id=job.job_id,
                 run_id=job.run_id,
                 status="failed",
                 error=detail,

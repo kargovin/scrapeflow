@@ -66,10 +66,10 @@ async def test_permanent_delete_removes_db_row(
         assert await db.get(Job, uuid.UUID(job_id)) is None
 
 
-async def test_permanent_delete_calls_minio_remove_for_history_and_latest(
+async def test_permanent_delete_removes_only_the_history_object(
     client, auth_headers, mock_jetstream, mock_minio_client
 ):
-    """MinIO remove_object is called for the history/ run object and the latest/ object."""
+    """MinIO remove_object is called for the run's history/ object, and nothing else."""
     response = await client.post(
         "/jobs",
         json={"url": "https://example.com", "output_format": "html"},
@@ -77,26 +77,32 @@ async def test_permanent_delete_calls_minio_remove_for_history_and_latest(
     )
     job_id = response.json()["id"]
 
-    # Attach a result_path to the run so the permanent delete has a history/ object to remove.
+    # Attach a result_path to the run so the permanent delete has an object to remove.
     async with AsyncSessionLocal() as db:
         run = await db.scalar(select(JobRun).where(JobRun.job_id == uuid.UUID(job_id)))
-        run.result_path = f"scrapeflow-results/history/{job_id}/1000000.html"
+        run.result_path = f"scrapeflow-results/history/{run.id}/scrape.html"
         run.status = "completed"
         await db.commit()
 
     await client.delete(f"/jobs/{job_id}?permanent=true", headers=auth_headers)
 
-    # One call per result_path (history/) + one call for latest/.
-    assert mock_minio_client.remove_object.call_count == 2
+    # One call per result_path. There is no second call for a latest/ mirror —
+    # nothing writes one any more (ADR-011 §4).
+    assert mock_minio_client.remove_object.call_count == 1
     called_keys = {call.args[1] for call in mock_minio_client.remove_object.call_args_list}
-    assert any("history/" in k for k in called_keys)
-    assert any(k.startswith("latest/") for k in called_keys)
+    assert all("history/" in k for k in called_keys)
+    assert not any(k.startswith("latest/") for k in called_keys)
 
 
-async def test_permanent_delete_markdown_uses_md_extension(
+async def test_permanent_delete_never_reconstructs_a_key_from_output_format(
     client, auth_headers, mock_jetstream, mock_minio_client
 ):
-    """latest/ object uses the .md extension for markdown output_format."""
+    """
+    The delete path used to rebuild `latest/{job_id}.{ext}` from job.output_format,
+    which is the guessing half of BUG-007: an LLM job leaves objects under more than
+    one extension, so a single reconstructed filename orphans the rest. With `latest/`
+    gone the guess is gone too — a job with no stored result deletes no objects at all.
+    """
     response = await client.post(
         "/jobs",
         json={"url": "https://example.com", "output_format": "markdown"},
@@ -106,13 +112,7 @@ async def test_permanent_delete_markdown_uses_md_extension(
 
     await client.delete(f"/jobs/{job_id}?permanent=true", headers=auth_headers)
 
-    latest_calls = [
-        call
-        for call in mock_minio_client.remove_object.call_args_list
-        if call.args[1].startswith("latest/")
-    ]
-    assert len(latest_calls) == 1
-    assert latest_calls[0].args[1].endswith(".md")
+    assert mock_minio_client.remove_object.call_count == 0
 
 
 # ---------------------------------------------------------------------------

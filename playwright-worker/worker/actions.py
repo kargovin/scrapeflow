@@ -21,7 +21,7 @@ log = structlog.get_logger()
 async def execute_actions(
     page: Any,
     minio: Minio,
-    job_id: str,
+    artifact_id: str,
     actions: list[dict],
 ) -> tuple[list[str], list[str]]:
     """
@@ -38,7 +38,7 @@ async def execute_actions(
         action_type = action.get("type", "unknown")
         try:
             await _dispatch(
-                action, page, minio, job_id, screenshot_index, screenshot_paths
+                action, page, minio, artifact_id, screenshot_index, screenshot_paths
             )
             if action_type == "screenshot":
                 screenshot_index += 1
@@ -53,7 +53,7 @@ async def _dispatch(
     action: dict,
     page: Any,
     minio: Minio,
-    job_id: str,
+    artifact_id: str,
     screenshot_index: int,
     screenshot_paths: list[str],
 ) -> None:
@@ -88,7 +88,7 @@ async def _dispatch(
 
     elif action_type == "screenshot":
         png_bytes = await page.screenshot()
-        path = await upload_screenshot(minio, job_id, screenshot_index, png_bytes)
+        path = await upload_screenshot(minio, artifact_id, screenshot_index, png_bytes)
         screenshot_paths.append(path)
 
     else:

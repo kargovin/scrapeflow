@@ -47,7 +47,9 @@ async def handle_message(
         await msg.ack()
         return
 
-    log.info("job_received", job_id=job.job_id, run_id=job.run_id, url=job.url)
+    log.info(
+        "job_received", artifact_id=job.artifact_id, run_id=job.run_id, url=job.url
+    )
 
     opts = job.playwright_options
     timeout_ms = (opts.timeout_seconds if opts else default_timeout) * 1000
@@ -62,11 +64,10 @@ async def handle_message(
         except Exception:
             blocked = False  # fetch failure → proceed
         if blocked:
-            log.info("robots_disallowed", job_id=job.job_id, url=job.url)
+            log.info("robots_disallowed", artifact_id=job.artifact_id, url=job.url)
             await publish_result(
                 js,
                 ResultMessage(
-                    job_id=job.job_id,
                     run_id=job.run_id,
                     status="failed",
                     error="robots_txt_disallowed",
@@ -81,7 +82,6 @@ async def handle_message(
     await publish_result(
         js,
         ResultMessage(
-            job_id=job.job_id,
             run_id=job.run_id,
             status="running",
             nats_stream_seq=nats_seq,
@@ -180,7 +180,7 @@ async def handle_message(
         screenshot_paths: list[str] = []
         if actions_list:
             warnings, screenshot_paths = await execute_actions(
-                page, minio, job.job_id, actions_list
+                page, minio, job.artifact_id, actions_list
             )
 
         html = await page.content()
@@ -205,7 +205,7 @@ async def handle_message(
         if detection.blocked:
             log.warning(
                 "block_detected",
-                job_id=job.job_id,
+                artifact_id=job.artifact_id,
                 run_id=job.run_id,
                 url=job.url,
                 final_url=final_url,
@@ -218,7 +218,6 @@ async def handle_message(
             await publish_result(
                 js,
                 ResultMessage(
-                    job_id=job.job_id,
                     run_id=job.run_id,
                     status="failed",
                     error=detection.error,
@@ -229,13 +228,12 @@ async def handle_message(
             return
 
         content, ext = format_output(html, job.output_format, final_url)
-        minio_path = await upload(minio, job.job_id, ext, content)
+        minio_path = await upload(minio, job.artifact_id, ext, content)
 
         # --- Step 11: Publish "completed" ---
         await publish_result(
             js,
             ResultMessage(
-                job_id=job.job_id,
                 run_id=job.run_id,
                 status="completed",
                 minio_path=minio_path,
@@ -246,7 +244,12 @@ async def handle_message(
         )
         # --- Step 12: Ack only after MinIO write succeeds (ADR-002 §6) ---
         await msg.ack()
-        log.info("job_completed", job_id=job.job_id, run_id=job.run_id, path=minio_path)
+        log.info(
+            "job_completed",
+            artifact_id=job.artifact_id,
+            run_id=job.run_id,
+            path=minio_path,
+        )
 
     except Exception as exc:
         # UF-003 3a. This branch used to ack unconditionally, which made every
@@ -267,7 +270,7 @@ async def handle_message(
             )
             log.warning(
                 "job_transient_failure",
-                job_id=job.job_id,
+                artifact_id=job.artifact_id,
                 run_id=job.run_id,
                 error=detail,
                 attempt=attempt,
@@ -287,7 +290,7 @@ async def handle_message(
             detail = f"{detail} (gave up after {attempt} attempts)"
         log.error(
             "job_failed",
-            job_id=job.job_id,
+            artifact_id=job.artifact_id,
             run_id=job.run_id,
             error=detail,
             kind=kind,
@@ -296,7 +299,6 @@ async def handle_message(
         await publish_result(
             js,
             ResultMessage(
-                job_id=job.job_id,
                 run_id=job.run_id,
                 status="failed",
                 error=detail,

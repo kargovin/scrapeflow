@@ -6,8 +6,6 @@ fat NATS messages to the appropriate worker subject, and detects crawl completio
 """
 
 import asyncio
-import json
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -16,6 +14,7 @@ from sqlalchemy import delete, select, update
 from coordinator.config import settings
 from coordinator.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from coordinator.db import AsyncSessionLocal
+from coordinator.messages import CrawlContext, MessageOptions, ScrapeMessage
 from coordinator.models import Crawl, CrawlPage, CrawlQueueItem
 from coordinator.result_handler import check_completion, enqueue_crawl_webhook
 
@@ -115,26 +114,28 @@ async def _dispatch_batch(js) -> None:
             item.dispatched_at = now
 
             subject = NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT if crawl.engine == "playwright" else NATS_JOBS_RUN_HTTP_SUBJECT
-            payload = json.dumps({
-                "schema_version": 2,
-                "job_id": str(page.id),   # crawl_page_id used as job_id for MinIO path
-                "run_id": str(uuid.uuid4()),
-                "url": item.url,
-                "output_format": "html",   # always html so link extraction can parse it
-                "engine": crawl.engine,
-                "credentials": None,
-                "options": {
-                    "respect_robots": crawl.respect_robots,
-                    "actions": None,
-                },
-                "crawl_context": {
-                    "crawl_id": str(crawl.id),
-                    "crawl_page_id": str(page.id),
-                    "depth": item.depth,
-                },
-            }).encode()
+            # artifact_id is the crawl page's own id (ADR-011 §1). It used to travel
+            # in a field named job_id — a crawl_pages row impersonating a jobs row,
+            # which worked precisely because nothing checked.
+            #
+            # run_id is omitted, not fabricated. This lane creates no job_runs row, and
+            # the uuid4() that used to fill the field named a run that did not exist:
+            # untraceable, and unlinkable from anything that would later want to point
+            # at the producer of an object.
+            message = ScrapeMessage(
+                artifact_id=str(page.id),
+                url=item.url,
+                output_format="html",   # always html so link extraction can parse it
+                engine=crawl.engine,
+                options=MessageOptions(respect_robots=crawl.respect_robots),
+                crawl_context=CrawlContext(
+                    crawl_id=str(crawl.id),
+                    crawl_page_id=str(page.id),
+                    depth=item.depth,
+                ),
+            )
 
-            await js.publish(subject, payload)
+            await js.publish(subject, message.to_nats_bytes())
             log.info(
                 "crawl_page_dispatched",
                 crawl_id=str(crawl.id),

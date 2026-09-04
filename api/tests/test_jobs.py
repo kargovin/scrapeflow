@@ -69,7 +69,9 @@ async def test_create_job(client, auth_headers, mock_jetstream):
     call_subject, call_payload = mock_jetstream.publish.call_args.args
     assert call_subject == NATS_JOBS_RUN_HTTP_SUBJECT
     published = json.loads(call_payload.decode())
-    assert published["job_id"] == data["id"]
+    # Artifacts key on the run, not the job (ADR-011 §1), and job_id has left the wire.
+    assert published["artifact_id"] == data["run_id"]
+    assert "job_id" not in published
     assert published["url"] == "https://example.com/"
     assert published["output_format"] == "markdown"
     assert published["run_id"] == data["run_id"]
@@ -403,7 +405,10 @@ async def test_result_consumer_completed_with_llm(db_user):
     subject, payload_bytes = mock_js.publish.call_args.args
     assert subject == NATS_JOBS_LLM_SUBJECT
     published = json.loads(payload_bytes.decode())
-    assert published["job_id"] == str(job_id)
+    # The LLM stage writes history/{artifact_id}/llm.json beside the scrape's
+    # history/{artifact_id}/scrape.{fmt}, so it is keyed on the same run.
+    assert published["artifact_id"] == str(run_id)
+    assert "job_id" not in published
     assert published["run_id"] == str(run_id)
     assert published["raw_minio_path"] == minio_path
 
@@ -1141,7 +1146,7 @@ async def test_rotate_webhook_secret_other_user(client, auth_headers, db_user):
 
 
 async def test_create_job_respect_robots_true(client, auth_headers, mock_jetstream):
-    """POST /jobs with respect_robots=true sends schema_version 2 with options.respect_robots=true."""
+    """POST /jobs with respect_robots=true sends schema_version 3 with options.respect_robots=true."""
     response = await client.post(
         "/jobs",
         json={"url": "https://example.com", "respect_robots": True},
@@ -1153,13 +1158,13 @@ async def test_create_job_respect_robots_true(client, auth_headers, mock_jetstre
     _, call_payload = mock_jetstream.publish.call_args.args
     published = json.loads(call_payload.decode())
 
-    assert published["schema_version"] == 2
+    assert published["schema_version"] == 3
     assert published["engine"] == "http"
     assert published["options"]["respect_robots"] is True
 
 
 async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstream):
-    """POST /jobs without respect_robots produces a schema_version 2 message with options.respect_robots=false."""
+    """POST /jobs without respect_robots produces a schema_version 3 message with options.respect_robots=false."""
     response = await client.post(
         "/jobs",
         json={"url": "https://example.com"},
@@ -1171,11 +1176,13 @@ async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstre
     _, call_payload = mock_jetstream.publish.call_args.args
     published = json.loads(call_payload.decode())
 
-    assert published["schema_version"] == 2
+    assert published["schema_version"] == 3
     assert published["engine"] == "http"
     assert published["options"]["respect_robots"] is False
-    assert published["credentials"] is None
-    assert published["crawl_context"] is None
+    # Unset optional sub-objects are omitted, not sent as null — the models serialize
+    # with exclude_none, matching the Go worker's omitempty tags.
+    assert "credentials" not in published
+    assert "crawl_context" not in published
 
 
 # ---------------------------------------------------------------------------
