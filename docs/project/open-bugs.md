@@ -282,9 +282,14 @@ product decision. The migration neither fixes nor worsens it.
 **Severity:** High (two paths hang forever with no error; the third silently returns the wrong
 content and breaks tenant isolation)
 **Discovered:** 2026-08-04, reviewing inputs for ADR-009
-**Status:** Open — **fix before the migration** (triage reasoning below).
+**Status:** ✅ **FIXED IN CODE 2026-09-04 — not yet deployed.** All three parts of the fix below
+shipped together, across five services, as `schema_version` 3. Production still runs the old
+convention until the next release, and one owner-authorised step remains: the `latest/` sweep
+(`api/scripts/sweep_latest_objects.py`, dry-run by default).
 **Design settled 2026-09-03**: [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md) is Accepted
-and answers fix part (2). **P6 has no remaining design dependency** and covers **all three lanes**.
+and answers fix part (2). **P6 had no remaining design dependency** and covered **all three lanes**.
+⚠️ **The cutover is a hard cut against a drained stream** — v2 and v3 have incompatible required
+fields in *both* directions, so all five services deploy together. Owner's call, 2026-09-04.
 
 ### What happens
 

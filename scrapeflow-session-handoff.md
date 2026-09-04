@@ -62,7 +62,30 @@ docker run --rm -v "$PWD/playwright-worker/worker:/app/worker:ro" \
 #    no cryptography, so test_main.py fails to import). Use a newer tag.
 
 cd http-worker && go test ./...          # non-integration
+go vet -tags integration ./...           # compile the integration-tagged tests
+
+# ⚠️ the coordinator needs env vars even for pure-unit tests — coordinator/config.py
+#    instantiates Settings() at import time, so collection fails without them.
+docker run --rm -e DATABASE_URL="postgresql+asyncpg://u:p@localhost/db" \
+  -e NATS_URL="nats://localhost:4222" \
+  -v "$PWD/coordinator:/app" -w /app docker-coordinator python -m pytest -q
 ```
+
+**Cross-service contract test** (ADR-011 §6) — the only test that feeds an API-produced
+message into each worker's *real* parser. Needs the repo root mounted, because the four
+message modules live in four build contexts:
+```bash
+# from repo root
+docker run --rm -v "$PWD:/repo" -w /repo docker-api \
+  /app/.venv/bin/python -m pytest contracts -q
+
+# after an intentional contract change, to refresh the Go fixtures
+docker run --rm -v "$PWD:/repo" -w /repo -e UPDATE_CONTRACT_FIXTURES=1 docker-api \
+  /app/.venv/bin/python -m pytest contracts -q
+```
+⚠️ The Go arm reads `contracts/fixtures/*.json` and is **not optional**: the silent half of
+BUG-005 (a JSON `null` unmarshalled to `""` with no error) exists *only* on the Python→Go
+wire, so a Python-only contract test would not reach the failure that actually shipped.
 
 **MCP tests** (standalone image, not in compose):
 ```bash
@@ -80,11 +103,28 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ---
 
-## Current state — as of 2026-09-03
+## Current state — as of 2026-09-04
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
-progress, and Phase 4 *is* the Temporal durable-workflows migration.** No build work has started —
-but the design phase that was blocking it has now closed (below).
+progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
+2026-09-03, and **the first build item of the pre-migration queue — P6 / BUG-005 — was built on
+2026-09-04.** It is committed and **not deployed**.
+
+🔷 **P6 is built (2026-09-04), `schema_version` 2 → 3, five services, 598 tests green.** Detail is
+in `phase4-backlog.md` §1's P6 row, which is the source of truth; the two things that belong here
+because they are *not* in any ADR:
+
+- ⚠️ **The cutover is a hard cut against a drained stream — owner's call, 2026-09-04.** ADR-011
+  says nothing about deployment ordering, and there is no safe order: old workers + new API drop
+  every message as malformed, new workers + old API reject every message as missing `artifact_id`.
+  **All five services deploy together.** The stream was confirmed empty. `schema_version` was bumped
+  in the same change so a mis-ordered deploy reports *which* mismatch it hit rather than a generic
+  missing field.
+- ⚠️ **One step is still outstanding and is the owner's to authorise: the production `latest/`
+  sweep.** `api/scripts/sweep_latest_objects.py` — **dry-run by default**, `--apply` to delete;
+  verified in dry-run against the *local dev* bucket (1,916 objects). It performs **no accounting
+  adjustment on purpose** — `latest/` is uncounted on both sides, so a decrement would corrupt the
+  counter. Nothing in production has been touched.
 
 **ADR-009 is `Accepted` (2026-09-08).** Its section-by-section review completed 2026-09-05 — §1–§17
 and both closing blocks, reviewed from 2026-08-08 — and the owner took the promotion decision on
@@ -117,7 +157,7 @@ leaves `str(page.id)` in a field named `job_id` for the `CrawlWorkflow` port to 
 stale companions redrawn, PRD-016's four carry-backs landed, the conditional PRD numbered, the
 lane-blind meters recorded, D5 closed.
 
-**Nothing is blocking. P6 is unblocked and the pre-migration queue can start.**
+**Nothing is blocking. P6 is built; the queue continues at P9.**
 
 ⚠️ **ADR-010 is still `Draft`, and a Draft is not a decision** (`docs/adr/README.md`) — *"do not
 implement against it, and do not cite it as settled in another document."* It blocks nothing in the
@@ -154,21 +194,21 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    batch-and-crawl cutover, and it opens the Schedule overlap policy (`phase4-backlog.md` §2
    gotcha 6), which is genuinely undecided.
 3. **The pre-migration queue is the entry condition for any build work** (16e):
-   **P6 → P9 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of truth.
-   ⚠️ **P9 (BUG-011) is new this session** and sits immediately after P6 because **P6 already edits
-   the same function** — `_recover_stale_pending` builds a payload containing `job_id`, which
-   ADR-011 removes from the wire. Two visits cost more than one.
-   ⚠️ **P6's first task is not in the fix at all**: the API has **10 publish sites building raw
-   dicts and no message schema**, and ADR-011 §6's contract test is meaningless until one exists —
-   a hand-written test payload is the same guess the worker fixtures already make.
-   ⚠️ **P6's last task is not in the fix either**: removing `latest/` implies a **one-time sweep of
-   production objects**. Bounded (the bucket was emptied at the 2026-07-03 Clerk cutover) and it
-   needs **no accounting adjustment** — `latest/` is uncounted on both sides today — but it is a
-   production data deletion, so it is the owner's to authorise, not a step to run silently.
-   ⚠️ **P6 spans all three lanes**, confirmed at ADR-011's promotion. The crawl lane's share also
-   forces a result-consumer change that is easy to miss: the `crawl_context` check must move
-   **above** the required-field parse, or every crawl page logs `ERROR Malformed result message`
-   for traffic that is not malformed — the BUG-001 shape, manufactured on purpose.
+   ~~P6~~ ✅ → **P9 → P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its source of
+   truth.
+   ⚠️ **P9 (BUG-011) is next, and P6 did not close it** — the reverse of the usual worry. P6
+   removed the *cause* of stuck batch items but left the net holed: `_recover_stale_pending` still
+   selects batch runs with no lane filter and drops them at `db.get(Job, run.job_id)`, silently,
+   every tick. **The one thing P6 was expected to save has already been spent** — the argument for
+   sequencing P9 immediately after P6 was that P6 edits the same function, and it now has (the
+   payload it builds is a `ScrapeMessage` via `_build_scrape_message`). That saving is gone, but the
+   *fix* is unchanged and still small: route by whichever FK is set, like the result consumer.
+   Everything it needs is persisted. Note the live SAWarning it still emits in
+   `test_scheduler.py` — *"fully NULL primary key identity cannot load any object"* — which is
+   BUG-011 visible in the test output today.
+
+   ⚠️ **The `latest/` production sweep is the one part of P6 that did not ship**, because it is a
+   production data deletion and therefore the owner's to authorise. See *Current state* above.
 
 ### Git / deploy state
 
@@ -178,12 +218,17 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 - ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** —
   pushing it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up.
   Do not do it at session end; wait to be asked.
-- **As of 2026-09-03 (the later session), freshly fetched:** `develop` is **2 ahead** of
-  `origin/develop` and 0 behind; `main` is **49 behind** `develop` and 0 ahead. The unpushed
-  commits are `b00e0f2` and `35f4aa4`. ⚠️ **`develop` was last pushed through `fa3c18d`** — the
-  first push since 2026-08-28.
+- ⚠️ **`5c7fbdf` is no longer the last application-code commit.** P6 (2026-09-04) is the first
+  code change since 2026-08-28, and it touches **five services**: `api/`, `coordinator/`,
+  `playwright-worker/`, `llm-worker/`, `http-worker/`, plus a new top-level `contracts/`.
+- **As of 2026-09-04, freshly fetched before the P6 commit:** `develop` was **4 ahead** of
+  `origin/develop` and 0 behind; `main` **51 behind** `develop` and 0 ahead. The four unpushed
+  commits were `35f4aa4`, `b00e0f2`, `a0714f6`, `bcd78c3`. ⚠️ **`develop` was last pushed through
+  `fa3c18d`.** Re-check before quoting — P6's commits are on top of these.
 - ✅ **The ADR-011 promotion is committed** as `a0714f6` (ten files, all docs, no application code),
   with this file's own follow-up on top. **Unpushed**; `main` untouched.
+- ⚠️ **Deploying P6 is a five-service simultaneous release against a drained stream** — not a
+  rolling deploy, and not reversible one service at a time. See *Current state*.
 - ⚠️ **The document timeline runs ahead of git, and has for several sessions.** Work dated
   2026-09-04 → 2026-09-08 across the ADRs, backlog and this file was committed on **2026-09-02**.
   Everything created on 2026-09-03 (ADR-011, BUG-011) is dated from the clock, so ADR-011 (09-03)
@@ -228,11 +273,13 @@ somewhere else, and a second copy here is how they go stale:
 
 ## Session log
 
-Docs-only from 2026-08-04 onward — **no application code has changed since `5c7fbdf`**. Verdicts
-live in ADR-009's review log; this table is only *what a session produced*.
+Docs-only from 2026-08-04 **to 2026-09-03**; **2026-09-04 breaks that run** — P6 is the first
+application-code change since `5c7fbdf` (2026-08-28), and it spans five services. Verdicts live in
+ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-04 | **🔷 P6 / BUG-005 BUILT — the first code of Phase 4's pre-migration queue.** `schema_version` 2 → 3 across five services; 598 tests green (API 251 · **cross-service contract 29** · Go · playwright 168 · llm 101 · coordinator 49). Two typed producer models (`api/app/messages.py`) with all seven dict-construction sites routed through them; `artifact_id` on the wire, `job_id` off it; `run_id` optional and absent on the crawl lane; stage-named objects; `latest/` deleted from three workers and the delete path; the result-consumer parse-order move. **The ADR-011 §6 contract test exists** (`contracts/`) and was mutation-checked in both directions — it catches a reverted Go guard and a stale Go fixture. **Three findings not in the ADR**, all from the code rather than the docs: 🔴 the Go worker's `history/` write **depended on `latest/`** via `CopyObject`, so the removal is a rewrite there, not a deleted line; dropping the timestamp from screenshot keys makes redelivery **idempotent**, shrinking **BUG-004** by construction the way `latest/`'s removal shrank BUG-007; and 🔴 **ADR-011 decides nothing about deployment ordering, and no safe order exists** — owner's call taken to hard-cut against a drained stream, which is why the version was bumped. ⚠️ **The production `latest/` sweep did not ship** — written as `api/scripts/sweep_latest_objects.py`, dry-run by default, owner-authorised | *(this session)* |
 | 2026-09-03 ⬅ *clock, second session* | **🔷 ADR-011 reviewed and promoted to `Accepted` (owner decision) — P6's last design dependency is closed and nothing blocks the pre-migration queue.** Its one open item confirmed by name: **the crawl lane stays in scope**, so P6 changes all three lanes. Promotion sweep across ten files (ADR-002 → `Partially Superseded`; both ADR indexes; `CLAUDE.md`; backlog; `open-bugs.md`; `temporal-full-migration.md`; `docs/process/`). **Three stale premises corrected, none found by reading the passage that was marked** — the `run_id` recommendation ADR-011 rejects by name, `latest/` listed under *what does NOT change*, and 🔴 **an undeclared reversal of a clause in the Accepted ADR-009 §8d**. The third is a new class and has its own section above; the method lesson is in *Trimming the docs*. Also recorded: the `latest/` sweep is a **production data deletion**, owner-authorised; ADR-003's `result_path` shape has drifted but is **not** superseded | `a0714f6` |
 | 2026-09-03 ⬅ *clock, first session* | **🔷 Owner decisions taken on artifact identity, written up as ADR-011 (Draft)** — artifacts key on the producing row via a lane-neutral `artifact_id`; `job_id` leaves the wire; objects named by **stage**; **`latest/` removed**; the crawl lane's fabricated `run_id` removed. **This closes P6's last design dependency.** Two findings that changed the design mid-session, neither from reading the docs: a flat `history/{artifact_id}.{ext}` would have **silently reintroduced the collision** (the LLM worker hardcodes `ext="json"`, so an `output_format=json` job's extraction overwrites its own scraped page — only the timestamp prevents it today, and only because LLM calls are slow); and **`run_id` cannot be the universal key**, because the coordinator fabricates one with `uuid4()` for a lane that creates no `job_runs` rows, so `crawl_pages.id` is in the message twice — once honestly, once as `job_id`. **BUG-011 filed as P9**: stale-pending recovery silently skips every batch run, under a comment asserting the case is impossible — **BUG-005's fix does not close it**, since that removes the cause of stuck items rather than the hole in the net. A contracts package was weighed and **not taken**, recorded in ADR-011 §6 with the trigger to revisit (pipelines). Also verified: change detection is **path-agnostic** — "which run came before" is a SQL query and the differs take opaque paths, so the convention change needs **no backfill** | `fa3c18d`, `b00e0f2` |
 | 2026-09-08 | **🔷 Two owner decisions taken: ADR-009 promoted to `Accepted`, and the conditional-execution PRD numbered `PRD-019`** (sort-order cost accepted; index order is not build order). **Both stale companions redrawn** — `temporal-full-migration.md` (five 🔴 divergences resolved, plus three the redraw found: Web UI exposure, tenancy, the SPA contract) and `workflows-scoping.md` (six 🔴 cleared, §9's open questions turned into a table of answers). ADR-009's three pre-redraw notes **corrected in place**, which is what surfaced that the second document was owed a redraw at all. **PRD-016 carry-back pass** — four items ADR-009 owed it, no decision changed. Draft caveat cleared from the ADR header and eight downstream documents. **The four lane-blind admin meters recorded** as cutover gotchas — which also caught gotcha 3 still describing the rejected NATS bridge. **ADR-009's D5 closed**: both deferrals decided by the owner and written up as **ADR-010** (Draft), which opens one new item — a Schedule overlap policy | `1d94d5d`, `041921d`, `33d58f2`, `c76edf8`, `c8f381f` |
