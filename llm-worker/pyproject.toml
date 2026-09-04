@@ -8,6 +8,12 @@ dependencies = [
     # aiohttp is miniopy-async's HTTP backend; declared explicitly because
     # worker/errors.py matches its connection-error types (UF-003 3a).
     "aiohttp>=3.9.0",
+    # httpx is imported directly by worker/llm.py (the ensure_ready warm-up probe)
+    # and worker/errors.py (which matches httpx.TransportError). It used to arrive
+    # transitively via the provider SDKs and was never declared; when those SDKs
+    # moved to httpx2 on a major bump, a routine rebuild produced an image with no
+    # httpx at all and the worker crash-looped on import. Declare what you import.
+    "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.3.0",
     "cryptography>=42.0.0",
