@@ -1103,3 +1103,203 @@ even though they are tracked separately.
   lost, and a Temporal workflow does not lose its own steps. But it is fixed pre-migration for the
   same reason BUG-005 is: it is on a live, shipped path with the migration months out, and P6 is
   already in the file.
+
+---
+
+## BUG-012 — `reenqueue_stalled` deletes `crawl_pages` while `crawl_queue` still references them; the coordinator cannot start
+
+**Severity:** High (the coordinator crash-loops on boot and never reaches its loops — a total
+crawl-lane outage, not a degradation)
+**Discovered:** 2026-09-04, restarting the rebuilt workers after P6. Not caused by P6 — the
+restart is only what ran the startup path against a database that had stalled items in it.
+**Status:** Open — **owner deferred on 2026-09-04, deliberately not fixed** (triage below).
+
+### What happens
+
+`reenqueue_stalled` (`coordinator/coordinator/dispatcher.py`) is **crash recovery**: it resets
+queue items left `dispatched` by a previous unclean stop back to `pending`. It runs from
+`coordinator/coordinator/main.py` **before either loop starts**:
+
+```python
+# Crash recovery: reset stalled dispatched items before loops start.
+async with AsyncSessionLocal() as db:
+    await reenqueue_stalled(db)
+```
+
+It does three things in this order:
+
+1. `SELECT crawl_queue.crawl_page_id` for stale dispatched items — collects `page_ids`.
+2. `DELETE FROM crawl_pages WHERE id IN (page_ids)`.
+3. `UPDATE crawl_queue SET status='pending', crawl_page_id=NULL` for those items.
+
+Step 2 deletes rows that step 3 has not yet stopped referencing:
+
+```
+sqlalchemy.exc.IntegrityError: ForeignKeyViolationError:
+  update or delete on table "crawl_pages" violates foreign key constraint
+  "crawl_queue_crawl_page_id_fkey" on table "crawl_queue"
+DETAIL: Key (id)=(9126e36a-…) is still referenced from table "crawl_queue".
+```
+
+The exception propagates out of `run()`, the process exits, the container restarts, and the same
+startup path runs again against the same rows. **Observed in local dev: 31 restarts, 194 stalled
+items.** There is no recovery — the state that triggers it is exactly the state the function exists
+to clean up, so it cannot clear itself.
+
+⚠️ **The trigger is ordinary.** Any coordinator stopped mid-crawl leaves `dispatched` items behind;
+once they age past `stale_threshold_minutes` the next start is fatal. A deploy, a node drain, or an
+OOM kill is enough. The bug is dormant only while no crawl has ever been interrupted.
+
+### Root cause
+
+Two things line up, and either alone would be harmless:
+
+**1. The statement order is inverted relative to the constraint.** The comment above the delete
+states the intent — *"Delete CrawlPage rows that are about to lose their FK reference"* — and it is
+correct about *what* should happen. The rows do need deleting, and `page_ids` is already collected
+into a Python list before either write, so the delete does not depend on the reference still
+existing. Only the order is wrong.
+
+**2. The FK has no `ON DELETE` action, while its sibling on the same table does.**
+
+```
+crawl_queue_crawl_id_fkey       FOREIGN KEY (crawl_id)      REFERENCES crawls(id) ON DELETE CASCADE
+crawl_queue_crawl_page_id_fkey  FOREIGN KEY (crawl_page_id) REFERENCES crawl_pages(id)
+```
+
+`crawl_id` cascades; `crawl_page_id` defaults to `NO ACTION`. Two FKs on one table with different
+delete semantics, which is why deleting a `crawls` row has never hit this and deleting a
+`crawl_pages` row always will.
+
+Introduced by `2edffce` — *"fix(coordinator): delete orphaned CrawlPages in reenqueue_stalled (prod
+review #51)"*. **A fix commit that introduced its own bug**, the same shape as BUG-005: the problem
+it set out to solve (orphaned pages breaking the 1:1 `CrawlQueueItem` ↔ `CrawlPage` invariant) is
+real, and the remedy is right; only the sequencing is wrong.
+
+### Why the tests did not catch it — 🔴 the test pins the broken order as correct
+
+`coordinator/tests/test_dispatcher.py::test_reenqueue_stalled_deletes_linked_pages` **passes**, and
+all 49 coordinator tests pass. It passes because it asserts the defect:
+
+```python
+db = AsyncMock()
+db.execute = AsyncMock(side_effect=[select_result, delete_result, update_result])
+await reenqueue_stalled(db)
+assert db.execute.call_count == 3
+```
+
+Its docstring is explicit: *"reenqueue_stalled must DELETE those CrawlPage rows **before** nulling
+the FK"*. The `side_effect` list encodes that order positionally — SELECT, DELETE, UPDATE — so
+**correcting the code will fail this test**, and the test must be updated as part of the fix.
+
+⚠️ **This is the second confirmed instance of this exact failure mode in this codebase.** The first
+is BUG-005, where `api/tests/test_batch.py` asserted `payload["job_id"] is None` — pinning the
+broken value as expected. Both are mock-based tests asserting a shape against a real constraint the
+mock cannot express: an `AsyncMock` enforces no foreign keys, just as an API-side assertion parses
+no worker schema. **A green suite is evidence about the mock, not about the database.**
+
+The generalisable lesson is the one ADR-011 §6 already drew for the wire: a test that stands
+entirely on one side of a boundary tells you nothing about the boundary. Here the boundary is the
+schema, and the missing test is one that runs `reenqueue_stalled` against a real Postgres with the
+FK in place.
+
+### The fix — a reorder, plus the test
+
+Move the `DELETE` to **after** the `UPDATE`. `page_ids` is already materialised into a list before
+either write, so nothing is lost by nulling the references first:
+
+1. `SELECT` the `page_ids` (unchanged).
+2. `UPDATE crawl_queue … SET crawl_page_id = NULL` — releases the references.
+3. `DELETE FROM crawl_pages WHERE id IN (page_ids)` — now unconstrained.
+
+Then update `test_reenqueue_stalled_deletes_linked_pages`: its `side_effect` order becomes
+`[select_result, update_result, delete_result]` and its docstring must stop asserting the inverted
+requirement.
+
+**Considered and not chosen: adding `ON DELETE SET NULL` to the FK.** It would also stop the crash,
+and it would make the constraint consistent with its sibling. It is not the fix because it papers
+over a statement order that is wrong on its own terms, and because a migration to alter a
+constraint is a heavier change than moving one statement — on a table in a service the migration
+deletes. Worth revisiting only if the same FK bites somewhere else.
+
+### Triage — why this is filed and not fixed
+
+`coordinator/` is on the migration's deletion list, so **`phase4-backlog.md` §3 points at
+do-not-fix**. This bug is a candidate for the same override BUG-005 and Q6 got — it is live, it is
+severe, and the migration is months out — but that override is the owner's call, and on 2026-09-04
+the owner **declined to take it now**. Filed so the decision is recorded rather than rediscovered.
+
+Two things bear on a later decision:
+
+- **The `CrawlWorkflow` port does not inherit it.** Temporal's own retry and timeout handling
+  replaces `reenqueue_stalled` outright; there is no equivalent function to port the bug into. This
+  is genuinely dissolved by the migration, unlike BUG-005's identity decision.
+- **The blast radius is bounded by BUG-008.** Crawl results are acked and dropped on v1 anyway, so a
+  coordinator that cannot start is losing a lane that already cannot complete a crawl. That lowers
+  the practical urgency without changing the severity of the mechanism.
+
+### Interactions
+
+- **BUG-008** — the crawl lane is already non-functional end to end on v1 (will-not-fix). This bug
+  stops the service starting at all; that one stops it finishing a crawl.
+- **BUG-005** — same failure mode in the tests (a mock-based assertion pinning the defect), and the
+  same *"a fix commit introduced it"* provenance.
+- **P6 / ADR-011** — unrelated to the mechanism. P6 touched this file (the dispatch payload) but not
+  this function; the restart is only what exposed it.
+- **P7** — will add quota accounting and artifact reclaim to the crawl lane. It should not land on a
+  coordinator that cannot boot.
+
+---
+
+## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
+
+Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised
+instance of the one already recorded.
+
+**What happened.** Rebuilding `llm-worker` for P6's deploy produced an image whose worker
+crash-looped on import:
+
+```
+File "/app/worker/errors.py", line 23, in <module>
+    import httpx
+ModuleNotFoundError: No module named 'httpx'
+```
+
+**Why.** `llm-worker/worker/llm.py` (the `ensure_ready()` warm-up probe) and
+`llm-worker/worker/errors.py` (which matches `httpx.TransportError` in the transient classifier)
+both import `httpx` **directly**, and `llm-worker/pyproject.toml` never declared it. It arrived
+transitively through the provider SDKs. Between the previous image build and this one, the
+resolver moved to **`anthropic 1.3.0`** and **`openai 3.8.0`** — major-version jumps past the
+`anthropic>=0.30.0` / `openai>=1.30.0` floors — and those releases migrated to **`httpx2`**, a
+**differently named package**. The image ended up with `httpx2 2.12.0` installed and no `httpx` at
+all.
+
+**Fixed** in `1c456a4` by declaring `httpx>=0.27.0`. Verified: 101 llm-worker tests pass against
+the rebuilt image, and the worker starts and subscribes cleanly.
+
+**Why this is BUG-006 and not a one-off.** The parent bug's *"Compounding the gap"* paragraph
+already predicted it — *"the version actually running in production is whatever PyPI resolved at
+image-build time — unpinned, non-reproducible"*. What it did not anticipate is the sharper form:
+an unpinned range let a transitive dependency **change its identity**, not merely its version. A
+version bump degrades behaviour; a package rename removes the module. Both are invisible without a
+lockfile, and only one of them fails loudly.
+
+**Two things this sharpens for the parent bug's fix:**
+
+1. **Lockfiles are the fix, and this is the argument for them.** BUG-006 is currently framed around
+   *scanning coverage* — Dependabot seeing 3 of 7 manifests. Scanning was never the whole problem:
+   a lockfile would have prevented this outage outright, and no amount of alerting would have.
+2. **An audit for undeclared imports belongs in the same pass.** Checked across all three Python
+   services on 2026-09-04: `llm-worker`'s `httpx` was **the only** undeclared direct import.
+   `playwright-worker` declares both `httpx` and `aiohttp`; `coordinator` declares `aiohttp` and
+   imports no `httpx`. Notably `llm-worker` *did* declare `aiohttp`, with a comment explaining
+   exactly why (*"declared explicitly because worker/errors.py matches its connection-error
+   types"*) — the same reasoning applied to `httpx` would have caught this in 2026-07. The
+   omission was an oversight in a file that demonstrates the correct instinct one line above.
+
+⚠️ **Unresolved, and larger than the fix:** the SDK majors themselves. `anthropic 1.3.0` and
+`openai 3.8.0` are now what a fresh build installs, against code written for `0.x` / `1.x`. The
+test suite passes, and `worker/errors.py` builds its exception tuple at **import time**, so the
+`anthropic.APITimeoutError` / `openai.RateLimitError` names it references still resolve — a real
+signal, not an assumption. But no one chose those versions, and whether to pin them is an open
+decision, not a settled one.
