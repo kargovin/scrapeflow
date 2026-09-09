@@ -1260,6 +1260,167 @@ Two things bear on a later decision:
 
 ---
 
+## BUG-013 — Five of seven dependency manifests resolve at build time; the tested image and the deployed image are different artifacts
+
+**Severity:** Medium (no live symptom today, and the one realised instance was caught before it
+reached production — but every rebuild is an unreviewed dependency change, and one has already
+produced a crash-looping image)
+**Discovered:** 2026-09-09, working out what a `main` fast-forward would actually build for the P6
+cutover
+**Status:** Open — **filed, not triaged.** Sequencing is the owner's call. Deliberately carved out
+of BUG-006 rather than folded into it; see *Relationship to BUG-006* below.
+
+### What happens
+
+Dev images and production images are built from the same Dockerfiles at different times. Five of the
+seven dependency roots resolve their versions **at build time** instead of reading a committed lock,
+so the image a test suite went green against and the image the cluster runs are two different
+artifacts that happen to share a commit SHA. Nothing in the pipeline detects the difference, and
+nothing records what was installed.
+
+| Manifest | How the image installs it | Reproducible? |
+|---|---|---|
+| `api/` (Python) | `uv sync --frozen` against committed `uv.lock` | ✅ Yes |
+| `http-worker/` | `go mod download` against committed `go.sum` | ✅ Yes |
+| `frontend/` | **`npm install`**, in `api/Dockerfile`'s `frontend-builder` stage | ❌ **No — and it has a lockfile** |
+| `coordinator/` | `pip install --no-cache-dir .` | ❌ No lockfile |
+| `llm-worker/` | `pip install --no-cache-dir .` | ❌ No lockfile |
+| `playwright-worker/` | `pip install --no-cache-dir .` | ❌ No lockfile |
+| `mcp/` | `pip install --no-cache-dir .` | ❌ No lockfile |
+
+**The four Python services are the known half** — floor-only constraints (`aiohttp>=3.9.0`,
+`anthropic>=0.30.0`, `cryptography>=41.0.0`) and no lockfile, so `pip` resolves whatever PyPI offers
+on the day. This is the *"Compounding the gap"* paragraph of BUG-006 stated as its own defect.
+
+**The frontend is the half nobody had looked at, and it is worse than missing a lockfile.**
+`frontend/package-lock.json` is committed, and it is one of the three manifests Dependabot *does*
+scan — 21 open alerts are filed against it. But `api/Dockerfile` copies **only `package.json`**
+into the builder stage before installing:
+
+```dockerfile
+COPY frontend/package.json ./
+RUN npm install
+COPY frontend/ ./          # ← the lockfile arrives here, after the install
+RUN npm run build
+```
+
+So the lockfile is not merely un-enforced — it is **absent from the stage that resolves versions**,
+and `npm install` without one resolves the whole tree fresh from the semver ranges in
+`package.json`. The consequence is that **the resolution Dependabot scans has never been the
+resolution that ships.** Those 21 alerts describe a tree the production bundle does not contain,
+in either direction: an alert may not apply, and a real vulnerability in what actually shipped
+would not appear.
+
+### Why this is not theoretical
+
+It has already happened once, on this exact mechanism. Rebuilding `llm-worker` for P6's deploy
+produced an image that crash-looped on import with `ModuleNotFoundError: No module named 'httpx'`.
+The resolver had moved past the floors to `anthropic 1.3.0` and `openai 3.8.0`, and those majors
+migrated to **`httpx2`** — a differently *named* package — so the image contained `httpx2 2.12.0`
+and no `httpx` at all. Full account: the [BUG-006 addendum](#bug-006-addendum-2026-09-04--the-coverage-gap-produced-a-concrete-outage).
+
+That outage is recorded there as evidence for BUG-006's fix. This bug is the defect it is evidence
+*of*: not "we could not see the version", but **"we did not choose the version, and could not have
+reproduced it if we had."**
+
+⚠️ **The unresolved half is still unresolved.** `anthropic 1.3.0` and `openai 3.8.0` are what a
+fresh build installs today, against code written for `0.x` / `1.x`. The suite passes and
+`worker/errors.py` builds its exception tuple at import time, so the names it references do resolve
+— real signal, not an assumption. But **nobody chose those majors**, and until a lock records them,
+nobody chose the next ones either.
+
+### Why it matters more than usual right now
+
+The P6 cutover rebuilds **all five services at once** (`paths-filter` matches every service
+directory, so a `main` fast-forward triggers all five jobs). Four of the five are unlocked, and the
+fifth — `api/` — carries the unlocked frontend. So the release that already has the least margin
+(a hard `schema_version` cut, five deployments, no per-service rollback) is also the one where the
+largest number of dependency trees re-resolve simultaneously.
+
+A crash-loop after that push may have nothing to do with P6. That is a diagnosis cost paid at the
+worst moment.
+
+### Root cause
+
+Two independent gaps, and neither is visible from the other:
+
+1. **No lockfile** for `coordinator/`, `llm-worker/`, `playwright-worker/`, `mcp/`. The floor-only
+   constraints were adequate when these services were new and are not now.
+2. **A lockfile that the build cannot see.** `frontend/` has one; `api/Dockerfile` does not copy it
+   before `npm install`. A committed lock that the build ignores is worse than no lock, because it
+   reads as solved on inspection — which is why this survived a scanning-coverage bug that
+   explicitly enumerated all seven manifests.
+
+Underneath both: nothing asserts that a rebuild of a given commit produces the same dependency set,
+so neither gap has a failing check.
+
+### Fix
+
+The acceptance criterion is one sentence: **rebuilding a given commit twice must install identical
+dependency versions, and those versions must be readable from the repository.**
+
+1. **Generate and commit lockfiles** for `coordinator/`, `llm-worker/`, `playwright-worker/`, `mcp/`
+   — `uv lock`, matching `api/`, which already works this way and is the in-repo precedent.
+2. **Install from the lock in each Dockerfile.** Committing a lock changes nothing on its own —
+   `pip install .` ignores it. `api/Dockerfile`'s `uv sync --frozen` is the shape to copy; `--frozen`
+   is the load-bearing flag, because it *fails* rather than silently re-resolving when the lock and
+   the manifest disagree.
+3. **Fix the frontend build**: copy `frontend/package-lock.json` alongside `package.json`, and use
+   **`npm ci`** rather than `npm install`. `npm ci` requires a lock and refuses to update it, which
+   is the enforcement `--frozen` gives on the Python side.
+4. **Decide the SDK majors.** `anthropic` and `openai` need a deliberate upper bound or a pinned
+   version, not just a lock recording an accident. Step 1 makes today's resolution reproducible;
+   this step makes it *chosen*. Open decision, per the BUG-006 addendum.
+5. **Then** `.github/dependabot.yml` enumerating all seven roots — BUG-006's step 1. It is listed
+   last on purpose: scanning a manifest with no enforced lock reports versions that are not what
+   ships.
+
+**Expect the alert count to rise.** Four services that have never been scanned will start
+reporting, and the frontend's numbers will change because the scanned tree will finally be the
+shipped one. That is the fix working, not a regression.
+
+**Smaller item, same file, worth doing in the same pass:** all four unlocked services list
+`pytest` and `pytest-asyncio` in runtime `dependencies` rather than a dev extra, so the test
+framework ships inside every production image. Harmless today; it widens the dependency surface
+being locked, and a lock is the natural moment to split it.
+
+### Relationship to BUG-006
+
+Same fix vehicle, different defects — filed separately so neither can be closed by the other.
+
+| | BUG-006 | BUG-013 |
+|---|---|---|
+| The defect is | **Visibility** — Dependabot scans 3 of 7 manifests, so the true advisory count is unknown | **Reproducibility** — the artifact tested is not the artifact deployed |
+| Closed when | Every manifest is scanned and its alerts triaged | A rebuild of a commit installs identical versions, readable from the repo |
+| Would a perfect fix of the other close it? | No — full scanning coverage still leaves the build re-resolving on every push | No — perfect reproducibility of an unscanned tree is still an unscanned tree |
+
+BUG-006's fix list already contains "generate lockfiles" as step 2, and its addendum concluded that
+lockfiles rather than scanning are the real fix. This bug is that conclusion promoted to its own
+record, plus the frontend finding, which BUG-006 cannot hold: it counts `frontend/package-lock.json`
+among the **scanned** manifests, and is right to — the gap there is not scanning at all.
+
+### Interactions
+
+- **BUG-006** — carved from it; see the table above. ⚠️ **Fixing this one changes BUG-006's
+  premise**: once the frontend installs from its lock, BUG-006's 21 frontend alerts describe the
+  shipped bundle for the first time and should be re-counted, not carried forward.
+- **BUG-002 alert counts** (`phase4-backlog.md` §4) — already flagged as stale and half-repo. They
+  are further off than that row says, because one of the three counted manifests was never the
+  deployed resolution.
+- **P6 / the cutover** — not a cause and not a blocker, but it is the release with the most
+  services rebuilding at once, so it is where an unlocked resolution is most likely to surface.
+  ⚠️ **After that push, check pod logs for import-time crash-loops on the four Python services
+  before attributing any failure to the `schema_version` change.**
+- **ADR-010** — needs a *"pinned, offline public-suffix list with a lockfile"*. That requirement
+  cites BUG-006 as its reason; the mechanism it actually needs is this one. A public-suffix list
+  that re-resolves at build time changes crawl admission decisions between builds.
+- **Survives Temporal.** The migration deletes `coordinator/` and rewrites the workers, but every
+  service it produces still installs dependencies at image build. Locking is unaffected by the
+  engine change, and the Temporal SDK becomes one more unpinned dependency if this is not fixed
+  first. `phase4-backlog.md` §4.
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised
