@@ -225,21 +225,16 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 - ⚠️ **`5c7fbdf` is no longer the last application-code commit.** P6 (2026-09-04) is the first
   code change since 2026-08-28, and it touches **five services**: `api/`, `coordinator/`,
   `playwright-worker/`, `llm-worker/`, `http-worker/`, plus a new top-level `contracts/`.
-- **As of 2026-09-09, freshly fetched:** `develop` is **9 ahead** of `origin/develop` and 0
-  behind; `main` is **56 behind** `develop` and 0 ahead. **`develop` was last pushed through
-  `fa3c18d`** (2026-09-03). The nine unpushed commits, oldest first:
-
-  | Commit | What |
-  |---|---|
-  | `b00e0f2` | BUG-011 filed as P9 |
-  | `35f4aa4` | ADR-011 + P9 recorded in `CLAUDE.md` and this file |
-  | `a0714f6` | ADR-011 promoted to Accepted; ADR-002 §4 superseded |
-  | `bcd78c3` | `a0714f6` recorded in the session log |
-  | **`81afbb9`** | **P6 — the code.** Five services, `schema_version` 3 |
-  | `d4330f4` | P6 recorded as built, not deployed |
-  | `1c456a4` | llm-worker declares its `httpx` dependency |
-  | `427f7ce` | BUG-012 filed; BUG-006 addendum |
-  | `5d91134` | BUG-006 cross-linked to its addendum |
+- ✅ **`develop` was pushed to `origin/develop` on 2026-09-09** (`fa3c18d..a57e395`, ten commits,
+  including P6). **`develop` and `origin/develop` are level; `main` is 57 behind and 0 ahead.**
+  ⚠️ Re-check against the remote before quoting these — that is the standing rule below, and this
+  line has already been stale once in this file.
+- ⚠️ **Pushing `develop` builds and deploys nothing.** `.github/workflows/build-push.yml` triggers
+  on `push: branches: ["main"]` only. **That is what makes a `main` fast-forward a release** — and
+  because P6 touched `api/`, `http-worker/`, `playwright-worker/`, `llm-worker/` **and**
+  `coordinator/`, its `paths-filter` matches **all five** service jobs. The five-service
+  simultaneous build the cutover needs is therefore what a `main` fast-forward already produces;
+  what it does **not** do is drain the stream first, which is still a manual step.
 - ✅ **The ADR-011 promotion is committed** as `a0714f6` (ten files, all docs, no application code),
   with this file's own follow-up on top. **Unpushed**; `main` untouched.
 - ⚠️ **Deploying P6 is a five-service simultaneous release against a drained stream** — not a
