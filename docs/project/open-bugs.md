@@ -1025,9 +1025,13 @@ a page and continue). Three things make it larger than it looks:
 
 ## BUG-011 — Stale-pending recovery silently skips every batch run, under a comment saying the case is impossible
 
-**Severity:** Low — latent by construction once P6 ships, and the fix is small. Filed rather than
-folded into BUG-005 because the net it holes is the platform's **only** recovery path for a lost
-dispatch, and the current code hides the gap rather than recording it.
+**Severity:** Low — **now latent by construction: P6 shipped in code 2026-09-04.** The fix is
+small. Filed rather than folded into BUG-005 because the net it holes is the platform's **only**
+recovery path for a lost dispatch, and the current code hides the gap rather than recording it.
+⚠️ **The sequencing saving is spent.** The argument for putting this immediately after P6 was that
+P6 edits the same function anyway — it now has (`_recover_stale_pending` builds its payload through
+`_build_scrape_message`). The fix is unchanged and still small, but it is a fresh visit to the file,
+not a free ride on one already open.
 **Discovered:** 2026-09-03, tracing BUG-005's fix scope against [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md)
 **Status:** Open — **pre-migration**, sequenced immediately after **P6**.
 

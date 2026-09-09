@@ -35,6 +35,9 @@ When the user is ready to build something, they will say so. Until then, guide a
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
 | Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
+| **The wire contract the API publishes through (P6)** | `api/app/messages.py` — and `coordinator/coordinator/messages.py`, a **deliberate duplicate** for the crawl lane (ADR-011 §6 rejected a shared package) |
+| **Cross-service contract test + Go fixtures** | `contracts/` — the only test that feeds an API-produced message into each worker's real parser. Command in *Commands* below |
+| `latest/` production sweep (owner-authorised, unrun) | `api/scripts/sweep_latest_objects.py` — dry-run by default |
 | Multi-persona process starter prompts | `docs/process/` |
 | Anti-bot hardening record (ADR-008 companion) | `docs/guides/anti-bot-hardening.md` |
 | Phase 1–3 history (specs, backlogs, reviews, audits) | `docs/archive/` |
@@ -204,7 +207,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    payload it builds is a `ScrapeMessage` via `_build_scrape_message`). That saving is gone, but the
    *fix* is unchanged and still small: route by whichever FK is set, like the result consumer.
    Everything it needs is persisted. Note the live SAWarning it still emits in
-   `test_scheduler.py` — *"fully NULL primary key identity cannot load any object"* — which is
+   `api/tests/test_scheduler.py` — *"fully NULL primary key identity cannot load any object"* — which is
    BUG-011 visible in the test output today.
 
    ⚠️ **The `latest/` production sweep is the one part of P6 that did not ship**, because it is a
@@ -214,17 +217,29 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 - **Deployed code is `b110591`** (2026-07-28).
 - **`5c7fbdf`** (the crawl page status-filter fix, 2026-08-28) is committed on `develop`,
-  **not deployed, not on `main`**. Everything on top of it is docs.
+  **not deployed, not on `main`**. ⚠️ *"Everything on top of it is docs"* was true until
+  2026-09-04 and is now false — see the P6 bullet below.
 - ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** —
   pushing it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up.
   Do not do it at session end; wait to be asked.
 - ⚠️ **`5c7fbdf` is no longer the last application-code commit.** P6 (2026-09-04) is the first
   code change since 2026-08-28, and it touches **five services**: `api/`, `coordinator/`,
   `playwright-worker/`, `llm-worker/`, `http-worker/`, plus a new top-level `contracts/`.
-- **As of 2026-09-04, freshly fetched before the P6 commit:** `develop` was **4 ahead** of
-  `origin/develop` and 0 behind; `main` **51 behind** `develop` and 0 ahead. The four unpushed
-  commits were `35f4aa4`, `b00e0f2`, `a0714f6`, `bcd78c3`. ⚠️ **`develop` was last pushed through
-  `fa3c18d`.** Re-check before quoting — P6's commits are on top of these.
+- **As of 2026-09-09, freshly fetched:** `develop` is **9 ahead** of `origin/develop` and 0
+  behind; `main` is **56 behind** `develop` and 0 ahead. **`develop` was last pushed through
+  `fa3c18d`** (2026-09-03). The nine unpushed commits, oldest first:
+
+  | Commit | What |
+  |---|---|
+  | `b00e0f2` | BUG-011 filed as P9 |
+  | `35f4aa4` | ADR-011 + P9 recorded in `CLAUDE.md` and this file |
+  | `a0714f6` | ADR-011 promoted to Accepted; ADR-002 §4 superseded |
+  | `bcd78c3` | `a0714f6` recorded in the session log |
+  | **`81afbb9`** | **P6 — the code.** Five services, `schema_version` 3 |
+  | `d4330f4` | P6 recorded as built, not deployed |
+  | `1c456a4` | llm-worker declares its `httpx` dependency |
+  | `427f7ce` | BUG-012 filed; BUG-006 addendum |
+  | `5d91134` | BUG-006 cross-linked to its addendum |
 - ✅ **The ADR-011 promotion is committed** as `a0714f6` (ten files, all docs, no application code),
   with this file's own follow-up on top. **Unpushed**; `main` untouched.
 - ⚠️ **Deploying P6 is a five-service simultaneous release against a drained stream** — not a
@@ -262,7 +277,7 @@ somewhere else, and a second copy here is how they go stale:
 |---|---|
 | What a given ADR-009 section decided, and what its review changed | ADR-009 `## Review status` → the section itself |
 | Whether a note you are holding is now wrong | ADR-009's **Reversed or withdrawn** + **Amended as a knock-on** tables. ⚠️ **They cover only what ADR-009's own review changed** — a *later* ADR displacing one of its clauses cannot appear there, and one has: ADR-011 §4 vs §8d's `latest/` sequencing. Check the superseding ADR's header too |
-| The live artifact-path convention | **ADR-011** — not ADR-002 §4, and not `CLAUDE.md`'s row alone (⚠️ **live code still implements the old convention**; the change ships with P6) |
+| The live artifact-path convention | **ADR-011** — not ADR-002 §4. ✅ **Live code implements it as of 2026-09-04** (P6, `81afbb9`), across all three lanes. ⚠️ **Production does not** — it still runs the old convention until the next release, and historical objects keep their old-format `result_path` strings forever (no backfill, by design) |
 | Phase 4 scope, sequencing, what is do-not-fix | `phase4-backlog.md` (§1 queue · §2 migration · §3 **do NOT fix** · §4 survives) |
 | A bug's root cause and fix plan | `open-bugs.md` |
 | Why a production trap exists | `CLAUDE.md` → Key decisions (41 rows; the rationale column *is* the trap) |
@@ -279,7 +294,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
-| 2026-09-04 | **🔷 P6 / BUG-005 BUILT — the first code of Phase 4's pre-migration queue.** `schema_version` 2 → 3 across five services; 598 tests green (API 251 · **cross-service contract 29** · Go · playwright 168 · llm 101 · coordinator 49). Two typed producer models (`api/app/messages.py`) with all seven dict-construction sites routed through them; `artifact_id` on the wire, `job_id` off it; `run_id` optional and absent on the crawl lane; stage-named objects; `latest/` deleted from three workers and the delete path; the result-consumer parse-order move. **The ADR-011 §6 contract test exists** (`contracts/`) and was mutation-checked in both directions — it catches a reverted Go guard and a stale Go fixture. **Three findings not in the ADR**, all from the code rather than the docs: 🔴 the Go worker's `history/` write **depended on `latest/`** via `CopyObject`, so the removal is a rewrite there, not a deleted line; dropping the timestamp from screenshot keys makes redelivery **idempotent**, shrinking **BUG-004** by construction the way `latest/`'s removal shrank BUG-007; and 🔴 **ADR-011 decides nothing about deployment ordering, and no safe order exists** — owner's call taken to hard-cut against a drained stream, which is why the version was bumped. ⚠️ **The production `latest/` sweep did not ship** — written as `api/scripts/sweep_latest_objects.py`, dry-run by default, owner-authorised. **Then the deploy rehearsal found two pre-existing bugs, neither from P6.** 🔴 **BUG-012 filed** — `reenqueue_stalled` deletes `crawl_pages` while `crawl_queue` still references them, so the **coordinator crash-loops on startup** and cannot self-clear (31 restarts, 194 stalled items observed). Owner **declined the §3 override**; filed to §3, dissolves cleanly. **Its unit test pins the broken order as correct** — the second instance of that shape after BUG-005's. 🔴 **BUG-006 addendum** — `llm-worker` imported `httpx` without declaring it; the provider SDKs jumped majors and moved to **`httpx2`**, so a rebuild produced an image with no `httpx` and the worker crash-looped. Fixed (`1c456a4`); **lockfiles, not scanning, are BUG-006's real fix**, and the SDK majors are now unpinned and undecided | *(this session)* |
+| 2026-09-04 | **🔷 P6 / BUG-005 BUILT — the first code of Phase 4's pre-migration queue.** `schema_version` 2 → 3 across five services; 598 tests green (API 251 · **cross-service contract 29** · Go · playwright 168 · llm 101 · coordinator 49). Two typed producer models (`api/app/messages.py`) with all seven dict-construction sites routed through them; `artifact_id` on the wire, `job_id` off it; `run_id` optional and absent on the crawl lane; stage-named objects; `latest/` deleted from three workers and the delete path; the result-consumer parse-order move. **The ADR-011 §6 contract test exists** (`contracts/`) and was mutation-checked in both directions — it catches a reverted Go guard and a stale Go fixture. **Three findings not in the ADR**, all from the code rather than the docs: 🔴 the Go worker's `history/` write **depended on `latest/`** via `CopyObject`, so the removal is a rewrite there, not a deleted line; dropping the timestamp from screenshot keys makes redelivery **idempotent**, shrinking **BUG-004** by construction the way `latest/`'s removal shrank BUG-007; and 🔴 **ADR-011 decides nothing about deployment ordering, and no safe order exists** — owner's call taken to hard-cut against a drained stream, which is why the version was bumped. ⚠️ **The production `latest/` sweep did not ship** — written as `api/scripts/sweep_latest_objects.py`, dry-run by default, owner-authorised. **Then the deploy rehearsal found two pre-existing bugs, neither from P6.** 🔴 **BUG-012 filed** — `reenqueue_stalled` deletes `crawl_pages` while `crawl_queue` still references them, so the **coordinator crash-loops on startup** and cannot self-clear (31 restarts, 194 stalled items observed). Owner **declined the §3 override**; filed to §3, dissolves cleanly. **Its unit test pins the broken order as correct** — the second instance of that shape after BUG-005's. 🔴 **BUG-006 addendum** — `llm-worker` imported `httpx` without declaring it; the provider SDKs jumped majors and moved to **`httpx2`**, so a rebuild produced an image with no `httpx` and the worker crash-looped. Fixed (`1c456a4`); **lockfiles, not scanning, are BUG-006's real fix**, and the SDK majors are now unpinned and undecided | `81afbb9`, `d4330f4`, `1c456a4`, `427f7ce`, `5d91134` |
 | 2026-09-03 ⬅ *clock, second session* | **🔷 ADR-011 reviewed and promoted to `Accepted` (owner decision) — P6's last design dependency is closed and nothing blocks the pre-migration queue.** Its one open item confirmed by name: **the crawl lane stays in scope**, so P6 changes all three lanes. Promotion sweep across ten files (ADR-002 → `Partially Superseded`; both ADR indexes; `CLAUDE.md`; backlog; `open-bugs.md`; `temporal-full-migration.md`; `docs/process/`). **Three stale premises corrected, none found by reading the passage that was marked** — the `run_id` recommendation ADR-011 rejects by name, `latest/` listed under *what does NOT change*, and 🔴 **an undeclared reversal of a clause in the Accepted ADR-009 §8d**. The third is a new class and has its own section above; the method lesson is in *Trimming the docs*. Also recorded: the `latest/` sweep is a **production data deletion**, owner-authorised; ADR-003's `result_path` shape has drifted but is **not** superseded | `a0714f6` |
 | 2026-09-03 ⬅ *clock, first session* | **🔷 Owner decisions taken on artifact identity, written up as ADR-011 (Draft)** — artifacts key on the producing row via a lane-neutral `artifact_id`; `job_id` leaves the wire; objects named by **stage**; **`latest/` removed**; the crawl lane's fabricated `run_id` removed. **This closes P6's last design dependency.** Two findings that changed the design mid-session, neither from reading the docs: a flat `history/{artifact_id}.{ext}` would have **silently reintroduced the collision** (the LLM worker hardcodes `ext="json"`, so an `output_format=json` job's extraction overwrites its own scraped page — only the timestamp prevents it today, and only because LLM calls are slow); and **`run_id` cannot be the universal key**, because the coordinator fabricates one with `uuid4()` for a lane that creates no `job_runs` rows, so `crawl_pages.id` is in the message twice — once honestly, once as `job_id`. **BUG-011 filed as P9**: stale-pending recovery silently skips every batch run, under a comment asserting the case is impossible — **BUG-005's fix does not close it**, since that removes the cause of stuck items rather than the hole in the net. A contracts package was weighed and **not taken**, recorded in ADR-011 §6 with the trigger to revisit (pipelines). Also verified: change detection is **path-agnostic** — "which run came before" is a SQL query and the differs take opaque paths, so the convention change needs **no backfill** | `fa3c18d`, `b00e0f2` |
 | 2026-09-08 | **🔷 Two owner decisions taken: ADR-009 promoted to `Accepted`, and the conditional-execution PRD numbered `PRD-019`** (sort-order cost accepted; index order is not build order). **Both stale companions redrawn** — `temporal-full-migration.md` (five 🔴 divergences resolved, plus three the redraw found: Web UI exposure, tenancy, the SPA contract) and `workflows-scoping.md` (six 🔴 cleared, §9's open questions turned into a table of answers). ADR-009's three pre-redraw notes **corrected in place**, which is what surfaced that the second document was owed a redraw at all. **PRD-016 carry-back pass** — four items ADR-009 owed it, no decision changed. Draft caveat cleared from the ADR header and eight downstream documents. **The four lane-blind admin meters recorded** as cutover gotchas — which also caught gotcha 3 still describing the rejected NATS bridge. **ADR-009's D5 closed**: both deferrals decided by the owner and written up as **ADR-010** (Draft), which opens one new item — a Schedule overlap policy | `1d94d5d`, `041921d`, `33d58f2`, `c76edf8`, `c8f381f` |
