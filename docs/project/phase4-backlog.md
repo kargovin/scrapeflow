@@ -261,8 +261,18 @@ Real work, untouched by the migration, but not blocking it. Revisit after Phase 
    fixed in parallel with, or after, the ADR — before any batch traffic arrives, not before the
    design lands. **P7's *decision* is a hard input to ADR-009 §3/§8** (already made — PRD-016 OQ-4,
    round 3); its implementation follows P6, which touches the same accounting surface.
+   ⚠️ **Release policy (owner, 2026-09-11): the whole queue ships as ONE `main` fast-forward.**
+   No per-item release — P6 stays unpushed and accumulates with P9, P8 and P7 + BUG-007, so the
+   drained-stream hard cut (`schema_version` 2→3, five services together) is paid once. ⚠️ **P8
+   adds a migration**, so unlike P6 alone that release runs Alembic on API startup. **`main` is
+   then frozen for the migration** — see the tension with §2's per-flow cutover noted there.
+
 2. **Phase 4 (§2)** — write the PRD, then **ADR-009**, then execute the strangler-fig sequence
    from `temporal-full-migration.md` §9.
+   ⚠️ **Open (2026-09-11):** the owner's `main` freeze for the duration of the migration is in
+   tension with this step — ADR-009's rollout is *per-flow, proven in production, reversible each
+   step*, which needs incremental releases. Changing it requires a **superseding ADR**, not an
+   edit: ADR-009 is Accepted and immutable.
 3. **Post-Phase 4 (§4)** — revisit, led by UF-002 (which unblocks BUG-003's remaining tiers).
 
 **Do not fix §3.** If one of those resurfaces in triage, check this table before writing code.
