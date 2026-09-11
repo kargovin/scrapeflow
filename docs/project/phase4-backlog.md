@@ -264,15 +264,17 @@ Real work, untouched by the migration, but not blocking it. Revisit after Phase 
    ⚠️ **Release policy (owner, 2026-09-11): the whole queue ships as ONE `main` fast-forward.**
    No per-item release — P6 stays unpushed and accumulates with P9, P8 and P7 + BUG-007, so the
    drained-stream hard cut (`schema_version` 2→3, five services together) is paid once. ⚠️ **P8
-   adds a migration**, so unlike P6 alone that release runs Alembic on API startup. **`main` is
-   then frozen for the migration** — see the tension with §2's per-flow cutover noted there.
+   adds a migration**, so unlike P6 alone that release runs Alembic on API startup. **The migration
+   itself then ships per-flow** (§2), not as one frozen batch.
 
 2. **Phase 4 (§2)** — write the PRD, then **ADR-009**, then execute the strangler-fig sequence
    from `temporal-full-migration.md` §9.
-   ⚠️ **Open (2026-09-11):** the owner's `main` freeze for the duration of the migration is in
-   tension with this step — ADR-009's rollout is *per-flow, proven in production, reversible each
-   step*, which needs incremental releases. Changing it requires a **superseding ADR**, not an
-   edit: ADR-009 is Accepted and immutable.
+   ✅ **Release cadence settled (owner, 2026-09-11): ship per-flow, one `main` push per §16 step.**
+   A *"freeze `main` until the migration is done"* alternative was weighed and dropped — the reason
+   for per-flow is attribution (*"better to fix at that juncture than everything is pushed all at
+   once"*), which is ADR-009's own reasoning, so **no superseding ADR is needed and §16 stands as
+   written.** ⚠️ Remember §16's **drain gate fires before each flow cutover**, not only at deletion:
+   the flow drained *and* its NATS consumers at zero unprocessed / zero outstanding acks.
 3. **Post-Phase 4 (§4)** — revisit, led by UF-002 (which unblocks BUG-003's remaining tiers).
 
 **Do not fix §3.** If one of those resurfaces in triage, check this table before writing code.

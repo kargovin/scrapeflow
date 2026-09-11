@@ -223,20 +223,23 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   Do **not** offer a `main` fast-forward per queue item. P6 stays unpushed and accumulates with
   **P9 → P8 → P7 + BUG-007**; `main` moves once, when the queue is empty. The drain-and-hard-cut
   window the `schema_version` 2→3 change needs is then paid **once instead of four times**.
-  **Then `main` is frozen for the Temporal migration** until it is complete. The service is
-  explicitly treated as non-critical — *"if it fails we'll deal with it with new pushes"* — so
-  **fix-forward is the accepted posture**; no rollback rehearsal is wanted, and the awkward part
-  of rollback here (Flux's image automation re-applies the newest tag within ~1 min unless the
-  automation is suspended first) is accepted rather than engineered around.
+  **The migration itself then ships per-flow**, following ADR-009 §16's named sequence — a `main`
+  push per step is expected and wanted. A *"freeze `main` until the whole migration is done"*
+  alternative was **considered and dropped the same day**: the owner's reason for per-flow is
+  attribution — *"better to fix at that juncture than everything is pushed all at once"* — which
+  is ADR-009's own reasoning, so **the policy and the Accepted ADR agree and no superseding ADR is
+  needed.** ✅ *This resolves the tension flagged earlier on 2026-09-11.*
+  The service is explicitly treated as non-critical — *"any failure is fixed by new ff pushes"* —
+  so **fix-forward is the accepted posture throughout**; no rollback rehearsal is wanted, and the
+  awkward part of rollback here (Flux's image automation re-applies the newest tag within ~1 min
+  unless the automation is suspended first) is accepted rather than engineered around.
   - ⚠️ **This expires P6's "zero migrations" comfort.** P6 alone adds no Alembic revision; **P8
     does** (the shared per-object ledger is a new table), so the queue-clearing release *will* run
     migrations on API startup — against a `Recreate`-strategy, single-replica API, which stops the
     old pod **before** starting the new one and therefore has no fallback if the new image fails.
-  - ⚠️ **Open, raised 2026-09-11:** the freeze is in tension with **ADR-009's Accepted rollout
-    model** (*route new work to v2, drain + cut v1 per-flow when proven, reversible each step*),
-    which assumes incremental production releases to prove each flow. If the freeze is meant
-    literally, that is a **change of decision needing a superseding ADR** — ADR-009 is immutable.
-    Not yet resolved.
+  - The first two §16 steps are the cheap ones: **engine up** is largely infra-repo work needing no
+    app release, and **worker port** is purely **additive** — the workers gain Temporal entry points
+    while still serving NATS, and nothing routes to them yet.
 - ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** —
   pushing it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up.
   Do not do it at session end; wait to be asked.
