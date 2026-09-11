@@ -19,31 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.credentials import resolve_credentials
+from app.core.dispatch import build_batch_scrape_message, build_scrape_message
 from app.core.quota import is_quota_exceeded
-from app.messages import Credentials, MessageOptions, ScrapeMessage
+from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.settings import settings
 
 logger = structlog.get_logger()
-
-
-def _build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> ScrapeMessage:
-    """Build the dispatch message for a scheduled job run.
-
-    Shared by _dispatch_due_jobs and _recover_stale_pending: recovery re-publishes an
-    existing run as-is, so the two must produce the same message or a recovered run
-    would not be the run that was lost.
-    """
-    return ScrapeMessage(
-        artifact_id=str(run.id),
-        run_id=str(run.id),
-        url=job.url,
-        output_format=job.output_format.value,
-        engine=job.engine,
-        credentials=Credentials(**credentials) if credentials else None,
-        options=MessageOptions(respect_robots=job.respect_robots, actions=job.playwright_actions),
-    )
 
 
 async def scheduler_loop(
@@ -110,13 +93,14 @@ async def _dispatch_due_jobs(
             await db.commit()  # commit per job — releases row lock immediately
 
             credentials = await resolve_credentials(job, db)
-            message = _build_scrape_message(job, run, credentials)
+            message = build_scrape_message(job, run, credentials)
+            subject = (
+                NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
+                if job.engine == "playwright"
+                else NATS_JOBS_RUN_HTTP_SUBJECT
+            )
             try:
-                if job.engine == "playwright":
-                    message.playwright_options = job.playwright_options  # already a dict (JSONB)
-                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, message.to_nats_bytes())
-                else:
-                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, message.to_nats_bytes())
+                await js.publish(subject, message.to_nats_bytes())
             except Exception:
                 logger.exception(
                     "scheduler: NATS publish failed after DB commit — stale-pending recovery will retry",
@@ -139,8 +123,14 @@ async def _recover_stale_pending(
 ) -> None:
     """Re-publish NATS messages for job_runs stuck in pending longer than the configured threshold.
 
-    This catches the crash-after-commit-before-publish failure mode from _dispatch_due_jobs.
-    No new JobRun is created — the existing run is re-published as-is.
+    This catches the crash-after-commit-before-publish failure mode from _dispatch_due_jobs
+    and create_batch. No new JobRun is created — the existing run is re-published as-is.
+
+    A run belongs to exactly one lane (job_runs CHECK: one of job_id / batch_item_id is set)
+    and each lane rebuilds its message from a different parent, so the loop resolves the
+    message per lane, then publishes through one shared tail. Every branch that skips a run
+    logs why — this is the only recovery path for a lost dispatch, and a silent skip here is
+    how batch runs went unrecovered from the day batch shipped (BUG-011).
     """
     stale_cutoff = datetime.now(UTC) - timedelta(minutes=settings.stale_pending_threshold_minutes)
 
@@ -156,29 +146,70 @@ async def _recover_stale_pending(
         stale_runs = (await db.execute(stmt)).scalars().all()
 
         for run in stale_runs:
-            job = await db.get(Job, run.job_id)
-            if job is None:
-                continue  # orphaned run — should not happen with CASCADE deletes
+            if run.job_id is not None:
+                job = await db.get(Job, run.job_id)
+                if job is None:
+                    # Unreachable: job_runs.job_id is ON DELETE CASCADE. Logged, not silent.
+                    logger.warning(
+                        "scheduler: stale pending run has no job — skipping",
+                        run_id=str(run.id),
+                        job_id=str(run.job_id),
+                    )
+                    continue
+                credentials = await resolve_credentials(job, db)
+                message = build_scrape_message(job, run, credentials)
+                engine = job.engine
+                log_ctx = {"job_id": str(job.id)}
+            elif run.batch_item_id is not None:
+                item = await db.get(BatchItem, run.batch_item_id)
+                if item is None:
+                    # Unreachable: job_runs.batch_item_id is ON DELETE CASCADE. Logged, not silent.
+                    logger.warning(
+                        "scheduler: stale pending run has no batch item — skipping",
+                        run_id=str(run.id),
+                        batch_item_id=str(run.batch_item_id),
+                    )
+                    continue
+                batch = await db.get(Batch, item.batch_id)
+                if batch is None:
+                    # Unreachable: batch_items.batch_id is ON DELETE CASCADE. Logged, not silent.
+                    logger.warning(
+                        "scheduler: stale pending run has no batch — skipping",
+                        run_id=str(run.id),
+                        batch_item_id=str(item.id),
+                        batch_id=str(item.batch_id),
+                    )
+                    continue
+                message = build_batch_scrape_message(batch, item, run)
+                engine = batch.engine
+                log_ctx = {"batch_id": str(batch.id), "batch_item_id": str(item.id)}
+            else:
+                # Unreachable: the job_runs CHECK requires exactly one FK. Logged, not silent.
+                logger.warning(
+                    "scheduler: stale pending run has neither job_id nor batch_item_id — skipping",
+                    run_id=str(run.id),
+                )
+                continue
 
-            credentials = await resolve_credentials(job, db)
-            message = _build_scrape_message(job, run, credentials)
+            subject = (
+                NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
+                if engine == "playwright"
+                else NATS_JOBS_RUN_HTTP_SUBJECT
+            )
             try:
-                if job.engine == "playwright":
-                    message.playwright_options = job.playwright_options
-                    await js.publish(NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT, message.to_nats_bytes())
-                else:
-                    await js.publish(NATS_JOBS_RUN_HTTP_SUBJECT, message.to_nats_bytes())
+                await js.publish(subject, message.to_nats_bytes())
             except Exception:
                 logger.exception(
                     "scheduler: NATS publish failed for stale-pending recovery — will retry next cycle",
                     run_id=str(run.id),
-                    job_id=str(job.id),
+                    **log_ctx,
                 )
                 continue
 
             logger.info(
                 "scheduler: re-published stale pending run",
                 run_id=str(run.id),
-                job_id=str(job.id),
+                engine=engine,
+                **log_ctx,
             )
         # No DB write — status stays pending; the worker result will advance it

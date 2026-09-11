@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
+from app.core.dispatch import build_batch_scrape_message
 from app.core.encryption import get_fernet
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.nats import get_jetstream
@@ -21,7 +22,6 @@ from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit_n
 from app.core.redis import get_redis
 from app.core.security import validate_no_ssrf
-from app.messages import MessageOptions, ScrapeMessage
 from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
@@ -83,7 +83,7 @@ async def create_batch(
     batch = Batch(
         user_id=user.id,
         status="queued",
-        output_format=body.output_format,
+        output_format=body.output_format.value,
         engine=body.engine.value,
         webhook_url=body.webhook_url,
         webhook_secret=webhook_secret_encrypted,
@@ -118,17 +118,7 @@ async def create_batch(
         else NATS_JOBS_RUN_HTTP_SUBJECT
     )
     for item, run in zip(items, runs, strict=True):
-        # A batch item is not a job (ADR-006), so there is no job id to send and the
-        # message no longer has a field that wants one. Artifacts key on the item's
-        # own run — the row that exists — rather than on a null (ADR-011 §1).
-        message = ScrapeMessage(
-            artifact_id=str(run.id),
-            run_id=str(run.id),
-            url=item.url,
-            output_format=body.output_format.value,
-            engine=body.engine.value,
-            options=MessageOptions(respect_robots=body.respect_robots),
-        )
+        message = build_batch_scrape_message(batch, item, run)
         await js.publish(subject, message.to_nats_bytes())
 
     # Transition batch to "running" after first dispatch.

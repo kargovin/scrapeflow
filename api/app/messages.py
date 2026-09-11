@@ -69,9 +69,10 @@ class CrawlContext(BaseModel):
 class ScrapeMessage(BaseModel):
     """The fat message consumed by the Go HTTP worker and the Playwright worker.
 
-    Built by all five scrape dispatchers: ``routers/jobs.py``, ``core/scheduler.py``
-    (dispatch and stale-pending recovery), ``routers/batch.py``, and the coordinator's
-    own copy of this shape.
+    Built in one place on the API side — ``core/dispatch.py``, which every scrape
+    dispatcher (``routers/jobs.py``, ``routers/batch.py``, ``core/scheduler.py`` for
+    both dispatch and stale-pending recovery) calls — plus the coordinator's own copy
+    of this shape.
 
     ``artifact_id`` is the primary key of the row that owns the execution —
     ``job_runs.id`` on the job, scheduled and batch lanes, ``crawl_pages.id`` on the
