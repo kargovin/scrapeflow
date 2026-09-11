@@ -14,6 +14,15 @@ scheduler has to detect its own stalled dispatches; Temporal's activity timeouts
 policy make the whole recovery loop unnecessary, and `scheduler.py` is deleted. Fixing the
 query would be work on code scheduled for removal. It is log noise, not a correctness
 problem, so it costs nothing to leave until then.
+> ✅ **Symptom gone by construction, 2026-09-11 — P9 (BUG-011), not a fix of this bug.** The
+> recovery loop now branches on `batch_item_id` *before* the job lookup, so `db.get(Job, None)` is
+> never called and `WHERE jobs.id IS NULL` never fires. Two things below are therefore stale and
+> left as written: the **Fix** section proposes *excluding* batch runs from the query — P9 did the
+> opposite, and recovers them; and *"batch runs are not recoverable via this path anyway"* is now
+> false. Status unchanged: nothing here was worked on for its own sake.
+> ⚠️ The v1-vs-v2 lane filter in this bug's `phase4-backlog.md` row (ADR-009 §7 mechanism 4) is a
+> different question — which *engine owns* a run, not which *parent* it has — and is **still owed at
+> migration step 2**.
 
 ### What happens
 
@@ -303,7 +312,7 @@ Playwright worker's `JobMessage.job_id` is a **required `str`**
 parse guard logs `malformed_message`, **acks, and returns** (`worker/worker.py:42-46`) — the ack
 tells JetStream the message was handled, so it is never redelivered. Every item stays `pending`
 forever. Stale-pending recovery cannot rescue them: it resolves `Job` by `run.job_id`, which is
-`None`, and skips (`scheduler.py:154-156`). **This is already recorded** — see BUG-001, which
+`None`, and skips (`_recover_stale_pending`'s job lookup — *since rewritten by P9, 2026-09-11*). **This is already recorded** — see BUG-001, which
 notes in passing that "batch runs stuck in `pending` are not recoverable via this path anyway."
 That line is Path A, written down and read as an aside.
 
@@ -643,7 +652,7 @@ scraped page is never removed at all.
 | LLM completes | `result_consumer.py:485` → `:81` | tries to add **JSON** size — **skipped**, stamp already set |
 | run finalised | `result_consumer.py:500` | `result_path` repointed at the **JSON** |
 | what the worker wrote | `llm-worker/worker/storage.py:23` | JSON to a **new** key; the HTML object is untouched |
-| job hard-deleted | `routers/jobs.py:391`, `admin.py:336` | enumerates `JobRun.result_path` → stats the **JSON** → decrements by **that** |
+| job hard-deleted | `cancel_job(permanent=True)` in `routers/jobs.py`, `admin.py:336` | enumerates `JobRun.result_path` → stats the **JSON** → decrements by **that** |
 
 So: charged for a 291 KiB–4.1 MiB page, credited back a few KiB of JSON.
 
@@ -693,7 +702,7 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
 - **The same pass found a fourth symptom, in the deletion path.** An LLM job leaves **four**
   objects, not two: the scrape writes the job's own format and the LLM always writes `.json`, so
   `latest/{job}.{fmt}` and `latest/{job}.json` are **different keys** and neither overwrites the
-  other. Hard delete derives **one** filename from `job.output_format` (`routers/jobs.py:395`), so
+  other. Hard delete derives **one** filename from `job.output_format` (`cancel_job(permanent=True)` in `routers/jobs.py`), so
   it removes whichever `latest/` copy matches the declared format and **orphans the other** — and
   *which* one survives depends on the format (an `output_format=json` job has only three objects,
   because the LLM's write lands on the scrape's key). The assumption underneath is **one artifact in
@@ -1025,15 +1034,21 @@ a page and continue). Three things make it larger than it looks:
 
 ## BUG-011 — Stale-pending recovery silently skips every batch run, under a comment saying the case is impossible
 
-**Severity:** Low — **now latent by construction: P6 shipped in code 2026-09-04.** The fix is
-small. Filed rather than folded into BUG-005 because the net it holes is the platform's **only**
-recovery path for a lost dispatch, and the current code hides the gap rather than recording it.
-⚠️ **The sequencing saving is spent.** The argument for putting this immediately after P6 was that
-P6 edits the same function anyway — it now has (`_recover_stale_pending` builds its payload through
-`_build_scrape_message`). The fix is unchanged and still small, but it is a fresh visit to the file,
-not a free ride on one already open.
+**Severity:** Low — latent by construction once P6 shipped in code (2026-09-04). Filed rather
+than folded into BUG-005 because the net it holes is the platform's **only** recovery path for a
+lost dispatch, and the code hid the gap rather than recording it.
 **Discovered:** 2026-09-03, tracing BUG-005's fix scope against [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md)
-**Status:** Open — **pre-migration**, sequenced immediately after **P6**.
+**Status:** ✅ **FIXED IN CODE 2026-09-11 (`ed4d63c`) — not yet deployed.** All three parts below
+shipped, plus one thing the fix surfaced: the job lane had the same duplication the batch lane
+would have gained — `create_job` built its message inline while the scheduler used a helper, so
+"recovery re-sends the run that was lost" was only *enforced* for scheduled runs. Both lanes' builders
+now live in **`api/app/core/dispatch.py`** (`build_scrape_message`, `build_batch_scrape_message`)
+and all five dispatch sites call them; two tests pin dispatch-vs-recovery **byte equality** per lane.
+Ships with the pre-migration queue's single release (`phase4-backlog.md` §1).
+⚠️ **Knock-on, not a fix: BUG-001's symptom is gone by construction.** A batch run now branches on
+`batch_item_id` before `db.get(Job, …)` is reached, so `WHERE jobs.id IS NULL` never fires. BUG-001
+stays closed-as-dissolved; see its note. ⚠️ **This is job-vs-batch routing, not v1-vs-v2** —
+ADR-009 §7 mechanism 4 (the lane marker owed at migration step 2) is untouched.
 
 ### What happens
 
@@ -1092,6 +1107,14 @@ Three things ship with it:
 3. A log line on the branch that still skips. A silent `continue` inside the only recovery path is
    how this stayed invisible.
 
+✅ **As shipped (`ed4d63c`):** the loop resolves the message per lane — `run → jobs` or
+`run → batch_items → batches` — then publishes through one shared tail. All four skip sites
+(orphaned job, orphaned item, orphaned batch, neither FK) log at warning with the `run_id`; each is
+unreachable by schema (CASCADE / the mutual-exclusion CHECK) and the comment now says which. The
+`SAWarning` this bug emitted in `api/tests/test_scheduler.py` — *"fully NULL primary key identity
+cannot load any object"* — is gone from the suite. Mutation-checked: with the batch branch reverted
+to a bare `continue`, both batch-lane tests fail.
+
 ### Sequencing
 
 **Immediately after P6.** Not before: ADR-011 changes the dispatch payload (`job_id` leaves the
@@ -1099,7 +1122,8 @@ wire, `artifact_id` arrives), so writing a second payload builder first means wr
 
 ⚠️ **P6 already edits this exact function** — `_recover_stale_pending` builds a payload containing
 `job_id` and must change regardless. Doing both in one pass is materially cheaper than two visits,
-even though they are tracked separately.
+even though they are tracked separately. *(That saving was spent — P6 landed 2026-09-04 without
+this, and P9 was a fresh visit on 2026-09-11.)*
 
 ### Interactions
 
