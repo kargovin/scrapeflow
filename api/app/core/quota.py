@@ -3,14 +3,17 @@
 Three dimensions:
   monthly_runs    — job_runs created since first-of-month
   concurrent_jobs — job_runs currently in pending/running/processing
-  storage_bytes   — cumulative MinIO bytes tracked in user_quotas.storage_bytes_used
+  storage_bytes   — cumulative MinIO bytes tracked in user_quotas.storage_bytes_used,
+                    a materialised sum over the storage_objects ledger (core/ledger.py);
+                    only the ledger moves it, in the same transaction as the row
 
 Limits come from the user_quotas row; NULL columns fall back to settings defaults.
 
 check_user_quota()  — raises HTTP 429; use at API endpoints (POST /jobs, POST /batch)
 is_quota_exceeded() — returns bool; use in scheduler (no HTTP context)
-check_storage_quota() / increment_storage_bytes() / decrement_storage_bytes()
-                    — used by result_consumer and cleanup_old_runs
+check_storage_quota() — used by result_consumer
+increment_storage_bytes() / decrement_storage_bytes()
+                    — called by core/ledger.py only; nothing else moves the counter
 """
 
 import json
@@ -94,8 +97,7 @@ async def _quota_check(
                 "error": "quota_exceeded",
                 "quota_type": "monthly_runs",
                 "message": (
-                    f"Monthly run limit reached ({used}/{limit}). "
-                    f"Quota resets on {resets_at[:10]}."
+                    f"Monthly run limit reached ({used}/{limit}). Quota resets on {resets_at[:10]}."
                 ),
                 "resets_at": resets_at,
             }
@@ -112,7 +114,7 @@ async def _quota_check(
                 "error": "quota_exceeded",
                 "quota_type": "concurrent_jobs",
                 "message": (
-                    f"Concurrent job limit reached ({used}/{limit}). " "Wait for a job to complete."
+                    f"Concurrent job limit reached ({used}/{limit}). Wait for a job to complete."
                 ),
                 "resets_at": None,
             }
@@ -129,8 +131,7 @@ async def _quota_check(
                 "error": "quota_exceeded",
                 "quota_type": "storage_bytes",
                 "message": (
-                    f"Storage limit reached ({used}/{limit} bytes). "
-                    "Delete old results to continue."
+                    f"Storage limit reached ({used}/{limit} bytes). Delete old results to continue."
                 ),
                 "resets_at": None,
             }
@@ -209,9 +210,14 @@ async def decrement_storage_bytes(user_id: uuid.UUID, db: AsyncSession, size: in
     )
 
 
-async def handle_storage_quota_exceeded(db, run: JobRun, minio_path: str, minio: Minio) -> None:
-    """Delete the oversized object, mark run failed, and emit the appropriate notify."""
+async def handle_storage_quota_exceeded(
+    db, run: JobRun, minio_path: str, minio: Minio, extra_paths: list[str] | None = None
+) -> None:
+    """Delete the oversized object (and any siblings that rode the same result message —
+    screenshots), mark run failed, and emit the appropriate notify."""
     await delete_minio_object(minio, minio_path, "oversized object")
+    for path in extra_paths or []:
+        await delete_minio_object(minio, path, "oversized object (sibling)")
 
     run.status = "failed"
     run.error = "storage_quota_exceeded"

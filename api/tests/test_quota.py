@@ -21,6 +21,7 @@ from app.core.result_consumer import _handle_result
 from app.models.api_key import ApiKey
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.models.storage_object import StorageObject
 from app.models.user import User
 from app.models.user_quota import UserQuota
 
@@ -418,7 +419,7 @@ async def test_result_consumer_storage_quota_ok_increments_usage(quota_user):
 async def test_permanent_delete_decrements_storage_quota(
     client, quota_user, quota_headers, mock_jetstream
 ):
-    """DELETE /jobs/{id}?permanent=true decrements storage_bytes_used for each deleted run."""
+    """DELETE /jobs/{id}?permanent=true decrements storage_bytes_used by each ledger row."""
     from unittest.mock import AsyncMock, MagicMock
 
     from app.core.minio import get_minio
@@ -428,20 +429,16 @@ async def test_permanent_delete_decrements_storage_quota(
         job = Job(user_id=quota_user.id, url="https://example.com")
         db.add(job)
         await db.flush()
-        run = JobRun(
-            job_id=job.id,
-            status="completed",
-            result_path=f"scrapeflow-results/history/{job.id}/123.html",
-        )
+        path = f"scrapeflow-results/history/{job.id}/scrape.html"
+        run = JobRun(job_id=job.id, status="completed", result_path=path)
         db.add(run)
+        await db.flush()
+        db.add(StorageObject(user_id=quota_user.id, object_key=path, bytes=300, job_run_id=run.id))
         db.add(UserQuota(user_id=quota_user.id, storage_bytes_used=500))
         await db.commit()
         job_id = job.id
 
-    stat_obj = MagicMock()
-    stat_obj.size = 300
     mock_minio = MagicMock()
-    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
     mock_minio.remove_object = AsyncMock()
 
     app.dependency_overrides[get_minio] = lambda: mock_minio
@@ -473,20 +470,16 @@ async def test_admin_hard_delete_decrements_storage_quota(client, quota_user, ad
         job = Job(user_id=quota_user.id, url="https://example.com")
         db.add(job)
         await db.flush()
-        run = JobRun(
-            job_id=job.id,
-            status="completed",
-            result_path=f"scrapeflow-results/history/{job.id}/456.html",
-        )
+        path = f"scrapeflow-results/history/{job.id}/scrape.html"
+        run = JobRun(job_id=job.id, status="completed", result_path=path)
         db.add(run)
+        await db.flush()
+        db.add(StorageObject(user_id=quota_user.id, object_key=path, bytes=400, job_run_id=run.id))
         db.add(UserQuota(user_id=quota_user.id, storage_bytes_used=800))
         await db.commit()
         job_id = job.id
 
-    stat_obj = MagicMock()
-    stat_obj.size = 400
     mock_minio = MagicMock()
-    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
     mock_minio.remove_object = AsyncMock()
 
     app.dependency_overrides[get_minio] = lambda: mock_minio
@@ -510,7 +503,7 @@ async def test_admin_hard_delete_decrements_storage_quota(client, quota_user, ad
 
 
 async def test_result_consumer_storage_increment_failure_fails_run(quota_user):
-    """If increment_storage_bytes raises, the run is marked failed (not completed)."""
+    """If the ledger write raises, the run is marked failed (not completed)."""
     from unittest.mock import patch
 
     async with AsyncSessionLocal() as db:
@@ -546,9 +539,7 @@ async def test_result_consumer_storage_increment_failure_fails_run(quota_user):
     msg.metadata = MagicMock()
     msg.ack = AsyncMock()
 
-    with patch(
-        "app.core.result_consumer.increment_storage_bytes", side_effect=Exception("db error")
-    ):
+    with patch("app.core.result_consumer.record_object", side_effect=Exception("db error")):
         await _handle_result(msg, AsyncMock(), mock_minio)
 
     async with AsyncSessionLocal() as db:
@@ -560,34 +551,39 @@ async def test_result_consumer_storage_increment_failure_fails_run(quota_user):
     msg.ack.assert_called_once()
 
 
-async def test_try_increment_storage_idempotent(db_user):
-    """Finding 5: _try_increment_storage is a no-op when run.storage_accounted_at is already set.
+async def test_record_object_idempotent_on_key(db_user):
+    """record_object charges a key once: the second call is a no-op and reports it.
 
-    Belt-and-suspenders guard: even if the terminal-status early-return is somehow
-    bypassed, a run that already has storage_accounted_at set must not increment the
-    quota a second time.
+    This is the redelivery guard the per-run stamp used to provide — keyed on the
+    object now, so a second *artifact* for the same run is still charged (BUG-007).
     """
-    from unittest.mock import patch
-
-    from app.core.result_consumer import _try_increment_storage
+    from app.core.ledger import record_object
 
     async with AsyncSessionLocal() as db:
         job = Job(user_id=db_user.id, url="https://example.com")
         db.add(job)
         await db.flush()
-        from datetime import UTC, datetime
-
-        run = JobRun(
-            job_id=job.id,
-            status="completed",
-            storage_accounted_at=datetime.now(UTC),
-        )
+        run = JobRun(job_id=job.id, status="completed")
         db.add(run)
         await db.commit()
         await db.refresh(run)
 
-        with patch("app.core.result_consumer.increment_storage_bytes") as mock_inc:
-            result = await _try_increment_storage(db, run, db_user.id, size=1024)
+        key = f"scrapeflow-results/history/{run.id}/scrape.html"
+        first = await record_object(
+            db, user_id=db_user.id, object_key=key, size=1024, job_run_id=run.id
+        )
+        second = await record_object(
+            db, user_id=db_user.id, object_key=key, size=1024, job_run_id=run.id
+        )
+        other = await record_object(
+            db,
+            user_id=db_user.id,
+            object_key=f"scrapeflow-results/history/{run.id}/llm.json",
+            size=16,
+            job_run_id=run.id,
+        )
+        await db.commit()
 
-        assert result is True, "should return True (accounting already recorded)"
-        mock_inc.assert_not_called()
+        assert (first, second, other) == (True, False, True)
+        quota_row = await db.get(UserQuota, db_user.id)
+        assert quota_row.storage_bytes_used == 1024 + 16

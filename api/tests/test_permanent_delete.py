@@ -11,6 +11,7 @@ from app.core.minio import get_minio
 from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.models.storage_object import StorageObject
 
 
 @pytest.fixture
@@ -77,16 +78,20 @@ async def test_permanent_delete_removes_only_the_history_object(
     )
     job_id = response.json()["id"]
 
-    # Attach a result_path to the run so the permanent delete has an object to remove.
+    # Record the run's object in the ledger so the permanent delete has something to
+    # enumerate — the delete path reads rows, not result_path (P8).
     async with AsyncSessionLocal() as db:
         run = await db.scalar(select(JobRun).where(JobRun.job_id == uuid.UUID(job_id)))
-        run.result_path = f"scrapeflow-results/history/{run.id}/scrape.html"
+        job = await db.get(Job, run.job_id)
+        path = f"scrapeflow-results/history/{run.id}/scrape.html"
+        run.result_path = path
         run.status = "completed"
+        db.add(StorageObject(user_id=job.user_id, object_key=path, bytes=10, job_run_id=run.id))
         await db.commit()
 
     await client.delete(f"/jobs/{job_id}?permanent=true", headers=auth_headers)
 
-    # One call per result_path. There is no second call for a latest/ mirror —
+    # One call per ledger row. There is no second call for a latest/ mirror —
     # nothing writes one any more (ADR-011 §4).
     assert mock_minio_client.remove_object.call_count == 1
     called_keys = {call.args[1] for call in mock_minio_client.remove_object.call_args_list}

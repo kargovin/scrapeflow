@@ -13,10 +13,9 @@ from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import get_current_admin_user
 from app.core.db import get_db
+from app.core.ledger import release_run_objects, release_user_objects
 from app.core.minio import get_minio
-from app.core.quota import decrement_storage_bytes
 from app.core.redis import get_redis
-from app.core.storage import delete_minio_object, stat_minio_size
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -192,25 +191,17 @@ async def admin_delete_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    # Collect result_paths for all of this user's runs (job path + batch path).
-    runs_result = await db.execute(
-        select(JobRun.result_path)
-        .outerjoin(Job, JobRun.job_id == Job.id)
-        .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
-        .outerjoin(Batch, BatchItem.batch_id == Batch.id)
-        .where(
-            func.coalesce(Job.user_id, Batch.user_id) == user_id,
-            JobRun.result_path.isnot(None),
+    # Everything the user holds, on every lane — the ledger is keyed on the owner.
+    outcome = await release_user_objects(db, minio_client, user_id, "user object on admin delete")
+    if outcome.failed:
+        await db.commit()  # what was freed stays freed; the user row stays too
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"{outcome.failed} stored object(s) could not be removed; "
+                "the user was not deleted. Retry."
+            ),
         )
-    )
-    total_freed = 0
-    for (result_path,) in runs_result.all():
-        file_size = await stat_minio_size(minio_client, result_path)
-        if await delete_minio_object(minio_client, result_path, "user object on admin delete"):
-            total_freed += file_size
-
-    if total_freed > 0:
-        await decrement_storage_bytes(user_id, db, total_freed)
 
     await db.delete(user)
     await db.commit()
@@ -218,7 +209,8 @@ async def admin_delete_user(
         "admin_user_deleted",
         user_id=str(user_id),
         admin_id=str(admin.id),
-        minio_bytes_freed=total_freed,
+        objects_released=outcome.released,
+        minio_bytes_freed=outcome.freed_bytes,
     )
 
 
@@ -322,21 +314,28 @@ async def admin_delete_or_cancel_job(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     if hard_delete:
-        runs_result = await db.execute(
-            select(JobRun.result_path).where(
-                JobRun.job_id == job_id, JobRun.result_path.is_not(None)
-            )
+        runs = (await db.execute(select(JobRun).where(JobRun.job_id == job_id))).scalars().all()
+        outcome = await release_run_objects(
+            db, minio_client, runs, job.user_id, "job object on admin hard delete"
         )
-        for (result_path,) in runs_result.all():
-            file_size = await stat_minio_size(minio_client, result_path)
-            if await delete_minio_object(
-                minio_client, result_path, "job object on admin hard delete"
-            ):
-                if file_size > 0:
-                    await decrement_storage_bytes(job.user_id, db, file_size)
+        if outcome.failed:
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"{outcome.failed} stored object(s) could not be removed; "
+                    "the job was not deleted. Retry."
+                ),
+            )
         await db.delete(job)
         await db.commit()
-        logger.info("admin_job_hard_deleted", job_id=str(job_id), admin_id=str(admin.id))
+        logger.info(
+            "admin_job_hard_deleted",
+            job_id=str(job_id),
+            admin_id=str(admin.id),
+            objects_released=outcome.released,
+            bytes_freed=outcome.freed_bytes,
+        )
         return CancelJobResponse(message="Job deleted")
 
     active_statuses = ("pending", "running", "processing")

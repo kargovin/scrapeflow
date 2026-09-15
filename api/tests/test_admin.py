@@ -167,27 +167,24 @@ async def test_admin_delete_user(client, admin_headers, db_user):
 
 
 async def test_admin_delete_user_cleans_minio_objects(client, admin_headers, db_user):
-    """DELETE /admin/users/{id} removes MinIO objects and decrements storage quota."""
+    """DELETE /admin/users/{id} removes every object the ledger holds for the user."""
+    from app.models.storage_object import StorageObject
     from app.models.user_quota import UserQuota
 
     async with AsyncSessionLocal() as db:
         job = Job(user_id=db_user.id, url="https://example.com")
         db.add(job)
         await db.flush()
-        run = JobRun(
-            job_id=job.id,
-            status="completed",
-            result_path=f"scrapeflow-results/history/{job.id}/123.html",
-        )
+        path = f"scrapeflow-results/history/{job.id}/scrape.html"
+        run = JobRun(job_id=job.id, status="completed", result_path=path)
         db.add(run)
+        await db.flush()
+        db.add(StorageObject(user_id=db_user.id, object_key=path, bytes=600, job_run_id=run.id))
         db.add(UserQuota(user_id=db_user.id, storage_bytes_used=600))
         await db.commit()
         user_id = db_user.id
 
-    stat_obj = MagicMock()
-    stat_obj.size = 600
     mock_minio = MagicMock()
-    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
     mock_minio.remove_object = AsyncMock()
 
     app.dependency_overrides[get_minio] = lambda: mock_minio

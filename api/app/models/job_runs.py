@@ -32,6 +32,9 @@ class JobRun(Base):
     nats_stream_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(VARCHAR(16), nullable=True)
     warnings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Pre-ledger marker (migration 3.18 → P8). Not written since P8; read only by the
+    # legacy branch in core/ledger.py so a pre-cutover object is decremented once and
+    # never when it was not charged. Drop once reconcile_storage_ledger.py has run.
     storage_accounted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

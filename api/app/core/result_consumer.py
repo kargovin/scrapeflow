@@ -13,11 +13,8 @@ from sqlalchemy import select, text
 from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RESULT_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.diff import compute_json_diff, compute_text_diff
-from app.core.quota import (
-    check_storage_quota,
-    handle_storage_quota_exceeded,
-    increment_storage_bytes,
-)
+from app.core.ledger import record_object
+from app.core.quota import check_storage_quota, handle_storage_quota_exceeded
 from app.core.storage import delete_minio_object, stat_minio_size
 from app.core.webhooks import create_batch_webhook_delivery, create_webhook_delivery
 from app.messages import LLMMessage
@@ -72,22 +69,40 @@ async def _get_user_id_for_run(run: JobRun, db) -> uuid.UUID | None:
     return None
 
 
-async def _try_increment_storage(db, run: JobRun, user_id: uuid.UUID, size: int) -> bool:
-    """Increment storage in a savepoint; returns False on failure (outer tx stays clean).
+async def _try_record_objects(
+    db, run: JobRun, user_id: uuid.UUID, objects: list[tuple[str, int]], minio: Minio
+) -> bool:
+    """Record every (path, size) as a ledger row in one savepoint; False on failure
+    (outer tx stays clean), and the objects are removed — a run that fails accounting
+    holds nothing, so nothing unaccounted is left for the reconcile sweep to find.
 
-    Idempotent: if run.storage_accounted_at is already set, the increment was recorded
-    on a prior delivery and is skipped to prevent double-counting on NATS redelivery.
+    Idempotency is the ledger's, keyed on the object: a NATS redelivery of the same
+    result finds its row already present and is a no-op, while a second artifact for the
+    same run — the LLM stage's extraction, a screenshot — has a different key and is
+    charged. The per-run `storage_accounted_at` stamp this replaced could not tell those
+    two apart (BUG-007); it is no longer written.
     """
-    if run.storage_accounted_at is not None:
-        return True
     try:
         async with db.begin_nested():
-            await increment_storage_bytes(user_id, db, size)
-        run.storage_accounted_at = datetime.now(UTC)
+            for path, size in objects:
+                await record_object(
+                    db, user_id=user_id, object_key=path, size=size, job_run_id=run.id
+                )
         return True
     except Exception:
-        logger.error("storage_increment_failed", user_id=str(user_id), size=size)
+        logger.error(
+            "storage_accounting_failed",
+            user_id=str(user_id),
+            run_id=str(run.id),
+            objects=[path for path, _ in objects],
+        )
+        await _delete_objects(minio, [path for path, _ in objects], "unaccounted object")
         return False
+
+
+async def _delete_objects(minio: Minio, paths: list[str], label: str) -> None:
+    for path in paths:
+        await delete_minio_object(minio, path, label)
 
 
 async def _handle_batch_result(
@@ -102,6 +117,7 @@ async def _handle_batch_result(
     started_at,
     storage_user_id: uuid.UUID | None,
     result_size: int,
+    screenshots: list[tuple[str, int]],
     source: str = "scrape",
 ) -> None:
     """Update batch item + batch counters, notify, and fire batch webhook on completion.
@@ -163,6 +179,9 @@ async def _handle_batch_result(
                     await delete_minio_object(
                         minio, minio_path, "orphaned batch object on LLM key miss"
                     )
+                await _delete_objects(
+                    minio, [p for p, _ in screenshots], "orphaned batch screenshot on LLM key miss"
+                )
                 run.status = "failed"
                 run.error = "LLM key not found or deleted"
                 run.completed_at = now
@@ -180,9 +199,9 @@ async def _handle_batch_result(
                 ).one()
             else:
                 accounting_ok = True
-                if storage_user_id and result_size > 0:
-                    accounting_ok = await _try_increment_storage(
-                        db, run, storage_user_id, result_size
+                if storage_user_id and minio_path:
+                    accounting_ok = await _try_record_objects(
+                        db, run, storage_user_id, [(minio_path, result_size), *screenshots], minio
                     )
                 if not accounting_ok:
                     run.status = "failed"
@@ -233,8 +252,10 @@ async def _handle_batch_result(
 
         else:
             accounting_ok = True
-            if storage_user_id and result_size > 0:
-                accounting_ok = await _try_increment_storage(db, run, storage_user_id, result_size)
+            if storage_user_id and minio_path:
+                accounting_ok = await _try_record_objects(
+                    db, run, storage_user_id, [(minio_path, result_size), *screenshots], minio
+                )
             if accounting_ok:
                 run.status = "completed"
                 run.result_path = minio_path
@@ -270,8 +291,10 @@ async def _handle_batch_result(
 
     elif worker_status == "completed" and run.status == "processing" and source == "llm":
         accounting_ok = True
-        if storage_user_id and result_size > 0:
-            accounting_ok = await _try_increment_storage(db, run, storage_user_id, result_size)
+        if storage_user_id and minio_path:
+            accounting_ok = await _try_record_objects(
+                db, run, storage_user_id, [(minio_path, result_size)], minio
+            )
         if accounting_ok:
             run.status = "completed"
             run.result_path = minio_path
@@ -370,6 +393,7 @@ async def _handle_scrape_completed(
     warnings: list | None,
     storage_user_id: uuid.UUID | None,
     result_size: int,
+    screenshots: list[tuple[str, int]],
 ) -> None:
     """Handle 'completed' from HTTP/Playwright worker when run was 'running'."""
     if minio_path:
@@ -378,12 +402,31 @@ async def _handle_scrape_completed(
             run.content_hash = content_hash
             prev = await _get_previous_completed_run(db, job_id, run_id)
             if prev and prev.content_hash == content_hash and prev.result_path:
+                await delete_minio_object(minio, minio_path, "history object on content dedup")
+                # The scraped page is a duplicate; the screenshots are this run's own.
+                if (
+                    storage_user_id
+                    and screenshots
+                    and not await _try_record_objects(db, run, storage_user_id, screenshots, minio)
+                ):
+                    run.status = "failed"
+                    run.error = "storage_accounting_failed"
+                    run.completed_at = datetime.now(UTC)
+                    job = await db.get(Job, job_id)
+                    if (
+                        job is not None
+                        and job.webhook_url
+                        and (not job.webhook_events or "job.failed" in job.webhook_events)
+                    ):
+                        await create_webhook_delivery(
+                            db, job, run_id, event="job.failed", minio_path=None, error=run.error
+                        )
+                    return
                 run.status = "completed"
                 run.completed_at = datetime.now(UTC)
                 run.diff_detected = False
                 run.warnings = warnings
                 run.result_path = prev.result_path
-                await delete_minio_object(minio, minio_path, "history object on content dedup")
                 logger.info(
                     "content_deduplicated",
                     job_id=job_id,
@@ -399,6 +442,9 @@ async def _handle_scrape_completed(
         if llm_key is None:
             if minio_path:
                 await delete_minio_object(minio, minio_path, "orphaned object on LLM key miss")
+            await _delete_objects(
+                minio, [p for p, _ in screenshots], "orphaned screenshot on LLM key miss"
+            )
             run.status = "failed"
             run.error = "LLM key not found or deleted"
             run.completed_at = datetime.now(UTC)
@@ -407,8 +453,10 @@ async def _handle_scrape_completed(
                     db, job, run_id, event="job.failed", minio_path=None, error=run.error
                 )
         else:
-            if storage_user_id and result_size > 0:
-                if not await _try_increment_storage(db, run, storage_user_id, result_size):
+            if storage_user_id and minio_path:
+                if not await _try_record_objects(
+                    db, run, storage_user_id, [(minio_path, result_size), *screenshots], minio
+                ):
                     run.status = "failed"
                     run.error = "storage_accounting_failed"
                     run.completed_at = datetime.now(UTC)
@@ -442,8 +490,10 @@ async def _handle_scrape_completed(
                 {"p": f"{job_id}:{run_id}:processing"},
             )
     else:
-        if storage_user_id and result_size > 0:
-            if not await _try_increment_storage(db, run, storage_user_id, result_size):
+        if storage_user_id and minio_path:
+            if not await _try_record_objects(
+                db, run, storage_user_id, [(minio_path, result_size), *screenshots], minio
+            ):
                 run.status = "failed"
                 run.error = "storage_accounting_failed"
                 run.completed_at = datetime.now(UTC)
@@ -487,8 +537,10 @@ async def _handle_llm_completed(
     result_size: int,
 ) -> None:
     """Handle 'completed' from LLM worker when run was 'processing'."""
-    if storage_user_id and result_size > 0:
-        if not await _try_increment_storage(db, run, storage_user_id, result_size):
+    if storage_user_id and minio_path:
+        if not await _try_record_objects(
+            db, run, storage_user_id, [(minio_path, result_size)], minio
+        ):
             run.status = "failed"
             run.error = "storage_accounting_failed"
             run.completed_at = datetime.now(UTC)
@@ -536,6 +588,7 @@ async def _handle_job_result(
     warnings: list | None,
     storage_user_id: uuid.UUID | None,
     result_size: int,
+    screenshots: list[tuple[str, int]],
     started_at,
     source: str = "scrape",
 ) -> None:
@@ -558,7 +611,17 @@ async def _handle_job_result(
 
     elif worker_status == "completed" and run.status == "running":
         await _handle_scrape_completed(
-            db, run, js, minio, job_id, run_id, minio_path, warnings, storage_user_id, result_size
+            db,
+            run,
+            js,
+            minio,
+            job_id,
+            run_id,
+            minio_path,
+            warnings,
+            storage_user_id,
+            result_size,
+            screenshots,
         )
 
     elif worker_status == "completed" and run.status == "processing" and source == "llm":
@@ -615,6 +678,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         error = data.get("error")
         nats_seq = data.get("nats_stream_seq")
         warnings = data.get("warnings")
+        screenshot_paths = data.get("screenshot_paths") or []
         source = data.get("source", "scrape")
     except KeyError as e:
         logger.error("Malformed result message, discarding", error=str(e), data=msg.data)
@@ -647,14 +711,22 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
 
         storage_user_id: uuid.UUID | None = None
         result_size: int = 0
+        # Screenshots (BUG-004) ride the same result message and are stored objects
+        # like any other: sized here, checked against the quota with the page, and
+        # recorded as ledger rows wherever the page is.
+        screenshots: list[tuple[str, int]] = []
         if worker_status == "completed" and minio_path:
             storage_user_id = await _get_user_id_for_run(run, db)
             if storage_user_id:
                 result_size = await stat_minio_size(minio, minio_path)
-                if result_size > 0 and not await check_storage_quota(
-                    storage_user_id, db, result_size
+                screenshots = [(p, await stat_minio_size(minio, p)) for p in screenshot_paths]
+                total_size = result_size + sum(size for _, size in screenshots)
+                if total_size > 0 and not await check_storage_quota(
+                    storage_user_id, db, total_size
                 ):
-                    await handle_storage_quota_exceeded(db, run, minio_path, minio)
+                    await handle_storage_quota_exceeded(
+                        db, run, minio_path, minio, extra_paths=[p for p, _ in screenshots]
+                    )
                     await db.commit()
                     await msg.ack()
                     logger.warning(
@@ -677,6 +749,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                 msg.metadata.timestamp,
                 storage_user_id,
                 result_size,
+                screenshots,
                 source=source,
             )
         else:
@@ -694,6 +767,7 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
                 warnings,
                 storage_user_id,
                 result_size,
+                screenshots,
                 msg.metadata.timestamp,
                 source=source,
             )

@@ -30,9 +30,10 @@ from app.core.credentials import resolve_credentials
 from app.core.db import get_db
 from app.core.dispatch import build_scrape_message
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
+from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
-from app.core.quota import check_user_quota, decrement_storage_bytes
+from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.job import Job
@@ -357,30 +358,34 @@ async def cancel_job(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     if permanent:
-        # Delete MinIO objects before the DB row (external-before-internal principle).
-        runs_result = await db.execute(
-            select(JobRun.result_path).where(
-                JobRun.job_id == job_id, JobRun.result_path.is_not(None)
-            )
+        # Objects before the DB row (external-before-internal), enumerated from the
+        # ledger rather than derived from result_path — an LLM run holds more than one.
+        runs = (await db.execute(select(JobRun).where(JobRun.job_id == job_id))).scalars().all()
+        outcome = await release_run_objects(
+            db, minio_client, runs, user.id, "job object on permanent delete"
         )
-        for (result_path,) in runs_result.all():
-            bucket, _, key = result_path.partition("/")
-            file_size = 0
-            try:
-                stat = await minio_client.stat_object(bucket, key)
-                file_size = stat.size or 0
-            except Exception:
-                pass
-            try:
-                await minio_client.remove_object(bucket, key)
-                if file_size > 0:
-                    await decrement_storage_bytes(user.id, db, file_size)
-            except Exception:
-                pass
+        if outcome.failed:
+            # Keep the job: its cascade would drop ledger rows for objects still on
+            # disk. What was freed stays freed — the ledger and the counter moved
+            # together per object.
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"{outcome.failed} stored object(s) could not be removed; "
+                    "the job was not deleted. Retry."
+                ),
+            )
 
         await db.delete(job)
         await db.commit()
-        logger.info("job_permanently_deleted", job_id=str(job_id), user_id=str(user.id))
+        logger.info(
+            "job_permanently_deleted",
+            job_id=str(job_id),
+            user_id=str(user.id),
+            objects_released=outcome.released,
+            bytes_freed=outcome.freed_bytes,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     # Soft cancel (default behaviour — existing semantics unchanged)
