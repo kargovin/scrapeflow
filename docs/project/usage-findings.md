@@ -155,6 +155,11 @@ the same file, which *does* log a warning):
   and `_try_increment_storage` are skipped. The user's storage is under-counted for that
   run **permanently** — the message acks, `storage_accounted_at` is never set, and no
   redelivery corrects it. Quota drifts with no trace.
+  ✅ *Shape changed by P8 (2026-09-15): the recording guard is gone — a 0-size object is
+  still recorded as a ledger row, so it is at least deletable; the quota check still skips
+  at 0. The under-count is no longer permanent: `scripts/reconcile_storage_ledger.py`
+  corrects any row whose recorded size disagrees with the bucket listing and recomputes
+  the counter. The missing log line in `stat_minio_size` is still the fix at source.*
 
 **`result_consumer.py` is deleted by the Temporal migration** (§3), so don't invest in
 structured logging there — a bare `logger.warning` in the two helpers is the ceiling.

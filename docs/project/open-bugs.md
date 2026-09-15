@@ -220,7 +220,16 @@ need a vendor too, and that is the moment to unify the string. Until then: known
 
 **Severity:** Medium (unbounded storage leak + quota bypass; no data corruption)
 **Discovered:** 2026-07-22 (while wiring BUG-003's block path)
-**Status:** Open
+**Status:** Open — **facet 2 (the quota bypass and the leak) closed in code by P8, 2026-09-15**;
+**facet 1 (the product gap) is still open and still a product call.** The consumer now reads
+`screenshot_paths`: each screenshot is sized with the page, counted against the storage quota with
+it (over the wall → all of them deleted, run fails), recorded as a ledger row, and released by the
+same delete paths as the page — no separate mechanism, exactly as ADR-009 §8d predicted. Not yet
+surfaced on `GET /jobs/{id}/result`; the rows exist, so surfacing is a query once decided.
+⚠️ **One leak survives, on the worker side:** the playwright worker omits `screenshot_paths` from
+its `failed` messages (bot-wall and exception paths), so screenshots taken before a failure are
+still orphaned. Fixing that means the worker includes the field on `failed` and the consumer's
+`failed` branch releases them — a contract addition, left for the facet-1 decision.
 
 ### What happens
 
@@ -634,10 +643,19 @@ server, and the coverage work is bounded and self-contained whenever it is picke
 
 **Severity:** Medium (billing accuracy + unbounded storage leak; no data corruption, no cross-tenant exposure)
 **Discovered:** 2026-08-17 (tracing ADR-009 §8's metering-parity claim against live code)
-**Status:** Open — **unblocked 2026-08-25** (the `latest/` decision landed), now **sequenced behind
-P8**, the shared per-object storage ledger that is the actual fix vehicle.
-⚠️ **Its fourth symptom is deleted upstream:** ADR-011 removes `latest/` in **P6**, so the two
-orphaned `latest/` keys stop existing before this bug is reached. What remains for P8 is the
+**Status:** ✅ **FIXED IN CODE 2026-09-15 (`f503f8b`) — by P8, not deployed.** The shared per-object storage
+ledger (`storage_objects`, `api/app/core/ledger.py`) is the fix vehicle this bug was sequenced
+behind, and building it closes all three `history/` symptoms at once: the consumer records every
+stored object as a row (`test_llm_job_charges_both_objects` pins 2000 + 50, not 2000), the delete
+paths enumerate rows instead of statting `result_path` (`test_permanent_delete_releases_every_ledger_row`
+pins both objects removed and the counter back to zero), and the counter is a materialised sum
+that only the ledger moves. ⚠️ **Production's already-inflated counters and already-leaked pages
+are not fixed by the deploy** — a pre-ledger object has no row. `api/scripts/reconcile_storage_ledger.py`
+(dry-run by default, `--apply` to act) walks the bucket, records what is attributable, deletes the
+orphaned pages, and **recomputes** every counter from the rows. Owner-run, like the `latest/` sweep.
+The pre-fix text below is kept as the record of what the bug was.
+⚠️ **Its fourth symptom was deleted upstream:** ADR-011 removed `latest/` in **P6**, so the two
+orphaned `latest/` keys stopped existing before this bug was reached. What P8 fixed is the
 `history/` half — the wrong object charged, and the scraped page never deleted.
 
 ### What happens

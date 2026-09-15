@@ -38,7 +38,9 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **The wire contract the API publishes through (P6)** | `api/app/messages.py` — and `coordinator/coordinator/messages.py`, a **deliberate duplicate** for the crawl lane (ADR-011 §6 rejected a shared package) |
 | **The dispatch-message builders (P9)** | `api/app/core/dispatch.py` — one builder per lane; every scrape dispatch site (`create_job`, `create_batch`, both scheduler paths) calls one. The only place a `ScrapeMessage` is constructed on the API side |
 | **Cross-service contract test + Go fixtures** | `contracts/` — the only test that feeds an API-produced message into each worker's real parser. Command in *Commands* below |
+| **The storage ledger (P8)** | `api/app/core/ledger.py` — the only writer (`record_object`) and releaser (`release_*`) of `storage_objects` rows; every delete path calls it. Model: `api/app/models/storage_object.py`. Regression tests: `api/tests/test_storage_ledger.py` |
 | `latest/` production sweep (owner-authorised, unrun) | `api/scripts/sweep_latest_objects.py` — dry-run by default |
+| **Storage ledger reconcile (owner-authorised, unrun in prod)** | `api/scripts/reconcile_storage_ledger.py` — dry-run by default. Walks the bucket, records pre-ledger objects, deletes BUG-007's orphaned pages, **recomputes** every counter. Verified in dry-run against local dev (2,216 objects: 1,142 attributable, 1,074 orphans) |
 | Multi-persona process starter prompts | `docs/process/` |
 | Anti-bot hardening record (ADR-008 companion) | `docs/guides/anti-bot-hardening.md` |
 | Phase 1–3 history (specs, backlogs, reviews, audits) | `docs/archive/` |
@@ -53,6 +55,10 @@ When the user is ready to build something, they will say so. Until then, guide a
 docker compose exec api uv run pytest tests/ -v
 docker compose exec api uv run pytest tests/test_jobs.py -v
 ```
+⚠️ `api/scripts/` is mounted into the api container **since 2026-09-15** (`docker-compose.yml`).
+Before that the container held a *baked* copy, so `python scripts/x.py` and any test that loaded a
+script ran the image's version, not the working tree's — a green "import ok" proved nothing. If the
+container predates the mount, `docker compose up -d api` once.
 
 **Worker tests** — not wired into compose; mount the source over the built image:
 ```bash
@@ -111,9 +117,38 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
-2026-09-03. **Two of the pre-migration queue's four items are built — P6 / BUG-005 (2026-09-04) and
-P9 / BUG-011 (2026-09-11, `ed4d63c`).** Both committed on `develop`, **neither deployed**; they ship
-together with the rest of the queue as one release (*Git / deploy state*).
+2026-09-03. **Three of the pre-migration queue's four items are built — P6 / BUG-005 (2026-09-04),
+P9 / BUG-011 (2026-09-11, `ed4d63c`) and P8 / BUG-007 (2026-09-15, `f503f8b`).** All committed on `develop`,
+**none deployed**; they ship together with P7 as one release (*Git / deploy state*).
+
+🔷 **P8 is built (2026-09-15) — and BUG-007 is fixed by it, not after it.** `phase4-backlog.md` §1's
+P8 row, its change-log entry, and `open-bugs.md` → BUG-007 hold the detail; `CLAUDE.md` has a new
+*Storage ledger* Key-decisions row. Four things that belong here because they are the session's
+findings rather than the filing's:
+
+- **The meter mechanism was undecided by §8d and is now decided: a materialised counter.**
+  `user_quotas.storage_bytes_used` stays and is moved *only* by `ledger.py`, in the same transaction
+  as the row. §8d fixes what the meter *reads* (owner and size) and argues for a live number; a
+  `SUM` over the ledger on every quota check would be O(objects) and would zero every existing
+  user's usage at cutover. The reconcile script is the auditor that recomputes it.
+- ⚠️ **The deploy does not repair production. The reconcile script does, and it is owner-run.**
+  "No backfill" (ADR-009 §8b) means a pre-ledger object has no row — so the inflated counters and
+  leaked pages BUG-007 already caused stay exactly as they are until
+  `reconcile_storage_ledger.py --apply` runs. The delete paths keep a **legacy branch** keyed on
+  the old `storage_accounted_at` stamp for those runs, so a pre-cutover object is still decremented
+  once and never when it was not charged; the stamp is no longer written.
+- ⚠️ **Two behaviour changes worth knowing before the next deploy.** A delete endpoint now returns
+  **503** and keeps the parent row when any object cannot be removed (the cascade would have dropped
+  the ledger row for an object still on disk — the exact orphan class this fixes; what was freed
+  stays freed). And **a run that fails accounting now holds nothing** — the objects are deleted
+  with the failure, where before they were left orphaned and unreachable. Both are one-line calls
+  in the endpoints and `_try_record_objects`; both have tests.
+- ⚠️ **The hot-reload migration trap fired again, and this time it dropped an index.** The
+  autogenerated revision included `drop_index("idx_webhook_deliveries_dedup")` — the raw-SQL partial
+  unique index from 3.18 is not in any model, so autogenerate always wants to remove it. The API
+  auto-applied that file on reload *before* the edit landed. Recovered with downgrade → upgrade →
+  `CREATE UNIQUE INDEX` by hand. **Every future autogenerate will propose the same drop; delete it
+  every time, or model the index.** The committed revision is clean.
 
 🔷 **P9 is built (2026-09-11).** `phase4-backlog.md` §1's P9 row and `open-bugs.md` → BUG-011 hold the
 detail. Two things that belong here because they are the session's findings rather than the filing's:
@@ -213,15 +248,19 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    batch-and-crawl cutover, and it opens the Schedule overlap policy (`phase4-backlog.md` §2
    gotcha 6), which is genuinely undecided.
 3. **The pre-migration queue is the entry condition for any build work** (16e):
-   ~~P6~~ ✅ → ~~P9~~ ✅ → **P8 → P7 + BUG-007**, then engine up. `phase4-backlog.md` §1 is its
-   source of truth.
-   **P8 is next** — the shared per-object storage ledger. ⚠️ It is the first queue item that
-   **adds an Alembic revision**, which is what makes the queue-clearing release run a migration on
-   API startup (see *Git / deploy state*). It is BUG-007's fix vehicle and P7's table; filed
-   2026-08-25, writeup in `phase4-backlog.md` §1.
+   ~~P6~~ ✅ → ~~P9~~ ✅ → ~~P8 (+ BUG-007)~~ ✅ → **P7**, then engine up. `phase4-backlog.md` §1 is
+   its source of truth.
+   **P7 is next, and it is the last** — crawl quota. Storage is now a ledger insert with
+   `crawl_page_id` set (the column and the CHECK already exist); the runs and concurrency meters
+   are P7's own. ⚠️ P7's row says the only v1 site for the storage insert is the coordinator's
+   result handler — which is BUG-008 (never worked) and §3 (do not fix). So on v1, P7 is the two
+   admission-time meters in `routers/crawls.py` plus reclaim; the per-page storage insert lands
+   in the `CrawlWorkflow` port. Read the row and ADR-009 §3/§8b before deciding what "built" means.
 
-   ⚠️ **The `latest/` production sweep is the one part of P6 that did not ship**, because it is a
-   production data deletion and therefore the owner's to authorise. See *Current state* above.
+   ⚠️ **Two owner-run production scripts are now outstanding, both dry-run by default:** the
+   `latest/` sweep (P6) and the ledger reconcile (P8). Neither is a deploy step; both are data
+   changes the owner authorises. The reconcile wants running **right after** the queue's release —
+   until it does, production's storage counters stay inflated.
 
 ### Git / deploy state
 
@@ -257,7 +296,10 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   code change since 2026-08-28, and it touches **five services**: `api/`, `coordinator/`,
   `playwright-worker/`, `llm-worker/`, `http-worker/`, plus a new top-level `contracts/`.
   **P9 (`ed4d63c`, 2026-09-11) is the second** — `api/` only (five files + one new module), so it
-  changes nothing about the five-service cutover P6 already requires.
+  changes nothing about the five-service cutover P6 already requires. **P8 (`f503f8b`, 2026-09-15) is the
+  third** — `api/` plus `docker/docker-compose.yml`, and it **adds the queue's first Alembic
+  revision** (`0c73753d5138`), so the release runs a migration on API startup against the
+  `Recreate`-strategy API.
 - ✅ **`develop` was pushed to `origin/develop` on 2026-09-09** (`fa3c18d..a57e395`, ten commits,
   including P6). ⚠️ **Since then, unpushed on `develop`:** four docs-only commits from the first
   2026-09-11 session (`e9304b9`, `43c828a`, `2e822d9`, `f724162`), then **P9's code (`ed4d63c`)**,
@@ -312,6 +354,7 @@ somewhere else, and a second copy here is how they go stale:
 | The live artifact-path convention | **ADR-011** — not ADR-002 §4. ✅ **Live code implements it as of 2026-09-04** (P6, `81afbb9`), across all three lanes. ⚠️ **Production does not** — it still runs the old convention until the next release, and historical objects keep their old-format `result_path` strings forever (no backfill, by design) |
 | Phase 4 scope, sequencing, what is do-not-fix | `phase4-backlog.md` (§1 queue · §2 migration · §3 **do NOT fix** · §4 survives) |
 | A bug's root cause and fix plan | `open-bugs.md` |
+| How storage is counted and released, and why the meter is a materialised sum | `CLAUDE.md` → Key decisions → *Storage ledger (P8)*; the code's own docstring in `api/app/core/ledger.py` |
 | Why a production trap exists | `CLAUDE.md` → Key decisions (43 rows; the rationale column *is* the trap) |
 | The two deferrals ADR-009 named and did not answer | `ADR-010` (Draft) — and the Schedule overlap policy it opened, in `phase4-backlog.md` §2 gotcha 6 |
 | What shipped when | `git log` |
@@ -326,6 +369,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-15 *(clock)* | **🔷 P8 BUILT — the storage ledger, and BUG-007 with it.** Built straight through at the owner's direction ("fix this completely"), then audited as a whole. `storage_objects` + migration `0c73753d5138`; `app/core/ledger.py` as the single writer/releaser; the consumer records every stored object — the LLM extraction *and* `screenshot_paths`, which it had ignored since the field was added (BUG-004 facet 2 closes for free); all three delete endpoints and the nightly cleanup enumerate rows; `reconcile_storage_ledger.py` for production's history. **266 API + 29 contract tests green** (255 → 266: 6 converted, 11 new); the two load-bearing tests were mutation-checked. **Decisions taken in the build, not in any filing:** materialised counter (not a live `SUM`); 503 on a failed release; a run that fails accounting holds nothing; `crawl_page_id` added now so P7 is a consumer. **Found by the build:** the hot-reload migration trap dropped `idx_webhook_deliveries_dedup` (recovered by hand — see *Current state*); `api/scripts/` was never mounted into the api container, so script imports and the P6-era "verified" sweep ran the image's baked copy (mounted now). Docs swept: `open-bugs.md` (BUG-007 fixed, BUG-004 facet 2), backlog (P8 row, queue, change log, sequencing), `CLAUDE.md` (queue + a new Key-decisions row), this file | `f503f8b` + docs closeout |
 | 2026-09-11 *(clock, second session)* | **🔷 P9 / BUG-011 BUILT — the second code item of the pre-migration queue.** Built piecemeal at the owner's direction (job branch → batch branch → builder move → tests), then audited as a whole. `_recover_stale_pending` routes by whichever FK is set; batch runs rebuild from `batch_items` + `batches`; all four skip sites log at warning; the SAWarning that was BUG-011 showing in the test output is gone. **One finding not in the filing:** `create_job` had its own inline message builder, so the job lane already had the duplication the batch lane was about to gain — both lanes' builders moved to **`api/app/core/dispatch.py`** and all five dispatch sites call them (owner accepted the scope). Two tests pin dispatch-vs-recovery byte equality per lane; mutation-checked. **255 API + 29 contract tests green.** 🔷 **Knock-on recorded, not claimed as a fix: BUG-001's symptom is gone by construction**; mechanism 4 is untouched. Two small things caught in the audit: a docstring I wrote said batch went unrecovered "for a year" (it shipped 2026-04-22 — under five months; corrected), and `ScrapeMessage`'s docstring listed dispatchers by file (stale after the move; corrected). Docs swept: `open-bugs.md` (BUG-011 fixed, BUG-001 annotated), backlog (P9 row, queue, change log, BUG-001 §3 row — its `scheduler.py:131` pointer dropped), `CLAUDE.md` (queue bullet + a new Key-decisions row), this file | `ed4d63c` + docs closeout |
 | 2026-09-11 *(clock)* | **Docs + decisions only — no application code.** Deploy-path audit of what a `main` fast-forward actually does, against the infra repo: **the deploy is automatic** (five `ImagePolicy` objects at 1m + `ImageUpdateAutomation` writing tags back to the infra repo), so a push needs no manual tag bump. **Four findings, none of them in any doc.** 🔴 **`api` and `http-worker` are `strategy: Recreate` at `replicas: 1`** — the old pod stops *before* the new one starts, so there is a real outage window on every release **and no fallback if the new image fails**; ⚠️ **the other three default to `RollingUpdate`, which at `replicas: 1` resolves to maxSurge 1 / maxUnavailable 0**, so a crash-looping image **stalls the rollout and leaves the old pod running** — good for uptime, **wrong for the P6 cutover**, because it silently leaves a **v2 worker against a v3 API**, and a bad `schema_version` is *acked and discarded*, not retried. **So verify `rollout status` per Deployment, not pod health.** ✅ The `flux-system` Kustomization has **no `wait: true`**, so a crash-looping coordinator (BUG-012) cannot block the other four reconciling — **ignoring crawls is safe**. ✅ The nightly `scrapeflow-cleanup` CronJob runs **from the API image** with MinIO delete rights and upgrades silently with it — checked and **unaffected by ADR-011**: it reads `result_path` from the DB and matches `startswith("history/")`, never constructing or parsing a path. ✅ **Zero Alembic revisions `main..develop`** — this release runs no migration. 🔷 **BUG-013 filed** (5 of 7 dependency manifests resolve at build time, so the tested image and the deployed image are different artifacts) — **carved out of BUG-006 deliberately: visibility vs reproducibility, neither closes the other.** Its new half is the **frontend**, which BUG-006 counts among the three *scanned* manifests: `api/Dockerfile` copies only `package.json` before `npm install`, so **the lockfile is absent from the step that resolves versions** and those 21 alerts have never described the shipped bundle. 🔷 **Two release-cadence decisions taken** — the pre-migration queue ships as **one** `main` fast-forward, and the migration then ships **per-flow, one push per ADR-009 §16 step**; a `main` freeze was weighed and dropped, so **§16 stands as written and no superseding ADR is needed** | `e9304b9`, `43c828a`, `2e822d9` |
 | 2026-09-04 | **🔷 P6 / BUG-005 BUILT — the first code of Phase 4's pre-migration queue.** `schema_version` 2 → 3 across five services; 598 tests green (API 251 · **cross-service contract 29** · Go · playwright 168 · llm 101 · coordinator 49). Two typed producer models (`api/app/messages.py`) with all seven dict-construction sites routed through them; `artifact_id` on the wire, `job_id` off it; `run_id` optional and absent on the crawl lane; stage-named objects; `latest/` deleted from three workers and the delete path; the result-consumer parse-order move. **The ADR-011 §6 contract test exists** (`contracts/`) and was mutation-checked in both directions — it catches a reverted Go guard and a stale Go fixture. **Three findings not in the ADR**, all from the code rather than the docs: 🔴 the Go worker's `history/` write **depended on `latest/`** via `CopyObject`, so the removal is a rewrite there, not a deleted line; dropping the timestamp from screenshot keys makes redelivery **idempotent**, shrinking **BUG-004** by construction the way `latest/`'s removal shrank BUG-007; and 🔴 **ADR-011 decides nothing about deployment ordering, and no safe order exists** — owner's call taken to hard-cut against a drained stream, which is why the version was bumped. ⚠️ **The production `latest/` sweep did not ship** — written as `api/scripts/sweep_latest_objects.py`, dry-run by default, owner-authorised. **Then the deploy rehearsal found two pre-existing bugs, neither from P6.** 🔴 **BUG-012 filed** — `reenqueue_stalled` deletes `crawl_pages` while `crawl_queue` still references them, so the **coordinator crash-loops on startup** and cannot self-clear (31 restarts, 194 stalled items observed). Owner **declined the §3 override**; filed to §3, dissolves cleanly. **Its unit test pins the broken order as correct** — the second instance of that shape after BUG-005's. 🔴 **BUG-006 addendum** — `llm-worker` imported `httpx` without declaring it; the provider SDKs jumped majors and moved to **`httpx2`**, so a rebuild produced an image with no `httpx` and the worker crash-looped. Fixed (`1c456a4`); **lockfiles, not scanning, are BUG-006's real fix**, and the SDK majors are now unpinned and undecided | `81afbb9`, `d4330f4`, `1c456a4`, `427f7ce`, `5d91134` |
