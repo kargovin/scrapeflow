@@ -302,12 +302,12 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   `Recreate`-strategy API.
 - ✅ **`develop` was pushed to `origin/develop` on 2026-09-09** (`fa3c18d..a57e395`, ten commits,
   including P6). ⚠️ **Since then, unpushed on `develop`:** four docs-only commits from the first
-  2026-09-11 session (`e9304b9`, `43c828a`, `2e822d9`, `f724162`), then **P9's code (`ed4d63c`)**,
-  then this session's docs closeout on top (deliberately not named — a hash cannot cite the commit
-  that writes it). **Verified 2026-09-11 after P9's code commit: `develop` is 5 ahead of
-  `origin/develop`; `main` is 63 behind and 0 ahead** — the closeout commit adds one more to each.
-  ⚠️ Re-check against the remote before quoting these — that is the standing rule below, and this
-  line has already been stale once in this file.
+  2026-09-11 session (`e9304b9`, `43c828a`, `2e822d9`, `f724162`), then **P9's code (`ed4d63c`)**
+  and its docs closeout (`7ae5b18`), then **P8's code (`f503f8b`)** and its docs closeout
+  (`34027df`, with this line's own follow-up on top). **Verified 2026-09-15 after fetch: `develop`
+  is 8 ahead of `origin/develop`, 0 behind; `main` is 66 behind and 0 ahead** — the follow-up
+  commit adds one more to each. ⚠️ Re-check against the remote before quoting these — that is the
+  standing rule below, and this line has already been stale once in this file.
 - ⚠️ **Pushing `develop` builds and deploys nothing.** `.github/workflows/build-push.yml` triggers
   on `push: branches: ["main"]` only. **That is what makes a `main` fast-forward a release** — and
   because P6 touched `api/`, `http-worker/`, `playwright-worker/`, `llm-worker/` **and**
