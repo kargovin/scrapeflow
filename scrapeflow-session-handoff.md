@@ -29,7 +29,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-013) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-014) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -39,6 +39,8 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **The dispatch-message builders (P9)** | `api/app/core/dispatch.py` — one builder per lane; every scrape dispatch site (`create_job`, `create_batch`, both scheduler paths) calls one. The only place a `ScrapeMessage` is constructed on the API side |
 | **Cross-service contract test + Go fixtures** | `contracts/` — the only test that feeds an API-produced message into each worker's real parser. Command in *Commands* below |
 | **The storage ledger (P8)** | `api/app/core/ledger.py` — the only writer (`record_object`) and releaser (`release_*`) of `storage_objects` rows; every delete path calls it. Model: `api/app/models/storage_object.py`. Regression tests: `api/tests/test_storage_ledger.py` |
+| **The run-counting views (P7)** | `api/app/models/quota_views.py` — `Table` objects on a private `MetaData` for the two views migration `86c780f55969` creates; `core/quota.py` reads them and nothing else does. `quota_run_units` = one row per attempted fetch (`monthly_runs`); `quota_active_submissions` = one row per submission holding a slot (`concurrent_jobs`). A new lane is one migration widening both |
+| **Crawl-quota audit (owner-run, read-only, unrun in prod)** | `api/scripts/audit_crawl_quota.py` — what 90 days of crawls would have cost per user under P7's meters, and who holds slots now. Reads the views, so it runs *after* the release. ⚠️ On v1 every crawl is `running` forever (BUG-008) and holds a slot until cancelled — the script says so |
 | `latest/` production sweep (owner-authorised, unrun) | `api/scripts/sweep_latest_objects.py` — dry-run by default |
 | **Storage ledger reconcile (owner-authorised, unrun in prod)** | `api/scripts/reconcile_storage_ledger.py` — dry-run by default. Walks the bucket, records pre-ledger objects, deletes BUG-007's orphaned pages, **recomputes** every counter. Verified in dry-run against local dev (2,216 objects: 1,142 attributable, 1,074 orphans) |
 | Multi-persona process starter prompts | `docs/process/` |
@@ -113,13 +115,52 @@ docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N
 
 ---
 
-## Current state — as of 2026-09-11
+## Current state — as of 2026-09-18
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
-2026-09-03. **Three of the pre-migration queue's four items are built — P6 / BUG-005 (2026-09-04),
-P9 / BUG-011 (2026-09-11, `ed4d63c`) and P8 / BUG-007 (2026-09-15, `f503f8b`).** All committed on `develop`,
-**none deployed**; they ship together with P7 as one release (*Git / deploy state*).
+2026-09-03. **The pre-migration queue is empty — P6 / BUG-005 (2026-09-04), P9 / BUG-011 (2026-09-11,
+`ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18).** All committed on `develop`,
+**none deployed**; they ship together as one release (*Git / deploy state*), and that release is
+now the next thing to do.
+
+🔷 **P7 is built (2026-09-18) — the queue is empty.** `phase4-backlog.md` §1's P7 row and its two
+change-log entries hold the detail; `CLAUDE.md` has a new *Run-counting views* Key-decisions row.
+Five things that belong here because they are the session's findings rather than the filing's:
+
+- ⚠️ **ADR-009 §3 says one view; the build is two, and the decision is unchanged.** §3 describes one
+  view with an `active` column that the two meters aggregate differently. A crawl holds its slot
+  from creation, but its first unit row — the seed's `crawl_pages` row — is written by the
+  coordinator ~2s later, or never while the coordinator is down (it crash-loops in prod, BUG-012).
+  "Distinct submissions among active unit rows" therefore lets a queued crawl hold nothing.
+  `quota_active_submissions` reads the submission tables directly. This is a mechanism refinement
+  found at build time, not a reversal; recorded in the migration's docstring, the backlog, the
+  migration doc and `CLAUDE.md`. ADR-009 is immutable and cannot say so itself — **the same class
+  as the §8d displacement below, and the owner may want to decide whether it warrants more than
+  a note.**
+- ⚠️ **§8's batch loosening is now live**: a batch of N pending runs is one concurrency slot, not N.
+  Owner's call of 2026-08-17; before this a 100-URL batch was admitted as 1 and metered as 100.
+  `test_batch_holds_one_concurrent_slot` pins it and fails against the old query.
+- ⚠️ **On v1 the per-page storage insert is not built, on purpose.** Its only v1 site is the
+  coordinator's result handler — BUG-008 (never ran) and §3 (do not fix). Crawl bytes stay
+  uncharged until the `CrawlWorkflow` port calls `record_object(crawl_page_id=…)`. Admission
+  against all three meters, the two count meters, and reclaim (`DELETE /crawls/{id}?permanent=true`,
+  503 on a failed release like the job path) are all live.
+- ⚠️ **On v1 every crawl stays `running` forever** (BUG-008 again) **and so holds a slot until the
+  user cancels it.** The meter is right; the lane never finishes. `scripts/audit_crawl_quota.py`
+  lists who is affected — the dev DB's mock user held 264 crawl slots against a limit of 5. Cancel
+  the crawls, do not raise the limit.
+- 🔴 **BUG-014 filed**: `DELETE /admin/users/{id}` 500s for any user with a batch or a crawl —
+  `crawls.user_id` and `batches.user_id` have no `ON DELETE`, and the ORM cascades neither.
+  Verified in a rolled-back transaction. It fails *after* the MinIO deletes, so the objects are
+  gone while the ledger rows stay. Filed to backlog §4, not fixed (scope). Also corrects P7's own
+  row: deleting a user does not *orphan* crawl artifacts — the delete never gets that far.
+
+⚠️ **New instance of the hot-reload trap, in the other direction.** `git stash -u` under the
+running API took the P7 migration file with it; the reloader restarted, `alembic upgrade head`
+found the DB at a revision no file describes, and every startup failed with `Can't locate
+revision identified by '86c780f55969'` until the pop. It recovered on its own, but a stash that
+outlives a reload leaves the API down. Stash `--keep-index` or exclude `migrations/`.
 
 🔷 **P8 is built (2026-09-15) — and BUG-007 is fixed by it, not after it.** `phase4-backlog.md` §1's
 P8 row, its change-log entry, and `open-bugs.md` → BUG-007 hold the detail; `CLAUDE.md` has a new
@@ -211,7 +252,8 @@ leaves `str(page.id)` in a field named `job_id` for the `CrawlWorkflow` port to 
 stale companions redrawn, PRD-016's four carry-backs landed, the conditional PRD numbered, the
 lane-blind meters recorded, D5 closed.
 
-**Nothing is blocking. P6 and P9 are built; the queue continues at P8.**
+**Nothing is blocking. The queue is empty; the next step is its single release, then the three
+owner-run scripts, then the ADR-009 §16 sequence begins at *engine up*.**
 
 ⚠️ **ADR-010 is still `Draft`, and a Draft is not a decision** (`docs/adr/README.md`) — *"do not
 implement against it, and do not cite it as settled in another document."* It blocks nothing in the
@@ -247,20 +289,16 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 2. **Promote ADR-010** when convenient — it blocks nothing in the queue but is required before the
    batch-and-crawl cutover, and it opens the Schedule overlap policy (`phase4-backlog.md` §2
    gotcha 6), which is genuinely undecided.
-3. **The pre-migration queue is the entry condition for any build work** (16e):
-   ~~P6~~ ✅ → ~~P9~~ ✅ → ~~P8 (+ BUG-007)~~ ✅ → **P7**, then engine up. `phase4-backlog.md` §1 is
-   its source of truth.
-   **P7 is next, and it is the last** — crawl quota. Storage is now a ledger insert with
-   `crawl_page_id` set (the column and the CHECK already exist); the runs and concurrency meters
-   are P7's own. ⚠️ P7's row says the only v1 site for the storage insert is the coordinator's
-   result handler — which is BUG-008 (never worked) and §3 (do not fix). So on v1, P7 is the two
-   admission-time meters in `routers/crawls.py` plus reclaim; the per-page storage insert lands
-   in the `CrawlWorkflow` port. Read the row and ADR-009 §3/§8b before deciding what "built" means.
+3. **The pre-migration queue was the entry condition for any build work** (16e) and is **empty**:
+   ~~P6~~ ✅ → ~~P9~~ ✅ → ~~P8 (+ BUG-007)~~ ✅ → ~~P7~~ ✅. **The queue's single release is next**
+   (*Git / deploy state*: a `main` fast-forward, five services against a drained stream, two
+   Alembic revisions on API startup), then engine up. `phase4-backlog.md` §1 is its source of truth.
 
-   ⚠️ **Two owner-run production scripts are now outstanding, both dry-run by default:** the
-   `latest/` sweep (P6) and the ledger reconcile (P8). Neither is a deploy step; both are data
-   changes the owner authorises. The reconcile wants running **right after** the queue's release —
-   until it does, production's storage counters stay inflated.
+   ⚠️ **Three owner-run production scripts are outstanding, all safe by default:** the `latest/`
+   sweep (P6, dry-run), the ledger reconcile (P8, dry-run) and the crawl-quota audit (P7,
+   read-only). None is a deploy step. The reconcile wants running **right after** the release, or
+   production's storage counters stay inflated; the audit wants running before anyone is told
+   about the quota change — and it needs the views, so it runs after the release too.
 
 ### Git / deploy state
 
@@ -283,7 +321,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   awkward part of rollback here (Flux's image automation re-applies the newest tag within ~1 min
   unless the automation is suspended first) is accepted rather than engineered around.
   - ⚠️ **This expires P6's "zero migrations" comfort.** P6 alone adds no Alembic revision; **P8
-    does** (the shared per-object ledger is a new table), so the queue-clearing release *will* run
+    and P7 do** (the ledger table; the two counting views), so the queue-clearing release *will* run
     migrations on API startup — against a `Recreate`-strategy, single-replica API, which stops the
     old pod **before** starting the new one and therefore has no fallback if the new image fails.
   - The first two §16 steps are the cheap ones: **engine up** is largely infra-repo work needing no
@@ -299,14 +337,15 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   changes nothing about the five-service cutover P6 already requires. **P8 (`f503f8b`, 2026-09-15) is the
   third** — `api/` plus `docker/docker-compose.yml`, and it **adds the queue's first Alembic
   revision** (`0c73753d5138`), so the release runs a migration on API startup against the
-  `Recreate`-strategy API.
+  `Recreate`-strategy API. **P7 (`24cb89c`, 2026-09-18) is the fourth and last** — `api/` only, and it adds
+  **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them).
 - ✅ **`develop` was pushed to `origin/develop` on 2026-09-09** (`fa3c18d..a57e395`, ten commits,
   including P6). ⚠️ **Since then, unpushed on `develop`:** four docs-only commits from the first
   2026-09-11 session (`e9304b9`, `43c828a`, `2e822d9`, `f724162`), then **P9's code (`ed4d63c`)**
   and its docs closeout (`7ae5b18`), then **P8's code (`f503f8b`)** and its docs closeout
-  (`34027df`, with this line's own follow-up on top). **Verified 2026-09-15 after fetch: `develop`
-  is 8 ahead of `origin/develop`, 0 behind; `main` is 66 behind and 0 ahead** — the follow-up
-  commit adds one more to each. ⚠️ Re-check against the remote before quoting these — that is the
+  (`34027df` + `a629b64`), then **P7's code (`24cb89c`, 2026-09-18)** and its docs closeout.
+  **Verified 2026-09-18 after fetch, before the P7 commits: `develop` was 9 ahead of
+  `origin/develop`, 0 behind; `main` 67 behind, 0 ahead** — the two P7 commits add two to each. ⚠️ Re-check against the remote before quoting these — that is the
   standing rule below, and this line has already been stale once in this file.
 - ⚠️ **Pushing `develop` builds and deploys nothing.** `.github/workflows/build-push.yml` triggers
   on `push: branches: ["main"]` only. **That is what makes a `main` fast-forward a release** — and
@@ -355,7 +394,8 @@ somewhere else, and a second copy here is how they go stale:
 | Phase 4 scope, sequencing, what is do-not-fix | `phase4-backlog.md` (§1 queue · §2 migration · §3 **do NOT fix** · §4 survives) |
 | A bug's root cause and fix plan | `open-bugs.md` |
 | How storage is counted and released, and why the meter is a materialised sum | `CLAUDE.md` → Key decisions → *Storage ledger (P8)*; the code's own docstring in `api/app/core/ledger.py` |
-| Why a production trap exists | `CLAUDE.md` → Key decisions (43 rows; the rationale column *is* the trap) |
+| What the two count meters count, per lane, and why there are two views | `CLAUDE.md` → Key decisions → *Run-counting views (P7)*; the migration's docstring (`86c780f55969`); `api/app/core/quota.py`'s module docstring |
+| Why a production trap exists | `CLAUDE.md` → Key decisions (44 rows; the rationale column *is* the trap) |
 | The two deferrals ADR-009 named and did not answer | `ADR-010` (Draft) — and the Schedule overlap policy it opened, in `phase4-backlog.md` §2 gotcha 6 |
 | What shipped when | `git log` |
 
@@ -369,6 +409,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-18 *(clock)* | **🔷 P7 BUILT — the pre-migration queue is empty.** Built straight through at the owner's direction ("fix this"), then audited as a whole. Migration `86c780f55969` creates **two views** — `quota_run_units` (fetches, monthly) and `quota_active_submissions` (submissions, concurrency) — read through `Table` objects on a private `MetaData` (`app/models/quota_views.py`; `compare_metadata` confirmed autogenerate sees only the standing `idx_webhook_deliveries_dedup` false positive); `core/quota.py`'s two count queries name no table; `check_crawl_quota` on `POST /crawls` (monthly pre-checked with `batch_count=max_pages`); `DELETE /crawls/{id}?permanent=true` through `ledger.release_crawl_objects` with the job path's 503 rule, deleting the crawl with a Core `DELETE` so Postgres cascades (the ORM would NULL the children's NOT NULL `crawl_id`); `scripts/audit_crawl_quota.py` (read-only). **279 API + 29 contract tests green** (266 → 279: 9 quota + 4 crawl); the three meter-change tests were mutation-checked against the old queries and fail exactly as they should; `EXPLAIN` confirmed the `user_id` predicate is pushed into every view arm. **Decisions taken in the build, not in any filing:** two views not one (queued crawl has no unit row — ADR-009 §3's mechanism refined, decision unchanged, and the ADR cannot say so itself); the per-page storage insert deferred to the `CrawlWorkflow` port (its only v1 site is BUG-008). **Found by the build:** 🔴 **BUG-014** (admin user delete 500s on the `crawls`/`batches` FKs — verified in a rolled-back transaction, filed to §4, not fixed); on v1 every crawl holds a slot forever (BUG-008, the audit script says so); a stashed migration file under the hot-reloading API fails every startup until it is back; "for a year" nearly went into a docstring again (crawls shipped 2026-04-17 — five months). Docs swept: backlog (P7 row, two change-log entries, queue, sequencing, BUG-014 row), `open-bugs.md` (BUG-014, two P7 notes under BUG-008/BUG-012), `temporal-full-migration.md` (view entry, entry condition), `CLAUDE.md` (queue, P7 bullet, a new Key-decisions row, BUG-014 in the open list), this file | `24cb89c` + docs closeout |
 | 2026-09-15 *(clock)* | **🔷 P8 BUILT — the storage ledger, and BUG-007 with it.** Built straight through at the owner's direction ("fix this completely"), then audited as a whole. `storage_objects` + migration `0c73753d5138`; `app/core/ledger.py` as the single writer/releaser; the consumer records every stored object — the LLM extraction *and* `screenshot_paths`, which it had ignored since the field was added (BUG-004 facet 2 closes for free); all three delete endpoints and the nightly cleanup enumerate rows; `reconcile_storage_ledger.py` for production's history. **266 API + 29 contract tests green** (255 → 266: 6 converted, 11 new); the two load-bearing tests were mutation-checked. **Decisions taken in the build, not in any filing:** materialised counter (not a live `SUM`); 503 on a failed release; a run that fails accounting holds nothing; `crawl_page_id` added now so P7 is a consumer. **Found by the build:** the hot-reload migration trap dropped `idx_webhook_deliveries_dedup` (recovered by hand — see *Current state*); `api/scripts/` was never mounted into the api container, so script imports and the P6-era "verified" sweep ran the image's baked copy (mounted now). Docs swept: `open-bugs.md` (BUG-007 fixed, BUG-004 facet 2), backlog (P8 row, queue, change log, sequencing), `CLAUDE.md` (queue + a new Key-decisions row), this file | `f503f8b` + docs closeout |
 | 2026-09-11 *(clock, second session)* | **🔷 P9 / BUG-011 BUILT — the second code item of the pre-migration queue.** Built piecemeal at the owner's direction (job branch → batch branch → builder move → tests), then audited as a whole. `_recover_stale_pending` routes by whichever FK is set; batch runs rebuild from `batch_items` + `batches`; all four skip sites log at warning; the SAWarning that was BUG-011 showing in the test output is gone. **One finding not in the filing:** `create_job` had its own inline message builder, so the job lane already had the duplication the batch lane was about to gain — both lanes' builders moved to **`api/app/core/dispatch.py`** and all five dispatch sites call them (owner accepted the scope). Two tests pin dispatch-vs-recovery byte equality per lane; mutation-checked. **255 API + 29 contract tests green.** 🔷 **Knock-on recorded, not claimed as a fix: BUG-001's symptom is gone by construction**; mechanism 4 is untouched. Two small things caught in the audit: a docstring I wrote said batch went unrecovered "for a year" (it shipped 2026-04-22 — under five months; corrected), and `ScrapeMessage`'s docstring listed dispatchers by file (stale after the move; corrected). Docs swept: `open-bugs.md` (BUG-011 fixed, BUG-001 annotated), backlog (P9 row, queue, change log, BUG-001 §3 row — its `scheduler.py:131` pointer dropped), `CLAUDE.md` (queue bullet + a new Key-decisions row), this file | `ed4d63c` + docs closeout |
 | 2026-09-11 *(clock)* | **Docs + decisions only — no application code.** Deploy-path audit of what a `main` fast-forward actually does, against the infra repo: **the deploy is automatic** (five `ImagePolicy` objects at 1m + `ImageUpdateAutomation` writing tags back to the infra repo), so a push needs no manual tag bump. **Four findings, none of them in any doc.** 🔴 **`api` and `http-worker` are `strategy: Recreate` at `replicas: 1`** — the old pod stops *before* the new one starts, so there is a real outage window on every release **and no fallback if the new image fails**; ⚠️ **the other three default to `RollingUpdate`, which at `replicas: 1` resolves to maxSurge 1 / maxUnavailable 0**, so a crash-looping image **stalls the rollout and leaves the old pod running** — good for uptime, **wrong for the P6 cutover**, because it silently leaves a **v2 worker against a v3 API**, and a bad `schema_version` is *acked and discarded*, not retried. **So verify `rollout status` per Deployment, not pod health.** ✅ The `flux-system` Kustomization has **no `wait: true`**, so a crash-looping coordinator (BUG-012) cannot block the other four reconciling — **ignoring crawls is safe**. ✅ The nightly `scrapeflow-cleanup` CronJob runs **from the API image** with MinIO delete rights and upgrades silently with it — checked and **unaffected by ADR-011**: it reads `result_path` from the DB and matches `startswith("history/")`, never constructing or parsing a path. ✅ **Zero Alembic revisions `main..develop`** — this release runs no migration. 🔷 **BUG-013 filed** (5 of 7 dependency manifests resolve at build time, so the tested image and the deployed image are different artifacts) — **carved out of BUG-006 deliberately: visibility vs reproducibility, neither closes the other.** Its new half is the **frontend**, which BUG-006 counts among the three *scanned* manifests: `api/Dockerfile` copies only `package.json` before `npm install`, so **the lockfile is absent from the step that resolves versions** and those 21 alerts have never described the shipped bundle. 🔷 **Two release-cadence decisions taken** — the pre-migration queue ships as **one** `main` fast-forward, and the migration then ships **per-flow, one push per ADR-009 §16 step**; a `main` freeze was weighed and dropped, so **§16 stands as written and no superseding ADR is needed** | `e9304b9`, `43c828a`, `2e822d9` |
@@ -449,7 +490,7 @@ verification is the part worth trusting, not the reading.**
 
 **What must NOT be trimmed further:**
 
-- ⚠️ **`CLAUDE.md`'s 43 Key-decisions rows, in full.** *(Re-counted 2026-09-11: 43, not 41 — the count had drifted by one before P9 added its row.)* The rationale column is not explanatory
+- ⚠️ **`CLAUDE.md`'s 44 Key-decisions rows, in full.** *(Re-counted 2026-09-18 by `awk` over the table: 44 — P8 and P7 each added one since the 2026-09-11 count of 43, so one of those counts was off by one; the awk number is the one to trust.)* The rationale column is not explanatory
   padding — it is the trap that stops the bug returning, and cutting it is the one edit that would
   make that file worse. Specifically: `xvfb-run`-as-pid-1, the **`nats consumer info --json`**
   requirement, the `llm_max_retries=0` pin and why the Q6 pin and the timeout bump are *safe

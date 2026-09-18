@@ -854,9 +854,12 @@ takes its bugs along; plumbing is replaced.
   silent when attempted.
 - **BUG-005** — same family: shipped, silently broken on every path, never exercised, and found by
   reading rather than by an alert.
-- **P7 / crawl quota** — P7 adds quota counting to a lane that has never successfully completed a
-  page. Worth knowing when sequencing: P7's accounting cannot be tested end to end until either
-  this is fixed or the crawl migration lands.
+- **P7 / crawl quota** — ✅ built 2026-09-18 on a lane that has never successfully completed a
+  page. Consequence, not a bug in P7: **every v1 crawl stays `running` forever and therefore holds
+  a concurrency slot until the user cancels it** — the meter is telling the truth about a lane that
+  never finishes. `scripts/audit_crawl_quota.py` lists them. The per-page storage insert is *not*
+  on v1 for the same reason (its only site is the handler this bug is about); it lands in the
+  `CrawlWorkflow` port.
 - **BUG-010 / ADR-009 §13a (2026-08-28)** — the blast radius of *this* bug is wider than "one
   consumer is missing". Traced through for the §13 review: because nothing reads results,
   `_process_crawl_result`, `_enqueue_url`, `_fetch_minio_bytes`, **link extraction and sitemap
@@ -1297,8 +1300,11 @@ Two things bear on a later decision:
   same *"a fix commit introduced it"* provenance.
 - **P6 / ADR-011** — unrelated to the mechanism. P6 touched this file (the dispatch payload) but not
   this function; the restart is only what exposed it.
-- **P7** — will add quota accounting and artifact reclaim to the crawl lane. It should not land on a
-  coordinator that cannot boot.
+- **P7** — ✅ built 2026-09-18: quota admission, the counting views and artifact reclaim are all
+  `api/`-side, so a coordinator that cannot boot does not affect them. What it changes for this bug:
+  `reenqueue_stalled` deletes `crawl_pages` rows, and `storage_objects.crawl_page_id` cascades — so
+  if the port ever gave this function ledger rows to delete behind, it would recreate the orphan
+  class P8 closed. Moot on v1 (no crawl row is ever written, BUG-008) and dissolved with the function.
 
 ---
 
@@ -1460,6 +1466,62 @@ among the **scanned** manifests, and is right to — the gap there is not scanni
   service it produces still installs dependencies at image build. Locking is unaffected by the
   engine change, and the Temporal SDK becomes one more unpinned dependency if this is not fixed
   first. `phase4-backlog.md` §4.
+
+---
+
+## BUG-014 — `DELETE /admin/users/{id}` returns 500 for any user who has ever created a batch or a crawl
+
+**Severity:** Medium (an admin endpoint that fails on most real users — but it fails *closed*,
+so nothing is orphaned or half-deleted)
+**Discovered:** 2026-09-18, building P7's reclaim path and checking what `release_user_objects`'s
+caller does after it
+**Status:** Open — **filed, not triaged.** Not a §3 do-not-fix: user deletion is not orchestration
+and `routers/admin.py` survives the migration. Sequencing is the owner's call.
+
+### What happens
+
+`admin_delete_user` releases every ledger row the user holds (P8), then `db.delete(user)` and
+commits. `users` is referenced by seven tables. Five cascade; **`crawls.user_id` and
+`batches.user_id` do not** — both are `ForeignKey("users.id")` with no `ondelete`, so Postgres
+runs `NO ACTION` — and the `User` model's relationships cascade only `api_keys` and `jobs`, so the
+ORM does not delete them either. The `DELETE FROM users` raises
+`violates foreign key constraint "crawls_user_id_fkey"` (or `batches_user_id_fkey`), the request
+500s, and the user stays.
+
+Verified 2026-09-18 with an inserted user + crawl inside a rolled-back transaction: the delete
+fails on `crawls_user_id_fkey` exactly as read.
+
+⚠️ **The failure is ordered after the release, so it is not free.** The release and the row
+delete share one transaction, and the FK fires at its commit — so the DB side (ledger rows,
+counter) rolls back, but **the MinIO deletes have already happened and are not transactional**.
+Result: the user's objects are gone from the bucket while their ledger rows and their bytes on
+the counter stay, and every retry repeats the (idempotent — S3 delete of a missing key succeeds)
+removals and fails at the same FK. Nothing double-counts: the first commit that succeeds, after
+the FK is fixed, releases each row exactly once. Until then the counter holds bytes for objects
+that no longer exist, which `scripts/reconcile_storage_ledger.py` would also detect (a row whose
+object is gone is dropped and the counter recomputed).
+
+### Why it was missed
+
+The two tables were added in Phase 2/3 (ADR-006, ADR-005) after the user-delete endpoint, and
+each added its own `user_id` without looking at what `users`' other referrers did. `test_admin.py`
+deletes users who have jobs only. The backlog's P7 row says *"even deleting a user orphans their
+crawl artifacts in MinIO"* — the truth is one step earlier: **the delete never gets that far**.
+
+### Fix
+
+Two lines and a migration: `ondelete="CASCADE"` on both FKs, matching `jobs`, `api_keys` and
+`storage_objects`. **Order matters in the same way P8's 503 does** — the release must still run
+*before* the row delete, because a cascade that drops `crawl_pages` and `batch_items` → `job_runs`
+would take `storage_objects` rows with it (both FKs cascade) for objects still on disk. That is
+already the endpoint's order; the fix only removes the FK that stops it completing. One test:
+delete a user who owns a crawl and a batch, assert 204 and that both parent rows are gone.
+
+### Relationship to P7
+
+None in mechanism. P7 gives `DELETE /crawls/{id}?permanent=true` its own release path, which works
+because it deletes the crawl row with a Core `DELETE` and lets the DB cascade — the same shape
+the user delete needs.
 
 ---
 

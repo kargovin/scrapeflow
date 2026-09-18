@@ -175,11 +175,15 @@ REST API query. Table-by-table:
 - **`pipeline_runs` + `pipeline_run_blocks`** — **new.** Pipeline runs are never `job_runs` rows:
   `job_runs` carries job-shaped columns and a two-way exclusive-or constraint that would become
   three-way, and R3's per-block status and timing needs a child table regardless.
-- **The run-counting view** — **new, and pre-migration (P7).** Quota counting stops naming a table.
-  The view is the single definition of *"a run this user started"* and carries **four lanes** —
-  job `job_runs`, batch `job_runs`, **`crawl_pages`**, `pipeline_runs`. `monthly_runs` counts rows;
-  `concurrent_jobs` counts distinct **submissions**. Without it a new lane is invisible to every
-  meter by construction, which is exactly what already happened to crawls.
+- **The run-counting views** — ✅ **built 2026-09-18 (P7), pre-migration.** Quota counting stops naming a table.
+  **Two views, one per meter** — `quota_run_units` (one row per attempted fetch; `monthly_runs` counts
+  rows) and `quota_active_submissions` (one row per submission holding a slot; `concurrent_jobs`
+  counts rows). Each carries **three lanes today** — job `job_runs`, batch `job_runs`, **`crawl_pages`**
+  / `crawls` — and **`pipeline_runs` is the fourth arm, added to both in the migration that creates
+  that table.** ⚠️ ADR-009 §3 describes one view aggregated two ways; the split is a build-time
+  refinement, decision unchanged: a queued crawl has no unit row yet still holds its slot, so the
+  concurrency arm reads the submission tables (`phase4-backlog.md` change log, 2026-09-18). Without
+  an arm a new lane is invisible to that meter by construction, which is exactly what happened to crawls.
 - **The shared storage ledger** — **new, and pre-migration (P8).** One per-object row, **shared
   across lanes and lane-blind by construction** (the meter reads `user_id` and `bytes` only). It is
   BUG-007's fix vehicle and the table P7 needs, which is why it is sequenced between them. Written
@@ -315,8 +319,9 @@ retries. **That looks exactly like a workflow bug and is not one.**
 Never big-bang. Each step ships independently; both systems run until a flow is fully moved.
 
 **Entry condition — the sequence does not start until the pre-migration queue is empty:**
-**P6 → P8 → P7 + BUG-007.** P8 (the shared storage ledger) is a hard dependency — the v2 charging
-activity has no table without it — and without P7's counting view a pipeline run consumes **none**
+**P6 → P9 → P8 → P7 + BUG-007 — ✅ all built as of 2026-09-18, none deployed; the queue's single release is the remaining step.**
+P8 (the shared storage ledger) is a hard dependency — the v2 charging
+activity has no table without it — and without P7's counting views a pipeline run consumes **none**
 of the three meters, reproducing P7's own bug on a brand-new lane. `phase4-backlog.md` §1 is the
 single source of truth for its contents.
 
