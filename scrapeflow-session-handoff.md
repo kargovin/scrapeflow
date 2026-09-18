@@ -339,8 +339,10 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   revision** (`0c73753d5138`), so the release runs a migration on API startup against the
   `Recreate`-strategy API. **P7 (`24cb89c`, 2026-09-18) is the fourth and last** — `api/` only, and it adds
   **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them).
-- ✅ **`develop` was pushed to `origin/develop` on 2026-09-09** (`fa3c18d..a57e395`, ten commits,
-  including P6). ⚠️ **Since then, unpushed on `develop`:** four docs-only commits from the first
+- ✅ **`develop` was pushed to `origin/develop` on 2026-09-18** (`0daf956..08655fd`, 13 commits —
+  P9, P8, P7 and their closeouts). **After the push: 0 ahead, 0 behind; `main` 71 behind, 0 ahead.**
+  The previous push was 2026-09-09 (`fa3c18d..a57e395`, ten commits, including P6). ⚠️ *Historical,
+  now pushed — kept for the commit list:* between those two pushes, on `develop`: four docs-only commits from the first
   2026-09-11 session (`e9304b9`, `43c828a`, `2e822d9`, `f724162`), then **P9's code (`ed4d63c`)**
   and its docs closeout (`7ae5b18`), then **P8's code (`f503f8b`)** and its docs closeout
   (`34027df` + `a629b64`), then **P7's code (`24cb89c`, 2026-09-18)** and its docs closeout.
