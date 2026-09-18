@@ -1475,8 +1475,15 @@ among the **scanned** manifests, and is right to — the gap there is not scanni
 so nothing is orphaned or half-deleted)
 **Discovered:** 2026-09-18, building P7's reclaim path and checking what `release_user_objects`'s
 caller does after it
-**Status:** Open — **filed, not triaged.** Not a §3 do-not-fix: user deletion is not orchestration
-and `routers/admin.py` survives the migration. Sequencing is the owner's call.
+**Status:** ✅ **FIXED IN CODE 2026-09-19 (`b57211a`) — not deployed.** `ondelete="CASCADE"` on
+both FKs (`models/crawl.py`, `models/batch.py`); migration `9a1ebad3fca2` swaps the two
+constraints and keeps their names, so nothing that names them changes; one test
+(`test_admin_delete_user_with_crawl_and_batch`) fails with this bug's exact
+`ForeignKeyViolationError` on the old schema and passes on the new one. It sits on `develop`
+ahead of the queue's release, so **it rides that release as its third Alembic revision** — the
+sequencing call the filing left open. The endpoint itself is untouched: its release-before-delete
+order was already right. Not a §3 do-not-fix: user deletion is not orchestration and
+`routers/admin.py` survives the migration.
 
 ### What happens
 
@@ -1516,6 +1523,21 @@ Two lines and a migration: `ondelete="CASCADE"` on both FKs, matching `jobs`, `a
 would take `storage_objects` rows with it (both FKs cascade) for objects still on disk. That is
 already the endpoint's order; the fix only removes the FK that stops it completing. One test:
 delete a user who owns a crawl and a batch, assert 204 and that both parent rows are gone.
+
+✅ **Built as written (2026-09-19, `b57211a`).** The test goes one step further than the plan: each
+lane holds a ledger row (a `crawl_pages` row and a batch `job_runs` row, both with a
+`storage_objects` row), so the release runs before the delete and the assertion covers the
+children and the ledger rows going with the parents, not only the parents. Two things from the
+build worth keeping:
+
+- **Autogenerate emits `create_foreign_key(None, …)` for the replacement constraints**, and the
+  matching `drop_constraint(None, …)` in the downgrade cannot run. The committed revision names
+  both explicitly with Postgres' own default names (`crawls_user_id_fkey`, `batches_user_id_fkey`),
+  so the downgrade round-trips — verified `c` → `a` → `c` on `confdeltype`.
+- **The P7 views read `crawls.user_id` and `batches.user_id`, and this migration does not need to
+  drop them.** A constraint swap leaves the column identity alone; the drop/recreate obligation in
+  `CLAUDE.md`'s *Run-counting views* row is for `DROP COLUMN` / `ALTER … TYPE` only. Verified by
+  the migration applying cleanly with both views in place.
 
 ### Relationship to P7
 
