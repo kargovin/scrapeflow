@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.quota import decrement_storage_bytes, increment_storage_bytes
 from app.core.storage import delete_minio_object, stat_minio_size
 from app.models.batch import Batch, BatchItem
+from app.models.crawl import CrawlPage
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.storage_object import StorageObject
@@ -111,6 +112,15 @@ async def objects_for_user(db: AsyncSession, user_id: uuid.UUID) -> list[Storage
     return list(result.scalars().all())
 
 
+async def objects_for_crawl(db: AsyncSession, crawl_id: uuid.UUID) -> list[StorageObject]:
+    """Every object any page of the crawl produced."""
+    page_ids = select(CrawlPage.id).where(CrawlPage.crawl_id == crawl_id)
+    result = await db.execute(
+        select(StorageObject).where(StorageObject.crawl_page_id.in_(page_ids))
+    )
+    return list(result.scalars().all())
+
+
 async def release_objects(
     db: AsyncSession, minio: Minio, rows: Sequence[StorageObject], label: str
 ) -> ReleaseOutcome:
@@ -169,6 +179,14 @@ async def release_run_objects(
             outcome.failed += 1
             outcome.failed_run_ids.add(run.id)
     return outcome
+
+
+async def release_crawl_objects(
+    db: AsyncSession, minio: Minio, crawl_id: uuid.UUID, label: str
+) -> ReleaseOutcome:
+    """Release everything a crawl's pages hold. No legacy branch: crawl pages were never
+    charged before the ledger, so there is nothing older than a row to fall back to."""
+    return await release_objects(db, minio, await objects_for_crawl(db, crawl_id), label)
 
 
 async def release_user_objects(

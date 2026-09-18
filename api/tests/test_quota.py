@@ -587,3 +587,210 @@ async def test_record_object_idempotent_on_key(db_user):
         assert (first, second, other) == (True, False, True)
         quota_row = await db.get(UserQuota, db_user.id)
         assert quota_row.storage_bytes_used == 1024 + 16
+
+
+# ---------------------------------------------------------------------------
+# P7 — the crawl lane is metered, and the count meters read the views
+# ---------------------------------------------------------------------------
+#
+# `quota_user`'s teardown deletes the user row, and crawls/batches reference it
+# without ON DELETE CASCADE — so every test here that creates one removes it.
+
+from app.models.batch import Batch, BatchItem  # noqa: E402
+from app.models.crawl import Crawl, CrawlPage  # noqa: E402
+
+
+async def _make_crawl(user_id, *, status="running", pages=0, page_status="pending"):
+    """A crawl row plus `pages` crawl_pages rows, the shape the coordinator writes."""
+    async with AsyncSessionLocal() as db:
+        crawl = Crawl(user_id=user_id, seed_url="https://example.com", status=status)
+        db.add(crawl)
+        await db.flush()
+        for i in range(pages):
+            db.add(
+                CrawlPage(
+                    crawl_id=crawl.id, url=f"https://example.com/{i}", depth=0, status=page_status
+                )
+            )
+        await db.commit()
+        return crawl.id
+
+
+async def _drop_crawls(user_id):
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Crawl).where(Crawl.user_id == user_id))
+        await db.commit()
+
+
+async def _drop_batches(user_id):
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Batch).where(Batch.user_id == user_id))
+        await db.commit()
+
+
+async def test_crawl_admission_prechecks_max_pages_against_monthly_runs(
+    quota_client, quota_user, quota_headers
+):
+    """POST /crawls is pre-checked with batch_count=max_pages, as a batch is with len(urls)."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, monthly_runs_limit=10))
+        await db.commit()
+
+    resp = await quota_client.post(
+        "/crawls", json={"seed_url": "https://example.com", "max_pages": 11}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["quota_type"] == "monthly_runs"
+
+    resp = await quota_client.post(
+        "/crawls", json={"seed_url": "https://example.com", "max_pages": 10}, headers=quota_headers
+    )
+    assert resp.status_code == 201, resp.text
+    await _drop_crawls(quota_user.id)
+
+
+async def test_crawl_pages_count_toward_monthly_runs(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """A crawl's pages are attempted fetches: 5 pages this month fill a limit of 5, and
+    the *job* lane is what gets refused — the meter is one number across lanes."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, monthly_runs_limit=5))
+        await db.commit()
+    await _make_crawl(quota_user.id, status="completed", pages=5, page_status="completed")
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    detail = resp.json()["detail"]
+    assert detail["quota_type"] == "monthly_runs"
+    assert "5/5" in detail["message"]
+    await _drop_crawls(quota_user.id)
+
+
+async def test_active_crawl_holds_one_concurrent_slot(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """A queued crawl with no pages yet still holds its slot — the slot belongs to the
+    submission, not to rows the coordinator has not written yet."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
+        await db.commit()
+    await _make_crawl(quota_user.id, status="queued", pages=0)
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["quota_type"] == "concurrent_jobs"
+    await _drop_crawls(quota_user.id)
+
+
+async def test_crawl_with_many_active_pages_is_still_one_slot(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """Contention is per submission: 50 pending pages under one crawl occupy one slot."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=2))
+        await db.commit()
+    await _make_crawl(quota_user.id, status="running", pages=50, page_status="pending")
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 201, resp.text
+    await _drop_crawls(quota_user.id)
+
+
+async def test_terminal_crawl_holds_no_slot(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
+        await db.commit()
+    await _make_crawl(quota_user.id, status="cancelled", pages=3, page_status="pending")
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 201, resp.text
+    await _drop_crawls(quota_user.id)
+
+
+async def test_crawl_admission_refused_when_pool_is_full(quota_client, quota_user, quota_headers):
+    """The pool is shared: a pending job run blocks a new crawl."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
+        job = Job(user_id=quota_user.id, url="https://example.com")
+        db.add(job)
+        await db.flush()
+        db.add(JobRun(job_id=job.id, status="pending"))
+        await db.commit()
+
+    resp = await quota_client.post(
+        "/crawls", json={"seed_url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["quota_type"] == "concurrent_jobs"
+
+
+async def test_crawl_admission_refused_at_storage_wall(quota_client, quota_user, quota_headers):
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, storage_bytes_limit=1000, storage_bytes_used=1000))
+        await db.commit()
+
+    resp = await quota_client.post(
+        "/crawls", json={"seed_url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["quota_type"] == "storage_bytes"
+
+
+async def test_batch_holds_one_concurrent_slot(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """ADR-009 §8, owner's call 2026-08-17: a batch of any size is one submission.
+    Before P7 this batch metered as 5 against a limit of 2 and the job was refused."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=2))
+        batch = Batch(user_id=quota_user.id, total=5, status="running")
+        db.add(batch)
+        await db.flush()
+        for i in range(5):
+            item = BatchItem(batch_id=batch.id, url=f"https://example.com/{i}", status="pending")
+            db.add(item)
+            await db.flush()
+            db.add(JobRun(batch_item_id=item.id, status="pending"))
+        await db.commit()
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 201, resp.text
+    await _drop_batches(quota_user.id)
+
+
+async def test_batch_items_each_count_toward_monthly_runs(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """Cost is per fetch even though contention is per submission: the same 5-run batch
+    is 5 monthly units."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, monthly_runs_limit=5))
+        batch = Batch(user_id=quota_user.id, total=5, status="completed")
+        db.add(batch)
+        await db.flush()
+        for i in range(5):
+            item = BatchItem(batch_id=batch.id, url=f"https://example.com/{i}", status="completed")
+            db.add(item)
+            await db.flush()
+            db.add(JobRun(batch_item_id=item.id, status="completed"))
+        await db.commit()
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["quota_type"] == "monthly_runs"
+    await _drop_batches(quota_user.id)

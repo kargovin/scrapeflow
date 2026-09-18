@@ -334,3 +334,165 @@ async def test_delete_crawl_other_user_returns_404(client, auth_headers, db_user
         if c:
             await db.delete(c)
             await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# DELETE /crawls/{id}?permanent=true — reclaim through the ledger (P7)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock  # noqa: E402
+
+from app.core.minio import get_minio  # noqa: E402
+from app.main import app  # noqa: E402
+from app.models.storage_object import StorageObject  # noqa: E402
+from app.models.user_quota import UserQuota  # noqa: E402
+
+BUCKET = "scrapeflow-results"
+
+
+async def _crawl_with_charged_pages(client, auth_headers, *, status="completed", sizes=(100, 7)):
+    """A crawl owned by the mock-Clerk user, one page per size, each page holding one
+    ledger row — the state the CrawlWorkflow port will leave behind."""
+    resp = await client.post(
+        "/crawls", json={"seed_url": f"https://{uuid.uuid4().hex}.local/"}, headers=auth_headers
+    )
+    assert resp.status_code == 201, resp.text
+    crawl_id = uuid.UUID(resp.json()["id"])
+    user_id = uuid.UUID(resp.json()["user_id"])
+
+    keys = []
+    async with AsyncSessionLocal() as db:
+        crawl = await db.get(Crawl, crawl_id)
+        crawl.status = status
+        for i, size in enumerate(sizes):
+            page = CrawlPage(
+                crawl_id=crawl_id, url=f"https://x.local/{i}", depth=0, status="completed"
+            )
+            db.add(page)
+            await db.flush()
+            key = f"{BUCKET}/history/{page.id}/scrape.html"
+            page.result_path = key
+            db.add(
+                StorageObject(user_id=user_id, object_key=key, bytes=size, crawl_page_id=page.id)
+            )
+            keys.append(key)
+        quota = await db.get(UserQuota, user_id)
+        if quota is None:
+            db.add(UserQuota(user_id=user_id, storage_bytes_used=sum(sizes)))
+        else:
+            quota.storage_bytes_used = sum(sizes)
+        await db.commit()
+    return crawl_id, user_id, keys
+
+
+async def _used(user_id):
+    async with AsyncSessionLocal() as db:
+        quota = await db.get(UserQuota, user_id)
+        return quota.storage_bytes_used if quota else 0
+
+
+async def _ledger_rows_for_crawl(crawl_id):
+    async with AsyncSessionLocal() as db:
+        page_ids = select(CrawlPage.id).where(CrawlPage.crawl_id == crawl_id)
+        rows = await db.execute(
+            select(StorageObject).where(StorageObject.crawl_page_id.in_(page_ids))
+        )
+        return rows.scalars().all()
+
+
+async def test_permanent_delete_releases_every_page_object(client, auth_headers, bypass_ssrf):
+    """Every page's object removed, every row gone, the counter down by their sum, and
+    the crawl row and its pages deleted. Cancel alone frees nothing — this is the only
+    path that does."""
+    crawl_id, user_id, keys = await _crawl_with_charged_pages(client, auth_headers)
+    minio = AsyncMock()
+    app.dependency_overrides[get_minio] = lambda: minio
+    try:
+        resp = await client.delete(f"/crawls/{crawl_id}?permanent=true", headers=auth_headers)
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+    assert resp.status_code == 204
+    removed = {call.args[1] for call in minio.remove_object.call_args_list}
+    assert removed == {k.split("/", 1)[1] for k in keys}
+    assert await _ledger_rows_for_crawl(crawl_id) == []
+    assert await _used(user_id) == 0
+    async with AsyncSessionLocal() as db:
+        assert await db.get(Crawl, crawl_id) is None
+        pages = await db.execute(select(CrawlPage).where(CrawlPage.crawl_id == crawl_id))
+        assert pages.scalars().all() == []
+
+
+async def test_permanent_delete_works_on_a_terminal_crawl(client, auth_headers, bypass_ssrf):
+    """Soft delete 409s on a completed crawl; permanent must not — reclaiming a finished
+    crawl's storage is the whole point."""
+    crawl_id, _, _ = await _crawl_with_charged_pages(client, auth_headers, status="completed")
+    soft = await client.delete(f"/crawls/{crawl_id}", headers=auth_headers)
+    assert soft.status_code == 409
+
+    app.dependency_overrides[get_minio] = lambda: AsyncMock()
+    try:
+        resp = await client.delete(f"/crawls/{crawl_id}?permanent=true", headers=auth_headers)
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+    assert resp.status_code == 204
+
+
+async def test_permanent_delete_refuses_when_an_object_cannot_be_removed(
+    client, auth_headers, bypass_ssrf
+):
+    """One object fails to delete: its row stays, the counter keeps its bytes, and the
+    crawl is kept — a cascade would have dropped the row for an object still on disk.
+    What was freed stays freed."""
+    crawl_id, user_id, keys = await _crawl_with_charged_pages(client, auth_headers, sizes=(100, 7))
+    _, bad_key = keys
+
+    minio = AsyncMock()
+
+    async def _remove(bucket, key):
+        if bad_key.endswith(key):
+            raise Exception("minio down")
+
+    minio.remove_object = AsyncMock(side_effect=_remove)
+    app.dependency_overrides[get_minio] = lambda: minio
+    try:
+        resp = await client.delete(f"/crawls/{crawl_id}?permanent=true", headers=auth_headers)
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+    assert resp.status_code == 503
+    rows = await _ledger_rows_for_crawl(crawl_id)
+    assert [(r.object_key, r.bytes) for r in rows] == [(bad_key, 7)]
+    assert await _used(user_id) == 7
+    async with AsyncSessionLocal() as db:
+        assert await db.get(Crawl, crawl_id) is not None
+
+    # The mock-Clerk user persists across the suite; take the kept crawl with us.
+    app.dependency_overrides[get_minio] = lambda: AsyncMock()
+    try:
+        resp = await client.delete(f"/crawls/{crawl_id}?permanent=true", headers=auth_headers)
+        assert resp.status_code == 204
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+    assert await _used(user_id) == 0
+
+
+async def test_permanent_delete_other_user_returns_404(client, auth_headers, db_user):
+    crawl = Crawl(user_id=db_user.id, seed_url="https://other-user-permanent.local/")
+    async with AsyncSessionLocal() as db:
+        db.add(crawl)
+        await db.commit()
+        await db.refresh(crawl)
+
+    app.dependency_overrides[get_minio] = lambda: AsyncMock()
+    try:
+        resp = await client.delete(f"/crawls/{crawl.id}?permanent=true", headers=auth_headers)
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+    assert resp.status_code == 404
+
+    async with AsyncSessionLocal() as db:
+        c = await db.get(Crawl, crawl.id)
+        assert c is not None  # still there — 404 must not delete
+        await db.delete(c)
+        await db.commit()

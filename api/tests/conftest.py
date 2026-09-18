@@ -19,6 +19,7 @@ from app.main import app
 from app.models.api_key import ApiKey
 from app.models.user import User
 from app.routers.batch import check_batch_quota
+from app.routers.crawls import check_crawl_quota
 from app.routers.jobs import check_job_quota
 
 
@@ -45,11 +46,13 @@ async def client():
     app.dependency_overrides[check_rate_limit] = lambda: None
     app.dependency_overrides[check_job_quota] = lambda: None
     app.dependency_overrides[check_batch_quota] = lambda: None
+    app.dependency_overrides[check_crawl_quota] = lambda: None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.pop(check_rate_limit, None)
     app.dependency_overrides.pop(check_job_quota, None)
     app.dependency_overrides.pop(check_batch_quota, None)
+    app.dependency_overrides.pop(check_crawl_quota, None)
 
 
 @pytest_asyncio.fixture
@@ -57,10 +60,12 @@ async def rate_limited_client():
     """Like `client` but with the real rate limiter active. Used only by rate-limit integration tests."""
     app.dependency_overrides[check_job_quota] = lambda: None
     app.dependency_overrides[check_batch_quota] = lambda: None
+    app.dependency_overrides[check_crawl_quota] = lambda: None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.pop(check_job_quota, None)
     app.dependency_overrides.pop(check_batch_quota, None)
+    app.dependency_overrides.pop(check_crawl_quota, None)
 
 
 @pytest_asyncio.fixture

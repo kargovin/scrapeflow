@@ -1,15 +1,22 @@
 """Per-user quota enforcement (PRD-012).
 
 Three dimensions:
-  monthly_runs    — job_runs created since first-of-month
-  concurrent_jobs — job_runs currently in pending/running/processing
+  monthly_runs    — attempted fetches since first-of-month, from the quota_run_units view:
+                    job run = 1, batch of N = N, crawl of N pages = N (ADR-009 §8)
+  concurrent_jobs — submissions in flight, from the quota_active_submissions view: a job
+                    run, a batch of any size and a crawl of any size each hold one slot
   storage_bytes   — cumulative MinIO bytes tracked in user_quotas.storage_bytes_used,
                     a materialised sum over the storage_objects ledger (core/ledger.py);
                     only the ledger moves it, in the same transaction as the row
 
+The two count meters name no table (ADR-009 §3). Each reads one view, and every lane is
+an arm of both views — a lane that is missing from an arm is invisible to that meter,
+which is how crawls cost nothing from 2026-04-17 until P7. Adding a lane is a migration
+that widens both views, not an edit here.
+
 Limits come from the user_quotas row; NULL columns fall back to settings defaults.
 
-check_user_quota()  — raises HTTP 429; use at API endpoints (POST /jobs, POST /batch)
+check_user_quota()  — raises HTTP 429; use at API endpoints (POST /jobs, /batch, /crawls)
 is_quota_exceeded() — returns bool; use in scheduler (no HTTP context)
 check_storage_quota() — used by result_consumer
 increment_storage_bytes() / decrement_storage_bytes()
@@ -28,8 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.storage import delete_minio_object
 from app.models.batch import Batch, BatchItem
-from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.models.quota_views import quota_active_submissions, quota_run_units
 from app.models.user_quota import UserQuota
 from app.settings import settings
 
@@ -45,31 +52,27 @@ def _first_of_next_month(now: datetime) -> datetime:
 
 
 async def _count_monthly_runs(user_id: uuid.UUID, db: AsyncSession) -> int:
+    """Attempted fetches this calendar month, on every lane."""
     now = datetime.now(UTC)
     first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     count = await db.scalar(
-        select(func.count(JobRun.id))
-        .outerjoin(Job, JobRun.job_id == Job.id)
-        .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
-        .outerjoin(Batch, BatchItem.batch_id == Batch.id)
+        select(func.count())
+        .select_from(quota_run_units)
         .where(
-            func.coalesce(Job.user_id, Batch.user_id) == user_id,
-            JobRun.created_at >= first_of_month,
+            quota_run_units.c.user_id == user_id,
+            quota_run_units.c.created_at >= first_of_month,
         )
     )
     return count or 0
 
 
 async def _count_concurrent_jobs(user_id: uuid.UUID, db: AsyncSession) -> int:
+    """Submissions holding a slot right now, on every lane — one per submission, so a
+    batch of 100 pending runs is 1, not 100."""
     count = await db.scalar(
-        select(func.count(JobRun.id))
-        .outerjoin(Job, JobRun.job_id == Job.id)
-        .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
-        .outerjoin(Batch, BatchItem.batch_id == Batch.id)
-        .where(
-            func.coalesce(Job.user_id, Batch.user_id) == user_id,
-            JobRun.status.in_(["pending", "running", "processing"]),
-        )
+        select(func.count())
+        .select_from(quota_active_submissions)
+        .where(quota_active_submissions.c.user_id == user_id)
     )
     return count or 0
 

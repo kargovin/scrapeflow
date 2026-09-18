@@ -5,11 +5,15 @@ from urllib.parse import urlparse
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from sqlalchemy import select, update
+from miniopy_async import Minio
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.core.db import get_db
+from app.core.ledger import release_crawl_objects
+from app.core.minio import get_minio
+from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.crawl import Crawl, CrawlPage, CrawlQueueItem
@@ -27,12 +31,30 @@ _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _PAGE_STATUSES = frozenset({"pending", "running", "completed", "failed"})
 
 
+async def check_crawl_quota(
+    body: CrawlCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """FastAPI dependency — raises 429 if any quota dimension is exceeded.
+
+    A crawl is pre-checked against its declared ceiling exactly as a batch is against
+    len(urls): monthly_runs with batch_count=max_pages, since every page is one attempted
+    fetch. Concurrency is one slot for the whole crawl (ADR-009 §8). The meter charges
+    actuals — crawl_pages rows as the coordinator creates them.
+    """
+    await check_user_quota(user.id, db, "monthly_runs", batch_count=body.max_pages)
+    await check_user_quota(user.id, db, "concurrent_jobs")
+    await check_user_quota(user.id, db, "storage_bytes")
+
+
 @router.post("", response_model=CrawlResponse, status_code=http_status.HTTP_201_CREATED)
 async def create_crawl(
     body: CrawlCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
+    _quota: None = Depends(check_crawl_quota),
 ) -> CrawlResponse:
     seed_url = str(body.seed_url)
     loop = get_running_loop()
@@ -132,12 +154,46 @@ async def list_crawl_pages(
 @router.delete("/{crawl_id}", status_code=http_status.HTTP_204_NO_CONTENT)
 async def cancel_crawl(
     crawl_id: uuid.UUID,
+    permanent: bool = Query(default=False),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
 ) -> None:
     crawl = await db.get(Crawl, crawl_id)
     if crawl is None or crawl.user_id != user.id:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Crawl not found")
+
+    if permanent:
+        # Objects before the DB row (external-before-internal), enumerated from the
+        # ledger. This is the only way a user frees crawl storage — the cancel below
+        # keeps every page on disk and charged.
+        outcome = await release_crawl_objects(
+            db, minio_client, crawl_id, "crawl object on permanent delete"
+        )
+        if outcome.failed:
+            # Keep the crawl: its cascade would drop ledger rows for objects still on
+            # disk. What was freed stays freed.
+            await db.commit()
+            raise HTTPException(
+                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"{outcome.failed} stored object(s) could not be removed; "
+                    "the crawl was not deleted. Retry."
+                ),
+            )
+
+        # Core delete so Postgres cascades (crawl_pages, crawl_queue, webhook_deliveries);
+        # the ORM would first try to NULL the children's NOT NULL crawl_id.
+        await db.execute(delete(Crawl).where(Crawl.id == crawl_id))
+        await db.commit()
+        logger.info(
+            "crawl_permanently_deleted",
+            crawl_id=str(crawl_id),
+            user_id=str(user.id),
+            objects_released=outcome.released,
+            bytes_freed=outcome.freed_bytes,
+        )
+        return
 
     if crawl.status in _TERMINAL_STATUSES:
         raise HTTPException(
