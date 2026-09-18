@@ -15,7 +15,9 @@ class Crawl(Base):
     __tablename__ = "crawls"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     seed_url: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="queued")
     max_depth: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")

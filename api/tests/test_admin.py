@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.auth.api_key import generate_api_key, hash_api_key
 from app.core.db import AsyncSessionLocal
@@ -200,6 +200,75 @@ async def test_admin_delete_user_cleans_minio_objects(client, admin_headers, db_
     async with AsyncSessionLocal() as db:
         gone = await db.get(User, user_id)
     assert gone is None
+
+
+async def test_admin_delete_user_with_crawl_and_batch(client, admin_headers, db_user):
+    """BUG-014: a user who owns a crawl and a batch can be deleted.
+
+    crawls.user_id and batches.user_id had no ON DELETE, so Postgres refused the delete
+    *after* the endpoint had released the user's objects from MinIO — files gone, rows
+    kept. Both lanes hold a ledger row here so the release-before-delete order is
+    exercised, and the cascade must take the children with the parents.
+    """
+    from app.models.batch import Batch, BatchItem
+    from app.models.crawl import Crawl, CrawlPage
+    from app.models.storage_object import StorageObject
+    from app.models.user_quota import UserQuota
+
+    async with AsyncSessionLocal() as db:
+        crawl = Crawl(user_id=db_user.id, seed_url="https://example.com", status="running")
+        batch = Batch(user_id=db_user.id, total=1, status="running")
+        db.add_all([crawl, batch])
+        await db.flush()
+        page = CrawlPage(crawl_id=crawl.id, url="https://example.com/", depth=0, status="completed")
+        item = BatchItem(batch_id=batch.id, url="https://example.com/", status="completed")
+        db.add_all([page, item])
+        await db.flush()
+        run = JobRun(batch_item_id=item.id, status="completed")
+        db.add(run)
+        await db.flush()
+        db.add_all(
+            [
+                StorageObject(
+                    user_id=db_user.id,
+                    object_key=f"history/{page.id}/scrape.md",
+                    bytes=100,
+                    crawl_page_id=page.id,
+                ),
+                StorageObject(
+                    user_id=db_user.id,
+                    object_key=f"history/{run.id}/scrape.md",
+                    bytes=200,
+                    job_run_id=run.id,
+                ),
+                UserQuota(user_id=db_user.id, storage_bytes_used=300),
+            ]
+        )
+        await db.commit()
+        user_id, crawl_id, batch_id = db_user.id, crawl.id, batch.id
+        page_id, item_id, run_id = page.id, item.id, run.id
+
+    mock_minio = MagicMock()
+    mock_minio.remove_object = AsyncMock()
+
+    app.dependency_overrides[get_minio] = lambda: mock_minio
+    try:
+        resp = await client.delete(f"/admin/users/{user_id}", headers=admin_headers)
+        assert resp.status_code == 204
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+    assert mock_minio.remove_object.await_count == 2
+
+    async with AsyncSessionLocal() as db:
+        assert await db.get(User, user_id) is None
+        assert await db.get(Crawl, crawl_id) is None
+        assert await db.get(Batch, batch_id) is None
+        assert await db.get(CrawlPage, page_id) is None
+        assert await db.get(BatchItem, item_id) is None
+        assert await db.get(JobRun, run_id) is None
+        left = await db.execute(select(StorageObject).where(StorageObject.user_id == user_id))
+        assert left.scalars().all() == []
 
 
 async def test_admin_delete_self_is_rejected(client, admin_user, admin_headers):

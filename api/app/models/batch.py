@@ -16,7 +16,9 @@ class Batch(Base):
     __tablename__ = "batches"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="queued")
     output_format: Mapped[str] = mapped_column(
         VARCHAR(20), nullable=False, server_default="markdown"
