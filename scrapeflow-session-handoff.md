@@ -149,7 +149,9 @@ Five things that belong here because they are the session's findings rather than
 - ⚠️ **On v1 every crawl stays `running` forever** (BUG-008 again) **and so holds a slot until the
   user cancels it.** The meter is right; the lane never finishes. `scripts/audit_crawl_quota.py`
   lists who is affected — the dev DB's mock user held 264 crawl slots against a limit of 5. Cancel
-  the crawls, do not raise the limit.
+  the crawls, do not raise the limit. ✅ **Moot in production — owner, 2026-09-18: no crawl has
+  ever run there and none will until the `CrawlWorkflow` port.** Temporal fixes it for new crawls;
+  it would not have touched pre-existing `running` rows, which is why it was worth asking.
 - 🔴 **BUG-014 filed**: `DELETE /admin/users/{id}` 500s for any user with a batch or a crawl —
   `crawls.user_id` and `batches.user_id` have no `ON DELETE`, and the ORM cascades neither.
   Verified in a rolled-back transaction. It fails *after* the MinIO deletes, so the objects are
