@@ -3,10 +3,11 @@ Unit tests for worker/blocking.py — detect_block().
 
 All tests are synchronous: detect_block is pure (no I/O, no async).
 
-The three "live wall" fixtures are trimmed from artifacts pulled out of prod
-MinIO on 2026-07-22 (BUG-003 audit) — real bytes, not invented ones. The
-negative cases matter as much as the positives: a false "blocked" fails a
-working job, so most of this file is about NOT firing.
+The "live wall" fixtures are real bytes, not invented ones: three trimmed from
+artifacts pulled out of prod MinIO on 2026-07-22 (BUG-003 audit), and a fourth
+stored verbatim from prod on 2026-09-19. The negative cases matter as much as
+the positives: a false "blocked" fails a working job, so most of this file is
+about NOT firing.
 """
 
 import pytest
@@ -65,6 +66,26 @@ WALMART_WALL = """<html><head><title>Robot or human?</title></head><body>
 <script>window._pxAppId = 'PXu6b0qd2S';</script>
 </body></html>"""
 
+# job 106f8e90… run 996cf840… — myntra.com/hand-towels/…/30352159, 481 B in prod,
+# stored as `completed` on 2026-09-19. A 200 in 0.8 s end to end. The same URL
+# fetched from a residential IP at the same time returned the real site; from
+# the cluster's datacenter IP it returned this. Not Akamai's template (that is
+# MYNTRA_WALL above) — Myntra's own, disguised as an outage. Verbatim.
+MYNTRA_MAINTENANCE_WALL = """<!DOCTYPE html><html><head>
+    <title>Site Maintenance</title>
+    <style type="text/css">body { text-align: center; padding: 150px; }h1 { font-size: 40px; }body { font: 16px Helvetica, sans-serif; color: #333; }#error { display: block; text-align: left; width: 650px; margin: 0 auto; }</style>
+</head>
+<body>
+    <div id="error">
+    <h1>Oops! Something went wrong</h1>
+    <div>
+        <hr>
+        <p>Please contact your administrator</p>
+    </div>
+    </div>
+
+</body></html>"""
+
 
 def _big_page(marker: str = "", size: int = 400_000) -> str:
     """A genuine, full-size page. Padded past TIER2_MAX_BYTES."""
@@ -103,11 +124,30 @@ def test_walmart_perimeterx_wall_detected():
     assert result.tier == 1
 
 
+def test_myntra_maintenance_wall_detected():
+    """The 2026-09-19 false negative: a 481 B 200 that tier 2 was consulted on
+    and had no phrase for. It has no vendor marker, so it is a tier 2 catch
+    with an `unknown` vendor — which is the honest answer for Myntra's own
+    template."""
+    result = detect_block(MYNTRA_MAINTENANCE_WALL, status=200)
+    assert result.blocked
+    assert result.vendor == VENDOR_UNKNOWN
+    assert result.tier == 2
+    assert result.error == "blocked:unknown"
+    assert "tier2:contact_administrator" in result.signals
+
+
 def test_live_walls_are_caught_at_tier1_regardless_of_status():
-    """All three prod walls returned 200 — none relied on the status signal."""
+    """All three 2026-07-22 prod walls returned 200 — none relied on the status signal."""
     for html in (AMAZON_WALL, MYNTRA_WALL, WALMART_WALL):
         assert detect_block(html, status=200).tier == 1
         assert detect_block(html, status=None).blocked
+
+
+def test_myntra_maintenance_wall_caught_regardless_of_status():
+    """The 2026-09-19 wall is tier 2, so it is size-gated rather than
+    status-gated — a missing status must not change the answer."""
+    assert detect_block(MYNTRA_MAINTENANCE_WALL, status=None).blocked
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +230,7 @@ def test_missing_status_is_not_evidence():
         "Request unsuccessful",
         "unusual traffic from your computer network",
         "Access to This Page Has Been Blocked",
+        "Please contact your administrator",
     ],
 )
 def test_tier2_phrases_fire_on_small_pages(phrase):
@@ -213,6 +254,7 @@ def test_tier2_phrases_fire_on_small_pages(phrase):
         "Are you a robot",
         "Continue shopping",
         "unusual traffic from your computer network",
+        "Please contact your administrator",
     ],
 )
 def test_tier2_phrases_do_not_fire_on_full_size_pages(phrase):
@@ -284,6 +326,21 @@ def test_genuine_404_is_not_a_block():
     assert not detect_block(html, status=404).blocked
 
 
+def test_genuine_maintenance_page_is_not_a_block():
+    """The boundary the Myntra fingerprint must respect: a real outage page is
+    the site's honest answer, and it is small, so the *title* must not be the
+    signal — only the denial-template phrase is."""
+    html = (
+        "<html><head><title>Site Maintenance</title></head><body>"
+        "<h1>We'll be back soon</h1>"
+        "<p>We're performing scheduled maintenance. Please check back shortly.</p>"
+        + "<p>Thank you for your patience.</p>" * 10
+        + "</body></html>"
+    )
+    assert not detect_block(html, status=200).blocked
+    assert not detect_block(html, status=None).blocked
+
+
 def test_article_about_bot_detection_is_not_blocked():
     """The realistic false positive: content discussing the very phrases we match."""
     html = _big_page(
@@ -302,6 +359,7 @@ def test_article_about_bot_detection_is_not_blocked():
 def test_error_string_is_stable_contract():
     assert detect_block(AMAZON_WALL, status=200).error == "blocked:amazon"
     assert detect_block(MYNTRA_WALL, status=200).error == "blocked:akamai"
+    assert detect_block(MYNTRA_MAINTENANCE_WALL, status=200).error == "blocked:unknown"
     assert detect_block(_big_page(), status=403).error == "blocked:unknown"
 
 

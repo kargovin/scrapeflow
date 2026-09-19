@@ -45,9 +45,10 @@ The TIER 1 and TIER 2 vendor patterns are adapted from Crawl4AI's
   (https://x.com/unclecode) as part of the Crawl4AI project
   (https://github.com/unclecode/crawl4ai).
 
-Our own prod-verified additions (Amazon in-house, and the text markers matching
-the Walmart/Myntra walls captured 2026-07-22) are marked SCRAPEFLOW below —
-Crawl4AI's list has no Amazon entry, so these are additive.
+Our own prod-verified additions (Amazon in-house, the text markers matching
+the Walmart/Myntra walls captured 2026-07-22, and Myntra's "Site Maintenance"
+wall captured 2026-09-19) are marked SCRAPEFLOW below — Crawl4AI's list has no
+Amazon entry, so these are additive.
 """
 
 import re
@@ -68,8 +69,8 @@ VENDOR_HCAPTCHA = "hcaptcha"
 VENDOR_UNKNOWN = "unknown"
 
 # Tier 2 only applies below this. Every genuine page observed in prod was
-# >= 291 KiB; the three live walls were 411 B, 464 B and 5.4 KiB. Three orders
-# of magnitude of separation, so this threshold is not finely balanced.
+# >= 291 KiB; the four live walls were 411 B, 464 B, 481 B and 5.4 KiB. Three
+# orders of magnitude of separation, so this threshold is not finely balanced.
 # (Crawl4AI uses 10_000; we allow more headroom for the 5.4 KiB Amazon wall
 # plus any inlined challenge script.)
 TIER2_MAX_BYTES = 20_000
@@ -226,6 +227,18 @@ _TIER2: list[tuple[str, re.Pattern[str], str]] = [
     (VENDOR_PERIMETERX, re.compile(r"Robot or human\?", re.I), "robot_or_human"),
     # SCRAPEFLOW — matches our live Amazon wall body text.
     (VENDOR_AMAZON, re.compile(r"Continue shopping", re.I), "continue_shopping"),
+    # SCRAPEFLOW — matches the live Myntra wall captured 2026-09-19: a 481 B
+    # 200 titled "Site Maintenance", served to the cluster's datacenter IP in
+    # <200 ms while the same request from a residential IP got the real site.
+    # "Contact your administrator" is denial-template language, not outage
+    # language — a genuine maintenance page has no administrator for the
+    # visitor to contact. The title alone is deliberately NOT matched: a real
+    # outage page is the site's honest answer.
+    (
+        VENDOR_UNKNOWN,
+        re.compile(r"contact\s+your\s+administrator", re.I),
+        "contact_administrator",
+    ),
 ]
 
 
