@@ -173,7 +173,10 @@ async def handle_message(
         # Keep the Response: its status is a block signal (BUG-003). It is None
         # for same-document navigations, which is not itself evidence.
         response = await page.goto(job.url, timeout=timeout_ms)
-        await page.wait_for_load_state(wait_state)
+        # Same budget as goto (BUG-015): without it the wait gets Playwright's
+        # 30s default, and a networkidle page that never goes quiet fails at
+        # goto elapsed + 30s regardless of what timeout_seconds asked for.
+        await page.wait_for_load_state(wait_state, timeout=timeout_ms)
 
         # --- Step 8: Execute actions (partial failures collected as warnings) ---
         warnings: list[str] = []

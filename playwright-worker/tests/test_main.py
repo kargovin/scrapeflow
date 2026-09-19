@@ -240,6 +240,51 @@ async def test_block_images_false_does_not_call_page_route():
 
 
 # ---------------------------------------------------------------------------
+# timeout_seconds governs the wait strategy, not just goto (BUG-015)
+# ---------------------------------------------------------------------------
+
+
+async def test_wait_for_load_state_receives_job_timeout():
+    """
+    playwright_options.timeout_seconds must be forwarded to
+    page.wait_for_load_state as well as page.goto. Without it the wait gets
+    Playwright's 30s default, so a networkidle page that never goes quiet
+    fails at goto elapsed + 30s under a budget that was never reached.
+    """
+    msg = make_nats_msg(
+        playwright_options={
+            "wait_strategy": "networkidle",
+            "timeout_seconds": 90,
+        }
+    )
+    browser, _, page = make_browser()
+
+    await _run(msg, browser=browser)
+
+    page.goto.assert_called_once()
+    assert page.goto.call_args.kwargs["timeout"] == 90_000
+    page.wait_for_load_state.assert_called_once()
+    assert page.wait_for_load_state.call_args.args[0] == "networkidle"
+    assert page.wait_for_load_state.call_args.kwargs["timeout"] == 90_000
+
+
+async def test_wait_for_load_state_receives_default_timeout():
+    """
+    With no playwright_options on the message, both goto and the wait use the
+    worker's default timeout — the two calls must never diverge.
+    """
+    msg = make_nats_msg()
+    browser, _, page = make_browser()
+
+    await _run(msg, browser=browser)
+
+    expected_ms = _DEFAULT_TIMEOUT * 1000
+    assert page.goto.call_args.kwargs["timeout"] == expected_ms
+    assert page.wait_for_load_state.call_args.args[0] == "load"
+    assert page.wait_for_load_state.call_args.kwargs["timeout"] == expected_ms
+
+
+# ---------------------------------------------------------------------------
 # robots.txt enforcement (Step 15)
 # ---------------------------------------------------------------------------
 
