@@ -468,7 +468,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   (`c2f0542`), the owner's own `c90d943`, the BUG-003 fourth fingerprint (`2ee84ea`) and its
   closeout (`4469b44`), then the session-close docs commit filing BUG-015/016/017.** Verified
   after fetch at session close: **`develop` 6 ahead of `origin/develop`, 0 behind** (the five above
-  plus this closeout); `main` unchanged, 77 behind. The fingerprint
+  plus this closeout); `main` unchanged, 80 behind. The fingerprint
   touches `playwright-worker/`, which P6 already rebuilds — no change to the five-service cutover.
   The previous push was 2026-09-09 (`fa3c18d..a57e395`, ten commits, including P6). ⚠️ *Historical,
   now pushed — kept for the commit list:* between those two pushes, on `develop`: four docs-only commits from the first
