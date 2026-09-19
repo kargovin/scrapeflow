@@ -511,10 +511,13 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them). **The BUG-014 fix
   (`b57211a`, 2026-09-19) is on top** — `api/` only, and it adds **the third revision** (`9a1ebad3fca2`,
   two FK constraint swaps; downgrade restores `NO ACTION`). **The Dependabot sweep (`83607e2`, 2026-09-19) is on top of that** — `api/` (`pyproject.toml`, `uv.lock`, `Dockerfile`), `frontend/` (`package.json`, lock), `http-worker/` (`go.mod`, `go.sum`); no Alembic revision, and the three services it touches are already in the five-service rebuild.
-- ✅ **`develop` was pushed to `origin/develop` on 2026-09-19** (`8ba7e85..51c8428`, 14 commits —
-  BUG-014, the BUG-003 fingerprint, BUG-015/016/017 and their closeouts). **After the push: 0 ahead,
-  0 behind; `main` 88 behind, 0 ahead.** ⚠️ **Since then, unpushed on `develop`: the Dependabot
-  sweep and its docs closeout** (this session). Re-check before quoting.
+- ✅ **`develop` was pushed to `origin/develop` twice on 2026-09-19**: `8ba7e85..51c8428` (14 commits —
+  BUG-014, the BUG-003 fingerprint, BUG-015/016/017 and their closeouts) at session start, then the
+  Dependabot sweep (`83607e2`), its docs closeout (`4a665e3`) and this session-close commit at session
+  end. **After the second push: 0 ahead, 0 behind; `main` 91 behind, 0 ahead.** Nothing is unpushed.
+  Re-check before quoting. ⚠️ **Next session's first item is the queue's release — the `main`
+  fast-forward** (*Outstanding* item 3): drain the stream, `git merge --ff-only develop` on `main`,
+  push, then `rollout status` per Deployment, then the three owner-run scripts.
 - *Historical, now pushed:* **`develop` was pushed to `origin/develop` on 2026-09-18** (`0daf956..08655fd`, 13 commits —
   P9, P8, P7 and their closeouts). **After the push: 0 ahead, 0 behind; `main` 71 behind, 0 ahead.**
   ⚠️ **Since then, unpushed on `develop`: the BUG-014 fix (`b57211a`) and its docs closeout
