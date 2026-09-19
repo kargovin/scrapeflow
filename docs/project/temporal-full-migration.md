@@ -319,7 +319,7 @@ retries. **That looks exactly like a workflow bug and is not one.**
 Never big-bang. Each step ships independently; both systems run until a flow is fully moved.
 
 **Entry condition — the sequence does not start until the pre-migration queue is empty:**
-**P6 → P9 → P8 → P7 + BUG-007 — ✅ all built as of 2026-09-18, none deployed; the queue's single release is the remaining step.**
+**P6 → P9 → P8 → P7 + BUG-007 — ✅ all built by 2026-09-18 and RELEASED 2026-09-19 (`421cbfe`); the three owner-run scripts ran the same day. The entry condition is met — the sequence starts at *engine up*.**
 P8 (the shared storage ledger) is a hard dependency — the v2 charging
 activity has no table without it — and without P7's counting views a pipeline run consumes **none**
 of the three meters, reproducing P7's own bug on a brand-new lane. `phase4-backlog.md` §1 is the

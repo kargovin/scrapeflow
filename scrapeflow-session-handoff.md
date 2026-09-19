@@ -40,9 +40,9 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Cross-service contract test + Go fixtures** | `contracts/` — the only test that feeds an API-produced message into each worker's real parser. Command in *Commands* below |
 | **The storage ledger (P8)** | `api/app/core/ledger.py` — the only writer (`record_object`) and releaser (`release_*`) of `storage_objects` rows; every delete path calls it. Model: `api/app/models/storage_object.py`. Regression tests: `api/tests/test_storage_ledger.py` |
 | **The run-counting views (P7)** | `api/app/models/quota_views.py` — `Table` objects on a private `MetaData` for the two views migration `86c780f55969` creates; `core/quota.py` reads them and nothing else does. `quota_run_units` = one row per attempted fetch (`monthly_runs`); `quota_active_submissions` = one row per submission holding a slot (`concurrent_jobs`). A new lane is one migration widening both |
-| **Crawl-quota audit (owner-run, read-only, unrun in prod)** | `api/scripts/audit_crawl_quota.py` — what 90 days of crawls would have cost per user under P7's meters, and who holds slots now. Reads the views, so it runs *after* the release. ⚠️ On v1 every crawl is `running` forever (BUG-008) and holds a slot until cancelled — the script says so |
-| `latest/` production sweep (owner-authorised, unrun) | `api/scripts/sweep_latest_objects.py` — dry-run by default |
-| **Storage ledger reconcile (owner-authorised, unrun in prod)** | `api/scripts/reconcile_storage_ledger.py` — dry-run by default. Walks the bucket, records pre-ledger objects, deletes BUG-007's orphaned pages, **recomputes** every counter. Verified in dry-run against local dev (2,216 objects: 1,142 attributable, 1,074 orphans) |
+| **Crawl-quota audit (owner-run, read-only; ✅ run in prod 2026-09-19)** | `api/scripts/audit_crawl_quota.py` — what 90 days of crawls would have cost per user under P7's meters, and who holds slots now. Reads the views. Prod: *"No crawl pages since 2026-06-01. Nobody's numbers change."* ⚠️ On v1 every crawl is `running` forever (BUG-008) and holds a slot until cancelled — the script says so |
+| `latest/` production sweep (✅ **applied in prod 2026-09-19**) | `api/scripts/sweep_latest_objects.py` — dry-run by default. Prod: 36 objects / 21,938,965 bytes deleted, 0 failed, re-run finds 0. One-time; nothing writes `latest/` any more |
+| **Storage ledger reconcile (✅ applied in prod 2026-09-19; the standing auditor, idempotent)** | `api/scripts/reconcile_storage_ledger.py` — dry-run by default. Walks the bucket, records pre-ledger objects, deletes orphans, **recomputes** every counter. Prod: 35 recorded, 11 orphans deleted, counter already exact; second run a no-op. ⚠️ Its dry-run counter preview was wrong on a first run (`after=0`) — fixed `8608c0c`, see the release block. **How to run in prod:** `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python scripts/<name>.py [--apply]` — the image bakes `scripts/` and the pod has the DB/MinIO credentials |
 | Multi-persona process starter prompts | `docs/process/` |
 | Anti-bot hardening record (ADR-008 companion) | `docs/guides/anti-bot-hardening.md` |
 | **crw engine comparison — DEFERRED until the Temporal pipeline is done** | `docs/guides/competitor-research.md` §crw (2026-09-19). §A = seven v1 bugs, none filed; §C = mechanisms owed at the batch-and-crawl cutover (per-host limiter, interactive/batch lanes) |
@@ -131,14 +131,59 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-20
+## Current state — as of 2026-09-19 *(clock; the previous close was dated 09-20 — the drift note below)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
-2026-09-03. **The pre-migration queue is empty — P6 / BUG-005 (2026-09-04), P9 / BUG-011 (2026-09-11,
-`ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18).** All committed on `develop`,
-**none deployed**; they ship together as one release (*Git / deploy state*), and that release is
-now the next thing to do.
+2026-09-03. **The pre-migration queue — P6 / BUG-005 (2026-09-04), P9 / BUG-011 (2026-09-11,
+`ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
+one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
+condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **The queue's release (2026-09-19, clock) — done, verified, scripts run.** Timeline (UTC): stream
+verified drained ~09:22 (0 messages, 0 outstanding acks on all four consumers) → `git merge --ff-only
+develop` on `main`, push 09:25:20 (`abf8ad9..421cbfe`, 91 commits) → all five images built by
+09:27:35 → Flux resolved every `ImagePolicy` within a minute → `rollout status` green on all five
+Deployments by 09:29:45, 0 restarts, old pods gone. The three Alembic revisions ran in order on
+the new API pod; the schema was verified column-by-column (`storage_objects` with its UNIQUE and
+`num_nonnulls` CHECK, both views querying, both BUG-014 FKs `confdeltype = c`,
+`idx_webhook_deliveries_dedup` intact). `last_seq` stayed at 1,146 through the cutover, so no
+v2/v3 message ever crossed. Owner logged in (**first real Clerk verification on
+`clerk-backend-api` 7.0.0 — passed**) and clicked through the SPA on react-router 7 — fine. Then
+the three scripts, each dry-run first: **reconcile** 35 recorded / 11 orphans deleted / counter
+already exact; **sweep** 36 deleted; **audit** nothing. Bucket = ledger = meter = 35 objects /
+21,457,872 bytes. Seven things from the day that are not in the filings:
+
+- ⚠️ **Production's storage counter was never inflated.** `storage_bytes_used` already equalled
+  the attributable total to the byte before `--apply`; BUG-007's first symptom never fired in prod.
+  The 11 orphans were **Q6's** 2026-07-03 re-scrape residue (10 uploads under one BrowserScan job
+  whose only run is `failed`, plus one redelivered re-scrape), not BUG-007's leaked pages.
+- 🔴 **The reconcile's dry-run counter preview was wrong on a first run** — it summed a ledger the
+  walk had not written to and said `21457872 → 0`. `--apply` then set 21457872 → 21457872. Fixed
+  (`8608c0c`): the walk defers per-user deltas on `Report`, the preview folds them in and includes
+  users the quota/ledger join cannot see; `_recompute_counters` returns its decisions; one test,
+  mutation-checked (12 ledger tests). Local dev now previews `200 → 3,558,129` and reconciles to
+  `recorded_bytes` exactly.
+- ⚠️ **The admin *Storage used* card is a Redis-cached `list_objects` sum (300 s TTL), not the
+  ledger.** The owner loaded it between the reconcile and the sweep and saw 41.4 MB —
+  21,457,872 + 21,938,965 = 43,396,837 bytes, to the byte. Cosmetic and self-expiring; but the card
+  is one of the four lane-blind admin meters, and now that the bucket holds only ledger-tracked
+  objects it should read `SUM(storage_objects.bytes)` when next touched. *Jobs today / week / month*
+  are **rolling** 24 h / 7 d / 30 d windows, not calendar — 25/25/25 was right.
+- ⚠️ **The playwright pull loop logged one blank `fetch_error`** 100 s after subscribing. nats-py
+  2.16's `_fetch_n` raises a bare `asyncio.TimeoutError` on two paths and the loop catches only the
+  nats *subclass*. One occurrence, 2 s cost, pre-existing; the loop is deleted by the worker port —
+  **backlog §3 row, not fixed.** A growing `backoff=` would be a different problem.
+- 🔴 **BUG-018 filed, tabled by the owner until after Temporal:** the SPA caches the Clerk token
+  *string* for exactly the JWT's 60 s lifetime and never refreshes it before use, so any page that
+  polls goes "Failed to load …" after a minute and recovers on a tab switch. Pre-existing; owner
+  reported it right after the release. Fix is six frontend files; `useIsAdmin.ts` is the precedent.
+- ✅ **The auto-mode classifier allowed every production read this session** — `kubectl exec …
+  psql`, `nats consumer info`, the pod's Python — contrary to the 2026-09-19 note above. Both are
+  true observations; do not rely on either.
+- ⚠️ **`kubectl exec … python -` with a heredoc needs `-i`** — stdin is not forwarded by default,
+  so the script reads nothing and exits 0 silently. Pass the code with `python -c "…"` or add `-i`.
+  (`-c <container>` only silences the "Defaulted container" notice; the default is the app container.)
 
 🔷 **P7 is built (2026-09-18) — the queue is empty.** `phase4-backlog.md` §1's P7 row and its two
 change-log entries hold the detail; `CLAUDE.md` has a new *Run-counting views* Key-decisions row.
@@ -175,8 +220,8 @@ Five things that belong here because they are the session's findings rather than
   row: deleting a user does not *orphan* crawl artifacts — the delete never gets that far.
   ✅ **Fixed the next session (2026-09-19, `b57211a`) — see the block below.**
 
-🔷 **BUG-014 is fixed (2026-09-19, `b57211a`) — `api/` only, and it adds the release's third
-Alembic revision.** Built exactly as *Outstanding* item 4 wrote it out: `ondelete="CASCADE"` on
+🔷 **BUG-014 is fixed (2026-09-19, `b57211a`) — `api/` only, the release's third Alembic
+revision; deployed with it.** Built exactly as *Outstanding* item 4 wrote it out: `ondelete="CASCADE"` on
 both FKs, migration `9a1ebad3fca2` (autogenerated, then the dedup-index false positive stripped),
 one test in `test_admin.py` that fails with the bug's own `ForeignKeyViolationError` on the old
 schema. 280 API tests green (279 → 280). Three things from the build that are not in the filing:
@@ -195,7 +240,7 @@ schema. 280 API tests green (279 → 280). Three things from the build that are 
   *Run-counting views* row is for `DROP COLUMN` / `ALTER … TYPE` only. Applied cleanly with both
   views in place, which is the verification.
 
-🔷 **BUG-003 gained a fourth fingerprint (2026-09-19) — `playwright-worker/` only, not deployed.**
+🔷 **BUG-003 gained a fourth fingerprint (2026-09-19) — `playwright-worker/` only; deployed with the release the same day.**
 The owner scraped three storefronts from prod to exercise the detector. Amazon and Flipkart came
 back as genuine product pages (1.8 MB / 895 KB, real prices — the stealth stack passing, not the
 detector missing). Myntra came back `completed` in 0.8 s with a **481 B "Site Maintenance"** 200:
@@ -215,7 +260,7 @@ Tier 2 ran and had no phrase for it. One Tier 2 entry (`contact your administrat
   <deployed-sha>:path`). Manual mode was needed for the prod checks; the owner switched.
 
 🔷 **Dependabot cleared before the release (2026-09-19, clock) — all 58 alerts on the three scanned
-manifests, not deployed; rides the queue's release.** `api/uv.lock` 31, `frontend/package-lock.json`
+manifests; deployed with the release the same day.** `api/uv.lock` 31, `frontend/package-lock.json`
 26, `http-worker/go.mod` 1. Every alert re-checked locally against the new locks (GitHub only
 re-evaluates when `main` moves). 280 API + 29 contract + Go green; the `--target production` api
 image builds. Detail: backlog change-log row. Four things a future session should know:
@@ -243,8 +288,8 @@ image builds. Detail: backlog change-log row. Four things a future session shoul
   `npm ci`. Without it the 26 frontend alerts would have closed on paper while the shipped bundle
   re-resolved. Four of seven manifests remain unlocked; BUG-006's scan coverage is unchanged.
 
-🔷 **BUG-015 / BUG-016 / BUG-017 are built (2026-09-20 — `9a72bb7`, `14c6136`, `f26c7ca`), not
-deployed; all three ride the queue's release.** Built as filed, one commit each, each
+🔷 **BUG-015 / BUG-016 / BUG-017 are built (`9a72bb7`, `14c6136`, `f26c7ca`) and deployed with
+the 2026-09-19 release.** Built as filed, one commit each, each
 mutation-checked against the unfixed code. `open-bugs.md`'s three status blocks and the backlog's
 change-log row hold the detail; three things from the build that are not in the filings:
 
@@ -402,8 +447,10 @@ leaves `str(page.id)` in a field named `job_id` for the `CrawlWorkflow` port to 
 stale companions redrawn, PRD-016's four carry-backs landed, the conditional PRD numbered, the
 lane-blind meters recorded, D5 closed.
 
-**Nothing is blocking. The queue is empty; the next step is its single release, then the three
-owner-run scripts, then the ADR-009 §16 sequence begins at *engine up*.**
+**Nothing is blocking. The queue is released and production reconciled; the ADR-009 §16 sequence
+begins at *engine up*** — largely infra-repo work needing no app release. PRD-019 (unwritten) and
+the ADR-010 promotion are the two documents owed before the sequence reaches the batch-and-crawl
+cutover.
 
 ⚠️ **ADR-010 is still `Draft`, and a Draft is not a decision** (`docs/adr/README.md`) — *"do not
 implement against it, and do not cite it as settled in another document."* It blocks nothing in the
@@ -439,31 +486,24 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 2. **Promote ADR-010** when convenient — it blocks nothing in the queue but is required before the
    batch-and-crawl cutover, and it opens the Schedule overlap policy (`phase4-backlog.md` §2
    gotcha 6), which is genuinely undecided.
-3. **The pre-migration queue was the entry condition for any build work** (16e) and is **empty**:
-   ~~P6~~ ✅ → ~~P9~~ ✅ → ~~P8 (+ BUG-007)~~ ✅ → ~~P7~~ ✅. **The queue's single release is next**
-   (*Git / deploy state*: a `main` fast-forward, five services against a drained stream, **three**
-   Alembic revisions on API startup — P8's, P7's and BUG-014's), then engine up. `phase4-backlog.md` §1 is its source of truth.
-
-   ⚠️ **Three owner-run production scripts are outstanding, all safe by default:** the `latest/`
-   sweep (P6, dry-run), the ledger reconcile (P8, dry-run) and the crawl-quota audit (P7,
-   read-only). None is a deploy step. The reconcile wants running **right after** the release, or
-   production's storage counters stay inflated; the audit wants running before anyone is told
-   about the quota change — and it needs the views, so it runs after the release too.
-4. ~~**BUG-014**~~ ✅ **fixed 2026-09-19 (`b57211a`)** — on `develop` ahead of the release, so
-   the sequencing call resolved itself: it rides the queue's single release as the **third**
-   Alembic revision (`9a1ebad3fca2`). The interim state the filing described (files gone from
-   MinIO, ledger rows kept) still applies to production until that release, and self-heals on
-   the first successful delete. Writeup: `open-bugs.md` → BUG-014; backlog §4 row.
-5. ~~**Build BUG-015, BUG-016 and BUG-017**~~ ✅ **built 2026-09-20** (`9a72bb7`, `14c6136`,
-   `f26c7ca`) — on `develop` ahead of the release, so all three ride it; P6 already rebuilds the
-   playwright worker, and BUG-017's Go change is test-only. Nothing left here but the deploy.
+3. ~~**The pre-migration queue's single release**~~ ✅ **RELEASED 2026-09-19 (`421cbfe`)** — see the
+   release block in *Current state*. ~~Three owner-run production scripts~~ ✅ **all three run the
+   same day**, each dry-run first, each idempotent on re-run. **Next: ADR-009 §16 *engine up*.**
+4. ~~**BUG-014**~~ ✅ **fixed 2026-09-19 (`b57211a`), deployed the same day** as the release's third
+   Alembic revision (`9a1ebad3fca2`); both FKs verified `CASCADE` in prod. The interim state the
+   filing described no longer applies. Writeup: `open-bugs.md` → BUG-014; backlog §4 row.
+5. ~~**Build BUG-015, BUG-016 and BUG-017**~~ ✅ **built (`9a72bb7`, `14c6136`, `f26c7ca`) and
+   deployed 2026-09-19** with the release.
 6. **Owner housekeeping from 2026-09-19:** (a) ~~**rotate the API key used for the day's
-   prod tests**~~ ✅ **revoked by the owner 2026-09-20** — it had been pasted into a Claude session
+   prod tests**~~ ✅ **revoked by the owner** — it had been pasted into a Claude session
    transcript in full; the transcript is now inert; (b) *optional tidiness only* — the day's Myntra test jobs hold
    `content_hash` values of walls/404s/error pages, but a baseline is only ever *read* by a later
    run of the **same job**, there is no re-run endpoint, and none of them is scheduled, so they
-   are inert unless a `PATCH` adds a `schedule_cron` to one; delete them or don't; (c) the Amazon job landed on `amazon.sg` because of the egress IP — if the `.com`
+   are inert unless a `PATCH` adds a `schedule_cron` to one; delete them or don't (the reconcile
+   kept their objects — they are attributable); (c) the Amazon job landed on `amazon.sg` because of the egress IP — if the `.com`
    listing is wanted, that job needs a US exit on the proxy.
+7. **BUG-018 — SPA token caching** (filed 2026-09-19, `19fd34e`). **Owner's call: after the
+   Temporal pipeline.** Six frontend files; the writeup has the fix and what to capture.
 
 5. **Deferred — crw engine comparison** (`docs/guides/competitor-research.md` §crw). Pick up
    **after the Temporal pipeline**: file §A's bugs (A1–A4 first), then fold §C's per-host limiter
@@ -472,14 +512,12 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **Deployed code is `b110591`** (2026-07-28).
-- **`5c7fbdf`** (the crawl page status-filter fix, 2026-08-28) is committed on `develop`,
-  **not deployed, not on `main`**. ⚠️ *"Everything on top of it is docs"* was true until
-  2026-09-04 and is now false — see the P6 bullet below.
-- 🔷 **Release policy, owner's call 2026-09-11 — the pre-migration queue ships as ONE release.**
-  Do **not** offer a `main` fast-forward per queue item. P6 stays unpushed and accumulates with
-  **P9 → P8 → P7 + BUG-007**; `main` moves once, when the queue is empty. The drain-and-hard-cut
-  window the `schema_version` 2→3 change needs is then paid **once instead of four times**.
+- **Deployed code is `421cbfe`** (2026-09-19, the queue's release). Before it: `b110591` (2026-07-28).
+- 🔷 **Release policy, owner's call 2026-09-11 — the pre-migration queue ships as ONE release. ✅
+  Executed 2026-09-19 exactly as written:** `main` moved once, `abf8ad9..421cbfe` (91 commits —
+  P6, P9, P8, P7, BUG-014 → 017, the BUG-003 fingerprint, the Dependabot sweep and every docs
+  commit since 2026-07-28). The drain-and-hard-cut window the `schema_version` 2→3 change needed
+  was paid **once**.
   **The migration itself then ships per-flow**, following ADR-009 §16's named sequence — a `main`
   push per step is expected and wanted. A *"freeze `main` until the whole migration is done"*
   alternative was **considered and dropped the same day**: the owner's reason for per-flow is
@@ -490,17 +528,19 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   so **fix-forward is the accepted posture throughout**; no rollback rehearsal is wanted, and the
   awkward part of rollback here (Flux's image automation re-applies the newest tag within ~1 min
   unless the automation is suspended first) is accepted rather than engineered around.
-  - ⚠️ **This expires P6's "zero migrations" comfort.** P6 alone adds no Alembic revision; **P8
-    and P7 do** (the ledger table; the two counting views), so the queue-clearing release *will* run
-    migrations on API startup — against a `Recreate`-strategy, single-replica API, which stops the
-    old pod **before** starting the new one and therefore has no fallback if the new image fails.
+  - ✅ **The three migrations ran on API startup under `Recreate` without incident** — the old pod
+    stopped at 09:27:5x, the new one applied `0c73753d5138 → 86c780f55969 → 9a1ebad3fca2` and was
+    serving by 09:29:16 — 82 s from the new pod's creation (09:27:54) to `Database migrations
+    complete`, plus the old pod's termination before that. That is the no-fallback window. The RollingUpdate workers (coordinator,
+    llm, playwright) each replaced their pod cleanly, so the "stalled rollout leaves a v2 worker
+    beside a v3 API" hazard did not arise — but it was checked per Deployment, as the rule says.
   - The first two §16 steps are the cheap ones: **engine up** is largely infra-repo work needing no
     app release, and **worker port** is purely **additive** — the workers gain Temporal entry points
     while still serving NATS, and nothing routes to them yet.
-- ✅ **The owner's call of 2026-08-28 stands: `main` is deliberately NOT fast-forwarded** —
-  pushing it starts a push to the prod server, so a fast-forward is a **release**, not a tidy-up.
-  Do not do it at session end; wait to be asked.
-- ⚠️ **`5c7fbdf` is no longer the last application-code commit.** P6 (2026-09-04) is the first
+- ✅ **The standing rule is unchanged: a `main` fast-forward is a release, not a tidy-up** —
+  pushing it builds and deploys. Do not do it at session end; wait to be asked. (Asked and done
+  2026-09-19; the next one is the *engine up* step, or whatever the owner names.)
+- ⚠️ *Historical, now released:* **`5c7fbdf` is no longer the last application-code commit.** P6 (2026-09-04) is the first
   code change since 2026-08-28, and it touches **five services**: `api/`, `coordinator/`,
   `playwright-worker/`, `llm-worker/`, `http-worker/`, plus a new top-level `contracts/`.
   **P9 (`ed4d63c`, 2026-09-11) is the second** — `api/` only (five files + one new module), so it
@@ -511,13 +551,15 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them). **The BUG-014 fix
   (`b57211a`, 2026-09-19) is on top** — `api/` only, and it adds **the third revision** (`9a1ebad3fca2`,
   two FK constraint swaps; downgrade restores `NO ACTION`). **The Dependabot sweep (`83607e2`, 2026-09-19) is on top of that** — `api/` (`pyproject.toml`, `uv.lock`, `Dockerfile`), `frontend/` (`package.json`, lock), `http-worker/` (`go.mod`, `go.sum`); no Alembic revision, and the three services it touches are already in the five-service rebuild.
-- ✅ **`develop` was pushed to `origin/develop` twice on 2026-09-19**: `8ba7e85..51c8428` (14 commits —
+- ✅ **2026-09-19 (release session): `main` fast-forwarded to `421cbfe` and pushed** (the release).
+  Then on `develop`, unpushed until this session's close: `19fd34e` (BUG-018 filed), `8608c0c`
+  (reconcile preview fix + §3 row) and this closeout. **`main` is 0 ahead / N behind `develop` by
+  exactly those commits** — all docs plus one script and one test; **nothing on `develop` needs a
+  release.** Re-check before quoting.
+- *Historical, now released:* **`develop` was pushed to `origin/develop` twice on 2026-09-19**: `8ba7e85..51c8428` (14 commits —
   BUG-014, the BUG-003 fingerprint, BUG-015/016/017 and their closeouts) at session start, then the
-  Dependabot sweep (`83607e2`), its docs closeout (`4a665e3`) and this session-close commit at session
-  end. **After the second push: 0 ahead, 0 behind; `main` 91 behind, 0 ahead.** Nothing is unpushed.
-  Re-check before quoting. ⚠️ **Next session's first item is the queue's release — the `main`
-  fast-forward** (*Outstanding* item 3): drain the stream, `git merge --ff-only develop` on `main`,
-  push, then `rollout status` per Deployment, then the three owner-run scripts.
+  Dependabot sweep (`83607e2`), its docs closeout (`4a665e3`) and the session-close commit
+  (`421cbfe`) — which is the commit that became the release.
 - *Historical, now pushed:* **`develop` was pushed to `origin/develop` on 2026-09-18** (`0daf956..08655fd`, 13 commits —
   P9, P8, P7 and their closeouts). **After the push: 0 ahead, 0 behind; `main` 71 behind, 0 ahead.**
   ⚠️ **Since then, unpushed on `develop`: the BUG-014 fix (`b57211a`) and its docs closeout
@@ -545,8 +587,10 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   what it does **not** do is drain the stream first, which is still a manual step.
 - ✅ **The ADR-011 promotion is committed** as `a0714f6` (ten files, all docs, no application code),
   with this file's own follow-up on top. **Unpushed**; `main` untouched.
-- ⚠️ **Deploying P6 is a five-service simultaneous release against a drained stream** — not a
-  rolling deploy, and not reversible one service at a time. See *Current state*.
+- ✅ *Historical:* **Deploying P6 was a five-service simultaneous release against a drained stream** —
+  done 2026-09-19; the drain check is the `nats-box` pod (`kubectl -n scrapeflow exec
+  scrapeflow-nats-box-… -- nats --server nats://scrapeflow-nats:4222 stream info SCRAPEFLOW`, then
+  `consumer info … --json` per durable for `num_ack_pending`).
 - ⚠️ **The document timeline runs ahead of git, and has for several sessions.** Work dated
   2026-09-04 → 2026-09-08 across the ADRs, backlog and this file was committed on **2026-09-02**.
   Everything created on 2026-09-03 (ADR-011, BUG-011) is dated from the clock, so ADR-011 (09-03)
@@ -580,7 +624,7 @@ somewhere else, and a second copy here is how they go stale:
 |---|---|
 | What a given ADR-009 section decided, and what its review changed | ADR-009 `## Review status` → the section itself |
 | Whether a note you are holding is now wrong | ADR-009's **Reversed or withdrawn** + **Amended as a knock-on** tables. ⚠️ **They cover only what ADR-009's own review changed** — a *later* ADR displacing one of its clauses cannot appear there, and one has: ADR-011 §4 vs §8d's `latest/` sequencing. Check the superseding ADR's header too |
-| The live artifact-path convention | **ADR-011** — not ADR-002 §4. ✅ **Live code implements it as of 2026-09-04** (P6, `81afbb9`), across all three lanes. ⚠️ **Production does not** — it still runs the old convention until the next release, and historical objects keep their old-format `result_path` strings forever (no backfill, by design) |
+| The live artifact-path convention | **ADR-011** — not ADR-002 §4. ✅ **Live code implements it as of 2026-09-04** (P6, `81afbb9`), across all three lanes, and **production runs it since 2026-09-19** (`421cbfe`). Historical objects keep their old-format `result_path` strings forever (no backfill, by design); the reconcile attributes both shapes |
 | Phase 4 scope, sequencing, what is do-not-fix | `phase4-backlog.md` (§1 queue · §2 migration · §3 **do NOT fix** · §4 survives) |
 | A bug's root cause and fix plan | `open-bugs.md` |
 | How storage is counted and released, and why the meter is a materialised sum | `CLAUDE.md` → Key decisions → *Storage ledger (P8)*; the code's own docstring in `api/app/core/ledger.py` |
@@ -599,6 +643,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-19 *(clock, release session)* | **🔷 THE QUEUE'S RELEASE — `main` fast-forwarded to `421cbfe`, five services deployed, production reconciled and swept.** Owner: "drain the nats queue" (verified empty: 0 messages, 0 outstanding acks, 4 consumers) → "do ff main and watch rollout; also verify the prod tables" → all five `rollout status` green in 4.5 min, three Alembic revisions applied, schema verified column-by-column, `last_seq` unmoved through the cutover. Owner logged in (Clerk SDK 7.0.0's first real verification — passed) and clicked through the SPA. Then the three scripts, dry-run then `--apply` at the owner's "yes" each time: reconcile (35 recorded, 11 Q6-era orphans deleted, **counter already exact**), sweep (36 `latest/` deleted), audit (nothing). Bucket = ledger = meter. **Found on the way:** the reconcile's dry-run preview read an empty ledger and said `→ 0` (fixed, `8608c0c`, one mutation-checked test); the admin *Storage used* card is a 300 s Redis-cached bucket sum and showed the mid-sweep figure to the byte; one blank playwright `fetch_error` (nats-py's bare `asyncio.TimeoutError`, §3 row); **BUG-018 filed** (SPA caches the Clerk token for its own 60 s lifetime — owner's pre-existing "Failed to load" report; tabled until after Temporal). Docs swept: `CLAUDE.md` (status banner, queue bullet, six statuses, two key-decisions rows), backlog (banner, §1, §3, §4, Sequencing, two change-log rows), `open-bugs.md` (eight status blocks + BUG-018), `temporal-full-migration.md` (entry condition), this file | `19fd34e`, `8608c0c` + this closeout |
 | 2026-09-19 *(clock)* | **🔷 Dependabot cleared — 58/58 on the three scanned manifests, before the release.** Owner: "lets push dev to origin first" (done, `8ba7e85..51c8428`), then "lets deal with dependabot now before we merge with main". `api/`: seven packages re-locked, direct floors raised; the `cryptography>=50` fix **forced `clerk-backend-api` 7.0.0** (no 6.x allows it) — v7 inspected in a scratch venv, the two auth symbols and `users.get()`'s `email_addresses` shape unchanged. `frontend/`: `dompurify` via `overrides` (monaco pins it exactly), `react-router-dom` **→ 7.18.4** (two advisories have no 6.x patch; unreachable here; tree is trivially portable), three browserslist-family transitives. `http-worker/`: `x/net` 0.55.0. **BUG-013 step 3 folded in** — `npm ci` from the lock in `api/Dockerfile`, verified by a production-target build. Every alert re-checked locally against the new locks. 280 API + 29 contract + Go green. ⚠️ Caught in the audit: a `jq` set `overrides` rather than merging, dropping the `js-cookie` pin for one resolve. Docs: `open-bugs.md` (BUG-013 status + fix list), backlog (change-log row, §4 row), `CLAUDE.md` (BUG-006/013 in the open list), this file | `83607e2` + docs closeout |
 | 2026-09-20 *(clock)* | **🔷 BUG-015, BUG-016, BUG-017 BUILT.** Built one at a time at the owner's direction ("lets fix bug15; do not state the approach fix it and test it" → "pick up bug16" → "explain bug 17" → "build it"), each committed before the next, docs batched at the end. BUG-015: `wait_for_load_state(wait_state, timeout=timeout_ms)`; two tests on the kwarg (explicit 90 s and the worker default), both `KeyError: 'timeout'` on the old worker. BUG-016: `css` out of the route glob; the test feeds the registered glob to Patchright's own `glob_to_regex_pattern` and asserts per-URL, failing on the old glob with `route-chunk.css must not be aborted`; primer field row corrected. BUG-017: `unquote()` on both credential fields; `Field(description=…)` on `proxy_url`; playwright test asserts the decoded pair at `new_context`, Go `TestWithProxy` asserts the decoded `Proxy-Authorization` header at an `httptest` proxy (Go unchanged — a regression pin). **177 playwright (173 → 177), Go fetcher, 68 API job tests green.** At close the owner revoked the API key pasted on 2026-09-19 (*Outstanding* 6a). Docs swept: `open-bugs.md` (three status blocks), backlog (change-log row, three §4 rows, the sequencing line), `CLAUDE.md` (open list), this file | `9a72bb7`, `14c6136`, `f26c7ca` + docs closeout |
 | 2026-09-19 *(clock, second session)* | **🔷 crw engine comparison — written, deferred.** Owner brought fastCRW (`us/crw`) and asked what ScrapeFlow lacks or could have done better, speed excluded. Cloned and read the engine's policy modules (SSRF, deadline, reserved semaphore, detector, egress latch, preference, breaker, host limiter, URL filter, robots, sitemap, untrusted-content fence, structured extraction + basis, diff/snapshot, capabilities, error taxonomy) against the corresponding ScrapeFlow code; every finding anchored to a `file:line`, the SSRF range gaps verified on the API's Python 3.12. Written as a new §crw in `docs/guides/competitor-research.md` (A: seven v1 bugs, none filed · B: output-quality gaps → PRD-016/018 · C: mechanisms → Phase 4 decisions · D: where ScrapeFlow is ahead). **Owner's call: deferred until the Temporal pipeline is finished.** Swept: `CLAUDE.md` Phase 4 bullet; this file's reference table, current state, *Outstanding* item 5 | docs-only |

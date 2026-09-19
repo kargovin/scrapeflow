@@ -69,7 +69,7 @@ artifacts: Amazon → `blocked:amazon` (`tier1:amazon_opfcaptcha`), Myntra → `
 (`tier1:akamai_reference_id`); CNN 4.1 MB, Times of India 319 KB and **browserscan.net/bot-detection
 450 KB** all correctly passed — that last one is the real false-positive test, being a page *about*
 bot detection full of the matching vocabulary. The Tier 2 size gate held.
-> ➕ **Fourth fingerprint added 2026-09-19 — not deployed, rides the queue's release.** A live
+> ➕ **Fourth fingerprint added 2026-09-19 — deployed the same day (`421cbfe`).** A live
 > Myntra wall the classifier missed (a 481 B "Site Maintenance" 200, served to the cluster's
 > datacenter IP); see the **BUG-003 addendum** directly below this section. The mechanism is
 > unchanged — Tier 2 ran and had no phrase for it.
@@ -250,7 +250,7 @@ administrator"** — denial-template language addressed to a client the server h
 against. A genuine maintenance page says "we'll be back" and has no administrator for the visitor
 to contact.
 
-**Fixed** (not deployed) with one Tier 2 entry in `blocking.py` — `contact\s+your\s+administrator`,
+**Fixed** (deployed 2026-09-19, `421cbfe`) with one Tier 2 entry in `blocking.py` — `contact\s+your\s+administrator`,
 vendor `unknown`, signal `tier2:contact_administrator` — size-gated like every Tier 2 phrase.
 **The title is deliberately not matched**: `test_genuine_maintenance_page_is_not_a_block` pins
 that a small "Site Maintenance / We'll be back soon" page stays a genuine result. The captured body
@@ -372,10 +372,13 @@ product decision. The migration neither fixes nor worsens it.
 **Severity:** High (two paths hang forever with no error; the third silently returns the wrong
 content and breaks tenant isolation)
 **Discovered:** 2026-08-04, reviewing inputs for ADR-009
-**Status:** ✅ **FIXED IN CODE 2026-09-04 — not yet deployed.** All three parts of the fix below
-shipped together, across five services, as `schema_version` 3. Production still runs the old
-convention until the next release, and one owner-authorised step remains: the `latest/` sweep
-(`api/scripts/sweep_latest_objects.py`, dry-run by default).
+**Status:** ✅ **FIXED — DEPLOYED 2026-09-19 (`421cbfe`), the queue's single release.** All three
+parts of the fix below shipped together, across five services, as `schema_version` 3. Production
+runs ADR-011's convention from that release; objects written before it keep their old-format
+`result_path` strings (no backfill, by design). **The `latest/` sweep ran the same day**
+(`api/scripts/sweep_latest_objects.py --apply`): 36 objects, 21,938,965 bytes, 0 failed; a re-run
+found 0. The stream was verified drained before the push (0 messages, 0 outstanding acks on all
+four consumers) and `last_seq` did not move during the cutover, so no v2/v3 mismatch occurred.
 **Design settled 2026-09-03**: [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md) is Accepted
 and answers fix part (2). **P6 had no remaining design dependency** and covered **all three lanes**.
 ⚠️ **The cutover is a hard cut against a drained stream** — v2 and v3 have incompatible required
@@ -715,17 +718,24 @@ server, and the coverage work is bounded and self-contained whenever it is picke
 
 **Severity:** Medium (billing accuracy + unbounded storage leak; no data corruption, no cross-tenant exposure)
 **Discovered:** 2026-08-17 (tracing ADR-009 §8's metering-parity claim against live code)
-**Status:** ✅ **FIXED IN CODE 2026-09-15 (`f503f8b`) — by P8, not deployed.** The shared per-object storage
+**Status:** ✅ **FIXED — DEPLOYED 2026-09-19 (`421cbfe`) and production RECONCILED the same day.** The shared per-object storage
 ledger (`storage_objects`, `api/app/core/ledger.py`) is the fix vehicle this bug was sequenced
 behind, and building it closes all three `history/` symptoms at once: the consumer records every
 stored object as a row (`test_llm_job_charges_both_objects` pins 2000 + 50, not 2000), the delete
 paths enumerate rows instead of statting `result_path` (`test_permanent_delete_releases_every_ledger_row`
 pins both objects removed and the counter back to zero), and the counter is a materialised sum
-that only the ledger moves. ⚠️ **Production's already-inflated counters and already-leaked pages
-are not fixed by the deploy** — a pre-ledger object has no row. `api/scripts/reconcile_storage_ledger.py`
-(dry-run by default, `--apply` to act) walks the bucket, records what is attributable, deletes the
-orphaned pages, and **recomputes** every counter from the rows. Owner-run, like the `latest/` sweep.
-The pre-fix text below is kept as the record of what the bug was.
+that only the ledger moves. ⚠️ **The deploy alone did not repair production** — a pre-ledger object has no row — so
+`api/scripts/reconcile_storage_ledger.py --apply` was run right after it (2026-09-19): 46 objects
+scanned, **35 recorded** (21,457,872 bytes), **11 orphans deleted** (5,336,209 bytes), 0 dangling,
+0 failed; a second run found nothing to do. Two findings from the run: **production's counter was
+never inflated** — `storage_bytes_used` already equalled the attributable total to the byte, so
+`counters_changed=0`; and the 11 orphans were not this bug's leaked pages but **Q6's** 2026-07-03
+re-scrape residue (10 uploads under one BrowserScan job whose only run is `failed`, plus one
+redelivered re-scrape discarded by the terminal-status guard) — the same class, handled the same
+way. Bucket, ledger and meter now agree: 35 objects / 35 rows / 21,457,872 bytes. **The delete
+paths' legacy branch (`_release_legacy_result`) has nothing left to serve in production** and can
+be removed when the code is next touched. The pre-fix text below is kept as the record of what
+the bug was.
 ⚠️ **Its fourth symptom was deleted upstream:** ADR-011 removed `latest/` in **P6**, so the two
 orphaned `latest/` keys stopped existing before this bug was reached. What P8 fixed is the
 `history/` half — the wrong object charged, and the scraped page never deleted.
@@ -1131,7 +1141,7 @@ a page and continue). Three things make it larger than it looks:
 than folded into BUG-005 because the net it holes is the platform's **only** recovery path for a
 lost dispatch, and the code hid the gap rather than recording it.
 **Discovered:** 2026-09-03, tracing BUG-005's fix scope against [ADR-011](../adr/ADR-011-artifact-identity-and-paths.md)
-**Status:** ✅ **FIXED IN CODE 2026-09-11 (`ed4d63c`) — not yet deployed.** All three parts below
+**Status:** ✅ **FIXED — DEPLOYED 2026-09-19 (`421cbfe`).** Built 2026-09-11 (`ed4d63c`). All three parts below
 shipped, plus one thing the fix surfaced: the job lane had the same duplication the batch lane
 would have gained — `create_job` built its message inline while the scheduler used a helper, so
 "recovery re-sends the run that was lost" was only *enforced* for scheduled runs. Both lanes' builders
@@ -1554,7 +1564,7 @@ among the **scanned** manifests, and is right to — the gap there is not scanni
 so nothing is orphaned or half-deleted)
 **Discovered:** 2026-09-18, building P7's reclaim path and checking what `release_user_objects`'s
 caller does after it
-**Status:** ✅ **FIXED IN CODE 2026-09-19 (`b57211a`) — not deployed.** `ondelete="CASCADE"` on
+**Status:** ✅ **FIXED — DEPLOYED 2026-09-19 (`421cbfe`)**, migration `9a1ebad3fca2` applied on the release; both FKs verified `confdeltype = c` in production. Built the same day (`b57211a`): `ondelete="CASCADE"` on
 both FKs (`models/crawl.py`, `models/batch.py`); migration `9a1ebad3fca2` swaps the two
 constraints and keeps their names, so nothing that names them changes; one test
 (`test_admin_delete_user_with_crawl_and_batch`) fails with this bug's exact
@@ -1632,7 +1642,7 @@ the user delete needs.
 needs it; the failure reads as the site's fault)
 **Discovered:** 2026-09-19, reading two proxied Myntra runs that failed with
 `TimeoutError: Timeout 30000ms exceeded` under `playwright_options.timeout_seconds: 90`
-**Status:** ✅ **FIXED IN CODE 2026-09-20 (`9a72bb7`) — not deployed.** One argument:
+**Status:** ✅ **FIXED — DEPLOYED 2026-09-19 (`421cbfe`).** Built as `9a72bb7`. One argument:
 `page.wait_for_load_state(wait_state, timeout=timeout_ms)` — the wait shares `goto`'s budget,
 the simple form the filing recommended. Two tests (`test_wait_for_load_state_receives_job_timeout`,
 `…_receives_default_timeout`) pin the kwarg for an explicit `timeout_seconds: 90` and for the
@@ -1674,14 +1684,14 @@ scrape and a markdown job loses everything)
 **Discovered:** 2026-09-19, three Myntra runs through a working proxy that rendered the full
 header and footer around "Oops! Something went wrong. Refresh"; confirmed by re-running with
 `block_images: false`, which rendered the product
-**Status:** ✅ **FIXED IN CODE 2026-09-20 (`14c6136`) — not deployed.** `css` dropped from the
+**Status:** ✅ **FIXED — DEPLOYED 2026-09-19 (`421cbfe`).** Built as `14c6136`. `css` dropped from the
 route glob (`**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}`); images and fonts still abort. The
 option keeps its name (an API field); the worker comment and `docs/guides/playwright-primer.md`'s
 field row now say what it blocks and why CSS must never return. One test
 (`test_block_images_aborts_images_and_fonts_but_never_css`) feeds the registered glob through
 Patchright's own `glob_to_regex_pattern` and asserts `.png`/`.jpg`/`.woff2` match and
 `.css`/`.js`/a page URL do not — it pins what the browser will abort, not the pattern's spelling,
-and fails on the old glob with `route-chunk.css must not be aborted`. Rides the queue's release.
+and fails on the old glob with `route-chunk.css must not be aborted`.
 Not §3, same reasoning as BUG-015.
 
 ### What happens
@@ -1717,7 +1727,7 @@ blocks. One test: with `block_images` on, a `.png` request is aborted and a `.cs
 reading, not by a failure)
 **Discovered:** 2026-09-19, explaining how to translate a proxy vendor's `curl -x … -U user:pass`
 into `proxy_url`
-**Status:** ✅ **FIXED IN CODE 2026-09-20 (`f26c7ca`) — not deployed.** `unquote()` on both
+**Status:** ✅ **FIXED — DEPLOYED 2026-09-19 (`421cbfe`).** Built as `f26c7ca`. `unquote()` on both
 `.username` and `.password` in `playwright-worker/worker/worker.py`, aligning Python to Go and the
 URL standard; `proxy_url` on `api/app/schemas/jobs.py` gained a `Field(description=…)` stating that
 reserved characters in credentials must be percent-encoded and both engines decode them. One test
