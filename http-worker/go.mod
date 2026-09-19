@@ -7,7 +7,7 @@ require (
 	github.com/fernet/fernet-go v0.0.0-20240119011108-303da6aec611
 	github.com/minio/minio-go/v7 v7.0.70
 	github.com/nats-io/nats.go v1.34.0
-	golang.org/x/net v0.54.0
+	golang.org/x/net v0.55.0
 )
 
 require (
