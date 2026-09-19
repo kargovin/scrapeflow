@@ -29,7 +29,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-014) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-017) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -113,6 +113,21 @@ docker compose exec api uv run alembic upgrade head
 docker compose exec api uv run alembic current
 docker compose exec api uv run alembic revision --autogenerate -m "migration_3_N_description"
 ```
+⚠️ **Autogenerate under the running API is the hot-reload trap** (the reloader applies the new file
+before you have edited it — it has dropped `idx_webhook_deliveries_dedup` once and mis-recorded a
+partial index once). **Standing procedure since 2026-09-19 — sidestep it, don't race it:**
+```bash
+# from ./docker — the api container is paused, so nothing reloads; the one-off container
+# shares the image, volumes and network, so alembic still reaches Postgres
+docker compose pause api
+docker compose run --rm --no-deps -T api uv run alembic revision --autogenerate -m "migration_4_N_description"
+#   → edit the file: delete the drop_index("idx_webhook_deliveries_dedup") op it always emits
+#     (and its create_index in downgrade); name any create_foreign_key(None, …) explicitly,
+#     or the downgrade's drop_constraint(None, …) cannot run
+docker compose run --rm --no-deps -T api uv run alembic upgrade head
+docker compose unpause api
+docker compose exec api uv run alembic check      # only the dedup false positive should remain
+```
 
 ---
 
@@ -132,7 +147,7 @@ Five things that belong here because they are the session's findings rather than
 - ⚠️ **ADR-009 §3 says one view; the build is two, and the decision is unchanged.** §3 describes one
   view with an `active` column that the two meters aggregate differently. A crawl holds its slot
   from creation, but its first unit row — the seed's `crawl_pages` row — is written by the
-  coordinator ~2s later, or never while the coordinator is down (it crash-loops in prod, BUG-012).
+  coordinator ~2s later, or never while the coordinator is down (BUG-012 — ⚠️ *corrected 2026-09-19: the crash loop was observed in **local dev**; prod's coordinator has 131 days' uptime, 0 restarts, and no crawl rows to trip on, so the release's restart is safe for it*).
   "Distinct submissions among active unit rows" therefore lets a queued crawl hold nothing.
   `quota_active_submissions` reads the submission tables directly. This is a mechanism refinement
   found at build time, not a reversal; recorded in the migration's docstring, the backlog, the
@@ -198,6 +213,18 @@ Tier 2 ran and had no phrase for it. One Tier 2 entry (`contact your administrat
   inert; `DELETE /jobs/106f8e90…?permanent=true` clears it. Same clean-up as the 2026-07-22 six.
 - ⚠️ **The auto-mode classifier refuses production reads** (`kubectl exec … psql`, even `git show
   <deployed-sha>:path`). Manual mode was needed for the prod checks; the owner switched.
+
+🔷 **Then the owner put a residential proxy on the Myntra job (Evomi, `core-residential.evomi.com:1000`
+— the owner has an account; credentials are the owner's) and the wall went away — what remained
+were three worker bugs, filed as BUG-015 / BUG-016 / BUG-017, none built.** In order of finding:
+`networkidle` runs died at `Timeout 30000ms` under a 90 s budget (`wait_for_load_state` gets no
+timeout — **BUG-015**); with `load`, the page rendered a healthy header around "Oops! Something went
+wrong" (`block_images` aborts `*.css`, which throws a lazily-loaded SPA route into React's error
+boundary — **BUG-016**, confirmed by `block_images: false` rendering the product); and explaining
+`proxy_url` surfaced that Go decodes percent-encoded credentials and Python does not — **BUG-017**,
+latent. ⚠️ **"Oops! Something went wrong" is not a wall and must not be fingerprinted** — the
+456 KB bodies carried the complete product in `window.__myx.pdpData`. Detail: `open-bugs.md` →
+BUG-015/016/017 and the BUG-003 addendum's closing paragraph. **Next session builds all three.**
 
 ⚠️ **New instance of the hot-reload trap, in the other direction.** `git stash -u` under the
 running API took the P7 migration file with it; the reloader restarted, `alembic upgrade head`
@@ -376,6 +403,18 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    Alembic revision (`9a1ebad3fca2`). The interim state the filing described (files gone from
    MinIO, ledger rows kept) still applies to production until that release, and self-heals on
    the first successful delete. Writeup: `open-bugs.md` → BUG-014; backlog §4 row.
+5. **Build BUG-015, BUG-016 and BUG-017** — filed 2026-09-19, owner's call to build next session.
+   All three are worker-side, one-to-three lines each, with the fix and the test named in each
+   writeup. BUG-015 and BUG-016 are `playwright-worker/` only; BUG-017 touches the playwright
+   worker (decode) and the API schema (a doc note). They ride the queue's release if built before
+   it — P6 already rebuilds the worker — so build them before the `main` fast-forward or accept
+   that prod keeps the 30 s cap and the CSS abort until the push after.
+6. **Owner housekeeping from 2026-09-19, none done:** (a) **rotate the API key used for the day's
+   prod tests** — it was pasted into a Claude session transcript in full; `POST /users/api-keys`
+   for a new one, revoke the old; (b) the six Myntra test jobs hold poisoned `content_hash`
+   baselines (`open-bugs.md` → BUG-003 addendum lists them) — `?permanent=true` deletes when done
+   testing; (c) the Amazon job landed on `amazon.sg` because of the egress IP — if the `.com`
+   listing is wanted, that job needs a US exit on the proxy.
 
 5. **Deferred — crw engine comparison** (`docs/guides/competitor-research.md` §crw). Pick up
    **after the Temporal pipeline**: file §A's bugs (A1–A4 first), then fold §C's per-host limiter
@@ -426,8 +465,11 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 - ✅ **`develop` was pushed to `origin/develop` on 2026-09-18** (`0daf956..08655fd`, 13 commits —
   P9, P8, P7 and their closeouts). **After the push: 0 ahead, 0 behind; `main` 71 behind, 0 ahead.**
   ⚠️ **Since then, unpushed on `develop`: the BUG-014 fix (`b57211a`) and its docs closeout
-  (`c2f0542`), then the BUG-003 fourth fingerprint and its closeout.** The fingerprint touches
-  `playwright-worker/`, which P6 already rebuilds — no change to the five-service cutover.
+  (`c2f0542`), the owner's own `c90d943`, the BUG-003 fourth fingerprint (`2ee84ea`) and its
+  closeout (`4469b44`), then the session-close docs commit filing BUG-015/016/017.** Verified
+  after fetch at session close: **`develop` 6 ahead of `origin/develop`, 0 behind** (the five above
+  plus this closeout); `main` unchanged, 77 behind. The fingerprint
+  touches `playwright-worker/`, which P6 already rebuilds — no change to the five-service cutover.
   The previous push was 2026-09-09 (`fa3c18d..a57e395`, ten commits, including P6). ⚠️ *Historical,
   now pushed — kept for the commit list:* between those two pushes, on `develop`: four docs-only commits from the first
   2026-09-11 session (`e9304b9`, `43c828a`, `2e822d9`, `f724162`), then **P9's code (`ed4d63c`)**
@@ -499,7 +541,7 @@ ADR-009's review log; this table is only *what a session produced*.
 | Date | Session produced | Commits |
 |---|---|---|
 | 2026-09-19 *(clock, second session)* | **🔷 crw engine comparison — written, deferred.** Owner brought fastCRW (`us/crw`) and asked what ScrapeFlow lacks or could have done better, speed excluded. Cloned and read the engine's policy modules (SSRF, deadline, reserved semaphore, detector, egress latch, preference, breaker, host limiter, URL filter, robots, sitemap, untrusted-content fence, structured extraction + basis, diff/snapshot, capabilities, error taxonomy) against the corresponding ScrapeFlow code; every finding anchored to a `file:line`, the SSRF range gaps verified on the API's Python 3.12. Written as a new §crw in `docs/guides/competitor-research.md` (A: seven v1 bugs, none filed · B: output-quality gaps → PRD-016/018 · C: mechanisms → Phase 4 decisions · D: where ScrapeFlow is ahead). **Owner's call: deferred until the Temporal pipeline is finished.** Swept: `CLAUDE.md` Phase 4 bullet; this file's reference table, current state, *Outstanding* item 5 | docs-only |
-| 2026-09-19 *(clock)* | **🔷 BUG-014 FIXED.** Built at the owner's direction ("lets fix bug14") from the pick-up the previous handoff wrote out, then audited. `ondelete="CASCADE"` on `crawls.user_id` + `batches.user_id`; migration `9a1ebad3fca2` (autogenerated from a one-off container with the api **paused**, so the hot-reload trap never fired; dedup-index false positive stripped; the unnamed replacement constraints named so the downgrade runs); one test deleting a user who holds a crawl page and a batch run, each with a ledger row — mutation-checked by downgrading the DB, where it fails with the bug's own `ForeignKeyViolationError`. **280 API tests green** (279 → 280); `alembic check` reports only the standing dedup false positive. **Decision resolved by placement, not taken:** the filing left "rides the release or ships later" to the owner — it is on `develop` before the release, so it rides it as the third revision. **Found by the build:** the P7 views read both columns and need no drop/recreate for a constraint swap; the pause-then-`run` procedure sidesteps the hot-reload race entirely. Docs swept: `open-bugs.md` (BUG-014 fixed, two build notes), backlog (change-log row, §4 row, Sequencing's revision count), `CLAUDE.md` (open list, queue bullet), this file. **Then, same session: BUG-003 fourth fingerprint.** Owner exercised the detector against Amazon, Flipkart (both genuine — stealth passing) and Myntra (a 481 B "Site Maintenance" 200 stored as `completed` — a Tier 2 list miss). Root-caused by fetching the URL from a residential IP and from a pod: **egress is an OVH Singapore datacenter IP**, Myntra denies it with an outage-shaped page. One Tier 2 entry (`contact your administrator`), verbatim fixture, 173 worker tests, mutation-checked. Docs: `open-bugs.md` (BUG-003 addendum), backlog (change-log row, P2 row), `CLAUDE.md` (Deployment egress bullet, bot-wall row trap), this file | `b57211a`, `c2f0542`, `2ee84ea` + closeout |
+| 2026-09-19 *(clock)* | **🔷 BUG-014 FIXED.** Built at the owner's direction ("lets fix bug14") from the pick-up the previous handoff wrote out, then audited. `ondelete="CASCADE"` on `crawls.user_id` + `batches.user_id`; migration `9a1ebad3fca2` (autogenerated from a one-off container with the api **paused**, so the hot-reload trap never fired; dedup-index false positive stripped; the unnamed replacement constraints named so the downgrade runs); one test deleting a user who holds a crawl page and a batch run, each with a ledger row — mutation-checked by downgrading the DB, where it fails with the bug's own `ForeignKeyViolationError`. **280 API tests green** (279 → 280); `alembic check` reports only the standing dedup false positive. **Decision resolved by placement, not taken:** the filing left "rides the release or ships later" to the owner — it is on `develop` before the release, so it rides it as the third revision. **Found by the build:** the P7 views read both columns and need no drop/recreate for a constraint swap; the pause-then-`run` procedure sidesteps the hot-reload race entirely. Docs swept: `open-bugs.md` (BUG-014 fixed, two build notes), backlog (change-log row, §4 row, Sequencing's revision count), `CLAUDE.md` (open list, queue bullet), this file. **Then, same session: BUG-003 fourth fingerprint.** Owner exercised the detector against Amazon, Flipkart (both genuine — stealth passing) and Myntra (a 481 B "Site Maintenance" 200 stored as `completed` — a Tier 2 list miss). Root-caused by fetching the URL from a residential IP and from a pod: **egress is an OVH Singapore datacenter IP**, Myntra denies it with an outage-shaped page. One Tier 2 entry (`contact your administrator`), verbatim fixture, 173 worker tests, mutation-checked. Docs: `open-bugs.md` (BUG-003 addendum), backlog (change-log row, P2 row), `CLAUDE.md` (Deployment egress bullet, bot-wall row trap), this file. **Then, with the owner's residential proxy on the job: three worker bugs filed, none built — BUG-015** (wait strategy ignores `timeout_seconds`), **BUG-016** (`block_images` aborts CSS → SPA error boundary, confirmed by toggling it), **BUG-017** (proxy credentials decoded by Go, not Python — found by reading). Session-close audit also corrected the handoff's "coordinator crash-loops in prod" (local dev; prod has 0 restarts in 131 d) and recorded the owner housekeeping (rotate the pasted API key, delete the poisoned test jobs). Session closed long; **building is next session's first item** | `b57211a`, `c2f0542`, `2ee84ea`, `4469b44` + session-close docs |
 | 2026-09-18 *(clock)* | **🔷 P7 BUILT — the pre-migration queue is empty.** Built straight through at the owner's direction ("fix this"), then audited as a whole. Migration `86c780f55969` creates **two views** — `quota_run_units` (fetches, monthly) and `quota_active_submissions` (submissions, concurrency) — read through `Table` objects on a private `MetaData` (`app/models/quota_views.py`; `compare_metadata` confirmed autogenerate sees only the standing `idx_webhook_deliveries_dedup` false positive); `core/quota.py`'s two count queries name no table; `check_crawl_quota` on `POST /crawls` (monthly pre-checked with `batch_count=max_pages`); `DELETE /crawls/{id}?permanent=true` through `ledger.release_crawl_objects` with the job path's 503 rule, deleting the crawl with a Core `DELETE` so Postgres cascades (the ORM would NULL the children's NOT NULL `crawl_id`); `scripts/audit_crawl_quota.py` (read-only). **279 API + 29 contract tests green** (266 → 279: 9 quota + 4 crawl); the three meter-change tests were mutation-checked against the old queries and fail exactly as they should; `EXPLAIN` confirmed the `user_id` predicate is pushed into every view arm. **Decisions taken in the build, not in any filing:** two views not one (queued crawl has no unit row — ADR-009 §3's mechanism refined, decision unchanged, and the ADR cannot say so itself); the per-page storage insert deferred to the `CrawlWorkflow` port (its only v1 site is BUG-008). **Found by the build:** 🔴 **BUG-014** (admin user delete 500s on the `crawls`/`batches` FKs — verified in a rolled-back transaction, filed to §4, not fixed); on v1 every crawl holds a slot forever (BUG-008, the audit script says so); a stashed migration file under the hot-reloading API fails every startup until it is back; "for a year" nearly went into a docstring again (crawls shipped 2026-04-17 — five months). Docs swept: backlog (P7 row, two change-log entries, queue, sequencing, BUG-014 row), `open-bugs.md` (BUG-014, two P7 notes under BUG-008/BUG-012), `temporal-full-migration.md` (view entry, entry condition), `CLAUDE.md` (queue, P7 bullet, a new Key-decisions row, BUG-014 in the open list), this file | `24cb89c` + docs closeout |
 | 2026-09-15 *(clock)* | **🔷 P8 BUILT — the storage ledger, and BUG-007 with it.** Built straight through at the owner's direction ("fix this completely"), then audited as a whole. `storage_objects` + migration `0c73753d5138`; `app/core/ledger.py` as the single writer/releaser; the consumer records every stored object — the LLM extraction *and* `screenshot_paths`, which it had ignored since the field was added (BUG-004 facet 2 closes for free); all three delete endpoints and the nightly cleanup enumerate rows; `reconcile_storage_ledger.py` for production's history. **266 API + 29 contract tests green** (255 → 266: 6 converted, 11 new); the two load-bearing tests were mutation-checked. **Decisions taken in the build, not in any filing:** materialised counter (not a live `SUM`); 503 on a failed release; a run that fails accounting holds nothing; `crawl_page_id` added now so P7 is a consumer. **Found by the build:** the hot-reload migration trap dropped `idx_webhook_deliveries_dedup` (recovered by hand — see *Current state*); `api/scripts/` was never mounted into the api container, so script imports and the P6-era "verified" sweep ran the image's baked copy (mounted now). Docs swept: `open-bugs.md` (BUG-007 fixed, BUG-004 facet 2), backlog (P8 row, queue, change log, sequencing), `CLAUDE.md` (queue + a new Key-decisions row), this file | `f503f8b` + docs closeout |
 | 2026-09-11 *(clock, second session)* | **🔷 P9 / BUG-011 BUILT — the second code item of the pre-migration queue.** Built piecemeal at the owner's direction (job branch → batch branch → builder move → tests), then audited as a whole. `_recover_stale_pending` routes by whichever FK is set; batch runs rebuild from `batch_items` + `batches`; all four skip sites log at warning; the SAWarning that was BUG-011 showing in the test output is gone. **One finding not in the filing:** `create_job` had its own inline message builder, so the job lane already had the duplication the batch lane was about to gain — both lanes' builders moved to **`api/app/core/dispatch.py`** and all five dispatch sites call them (owner accepted the scope). Two tests pin dispatch-vs-recovery byte equality per lane; mutation-checked. **255 API + 29 contract tests green.** 🔷 **Knock-on recorded, not claimed as a fix: BUG-001's symptom is gone by construction**; mechanism 4 is untouched. Two small things caught in the audit: a docstring I wrote said batch went unrecovered "for a year" (it shipped 2026-04-22 — under five months; corrected), and `ScrapeMessage`'s docstring listed dispatchers by file (stale after the move; corrected). Docs swept: `open-bugs.md` (BUG-011 fixed, BUG-001 annotated), backlog (P9 row, queue, change log, BUG-001 §3 row — its `scheduler.py:131` pointer dropped), `CLAUDE.md` (queue bullet + a new Key-decisions row), this file | `ed4d63c` + docs closeout |

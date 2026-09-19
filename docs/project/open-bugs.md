@@ -264,10 +264,22 @@ changes an IP decision — this is the UF-002 / middle-tier problem (an Indian r
 the proxy layer). The one-request Amazon and Flipkart passes the same day were the browser
 fingerprint winning; Myntra is the IP losing.
 
-⚠️ **Prod knock-on, owner's call, not done:** run `996cf840…` holds `content_hash a649a09b3c1295fa`
-of the wall — a poisoned dedup baseline for job `106f8e90…` if it is ever re-run (one-off job, no
-schedule, no webhook, so it is inert until then). `DELETE /jobs/106f8e90…?permanent=true` removes
-the object and the run together. The same clean-up the 2026-07-22 closeout did for six runs.
+⚠️ **Prod knock-on, owner's call, not done:** every one of the day's Myntra test jobs stored
+*something* as `completed` and hashed it — the wall (`106f8e90…`, `5d0710d5…`), a genuine 404
+(`cda0aacf…`, the slug URL without `/buy`), and the BUG-016 error-boundary pages (`4ed66910…`,
+`b4e2f2c8…`). All one-off jobs, no schedule, no webhook, so the poisoned baselines are inert
+until re-run. `DELETE /jobs/{id}?permanent=true` removes object and run together. The same
+clean-up the 2026-07-22 closeout did for six runs.
+
+**How the rest of the thread resolved (so nobody re-diagnoses it as a wall).** With a residential
+exit (owner's Evomi proxy) Myntra served the real site every time. What still looked broken was
+two worker bugs, filed the same day: `networkidle` dying at 30 s under a 90 s budget (**BUG-015**),
+and "Oops! Something went wrong" over a healthy header because `block_images` aborts CSS chunks
+(**BUG-016**, confirmed by `block_images: false`). Myntra's product data is server-embedded in
+`window.__myx.pdpData` (price, sizes, descriptors, media, sellers) and was complete in every
+"Oops" body — `output_format: html` keeps it, markdown strips the `<script>` and loses it. Also
+site-specific: a Myntra slug URL without `/buy` is a 404; the bare `https://www.myntra.com/{id}`
+form works.
 
 ⚠️ **Deployment fact this surfaced, recorded in `CLAUDE.md` → Deployment:** the cluster's egress
 is a datacenter IP in Singapore, which is also why `amazon.com` redirected the same day's Amazon job
@@ -1603,6 +1615,107 @@ build worth keeping:
 None in mechanism. P7 gives `DELETE /crawls/{id}?permanent=true` its own release path, which works
 because it deletes the crawl row with a Core `DELETE` and lets the DB cascade — the same shape
 the user delete needs.
+
+---
+
+## BUG-015 — `timeout_seconds` does not govern the wait strategy
+
+**Severity:** Medium (a user-set budget is silently capped at 30 s on the step that most often
+needs it; the failure reads as the site's fault)
+**Discovered:** 2026-09-19, reading two proxied Myntra runs that failed with
+`TimeoutError: Timeout 30000ms exceeded` under `playwright_options.timeout_seconds: 90`
+**Status:** Open — **filed, not built.** Not §3: page rendering is activity logic and ports into
+the Temporal `PlaywrightWorkflow` activity unchanged. `playwright-worker/` only; rides the queue's
+release if built before it, since P6 rebuilds the worker anyway.
+
+### What happens
+
+`playwright-worker/worker/worker.py` computes `timeout_ms` from `timeout_seconds` and passes it to
+`page.goto(job.url, timeout=timeout_ms)` — then calls `page.wait_for_load_state(wait_state)` on the
+next line **with no timeout**, so the wait gets Playwright's default 30 s regardless of what the
+job asked for. With `wait_strategy: networkidle` on a page that never goes quiet (any site with a
+bot sensor or analytics beacons; every request slower through a residential proxy) the run fails
+at `goto` elapsed + 30 s. Observed: two runs at ~55 s each — ~24 s of `goto` through the proxy
+plus the 30 s cap — under a 90 s budget that was never reached.
+
+### Why it was missed
+
+`load` (the default) usually fires before or with `goto`, so the missing timeout is invisible
+unless the strategy is `networkidle` or `domcontentloaded` *and* the site is slow. Both were true
+for the first time on 2026-09-19.
+
+### Fix
+
+One argument: `page.wait_for_load_state(wait_state, timeout=timeout_ms)`. Whether the wait should
+share the `goto` budget (total ≤ `timeout_seconds`) or get its own is a small design call; the
+simple form — same value for both — is what the option's name promises and is enough. One test
+that pins the timeout being forwarded (the worker tests mock the page; assert the kwarg).
+
+---
+
+## BUG-016 — `block_images` also blocks stylesheets, which breaks SPA routes
+
+**Severity:** Medium (a `completed` run whose visible DOM is an error boundary; the data may
+still be in the page, as it was on Myntra, but a user reading the rendered output sees a broken
+scrape and a markdown job loses everything)
+**Discovered:** 2026-09-19, three Myntra runs through a working proxy that rendered the full
+header and footer around "Oops! Something went wrong. Refresh"; confirmed by re-running with
+`block_images: false`, which rendered the product
+**Status:** Open — **filed, not built.** Not §3, same reasoning as BUG-015. `playwright-worker/`
+only.
+
+### What happens
+
+The option's route glob is `**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,css}` — images, fonts
+**and CSS** (the comment says so: "block images/fonts/CSS"). A React app whose route is
+lazy-loaded fetches that route's CSS chunk through webpack's chunk loader; an aborted stylesheet
+rejects the `import()`, the error reaches React's error boundary, and the page renders the
+boundary's fallback instead of the route. The document, the state blob and everything already
+styled still render, which is why it looks like the *site* failed rather than the scraper.
+
+⚠️ **This is not a bot wall and must not be fingerprinted as one.** "Something went wrong" is a
+generic error-boundary string. The 2026-09-19 Myntra bodies were 456 KB with the complete product
+in `window.__myx.pdpData`; the detector was right to pass them.
+
+### Why it was missed
+
+Server-rendered targets — the bulk of what the platform scrapes (CLAUDE.md: "HTTP first,
+Playwright opt-in") — do not lazy-load CSS, so aborting it only speeds them up. Myntra is the
+first observed target that renders its product client-side from a route chunk.
+
+### Fix
+
+Take `css` out of the glob. Images and fonts stay: a missing font falls back silently, a missing
+stylesheet chunk throws. Keep the option's name (an API field), fix its docstring to say what it
+blocks. One test: with `block_images` on, a `.png` request is aborted and a `.css` request is not.
+
+---
+
+## BUG-017 — `proxy_url` credentials are decoded by one engine and not the other
+
+**Severity:** Low (latent — only bites a password containing a URL-reserved character; found by
+reading, not by a failure)
+**Discovered:** 2026-09-19, explaining how to translate a proxy vendor's `curl -x … -U user:pass`
+into `proxy_url`
+**Status:** Open — **filed, not built.** Two-worker change; both sides port into the activities.
+
+### What happens
+
+`playwright-worker/worker/worker.py` splits `proxy_url` with `urllib.parse.urlparse` and passes
+`.username` / `.password` to Playwright verbatim. Python does **not** percent-decode userinfo:
+`urlparse("http://user:p%40ss@h:1").password == "p%40ss"`. The Go http-worker
+(`internal/fetcher/fetcher.go`, `url.Parse` + `http.ProxyURL`) **does** decode it. So a
+`proxy_url` written the standard way — reserved characters in the password percent-encoded —
+authenticates on `engine: http` and fails on `engine: playwright`; written unencoded, a `@` or
+`:` in the password mis-splits on both. There is no valid spelling that works on both engines for
+such a password.
+
+### Fix
+
+`unquote()` both fields on the Python side, matching Go and the URL standard; document on the
+schema field that reserved characters in credentials must be percent-encoded. One test per
+engine with a password containing `@`. Workaround until then: issue proxy credentials without
+reserved characters (most vendors let you regenerate).
 
 ---
 
