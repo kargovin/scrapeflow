@@ -1387,8 +1387,15 @@ reached production — but every rebuild is an unreviewed dependency change, and
 produced a crash-looping image)
 **Discovered:** 2026-09-09, working out what a `main` fast-forward would actually build for the P6
 cutover
-**Status:** Open — **filed, not triaged.** Sequencing is the owner's call. Deliberately carved out
-of BUG-006 rather than folded into it; see *Relationship to BUG-006* below.
+**Status:** Open — **step 3 (frontend) done 2026-09-19, steps 1, 2, 4, 5 untouched.**
+`api/Dockerfile`'s builder stage now copies `package-lock.json` beside `package.json` and runs
+**`npm ci`**, so the frontend bundle is built from the committed lock — done in the Dependabot
+sweep of 2026-09-19 (the 58 alerts on the three scanned manifests), because 26 of those alerts
+were against `frontend/package-lock.json`, and fixing a lock the build ignores would have closed
+them without changing what ships. Verified by a `--target production` build (`npm ci` installs
+226 packages from the lock, bundle builds). The four unlocked Python services are still exactly
+as filed. Sequencing of the rest is the owner's call. Deliberately carved out of BUG-006 rather
+than folded into it; see *Relationship to BUG-006* below.
 
 ### What happens
 
@@ -1485,9 +1492,9 @@ dependency versions, and those versions must be readable from the repository.**
    `pip install .` ignores it. `api/Dockerfile`'s `uv sync --frozen` is the shape to copy; `--frozen`
    is the load-bearing flag, because it *fails* rather than silently re-resolving when the lock and
    the manifest disagree.
-3. **Fix the frontend build**: copy `frontend/package-lock.json` alongside `package.json`, and use
-   **`npm ci`** rather than `npm install`. `npm ci` requires a lock and refuses to update it, which
-   is the enforcement `--frozen` gives on the Python side.
+3. ~~**Fix the frontend build**: copy `frontend/package-lock.json` alongside `package.json`, and use
+   **`npm ci`** rather than `npm install`.~~ ✅ **Done 2026-09-19.** `npm ci` requires a lock and
+   refuses to update it, which is the enforcement `--frozen` gives on the Python side.
 4. **Decide the SDK majors.** `anthropic` and `openai` need a deliberate upper bound or a pinned
    version, not just a lock recording an accident. Step 1 makes today's resolution reproducible;
    this step makes it *chosen*. Open decision, per the BUG-006 addendum.

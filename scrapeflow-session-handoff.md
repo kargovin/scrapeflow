@@ -214,6 +214,35 @@ Tier 2 ran and had no phrase for it. One Tier 2 entry (`contact your administrat
 - ⚠️ **The auto-mode classifier refuses production reads** (`kubectl exec … psql`, even `git show
   <deployed-sha>:path`). Manual mode was needed for the prod checks; the owner switched.
 
+🔷 **Dependabot cleared before the release (2026-09-19, clock) — all 58 alerts on the three scanned
+manifests, not deployed; rides the queue's release.** `api/uv.lock` 31, `frontend/package-lock.json`
+26, `http-worker/go.mod` 1. Every alert re-checked locally against the new locks (GitHub only
+re-evaluates when `main` moves). 280 API + 29 contract + Go green; the `--target production` api
+image builds. Detail: backlog change-log row. Four things a future session should know:
+
+- ⚠️ **`clerk-backend-api` went 6.0.1 → 7.0.0, and it was forced, not chosen.** The high-severity
+  `cryptography` fix needs `>=50`; every 6.x release of the Clerk SDK pins `cryptography<49` (6.0.1)
+  or `<47` (6.0.0). v7's breaking list is management-API `error` types and the `verification`
+  sub-object; the code uses `authenticate_request` + `AuthenticateRequestOptions(authorized_parties=…)`
+  and one `users.get()` reading `email_addresses[0].email_address` — all present and unchanged in
+  the installed v7 (inspected, not assumed). **The JWT path has only been exercised by the test
+  suite's mocks; the first real Clerk verification on v7 is the release.** Fix-forward if it 401s.
+- ⚠️ **`react-router-dom` went 6.30.3 → 7.18.4 — a major, taken deliberately.** Two advisories
+  (SSR `deserializeErrors`, backslash open-redirect in `navigate`) are patched only in 7.18.0; both
+  are unreachable here (`BrowserRouter` + `Routes`, no data router or hydration; every `navigate()`
+  target is a mode constant, a nav path or a server UUID). Upgraded rather than dismissed because
+  the tree is eight basic symbols and all-absolute paths, so v7's one behaviour change
+  (`relativeSplatPath`) cannot bite. `tsc -b && vite build` is the only verification — **there is
+  no frontend test suite, so a click-through after the release is the real smoke.**
+- ⚠️ **`dompurify` is an `overrides` entry now** (`^3.4.15`), beside the pre-existing `js-cookie`
+  one. `monaco-editor` pins it *exactly* (`3.2.7` at 0.55.1, `3.4.8` at 0.56.0 — still five
+  alerts short), so no monaco bump reaches a patched version. ⚠️ A `jq` that *set* `overrides`
+  instead of merging into it silently dropped `js-cookie` for one resolve — caught by diffing the
+  lock, not by the build. Diff the lock after every `npm install`.
+- 🔷 **BUG-013's frontend half is done** — `api/Dockerfile` copies `package-lock.json` and runs
+  `npm ci`. Without it the 26 frontend alerts would have closed on paper while the shipped bundle
+  re-resolved. Four of seven manifests remain unlocked; BUG-006's scan coverage is unchanged.
+
 🔷 **BUG-015 / BUG-016 / BUG-017 are built (2026-09-20 — `9a72bb7`, `14c6136`, `f26c7ca`), not
 deployed; all three ride the queue's release.** Built as filed, one commit each, each
 mutation-checked against the unfixed code. `open-bugs.md`'s three status blocks and the backlog's
@@ -481,8 +510,12 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   `Recreate`-strategy API. **P7 (`24cb89c`, 2026-09-18) is the fourth and last** — `api/` only, and it adds
   **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them). **The BUG-014 fix
   (`b57211a`, 2026-09-19) is on top** — `api/` only, and it adds **the third revision** (`9a1ebad3fca2`,
-  two FK constraint swaps; downgrade restores `NO ACTION`).
-- ✅ **`develop` was pushed to `origin/develop` on 2026-09-18** (`0daf956..08655fd`, 13 commits —
+  two FK constraint swaps; downgrade restores `NO ACTION`). **The Dependabot sweep (`83607e2`, 2026-09-19) is on top of that** — `api/` (`pyproject.toml`, `uv.lock`, `Dockerfile`), `frontend/` (`package.json`, lock), `http-worker/` (`go.mod`, `go.sum`); no Alembic revision, and the three services it touches are already in the five-service rebuild.
+- ✅ **`develop` was pushed to `origin/develop` on 2026-09-19** (`8ba7e85..51c8428`, 14 commits —
+  BUG-014, the BUG-003 fingerprint, BUG-015/016/017 and their closeouts). **After the push: 0 ahead,
+  0 behind; `main` 88 behind, 0 ahead.** ⚠️ **Since then, unpushed on `develop`: the Dependabot
+  sweep and its docs closeout** (this session). Re-check before quoting.
+- *Historical, now pushed:* **`develop` was pushed to `origin/develop` on 2026-09-18** (`0daf956..08655fd`, 13 commits —
   P9, P8, P7 and their closeouts). **After the push: 0 ahead, 0 behind; `main` 71 behind, 0 ahead.**
   ⚠️ **Since then, unpushed on `develop`: the BUG-014 fix (`b57211a`) and its docs closeout
   (`c2f0542`), the owner's own `c90d943`, the BUG-003 fourth fingerprint (`2ee84ea`) and its
@@ -563,6 +596,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-19 *(clock)* | **🔷 Dependabot cleared — 58/58 on the three scanned manifests, before the release.** Owner: "lets push dev to origin first" (done, `8ba7e85..51c8428`), then "lets deal with dependabot now before we merge with main". `api/`: seven packages re-locked, direct floors raised; the `cryptography>=50` fix **forced `clerk-backend-api` 7.0.0** (no 6.x allows it) — v7 inspected in a scratch venv, the two auth symbols and `users.get()`'s `email_addresses` shape unchanged. `frontend/`: `dompurify` via `overrides` (monaco pins it exactly), `react-router-dom` **→ 7.18.4** (two advisories have no 6.x patch; unreachable here; tree is trivially portable), three browserslist-family transitives. `http-worker/`: `x/net` 0.55.0. **BUG-013 step 3 folded in** — `npm ci` from the lock in `api/Dockerfile`, verified by a production-target build. Every alert re-checked locally against the new locks. 280 API + 29 contract + Go green. ⚠️ Caught in the audit: a `jq` set `overrides` rather than merging, dropping the `js-cookie` pin for one resolve. Docs: `open-bugs.md` (BUG-013 status + fix list), backlog (change-log row, §4 row), `CLAUDE.md` (BUG-006/013 in the open list), this file | `83607e2` + docs closeout |
 | 2026-09-20 *(clock)* | **🔷 BUG-015, BUG-016, BUG-017 BUILT.** Built one at a time at the owner's direction ("lets fix bug15; do not state the approach fix it and test it" → "pick up bug16" → "explain bug 17" → "build it"), each committed before the next, docs batched at the end. BUG-015: `wait_for_load_state(wait_state, timeout=timeout_ms)`; two tests on the kwarg (explicit 90 s and the worker default), both `KeyError: 'timeout'` on the old worker. BUG-016: `css` out of the route glob; the test feeds the registered glob to Patchright's own `glob_to_regex_pattern` and asserts per-URL, failing on the old glob with `route-chunk.css must not be aborted`; primer field row corrected. BUG-017: `unquote()` on both credential fields; `Field(description=…)` on `proxy_url`; playwright test asserts the decoded pair at `new_context`, Go `TestWithProxy` asserts the decoded `Proxy-Authorization` header at an `httptest` proxy (Go unchanged — a regression pin). **177 playwright (173 → 177), Go fetcher, 68 API job tests green.** At close the owner revoked the API key pasted on 2026-09-19 (*Outstanding* 6a). Docs swept: `open-bugs.md` (three status blocks), backlog (change-log row, three §4 rows, the sequencing line), `CLAUDE.md` (open list), this file | `9a72bb7`, `14c6136`, `f26c7ca` + docs closeout |
 | 2026-09-19 *(clock, second session)* | **🔷 crw engine comparison — written, deferred.** Owner brought fastCRW (`us/crw`) and asked what ScrapeFlow lacks or could have done better, speed excluded. Cloned and read the engine's policy modules (SSRF, deadline, reserved semaphore, detector, egress latch, preference, breaker, host limiter, URL filter, robots, sitemap, untrusted-content fence, structured extraction + basis, diff/snapshot, capabilities, error taxonomy) against the corresponding ScrapeFlow code; every finding anchored to a `file:line`, the SSRF range gaps verified on the API's Python 3.12. Written as a new §crw in `docs/guides/competitor-research.md` (A: seven v1 bugs, none filed · B: output-quality gaps → PRD-016/018 · C: mechanisms → Phase 4 decisions · D: where ScrapeFlow is ahead). **Owner's call: deferred until the Temporal pipeline is finished.** Swept: `CLAUDE.md` Phase 4 bullet; this file's reference table, current state, *Outstanding* item 5 | docs-only |
 | 2026-09-19 *(clock)* | **🔷 BUG-014 FIXED.** Built at the owner's direction ("lets fix bug14") from the pick-up the previous handoff wrote out, then audited. `ondelete="CASCADE"` on `crawls.user_id` + `batches.user_id`; migration `9a1ebad3fca2` (autogenerated from a one-off container with the api **paused**, so the hot-reload trap never fired; dedup-index false positive stripped; the unnamed replacement constraints named so the downgrade runs); one test deleting a user who holds a crawl page and a batch run, each with a ledger row — mutation-checked by downgrading the DB, where it fails with the bug's own `ForeignKeyViolationError`. **280 API tests green** (279 → 280); `alembic check` reports only the standing dedup false positive. **Decision resolved by placement, not taken:** the filing left "rides the release or ships later" to the owner — it is on `develop` before the release, so it rides it as the third revision. **Found by the build:** the P7 views read both columns and need no drop/recreate for a constraint swap; the pause-then-`run` procedure sidesteps the hot-reload race entirely. Docs swept: `open-bugs.md` (BUG-014 fixed, two build notes), backlog (change-log row, §4 row, Sequencing's revision count), `CLAUDE.md` (open list, queue bullet), this file. **Then, same session: BUG-003 fourth fingerprint.** Owner exercised the detector against Amazon, Flipkart (both genuine — stealth passing) and Myntra (a 481 B "Site Maintenance" 200 stored as `completed` — a Tier 2 list miss). Root-caused by fetching the URL from a residential IP and from a pod: **egress is an OVH Singapore datacenter IP**, Myntra denies it with an outage-shaped page. One Tier 2 entry (`contact your administrator`), verbatim fixture, 173 worker tests, mutation-checked. Docs: `open-bugs.md` (BUG-003 addendum), backlog (change-log row, P2 row), `CLAUDE.md` (Deployment egress bullet, bot-wall row trap), this file. **Then, with the owner's residential proxy on the job: three worker bugs filed, none built — BUG-015** (wait strategy ignores `timeout_seconds`), **BUG-016** (`block_images` aborts CSS → SPA error boundary, confirmed by toggling it), **BUG-017** (proxy credentials decoded by Go, not Python — found by reading). Session-close audit also corrected the handoff's "coordinator crash-loops in prod" (local dev; prod has 0 restarts in 131 d) and recorded the owner housekeeping (rotate the pasted API key, delete the poisoned test jobs). Session closed long; **building is next session's first item** | `b57211a`, `c2f0542`, `2ee84ea`, `4469b44` + session-close docs |
