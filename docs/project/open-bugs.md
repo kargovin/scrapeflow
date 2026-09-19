@@ -1748,6 +1748,81 @@ reserved characters (most vendors let you regenerate).
 
 ---
 
+## BUG-018 — The SPA caches the Clerk session token for exactly its own lifetime, so any page left open goes "Failed to load"
+
+**Severity:** Medium (every list page in the admin SPA and the user dashboard breaks after ~60 s
+of sitting on it while anything polls; self-heals on a tab switch, which is why it reads as
+random)
+**Discovered:** 2026-09-19, owner's report after the queue release — "after some time the
+frontend shows failed to load in the job list and user list". Pre-existing; not introduced by the
+`react-router-dom` 6 → 7 or `clerk-backend-api` 6 → 7 bumps in that release.
+**Status:** 🔴 **Open — owner's call 2026-09-19: tabled until after the Temporal pipeline.**
+Not a Phase 4 item (backlog §4). Root cause read from the code; not yet confirmed against a
+captured 401 — the confirmation step is in *What to capture*.
+
+### What happens
+
+Five pages — `frontend/src/pages/Jobs.tsx`, `JobDetail.tsx`, `Users.tsx`, `ApiKeys.tsx`,
+`UsageStats.tsx` — obtain the bearer token the same way:
+
+```ts
+const { data: token } = useQuery({
+  queryKey: ['token'],
+  queryFn: () => getToken() as Promise<string>,
+  staleTime: 60_000,
+})
+```
+
+and pass that **string** to every `apiGet`/`apiPost`/… call. A Clerk session JWT expires **60 s**
+after issue. The cached string is therefore handed to requests right up to, and past, the moment
+the API starts rejecting it — nothing ties the cache's staleness to the token's `exp`, and a
+stale query is only re-run on a remount, a window-focus event or a reconnect, never because a
+*different* query is about to use its value.
+
+So on any page that refetches without remounting — `Jobs` polls every 5 s while a run is
+non-terminal, `UsageStats` polls every 30 s, and every page refetches on a filter, page or action
+— the first request after the 60 s mark gets **401** from the API, `apiFetch` throws
+`HTTP 401: …`, the `QueryClient`'s `retry: 1` retries with the same dead string, and the page
+renders its `isError` branch: *"Failed to load jobs."* / *"Failed to load users."* Switching to
+another tab and back fires `refetchOnWindowFocus`, which re-runs the stale `['token']` query and
+the page recovers — hence intermittent.
+
+`frontend/src/lib/useIsAdmin.ts` already does it right: it calls `getToken()` **inside** its
+`queryFn`, per probe. Clerk's `getToken()` is designed for exactly that — it caches internally and
+refreshes when the token is about to expire — so wrapping its *result* in a second cache defeats
+the one mechanism that knew the expiry.
+
+### Root cause
+
+The token is treated as data (cached by value, with a wall-clock `staleTime`) when it is a
+credential with its own expiry that the issuing library already manages. Two caches with
+different notions of "fresh"; the outer one wins and is wrong.
+
+### Fix
+
+`frontend/src/api.ts`: `apiFetch` takes a token *getter* instead of a string and calls it per
+request —
+
+```ts
+async function apiFetch(path: string, getToken: () => Promise<string | null>, options?: RequestInit) {
+  const token = await getToken()
+  if (!token) throw new Error('Not signed in')
+  …
+```
+
+— then each of the five pages passes `getToken` straight from `useAuth()`, drops its `['token']`
+query and its `enabled: !!token` guard. Six files, no backend change; `useIsAdmin.ts` is the
+in-repo precedent. There is no frontend test suite (BUG-013 note), so the check is manual: open
+Jobs while a run is in flight, keep the tab focused, wait 90 s — the list must keep refreshing.
+
+### What to capture, when it recurs
+
+DevTools → Network → the red request: status **401** is the confirmation, and a tab switch that
+recovers the list within a couple of seconds is the second signal. A screenshot of the page adds
+nothing — the request status is the evidence.
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised
