@@ -411,9 +411,10 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    that prod keeps the 30 s cap and the CSS abort until the push after.
 6. **Owner housekeeping from 2026-09-19, none done:** (a) **rotate the API key used for the day's
    prod tests** — it was pasted into a Claude session transcript in full; `POST /users/api-keys`
-   for a new one, revoke the old; (b) the six Myntra test jobs hold poisoned `content_hash`
-   baselines (`open-bugs.md` → BUG-003 addendum lists them) — `?permanent=true` deletes when done
-   testing; (c) the Amazon job landed on `amazon.sg` because of the egress IP — if the `.com`
+   for a new one, revoke the old; (b) *optional tidiness only* — the day's Myntra test jobs hold
+   `content_hash` values of walls/404s/error pages, but a baseline is only ever *read* by a later
+   run of the **same job**, there is no re-run endpoint, and none of them is scheduled, so they
+   are inert unless a `PATCH` adds a `schedule_cron` to one; delete them or don't; (c) the Amazon job landed on `amazon.sg` because of the egress IP — if the `.com`
    listing is wanted, that job needs a US exit on the proxy.
 
 5. **Deferred — crw engine comparison** (`docs/guides/competitor-research.md` §crw). Pick up

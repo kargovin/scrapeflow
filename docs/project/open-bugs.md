@@ -267,9 +267,10 @@ fingerprint winning; Myntra is the IP losing.
 ⚠️ **Prod knock-on, owner's call, not done:** every one of the day's Myntra test jobs stored
 *something* as `completed` and hashed it — the wall (`106f8e90…`, `5d0710d5…`), a genuine 404
 (`cda0aacf…`, the slug URL without `/buy`), and the BUG-016 error-boundary pages (`4ed66910…`,
-`b4e2f2c8…`). All one-off jobs, no schedule, no webhook, so the poisoned baselines are inert
-until re-run. `DELETE /jobs/{id}?permanent=true` removes object and run together. The same
-clean-up the 2026-07-22 closeout did for six runs.
+`b4e2f2c8…`). All one-off jobs, no schedule, no webhook — and a baseline is only *read* by a later
+completed run of the same job (`result_consumer.py`, `_get_previous_completed_run`), which for a
+one-off job can only come from a `PATCH` adding a `schedule_cron`. **Inert; deleting them is
+tidiness, not a fix.** The 2026-07-22 closeout had to null six because those jobs *were* scheduled.
 
 **How the rest of the thread resolved (so nobody re-diagnoses it as a wall).** With a residential
 exit (owner's Evomi proxy) Myntra served the real site every time. What still looked broken was
