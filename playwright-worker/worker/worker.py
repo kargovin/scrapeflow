@@ -7,7 +7,7 @@ without standing up a NATS pull consumer loop.
 
 import json
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import structlog
 from cryptography.fernet import Fernet
@@ -104,6 +104,9 @@ async def handle_message(
     # --- Steps 5–12: Render, format, upload ---
     # Build context options — proxy is set at context level so all traffic routes through it.
     # Chromium silently drops userinfo from proxy URLs; split into server/username/password.
+    # urlparse leaves userinfo percent-encoded, so unquote() both fields (BUG-017): the Go
+    # http-worker decodes them via net/url, and a password with a reserved character must
+    # authenticate the same way on both engines.
     #
     # no_viewport=True lets the page use the real browser window size instead of a
     # forced viewport. A forced viewport goes through CDP Emulation.setDeviceMetricsOverride,
@@ -117,9 +120,9 @@ async def handle_message(
             "server": f"{parsed_proxy.scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}",
         }
         if parsed_proxy.username:
-            proxy_config["username"] = parsed_proxy.username
+            proxy_config["username"] = unquote(parsed_proxy.username)
         if parsed_proxy.password:
-            proxy_config["password"] = parsed_proxy.password
+            proxy_config["password"] = unquote(parsed_proxy.password)
         context_kwargs["proxy"] = proxy_config
 
     context = await browser.new_context(**context_kwargs)

@@ -2,6 +2,7 @@ package fetcher
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -124,4 +125,63 @@ func TestFetch(t *testing.T) {
 			t.Errorf("body not capped: got %d bytes, want <= %d", len(result.Body), maxBodySize)
 		}
 	})
+}
+
+func TestWithProxy(t *testing.T) {
+	t.Run("percent-encoded credentials are decoded before Proxy-Authorization", func(t *testing.T) {
+		// Pins the behaviour the playwright worker was aligned to (BUG-017): a
+		// reserved character in the password is spelled percent-encoded in
+		// proxy_url and must reach the proxy decoded. net/url decodes userinfo
+		// and http.ProxyURL builds the header from the decoded form.
+		wantUser, wantPass := "us@er", "p@ss:w0rd"
+		var gotUser, gotPass string
+		var gotOK bool
+
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotUser, gotPass, gotOK = parseProxyBasicAuth(r.Header.Get("Proxy-Authorization"))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("via proxy"))
+		}))
+		defer proxy.Close()
+
+		f, err := New(5).WithProxy("http://us%40er:p%40ss%3Aw0rd@" + strings.TrimPrefix(proxy.URL, "http://"))
+		if err != nil {
+			t.Fatalf("WithProxy: %v", err)
+		}
+		// Plain http so the transport forwards through the proxy rather than CONNECT.
+		result, err := f.Fetch(context.Background(), "http://example.invalid/page")
+		if err != nil {
+			t.Fatalf("Fetch via proxy: %v", err)
+		}
+		if string(result.Body) != "via proxy" {
+			t.Errorf("body: got %q, want %q", string(result.Body), "via proxy")
+		}
+		if !gotOK {
+			t.Fatal("proxy received no parseable Proxy-Authorization header")
+		}
+		if gotUser != wantUser || gotPass != wantPass {
+			t.Errorf("proxy credentials: got %q:%q, want %q:%q", gotUser, gotPass, wantUser, wantPass)
+		}
+	})
+
+	t.Run("invalid proxy URL returns error", func(t *testing.T) {
+		if _, err := New(5).WithProxy("http://[::1"); err == nil {
+			t.Fatal("expected error for malformed proxy URL, got nil")
+		}
+	})
+}
+
+// parseProxyBasicAuth decodes a "Basic <base64>" Proxy-Authorization value into
+// its username and password, mirroring (*http.Request).BasicAuth for the proxy header.
+func parseProxyBasicAuth(header string) (user, pass string, ok bool) {
+	const prefix = "Basic "
+	if !strings.HasPrefix(header, prefix) {
+		return "", "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(header[len(prefix):])
+	if err != nil {
+		return "", "", false
+	}
+	user, pass, ok = strings.Cut(string(raw), ":")
+	return user, pass, ok
 }

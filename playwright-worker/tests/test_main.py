@@ -426,6 +426,34 @@ async def test_proxy_passed_to_new_context():
     )
 
 
+async def test_proxy_credentials_are_percent_decoded():
+    """
+    Reserved characters in proxy credentials arrive percent-encoded (the only
+    way to spell them in a URL) and must reach Playwright decoded (BUG-017).
+    urlparse leaves userinfo encoded; the Go http-worker decodes it, so
+    without unquote() the same proxy_url authenticates on one engine and
+    fails on the other.
+    """
+    proxy_url = "http://us%40er:p%40ss%3Aw0rd@proxy.example.com:8080"
+    msg = make_nats_msg(
+        credentials={"encrypted_proxy_url": encrypt_credential(proxy_url)}
+    )
+    browser, _, _ = make_browser()
+
+    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        mock_upload.return_value = _FAKE_MINIO_PATH
+        await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
+
+    browser.new_context.assert_called_once_with(
+        no_viewport=True,
+        proxy={
+            "server": "http://proxy.example.com:8080",
+            "username": "us@er",
+            "password": "p@ss:w0rd",
+        },
+    )
+
+
 async def test_no_proxy_calls_new_context_without_proxy():
     """When no credentials are set, new_context is called with only no_viewport=True."""
     msg = make_nats_msg()

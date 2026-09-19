@@ -61,7 +61,15 @@ class _MutableJobFields(BaseModel):
     webhook_url: AnyHttpUrl | None = None
     respect_robots: bool = False
     proxy_provider: str | None = None
-    proxy_url: str | None = None  # write-only; stored encrypted in job_secrets, never returned
+    proxy_url: str | None = Field(
+        default=None,
+        description=(
+            "Proxy for this job as a URL, e.g. 'http://user:pass@host:port'. "
+            "Write-only: stored encrypted in job_secrets, never returned. "
+            "Reserved characters in the username or password (@ : / ? # %) must be "
+            "percent-encoded; both engines decode them (BUG-017)."
+        ),
+    )
     cookies: list[dict] | None = None  # write-only; stored encrypted in job_secrets, never returned
     actions: list[dict] | None = None
     webhook_events: list[str] | None = None
