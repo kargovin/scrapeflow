@@ -72,6 +72,13 @@ class Report:
     counters_changed: int = 0
     failed: int = 0
     orphan_keys: list[str] = field(default_factory=list)
+    # Dry run only: bytes each user's counter would move by, from the rows this run
+    # did not write. The counter preview reads the ledger, and on a first run the
+    # ledger is empty, so without this the preview says "→ 0" for everyone.
+    pending_delta: dict[uuid.UUID, int] = field(default_factory=dict)
+
+    def defer(self, user_id: uuid.UUID, delta: int) -> None:
+        self.pending_delta[user_id] = self.pending_delta.get(user_id, 0) + delta
 
 
 def _artifact_id(key: str) -> uuid.UUID | None:
@@ -149,6 +156,8 @@ async def _walk_bucket(db: AsyncSession, minio, apply: bool, report: Report) -> 
                     )
                     if apply:
                         row.bytes = size
+                    else:
+                        report.defer(row.user_id, size - row.bytes)
                 continue
 
             attribution = await _attribute(db, path, key)
@@ -186,6 +195,7 @@ async def _walk_bucket(db: AsyncSession, minio, apply: bool, report: Report) -> 
                     user_id=str(attribution.user_id),
                 )
             else:
+                report.defer(attribution.user_id, size)
                 logger.info(
                     "reconcile: unrecorded (would record)",
                     key=key,
@@ -215,14 +225,22 @@ async def _drop_dangling_rows(db: AsyncSession, minio, apply: bool, report: Repo
             await db.delete(row)
             logger.info("reconcile: dangling row dropped", key=key, bytes=row.bytes)
         else:
+            report.defer(row.user_id, -row.bytes)
             logger.info("reconcile: dangling row (would drop)", key=key, bytes=row.bytes)
     if apply:
         await db.flush()
 
 
-async def _recompute_counters(db: AsyncSession, apply: bool, report: Report) -> None:
+async def _recompute_counters(
+    db: AsyncSession, apply: bool, report: Report
+) -> list[tuple[uuid.UUID, int, int]]:
     """Set every counter to the sum of the user's rows. Users with a quota row but no
-    objects go to zero; users with objects but no quota row get one."""
+    objects go to zero; users with objects but no quota row get one.
+
+    Returns `(user_id, before, after)` for every counter that changes (or would). In a
+    dry run the ledger still lacks the rows the walk would have written, so `after` is
+    the ledger sum plus `report.pending_delta`; a user with neither a quota row nor a
+    ledger row is invisible to the query and is added from the deltas."""
     rows = (
         await db.execute(
             text("""
@@ -236,9 +254,16 @@ async def _recompute_counters(db: AsyncSession, apply: bool, report: Report) -> 
             """)
         )
     ).all()
-    for user_id, used, total in rows:
+    totals = {user_id: (int(used), int(total)) for user_id, used, total in rows}
+    if not apply:
+        for user_id, delta in report.pending_delta.items():
+            used, total = totals.get(user_id, (0, 0))
+            totals[user_id] = (used, total + delta)
+    decisions: list[tuple[uuid.UUID, int, int]] = []
+    for user_id, (used, total) in totals.items():
         if used == total:
             continue
+        decisions.append((user_id, used, total))
         report.counters_changed += 1
         logger.info(
             "reconcile: counter " + ("set" if apply else "would set"),
@@ -254,8 +279,9 @@ async def _recompute_counters(db: AsyncSession, apply: bool, report: Report) -> 
                     ON CONFLICT (user_id) DO UPDATE
                     SET storage_bytes_used = :total, updated_at = NOW()
                 """),
-                {"user_id": user_id, "total": int(total)},
+                {"user_id": user_id, "total": total},
             )
+    return decisions
 
 
 async def reconcile(db: AsyncSession, minio, apply: bool) -> Report:

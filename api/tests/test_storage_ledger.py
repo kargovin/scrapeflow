@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import AsyncSessionLocal
@@ -22,6 +22,7 @@ from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
 from app.models.storage_object import StorageObject
+from app.models.user import User
 from app.models.user_quota import UserQuota
 
 BUCKET = "scrapeflow-results"
@@ -515,3 +516,60 @@ async def test_reconcile_attributes_both_conventions_and_flags_orphans(db_user):
     assert (new_style.user_id, new_style.job_run_id) == (db_user.id, new_id)
     assert old_style.user_id == db_user.id and old_style.job_run_id is not None
     assert orphan is None
+
+
+async def test_reconcile_dry_run_previews_the_counter_it_would_set(db_user):
+    """A first dry run walks a bucket the ledger knows nothing about, so the counter
+    preview cannot read the ledger alone — it said "→ 0" for a counter that --apply then
+    left exactly where it was (prod, 2026-09-19). The preview must fold in what the walk
+    would have written, and must list a user the quota/ledger join cannot see."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("rec", "scripts/reconcile_storage_ledger.py")
+    rec = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rec)
+
+    # A second user with neither a quota row nor a ledger row: invisible to the join.
+    unseen = User(clerk_id=f"user_{uuid.uuid4().hex}", email=f"{uuid.uuid4().hex}@example.com")
+    async with AsyncSessionLocal() as db:
+        db.add(unseen)
+        db.add(UserQuota(user_id=db_user.id, storage_bytes_limit=10_000, storage_bytes_used=500))
+        await db.commit()
+        await db.refresh(unseen)
+
+    try:
+        report = rec.Report()
+        report.defer(db_user.id, 120)  # would record
+        report.defer(db_user.id, 230)  # would record
+        report.defer(db_user.id, -50)  # would drop a dangling row
+        report.defer(unseen.id, 42)
+
+        # The counter pass walks every user, and the dev DB is shared — scope to ours.
+        ours = {db_user.id, unseen.id}
+        async with AsyncSessionLocal() as db:
+            decisions = await rec._recompute_counters(db, apply=False, report=report)
+            assert sorted((d for d in decisions if d[0] in ours), key=lambda d: d[1]) == [
+                (unseen.id, 0, 42),
+                (db_user.id, 500, 300),
+            ]
+            # Nothing moved: a dry run reports and stops.
+            assert (
+                await db.scalar(
+                    select(UserQuota.storage_bytes_used).where(UserQuota.user_id == db_user.id)
+                )
+                == 500
+            )
+            assert (
+                await db.scalar(select(UserQuota.user_id).where(UserQuota.user_id == unseen.id))
+                is None
+            )
+
+        # --apply ignores the deltas: it reads the rows the walk really wrote.
+        async with AsyncSessionLocal() as db:
+            decisions = await rec._recompute_counters(db, apply=True, report=rec.Report())
+            assert [d for d in decisions if d[0] in ours] == [(db_user.id, 500, 0)]
+            await db.rollback()
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(User).where(User.id == unseen.id))
+            await db.commit()
