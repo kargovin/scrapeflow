@@ -136,10 +136,13 @@ async def handle_message(
                 cookies_to_add.append(c)
             await context.add_cookies(cookies_to_add)
 
-        # Optional: block images/fonts/CSS to speed up non-visual scrapes
+        # Optional: block images/fonts to speed up non-visual scrapes.
+        # Never CSS (BUG-016): a missing font falls back silently, but an
+        # aborted stylesheet chunk rejects a lazy-loaded SPA route's import()
+        # and the page renders React's error boundary instead of the content.
         if opts and opts.block_images:
             await page.route(
-                "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,css}",
+                "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}",
                 lambda route: route.abort(),
             )
 

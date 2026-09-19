@@ -243,7 +243,7 @@ Between these two failure modes, ack-after-write is the safe choice. The spec en
 |---|---|---|---|
 | `wait_strategy` | `"load"` \| `"domcontentloaded"` \| `"networkidle"` | `"load"` | When navigation is considered complete |
 | `timeout_seconds` | int, 5–300 | 60 | Max time before `TimeoutError` |
-| `block_images` | bool | false | Whether to abort image/font/CSS requests |
+| `block_images` | bool | false | Whether to abort image/font requests (never CSS — an aborted stylesheet chunk breaks lazy-loaded SPA routes, BUG-016) |
 
 These values are validated at the API layer before the message is published — the worker will always receive valid values. You do not need to re-validate them. If `playwright_options` is null (user sent an HTTP job routed incorrectly), treat missing fields as their defaults.
 

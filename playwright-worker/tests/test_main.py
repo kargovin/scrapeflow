@@ -223,6 +223,50 @@ async def test_block_images_true_calls_page_route():
     assert "jpg" in route_pattern
 
 
+async def test_block_images_aborts_images_and_fonts_but_never_css():
+    """
+    block_images must abort image and font requests and leave stylesheets
+    alone (BUG-016). An aborted CSS chunk rejects a lazy-loaded SPA route's
+    import() and the page renders React's error boundary in place of the
+    content — a `completed` run whose visible DOM is "Something went wrong".
+    A missing font falls back silently, so fonts stay blocked.
+
+    The glob is matched with Patchright's own matcher, so this pins what
+    the browser will actually abort rather than the pattern's spelling.
+    """
+    import re
+
+    from patchright._impl._glob import glob_to_regex_pattern
+
+    msg = make_nats_msg(
+        playwright_options={
+            "wait_strategy": "load",
+            "timeout_seconds": 30,
+            "block_images": True,
+        }
+    )
+    browser, _, page = make_browser()
+
+    await _run(msg, browser=browser)
+
+    page.route.assert_called_once()
+    matcher = re.compile(glob_to_regex_pattern(page.route.call_args.args[0]))
+
+    for blocked in (
+        "https://example.com/assets/hero.png",
+        "https://example.com/assets/photo.jpg",
+        "https://cdn.example.com/fonts/inter.woff2",
+    ):
+        assert matcher.match(blocked), f"{blocked} should be aborted"
+
+    for passed in (
+        "https://example.com/static/css/route-chunk.css",
+        "https://example.com/static/js/route-chunk.js",
+        "https://example.com/product/123",
+    ):
+        assert not matcher.match(passed), f"{passed} must not be aborted"
+
+
 async def test_block_images_false_does_not_call_page_route():
     """When block_images=False (default), page.route() must NOT be called."""
     msg = make_nats_msg(
