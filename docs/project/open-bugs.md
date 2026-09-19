@@ -69,6 +69,10 @@ artifacts: Amazon → `blocked:amazon` (`tier1:amazon_opfcaptcha`), Myntra → `
 (`tier1:akamai_reference_id`); CNN 4.1 MB, Times of India 319 KB and **browserscan.net/bot-detection
 450 KB** all correctly passed — that last one is the real false-positive test, being a page *about*
 bot detection full of the matching vocabulary. The Tier 2 size gate held.
+> ➕ **Fourth fingerprint added 2026-09-19 — not deployed, rides the queue's release.** A live
+> Myntra wall the classifier missed (a 481 B "Site Maintenance" 200, served to the cluster's
+> datacenter IP); see the **BUG-003 addendum** directly below this section. The mechanism is
+> unchanged — Tier 2 ran and had no phrase for it.
 
 ### What happens
 
@@ -213,6 +217,61 @@ failure model), so doing it today is effort the migration partly redoes. It also
 with the **middle/full block-handling tiers** (getting *past* walls), which are already deferred
 post-Phase-4, gated on UF-002 — if we build vendor-conditional routing then, the Go worker will
 need a vendor too, and that is the moment to unify the string. Until then: known, intentional.
+
+---
+
+## BUG-003 addendum (2026-09-19) — a live wall the fingerprint list did not have
+
+Filed against BUG-003 rather than separately: the mechanism caught nothing wrong, the list did.
+
+**What happened.** Job `106f8e90…` (myntra.com product page, playwright, `html`) came back
+`completed` in **0.8 s** with a **481 B** body:
+
+```html
+<title>Site Maintenance</title> … <h1>Oops! Something went wrong</h1>
+<p>Please contact your administrator</p>
+```
+
+A `200`, stored as a result, `content_hash` computed on it — BUG-003's original symptom exactly.
+
+**Why the classifier let it through, against the code.** Tier 1: none of the vendor markers — the
+Myntra wall captured 2026-07-22 was *Akamai's* interstitial (`Reference #…`, fingerprinted); this is
+Myntra's own template. Status rule: it was a 200. Empty-body rule: 481 B is over the 100 B floor.
+**Tier 2 ran** (481 B is well under the 20 KB gate) and none of its fourteen phrases is on the page.
+A false negative of the list, not of the tiering.
+
+**Why it is a block and not an outage.** Fetched at the same time with the same UA: from a
+residential Indian IP, Myntra served its full site (404 KB); from the cluster's egress IP —
+**`139.99.121.44`, an OVH Singapore datacenter range** — it served this page in 0.18 s. The
+operative test says *"a real person on a normal browser and a residential connection"*: the word
+*residential* is there so that datacenter-IP denial counts. Geo-blocks are excluded only when the
+page honestly says so; this one lies about why. The tell is **"please contact your
+administrator"** — denial-template language addressed to a client the server has already decided
+against. A genuine maintenance page says "we'll be back" and has no administrator for the visitor
+to contact.
+
+**Fixed** (not deployed) with one Tier 2 entry in `blocking.py` — `contact\s+your\s+administrator`,
+vendor `unknown`, signal `tier2:contact_administrator` — size-gated like every Tier 2 phrase.
+**The title is deliberately not matched**: `test_genuine_maintenance_page_is_not_a_block` pins
+that a small "Site Maintenance / We'll be back soon" page stays a genuine result. The captured body
+is a verbatim fixture (`MYNTRA_MAINTENANCE_WALL`); 173 worker tests pass (168 → 173), and the three
+new positive cases fail against the previous detector. The worker's `error` will read
+`blocked:unknown` — the honest vendor for a site's own template.
+
+**What it does not fix.** The detector change makes the failure *honest*; it does not get Myntra's
+content. From a Singapore datacenter IP Myntra will keep serving this, and no stealth setting
+changes an IP decision — this is the UF-002 / middle-tier problem (an Indian residential exit via
+the proxy layer). The one-request Amazon and Flipkart passes the same day were the browser
+fingerprint winning; Myntra is the IP losing.
+
+⚠️ **Prod knock-on, owner's call, not done:** run `996cf840…` holds `content_hash a649a09b3c1295fa`
+of the wall — a poisoned dedup baseline for job `106f8e90…` if it is ever re-run (one-off job, no
+schedule, no webhook, so it is inert until then). `DELETE /jobs/106f8e90…?permanent=true` removes
+the object and the run together. The same clean-up the 2026-07-22 closeout did for six runs.
+
+⚠️ **Deployment fact this surfaced, recorded in `CLAUDE.md` → Deployment:** the cluster's egress
+is a datacenter IP in Singapore, which is also why `amazon.com` redirected the same day's Amazon job
+to `amazon.sg`. Any geo-sensitive target behaves accordingly.
 
 ---
 
