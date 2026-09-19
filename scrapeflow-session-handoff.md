@@ -45,6 +45,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Storage ledger reconcile (owner-authorised, unrun in prod)** | `api/scripts/reconcile_storage_ledger.py` — dry-run by default. Walks the bucket, records pre-ledger objects, deletes BUG-007's orphaned pages, **recomputes** every counter. Verified in dry-run against local dev (2,216 objects: 1,142 attributable, 1,074 orphans) |
 | Multi-persona process starter prompts | `docs/process/` |
 | Anti-bot hardening record (ADR-008 companion) | `docs/guides/anti-bot-hardening.md` |
+| **crw engine comparison — DEFERRED until the Temporal pipeline is done** | `docs/guides/competitor-research.md` §crw (2026-09-19). §A = seven v1 bugs, none filed; §C = mechanisms owed at the batch-and-crawl cutover (per-host limiter, interactive/batch lanes) |
 | Phase 1–3 history (specs, backlogs, reviews, audits) | `docs/archive/` |
 
 ---
@@ -184,6 +185,35 @@ running API took the P7 migration file with it; the reloader restarted, `alembic
 found the DB at a revision no file describes, and every startup failed with `Can't locate
 revision identified by '86c780f55969'` until the pop. It recovered on its own, but a stash that
 outlives a reload leaves the API down. Stash `--keep-index` or exclude `migrations/`.
+
+🔷 **crw engine comparison written and deferred (2026-09-19, second session).** Owner brought
+https://github.com/us/crw (fastCRW — Rust, ~95k lines, 11 crates) and asked for a code-level
+comparison, speed excluded. Written into `docs/guides/competitor-research.md` as a new §crw;
+**owner's call: nothing built now — "we'll come back after we finish the Temporal pipeline."**
+Three things a future session should know without opening it:
+
+- **§A is seven v1 correctness bugs, verified against the working tree, none filed.** The two
+  with teeth: SSRF is checked once at `POST /jobs` and never at fetch time — `fetcher.go:33-36`
+  keeps Go's default redirect-follow, so `https://x → 302 → http://169.254.169.254/` is open, and
+  DNS rebinding with it (BUG-010 is a special case); and the `http` engine has **no** bot-wall
+  detection, so BUG-003's Amazon 200-wall is a *completed* scrape on that engine. The others:
+  robots `*`/`$` literal + query ignored + the Go and Python parsers disagree on an empty group;
+  no content-type check; `difflib` text diff blocks the API event loop (§3 class, dissolves in
+  the activity — do not fix on v1); LLM prompt unfenced and output unvalidated; silent 10 MB
+  truncation. When filed, A1/A3/A4 join `CLAUDE.md`'s *do-not-delete* list as "port with the fix".
+- **§C is what matters for the migration's shape.** Two crw mechanisms are hard to retrofit once
+  the Temporal task queues exist: a **per-eTLD+1 host limiter** (ScrapeFlow rate-limits per
+  *user* at the API and never per *target*; a crawl hammers its host as fast as the worker drains)
+  and **interactive/batch reserved lanes** (today one NATS FIFO per engine; a 100-URL batch queues
+  every single scrape behind it). Both belong in the `CrawlWorkflow` / batch-cutover design, next
+  to ADR-010. The rest of §C — `Deadline` propagation (R4's mechanism), classified breaker
+  outcomes, per-host egress memory, a capabilities endpoint, a closed error-code set — is
+  activity-port input.
+- **§B is product input, not Phase 4:** main-content extraction as a scored ladder (PRD-016 Clean
+  block), page metadata on the run, normalised change hashing (raw-byte xxh64 is dead for HTML),
+  URL canonicalisation + tracking-param strip, sitemap-index support, per-field extraction
+  evidence. §D records where ScrapeFlow is ahead so the comparison stays honest: durability,
+  tenancy, the ledger, contract tests — crw has none of it.
 
 🔷 **P8 is built (2026-09-15) — and BUG-007 is fixed by it, not after it.** `phase4-backlog.md` §1's
 P8 row, its change-log entry, and `open-bugs.md` → BUG-007 hold the detail; `CLAUDE.md` has a new
@@ -328,6 +358,11 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    MinIO, ledger rows kept) still applies to production until that release, and self-heals on
    the first successful delete. Writeup: `open-bugs.md` → BUG-014; backlog §4 row.
 
+5. **Deferred — crw engine comparison** (`docs/guides/competitor-research.md` §crw). Pick up
+   **after the Temporal pipeline**: file §A's bugs (A1–A4 first), then fold §C's per-host limiter
+   and interactive/batch lanes into the batch-and-crawl cutover design before the task queues are
+   shaped. Nothing in it blocks the queue release.
+
 ### Git / deploy state
 
 - **Deployed code is `b110591`** (2026-07-28).
@@ -442,6 +477,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-19 *(clock, second session)* | **🔷 crw engine comparison — written, deferred.** Owner brought fastCRW (`us/crw`) and asked what ScrapeFlow lacks or could have done better, speed excluded. Cloned and read the engine's policy modules (SSRF, deadline, reserved semaphore, detector, egress latch, preference, breaker, host limiter, URL filter, robots, sitemap, untrusted-content fence, structured extraction + basis, diff/snapshot, capabilities, error taxonomy) against the corresponding ScrapeFlow code; every finding anchored to a `file:line`, the SSRF range gaps verified on the API's Python 3.12. Written as a new §crw in `docs/guides/competitor-research.md` (A: seven v1 bugs, none filed · B: output-quality gaps → PRD-016/018 · C: mechanisms → Phase 4 decisions · D: where ScrapeFlow is ahead). **Owner's call: deferred until the Temporal pipeline is finished.** Swept: `CLAUDE.md` Phase 4 bullet; this file's reference table, current state, *Outstanding* item 5 | docs-only |
 | 2026-09-19 *(clock)* | **🔷 BUG-014 FIXED.** Built at the owner's direction ("lets fix bug14") from the pick-up the previous handoff wrote out, then audited. `ondelete="CASCADE"` on `crawls.user_id` + `batches.user_id`; migration `9a1ebad3fca2` (autogenerated from a one-off container with the api **paused**, so the hot-reload trap never fired; dedup-index false positive stripped; the unnamed replacement constraints named so the downgrade runs); one test deleting a user who holds a crawl page and a batch run, each with a ledger row — mutation-checked by downgrading the DB, where it fails with the bug's own `ForeignKeyViolationError`. **280 API tests green** (279 → 280); `alembic check` reports only the standing dedup false positive. **Decision resolved by placement, not taken:** the filing left "rides the release or ships later" to the owner — it is on `develop` before the release, so it rides it as the third revision. **Found by the build:** the P7 views read both columns and need no drop/recreate for a constraint swap; the pause-then-`run` procedure sidesteps the hot-reload race entirely. Docs swept: `open-bugs.md` (BUG-014 fixed, two build notes), backlog (change-log row, §4 row, Sequencing's revision count), `CLAUDE.md` (open list, queue bullet), this file | `b57211a` + docs closeout |
 | 2026-09-18 *(clock)* | **🔷 P7 BUILT — the pre-migration queue is empty.** Built straight through at the owner's direction ("fix this"), then audited as a whole. Migration `86c780f55969` creates **two views** — `quota_run_units` (fetches, monthly) and `quota_active_submissions` (submissions, concurrency) — read through `Table` objects on a private `MetaData` (`app/models/quota_views.py`; `compare_metadata` confirmed autogenerate sees only the standing `idx_webhook_deliveries_dedup` false positive); `core/quota.py`'s two count queries name no table; `check_crawl_quota` on `POST /crawls` (monthly pre-checked with `batch_count=max_pages`); `DELETE /crawls/{id}?permanent=true` through `ledger.release_crawl_objects` with the job path's 503 rule, deleting the crawl with a Core `DELETE` so Postgres cascades (the ORM would NULL the children's NOT NULL `crawl_id`); `scripts/audit_crawl_quota.py` (read-only). **279 API + 29 contract tests green** (266 → 279: 9 quota + 4 crawl); the three meter-change tests were mutation-checked against the old queries and fail exactly as they should; `EXPLAIN` confirmed the `user_id` predicate is pushed into every view arm. **Decisions taken in the build, not in any filing:** two views not one (queued crawl has no unit row — ADR-009 §3's mechanism refined, decision unchanged, and the ADR cannot say so itself); the per-page storage insert deferred to the `CrawlWorkflow` port (its only v1 site is BUG-008). **Found by the build:** 🔴 **BUG-014** (admin user delete 500s on the `crawls`/`batches` FKs — verified in a rolled-back transaction, filed to §4, not fixed); on v1 every crawl holds a slot forever (BUG-008, the audit script says so); a stashed migration file under the hot-reloading API fails every startup until it is back; "for a year" nearly went into a docstring again (crawls shipped 2026-04-17 — five months). Docs swept: backlog (P7 row, two change-log entries, queue, sequencing, BUG-014 row), `open-bugs.md` (BUG-014, two P7 notes under BUG-008/BUG-012), `temporal-full-migration.md` (view entry, entry condition), `CLAUDE.md` (queue, P7 bullet, a new Key-decisions row, BUG-014 in the open list), this file | `24cb89c` + docs closeout |
 | 2026-09-15 *(clock)* | **🔷 P8 BUILT — the storage ledger, and BUG-007 with it.** Built straight through at the owner's direction ("fix this completely"), then audited as a whole. `storage_objects` + migration `0c73753d5138`; `app/core/ledger.py` as the single writer/releaser; the consumer records every stored object — the LLM extraction *and* `screenshot_paths`, which it had ignored since the field was added (BUG-004 facet 2 closes for free); all three delete endpoints and the nightly cleanup enumerate rows; `reconcile_storage_ledger.py` for production's history. **266 API + 29 contract tests green** (255 → 266: 6 converted, 11 new); the two load-bearing tests were mutation-checked. **Decisions taken in the build, not in any filing:** materialised counter (not a live `SUM`); 503 on a failed release; a run that fails accounting holds nothing; `crawl_page_id` added now so P7 is a consumer. **Found by the build:** the hot-reload migration trap dropped `idx_webhook_deliveries_dedup` (recovered by hand — see *Current state*); `api/scripts/` was never mounted into the api container, so script imports and the P6-era "verified" sweep ran the image's baked copy (mounted now). Docs swept: `open-bugs.md` (BUG-007 fixed, BUG-004 facet 2), backlog (P8 row, queue, change log, sequencing), `CLAUDE.md` (queue + a new Key-decisions row), this file | `f503f8b` + docs closeout |
