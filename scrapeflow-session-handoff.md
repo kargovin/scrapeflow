@@ -131,7 +131,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-19
+## Current state — as of 2026-09-20
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -214,9 +214,31 @@ Tier 2 ran and had no phrase for it. One Tier 2 entry (`contact your administrat
 - ⚠️ **The auto-mode classifier refuses production reads** (`kubectl exec … psql`, even `git show
   <deployed-sha>:path`). Manual mode was needed for the prod checks; the owner switched.
 
-🔷 **Then the owner put a residential proxy on the Myntra job (Evomi, `core-residential.evomi.com:1000`
+🔷 **BUG-015 / BUG-016 / BUG-017 are built (2026-09-20 — `9a72bb7`, `14c6136`, `f26c7ca`), not
+deployed; all three ride the queue's release.** Built as filed, one commit each, each
+mutation-checked against the unfixed code. `open-bugs.md`'s three status blocks and the backlog's
+change-log row hold the detail; three things from the build that are not in the filings:
+
+- **BUG-016's test drives Patchright's own matcher**, not the pattern string —
+  `patchright._impl._glob.glob_to_regex_pattern` (a private path — neither `_helper.glob_to_regex`
+  nor a `playwright` module exists in the image, both tried first; if Patchright relocates it the
+  test's import breaks, not the fix). It pins what the browser will abort — `.png`/`.jpg`/`.woff2`
+  yes, `.css`/`.js`/a page URL no — which a substring check on the glob cannot.
+- **BUG-017's Go test asserts on the wire, not on `net/url`.** An `httptest` server plays the
+  proxy and decodes the `Proxy-Authorization` header the transport sends; asserting on
+  `url.User.Password()` would have tested the stdlib. Go's behaviour did not change — the test
+  is the regression pin that stops the two engines diverging again after the activity port.
+  ⚠️ The transport only *forwards* through a proxy for plain-`http` targets; an `https` target
+  would CONNECT, and the header sits on the CONNECT, which the handler would not see.
+- **The `proxy_url` schema note is a `Field(description=…)`, not a comment** — it lands in the
+  OpenAPI schema, which is where a user translating `curl -x … -U user:pass` will look.
+
+**177 playwright tests (173 → 177); Go fetcher and API jobs suites green.** Session-close
+housekeeping from 2026-09-19 (*Outstanding* item 6) is still the owner's.
+
+🔷 **How the three were found (2026-09-19): the owner put a residential proxy on the Myntra job (Evomi, `core-residential.evomi.com:1000`
 — the owner has an account; credentials are the owner's) and the wall went away — what remained
-were three worker bugs, filed as BUG-015 / BUG-016 / BUG-017, none built.** In order of finding:
+were three worker bugs, filed as BUG-015 / BUG-016 / BUG-017.** In order of finding:
 `networkidle` runs died at `Timeout 30000ms` under a 90 s budget (`wait_for_load_state` gets no
 timeout — **BUG-015**); with `load`, the page rendered a healthy header around "Oops! Something went
 wrong" (`block_images` aborts `*.css`, which throws a lazily-loaded SPA route into React's error
@@ -224,7 +246,7 @@ boundary — **BUG-016**, confirmed by `block_images: false` rendering the produ
 `proxy_url` surfaced that Go decodes percent-encoded credentials and Python does not — **BUG-017**,
 latent. ⚠️ **"Oops! Something went wrong" is not a wall and must not be fingerprinted** — the
 456 KB bodies carried the complete product in `window.__myx.pdpData`. Detail: `open-bugs.md` →
-BUG-015/016/017 and the BUG-003 addendum's closing paragraph. **Next session builds all three.**
+BUG-015/016/017 and the BUG-003 addendum's closing paragraph. ✅ **All three built 2026-09-20 — the block above.**
 
 ⚠️ **New instance of the hot-reload trap, in the other direction.** `git stash -u` under the
 running API took the P7 migration file with it; the reloader restarted, `alembic upgrade head`
@@ -403,12 +425,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    Alembic revision (`9a1ebad3fca2`). The interim state the filing described (files gone from
    MinIO, ledger rows kept) still applies to production until that release, and self-heals on
    the first successful delete. Writeup: `open-bugs.md` → BUG-014; backlog §4 row.
-5. **Build BUG-015, BUG-016 and BUG-017** — filed 2026-09-19, owner's call to build next session.
-   All three are worker-side, one-to-three lines each, with the fix and the test named in each
-   writeup. BUG-015 and BUG-016 are `playwright-worker/` only; BUG-017 touches the playwright
-   worker (decode) and the API schema (a doc note). They ride the queue's release if built before
-   it — P6 already rebuilds the worker — so build them before the `main` fast-forward or accept
-   that prod keeps the 30 s cap and the CSS abort until the push after.
+5. ~~**Build BUG-015, BUG-016 and BUG-017**~~ ✅ **built 2026-09-20** (`9a72bb7`, `14c6136`,
+   `f26c7ca`) — on `develop` ahead of the release, so all three ride it; P6 already rebuilds the
+   playwright worker, and BUG-017's Go change is test-only. Nothing left here but the deploy.
 6. **Owner housekeeping from 2026-09-19, none done:** (a) **rotate the API key used for the day's
    prod tests** — it was pasted into a Claude session transcript in full; `POST /users/api-keys`
    for a new one, revoke the old; (b) *optional tidiness only* — the day's Myntra test jobs hold
@@ -467,10 +486,13 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   P9, P8, P7 and their closeouts). **After the push: 0 ahead, 0 behind; `main` 71 behind, 0 ahead.**
   ⚠️ **Since then, unpushed on `develop`: the BUG-014 fix (`b57211a`) and its docs closeout
   (`c2f0542`), the owner's own `c90d943`, the BUG-003 fourth fingerprint (`2ee84ea`) and its
-  closeout (`4469b44`), then the session-close docs commit filing BUG-015/016/017.** Verified
-  after fetch at `8f75ecf`: **`develop` 6 ahead of `origin/develop`, 0 behind** (the five above
-  plus this closeout); `main` unchanged, 80 behind. The fingerprint
-  touches `playwright-worker/`, which P6 already rebuilds — no change to the five-service cutover.
+  closeout (`4469b44`), the session-close docs commit filing BUG-015/016/017 (`8f75ecf`) and
+  three docs follow-ups, then the three fixes (`9a72bb7`, `14c6136`, `f26c7ca`).** Verified
+  after fetch at `f26c7ca`: **`develop` 12 ahead of `origin/develop`, 0 behind; `main` 86
+  behind, 0 ahead** — this closeout adds one to each. The fingerprint and the three fixes touch
+  `playwright-worker/`, which P6 already rebuilds; BUG-017's `http-worker/` change is a test
+  file and its `api/` change is a schema description — no change to the five-service cutover
+  and no fourth Alembic revision.
   The previous push was 2026-09-09 (`fa3c18d..a57e395`, ten commits, including P6). ⚠️ *Historical,
   now pushed — kept for the commit list:* between those two pushes, on `develop`: four docs-only commits from the first
   2026-09-11 session (`e9304b9`, `43c828a`, `2e822d9`, `f724162`), then **P9's code (`ed4d63c`)**
@@ -541,6 +563,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-20 *(clock)* | **🔷 BUG-015, BUG-016, BUG-017 BUILT.** Built one at a time at the owner's direction ("lets fix bug15; do not state the approach fix it and test it" → "pick up bug16" → "explain bug 17" → "build it"), each committed before the next, docs batched at the end. BUG-015: `wait_for_load_state(wait_state, timeout=timeout_ms)`; two tests on the kwarg (explicit 90 s and the worker default), both `KeyError: 'timeout'` on the old worker. BUG-016: `css` out of the route glob; the test feeds the registered glob to Patchright's own `glob_to_regex_pattern` and asserts per-URL, failing on the old glob with `route-chunk.css must not be aborted`; primer field row corrected. BUG-017: `unquote()` on both credential fields; `Field(description=…)` on `proxy_url`; playwright test asserts the decoded pair at `new_context`, Go `TestWithProxy` asserts the decoded `Proxy-Authorization` header at an `httptest` proxy (Go unchanged — a regression pin). **177 playwright (173 → 177), Go fetcher, 68 API job tests green.** Docs swept: `open-bugs.md` (three status blocks), backlog (change-log row, three §4 rows, the sequencing line), `CLAUDE.md` (open list), this file | `9a72bb7`, `14c6136`, `f26c7ca` + docs closeout |
 | 2026-09-19 *(clock, second session)* | **🔷 crw engine comparison — written, deferred.** Owner brought fastCRW (`us/crw`) and asked what ScrapeFlow lacks or could have done better, speed excluded. Cloned and read the engine's policy modules (SSRF, deadline, reserved semaphore, detector, egress latch, preference, breaker, host limiter, URL filter, robots, sitemap, untrusted-content fence, structured extraction + basis, diff/snapshot, capabilities, error taxonomy) against the corresponding ScrapeFlow code; every finding anchored to a `file:line`, the SSRF range gaps verified on the API's Python 3.12. Written as a new §crw in `docs/guides/competitor-research.md` (A: seven v1 bugs, none filed · B: output-quality gaps → PRD-016/018 · C: mechanisms → Phase 4 decisions · D: where ScrapeFlow is ahead). **Owner's call: deferred until the Temporal pipeline is finished.** Swept: `CLAUDE.md` Phase 4 bullet; this file's reference table, current state, *Outstanding* item 5 | docs-only |
 | 2026-09-19 *(clock)* | **🔷 BUG-014 FIXED.** Built at the owner's direction ("lets fix bug14") from the pick-up the previous handoff wrote out, then audited. `ondelete="CASCADE"` on `crawls.user_id` + `batches.user_id`; migration `9a1ebad3fca2` (autogenerated from a one-off container with the api **paused**, so the hot-reload trap never fired; dedup-index false positive stripped; the unnamed replacement constraints named so the downgrade runs); one test deleting a user who holds a crawl page and a batch run, each with a ledger row — mutation-checked by downgrading the DB, where it fails with the bug's own `ForeignKeyViolationError`. **280 API tests green** (279 → 280); `alembic check` reports only the standing dedup false positive. **Decision resolved by placement, not taken:** the filing left "rides the release or ships later" to the owner — it is on `develop` before the release, so it rides it as the third revision. **Found by the build:** the P7 views read both columns and need no drop/recreate for a constraint swap; the pause-then-`run` procedure sidesteps the hot-reload race entirely. Docs swept: `open-bugs.md` (BUG-014 fixed, two build notes), backlog (change-log row, §4 row, Sequencing's revision count), `CLAUDE.md` (open list, queue bullet), this file. **Then, same session: BUG-003 fourth fingerprint.** Owner exercised the detector against Amazon, Flipkart (both genuine — stealth passing) and Myntra (a 481 B "Site Maintenance" 200 stored as `completed` — a Tier 2 list miss). Root-caused by fetching the URL from a residential IP and from a pod: **egress is an OVH Singapore datacenter IP**, Myntra denies it with an outage-shaped page. One Tier 2 entry (`contact your administrator`), verbatim fixture, 173 worker tests, mutation-checked. Docs: `open-bugs.md` (BUG-003 addendum), backlog (change-log row, P2 row), `CLAUDE.md` (Deployment egress bullet, bot-wall row trap), this file. **Then, with the owner's residential proxy on the job: three worker bugs filed, none built — BUG-015** (wait strategy ignores `timeout_seconds`), **BUG-016** (`block_images` aborts CSS → SPA error boundary, confirmed by toggling it), **BUG-017** (proxy credentials decoded by Go, not Python — found by reading). Session-close audit also corrected the handoff's "coordinator crash-loops in prod" (local dev; prod has 0 restarts in 131 d) and recorded the owner housekeeping (rotate the pasted API key, delete the poisoned test jobs). Session closed long; **building is next session's first item** | `b57211a`, `c2f0542`, `2ee84ea`, `4469b44` + session-close docs |
 | 2026-09-18 *(clock)* | **🔷 P7 BUILT — the pre-migration queue is empty.** Built straight through at the owner's direction ("fix this"), then audited as a whole. Migration `86c780f55969` creates **two views** — `quota_run_units` (fetches, monthly) and `quota_active_submissions` (submissions, concurrency) — read through `Table` objects on a private `MetaData` (`app/models/quota_views.py`; `compare_metadata` confirmed autogenerate sees only the standing `idx_webhook_deliveries_dedup` false positive); `core/quota.py`'s two count queries name no table; `check_crawl_quota` on `POST /crawls` (monthly pre-checked with `batch_count=max_pages`); `DELETE /crawls/{id}?permanent=true` through `ledger.release_crawl_objects` with the job path's 503 rule, deleting the crawl with a Core `DELETE` so Postgres cascades (the ORM would NULL the children's NOT NULL `crawl_id`); `scripts/audit_crawl_quota.py` (read-only). **279 API + 29 contract tests green** (266 → 279: 9 quota + 4 crawl); the three meter-change tests were mutation-checked against the old queries and fail exactly as they should; `EXPLAIN` confirmed the `user_id` predicate is pushed into every view arm. **Decisions taken in the build, not in any filing:** two views not one (queued crawl has no unit row — ADR-009 §3's mechanism refined, decision unchanged, and the ADR cannot say so itself); the per-page storage insert deferred to the `CrawlWorkflow` port (its only v1 site is BUG-008). **Found by the build:** 🔴 **BUG-014** (admin user delete 500s on the `crawls`/`batches` FKs — verified in a rolled-back transaction, filed to §4, not fixed); on v1 every crawl holds a slot forever (BUG-008, the audit script says so); a stashed migration file under the hot-reloading API fails every startup until it is back; "for a year" nearly went into a docstring again (crawls shipped 2026-04-17 — five months). Docs swept: backlog (P7 row, two change-log entries, queue, sequencing, BUG-014 row), `open-bugs.md` (BUG-014, two P7 notes under BUG-008/BUG-012), `temporal-full-migration.md` (view entry, entry condition), `CLAUDE.md` (queue, P7 bullet, a new Key-decisions row, BUG-014 in the open list), this file | `24cb89c` + docs closeout |

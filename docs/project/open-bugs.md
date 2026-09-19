@@ -1625,9 +1625,14 @@ the user delete needs.
 needs it; the failure reads as the site's fault)
 **Discovered:** 2026-09-19, reading two proxied Myntra runs that failed with
 `TimeoutError: Timeout 30000ms exceeded` under `playwright_options.timeout_seconds: 90`
-**Status:** Open — **filed, not built.** Not §3: page rendering is activity logic and ports into
-the Temporal `PlaywrightWorkflow` activity unchanged. `playwright-worker/` only; rides the queue's
-release if built before it, since P6 rebuilds the worker anyway.
+**Status:** ✅ **FIXED IN CODE 2026-09-20 (`9a72bb7`) — not deployed.** One argument:
+`page.wait_for_load_state(wait_state, timeout=timeout_ms)` — the wait shares `goto`'s budget,
+the simple form the filing recommended. Two tests (`test_wait_for_load_state_receives_job_timeout`,
+`…_receives_default_timeout`) pin the kwarg for an explicit `timeout_seconds: 90` and for the
+worker default; both fail on the old worker with `KeyError: 'timeout'`. `playwright-worker/`
+only, on `develop` ahead of the queue's release, so it rides it (P6 rebuilds the worker anyway).
+Not §3: page rendering is activity logic and ports into the Temporal `PlaywrightWorkflow`
+activity unchanged.
 
 ### What happens
 
@@ -1662,8 +1667,15 @@ scrape and a markdown job loses everything)
 **Discovered:** 2026-09-19, three Myntra runs through a working proxy that rendered the full
 header and footer around "Oops! Something went wrong. Refresh"; confirmed by re-running with
 `block_images: false`, which rendered the product
-**Status:** Open — **filed, not built.** Not §3, same reasoning as BUG-015. `playwright-worker/`
-only.
+**Status:** ✅ **FIXED IN CODE 2026-09-20 (`14c6136`) — not deployed.** `css` dropped from the
+route glob (`**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}`); images and fonts still abort. The
+option keeps its name (an API field); the worker comment and `docs/guides/playwright-primer.md`'s
+field row now say what it blocks and why CSS must never return. One test
+(`test_block_images_aborts_images_and_fonts_but_never_css`) feeds the registered glob through
+Patchright's own `glob_to_regex_pattern` and asserts `.png`/`.jpg`/`.woff2` match and
+`.css`/`.js`/a page URL do not — it pins what the browser will abort, not the pattern's spelling,
+and fails on the old glob with `route-chunk.css must not be aborted`. Rides the queue's release.
+Not §3, same reasoning as BUG-015.
 
 ### What happens
 
@@ -1698,7 +1710,16 @@ blocks. One test: with `block_images` on, a `.png` request is aborted and a `.cs
 reading, not by a failure)
 **Discovered:** 2026-09-19, explaining how to translate a proxy vendor's `curl -x … -U user:pass`
 into `proxy_url`
-**Status:** Open — **filed, not built.** Two-worker change; both sides port into the activities.
+**Status:** ✅ **FIXED IN CODE 2026-09-20 (`f26c7ca`) — not deployed.** `unquote()` on both
+`.username` and `.password` in `playwright-worker/worker/worker.py`, aligning Python to Go and the
+URL standard; `proxy_url` on `api/app/schemas/jobs.py` gained a `Field(description=…)` stating that
+reserved characters in credentials must be percent-encoded and both engines decode them. One test
+per engine with `us%40er:p%40ss%3Aw0rd`: the playwright test asserts the decoded pair reaches
+`new_context` (fails on the old worker with the encoded strings in the actual call); the Go test
+(`TestWithProxy`) stands up an `httptest` proxy and asserts the decoded pair in the
+`Proxy-Authorization` header the transport actually sends — a regression pin on behaviour Go
+already had, deliberately on the wire rather than on `url.User.Password()`. Both sides port into
+the activities; the port now copies one behaviour instead of two.
 
 ### What happens
 
