@@ -9,7 +9,7 @@
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
 > **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
-> **Last updated:** 2026-09-20 · **Tracking:** the status table below is the tracker.
+> **Last updated:** 2026-09-21 · **Tracking:** the status table below is the tracker.
 
 ---
 
@@ -27,6 +27,10 @@
   before **every flow cutover** and before **every v1 deletion** — 16b. It is a runbook step
   inside the tasks that need it, not a separate task.
 - **Never fix §3.** If a task tempts you toward a bug in `phase4-backlog.md` §3, stop.
+- **Group A is built local-first (owner, 2026-09-21):** each engine piece lands in
+  `docker/docker-compose.yml` and is verified there before its infra-repo manifest is written.
+  So A.7 is not one task at the end — its compose services arrive alongside A.1–A.6, and a
+  task's status shows both halves (local · k8s) until both are ✅.
 
 ---
 
@@ -35,13 +39,13 @@
 | # | Task | Status |
 |---|---|---|
 | **A** | **Engine up** | |
-| A.1 | Temporal persistence: second Postgres StatefulSet, two databases | ⬜ |
+| A.1 | Temporal persistence: second Postgres StatefulSet, two databases | ✅ 2026-09-21 (local + k8s; infra `de903a2`, verified in prod) |
 | A.2 | Temporal server Deployment (auto-setup image, standard visibility) | ⬜ |
 | A.3 | Namespace registration init Job, retention 30 d | ⬜ |
 | A.4 | Temporal Web UI — ClusterIP only, no ingress | ⬜ |
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ⬜ |
 | A.6 | Workflow-worker Deployment in the infra repo | ⬜ |
-| A.7 | Local dev: compose services for Temporal + workflow worker | ⬜ |
+| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal`, `temporal-ui`, `workflow-worker` ⬜ |
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ⬜ |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
@@ -142,6 +146,27 @@ StatefulSet, own PVC (10Gi), own Secret. **Two databases inside it: `temporal` a
 `temporal_visibility`** — provisioning one is §2a's "predictable way to lose an hour".
 **Verify:** `psql -l` from a pod shows both. Both empty (auto-setup fills them in A.2).
 **Depends on:** —
+**Local half ✅ 2026-09-21:** `docker/docker-compose.yml` → `temporal-postgres` (`postgres:16-alpine`,
+own `temporal_postgres_data` volume, host port **5434** — 5433 was taken by another project's
+container on the owner's machine) + `docker/temporal-postgres/init.sql`, bind-mounted into
+`/docker-entrypoint-initdb.d/`. `POSTGRES_DB` makes `temporal`; the script makes
+`temporal_visibility`. Verified: `\l` lists both, 0 tables in each. ⚠️ Two hook facts the k8s half
+inherits: the initdb hook runs **only against an empty `PGDATA`** — adding the script after
+Postgres has once started does nothing (reset = drop the volume/PVC); and a bind-mount of a file
+that does not yet exist creates a *directory* at that path, so write the script before the first
+start. **k8s half ✅ 2026-09-21 — infra repo `de903a2`, applied by Flux in ~35 s, pod ready in 21 s,
+Verify line run from the pod: both databases owned by `temporal`, 0 tables each; the boot log shows
+`POSTGRES_DB`'s `CREATE DATABASE` and then the hook running `01-visibility-db.sql`.** Files:
+`clusters/k3s-server/scrapeflow/infrastructure/temporal-postgres.yaml` (ConfigMap with the same
+script + StatefulSet `scrapeflow-temporal-postgresql` + ClusterIP Service), its kustomization
+entry, and a README section for the `scrapeflow-temporal-db-credentials` Secret (user/password
+only). `POSTGRES_DB` is a *name the server is configured with* (A.2's `DBNAME`/`VISIBILITY_DBNAME`),
+so it is hardcoded, not a Secret key. Carries the app manifest's `PGDATA=…/pgdata` (a fresh PVC's
+`lost+found` makes `initdb` refuse the mount root — compose never hit this) and `postgres:16` to
+match the sibling. `kubectl apply --dry-run=server` passes; node memory limits at 54% before it.
+Order that worked: owner created the Secret → push → Flux applied → Verify from the pod.
+⚠️ The PVC (`data-scrapeflow-temporal-postgresql-0`) outlives the StatefulSet — a wrong first boot
+is reset by deleting it explicitly.
 
 #### A.2 — Temporal server
 
@@ -215,6 +240,10 @@ mirroring `api`'s so it follows the same tag.
 mounted like the api service so it hot-reloads). Temporal env on the `api` service.
 **Verify:** `HelloWorkflow` started via a one-line script shows in the local UI.
 **Depends on:** A.5
+**Progress:** `temporal-postgres` ✅ 2026-09-21 (see A.1). Next compose service is `temporal`
+(A.2's auto-setup image) — it must set `DBNAME=temporal` and `VISIBILITY_DBNAME=temporal_visibility`
+explicitly (they are the image defaults, but the wiring should be readable from the file) and
+`depends_on: temporal-postgres: condition: service_healthy`.
 
 #### A.8 — 🚀 Engine-up release + proof
 
