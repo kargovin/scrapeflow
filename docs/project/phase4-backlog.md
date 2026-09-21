@@ -152,7 +152,7 @@ hand-rolled orchestration already caused a live feedback loop.
 
 **Rollout:** strangler-fig, never big-bang. Temporal comes up *alongside* NATS; new work routes
 to v2 (Temporal) while v1 keeps serving in-flight work; cut v1 per-flow once proven; reversible
-at each step. Full sequence in `temporal-full-migration.md` §9.
+at each step. Full sequence in `temporal-full-migration.md` §9. **Engineer-ready task list, one task per session, with the release points and the drain-gate runbooks: [`phase4-implementation-backlog.md`](./phase4-implementation-backlog.md)** (Tech Lead, 2026-09-20; its status table is the tracker).
 
 **End state:** retires `result_consumer.py`, `scheduler.py`, `webhook_loop.py`, `advisory.py`,
 and the `coordinator/` service; removes NATS; workers become Temporal activity workers; the API

@@ -35,6 +35,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
 | Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
+| **Phase 4 implementation backlog — the ordered task list (Tech Lead, 2026-09-20)** | `docs/project/phase4-implementation-backlog.md` — groups A–I are ADR-009 §16's named steps; one task per session; 🚀 marks the release points; its status table is the tracker. **Eight open items at the bottom need Architect/owner answers before the tasks that cite them** |
 | **The wire contract the API publishes through (P6)** | `api/app/messages.py` — and `coordinator/coordinator/messages.py`, a **deliberate duplicate** for the crawl lane (ADR-011 §6 rejected a shared package) |
 | **The dispatch-message builders (P9)** | `api/app/core/dispatch.py` — one builder per lane; every scrape dispatch site (`create_job`, `create_batch`, both scheduler paths) calls one. The only place a `ScrapeMessage` is constructed on the API side |
 | **Cross-service contract test + Go fixtures** | `contracts/` — the only test that feeds an API-produced message into each worker's real parser. Command in *Commands* below |
@@ -131,7 +132,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-19 *(clock; the previous close was dated 09-20 — the drift note below)*
+## Current state — as of 2026-09-20 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -139,6 +140,36 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **The Phase 4 implementation backlog exists (2026-09-20, Tech Lead persona) — pick up A.1 next.**
+`docs/project/phase4-implementation-backlog.md`: 56 engineering tasks + 3 docs items in nine groups
+that are ADR-009 §16's named steps in order (A engine up · B worker port · C pipeline lane · D job
+cutover · E batch and crawl · F schedule and webhook · G consumer deletion · H NATS removal · I API
+thinning). One task per session; 🚀 marks the 14 release points; the status table at the top is the
+tracker; a *Non-negotiables* table restates the rules an engineer must not revise. **Uncommitted at
+close** (the doc plus one pointer line each in `phase4-backlog.md` §2, `CLAUDE.md`, and this file's
+reference table). Four things a future session should know without opening it:
+
+- **Three TL calls, all reversible, reasoning in the doc:** the workflow worker is a **second
+  entrypoint of the api image** (`python -m app.workflows.worker_main`), not a new service — its
+  logic lives in `api/app/core` today, and the cleanup CronJob is the precedent; **cost: until API
+  thinning, a worker-only change triggers an API `Recreate` rollout.** Clean/Validate run on the LLM
+  worker's Temporal deployment; crawl fetch-side activities (robots, sitemap on `httpx`, link
+  extraction) on the Playwright one — target-facing fetches stay off the DB-holding pod.
+- 🔴 **Eight open items at the bottom of the doc need Architect/owner answers before the tasks
+  that cite them.** The two with teeth: **D.2** — ADR-009 §10 parks content-hash dedup + `diff.py`
+  as "wait for Monitors", which is the *pipeline* lane's answer; on the *job* lane R5 forbids
+  user-visible change, so `JobWorkflow` must port both or the job cutover regresses jobs — the ADR
+  does not say this. **I.1** — `alembic upgrade head` on every API startup races itself at
+  `replicas: 2`; no ADR covers it (TL recommends a Postgres advisory lock). The others: C.9's
+  `waiting`-under-`RetryPolicy` reading (only the activity can flip the state), C.13 Worker
+  Versioning before the pipeline release, E.0 task-queue shape vs the crw deferral, F.4
+  `webhook_deliveries`' fate, C.11 pulling BUG-009 in, A.8 where the Temporal Postgres backup lives.
+- **Gates that are documents, not code:** ADR-010 must be Accepted before E.0; the Schedule
+  overlap policy (X.3, `BUFFER_ONE` recommended) must exist before F.1 creates a Schedule; PRD-019
+  is parallel to C and not on the critical path.
+- **The lane marker is D.1, built at the job cutover** — 16a's trap restated as a dependency
+  constraint so nobody builds it in B where it is inert.
 
 🔷 **The queue's release (2026-09-19, clock) — done, verified, scripts run.** Timeline (UTC): stream
 verified drained ~09:22 (0 messages, 0 outstanding acks on all four consumers) → `git merge --ff-only
@@ -448,9 +479,10 @@ stale companions redrawn, PRD-016's four carry-backs landed, the conditional PRD
 lane-blind meters recorded, D5 closed.
 
 **Nothing is blocking. The queue is released and production reconciled; the ADR-009 §16 sequence
-begins at *engine up*** — largely infra-repo work needing no app release. PRD-019 (unwritten) and
-the ADR-010 promotion are the two documents owed before the sequence reaches the batch-and-crawl
-cutover.
+begins at *engine up*** — largely infra-repo work needing no app release. **The sequence is now a
+task list: `phase4-implementation-backlog.md`, next task A.1** (Temporal Postgres StatefulSet, infra
+repo). PRD-019 (unwritten) and the ADR-010 promotion are the two documents owed before the sequence
+reaches the batch-and-crawl cutover.
 
 ⚠️ **ADR-010 is still `Draft`, and a Draft is not a decision** (`docs/adr/README.md`) — *"do not
 implement against it, and do not cite it as settled in another document."* It blocks nothing in the
@@ -476,6 +508,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
+0. **Pick up A.1 in `phase4-implementation-backlog.md`** — and commit the backlog first (it is
+   uncommitted; four files). The eight open items at its foot are owner/Architect calls; none
+   blocks Group A.
 1. **Write PRD-019 — conditional execution (layer A).** ✅ Numbered 2026-09-08 (owner's call) and given
    its `phase4-backlog.md` §2 row; **the document itself is unwritten.** It owes **four** things,
    all on that row: the Validate-precedent brief and the replay constraint (14c), the halt-early
@@ -643,6 +678,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-20 *(clock)* | **🔷 Tech Lead persona — the Phase 4 implementation backlog written.** Owner: "take the persona of tech lead and divide the temporal stuff into a backlog list and i'll go through 1 by 1". Read ADR-009 (§2, §3–§11, §13, §15, §16, the closing blocks), `phase4-backlog.md` §2, `temporal-full-migration.md`, PRD-016 R1–R6, ADR-010's header, the infra repo's manifest layout and the code sites the tasks cite. Produced `docs/project/phase4-implementation-backlog.md` — 56 tasks + 3 docs items, nine groups = the §16 named steps, per-task why/location/what/verify/depends-on/cites, 14 🚀 release points, a status-table tracker, a non-negotiables table. **Three TL calls** (workflow worker = api-image entrypoint; Clean/Validate on the LLM deployment; crawl fetches on the Playwright deployment) and **eight open items** raised, two with teeth (D.2 dedup/diff must port at the job cutover for R5; I.1 Alembic-on-startup races at two replicas). Pointers added in `phase4-backlog.md` §2, `CLAUDE.md`, this file. Session closed at the owner's "done for now"; **uncommitted** | *(uncommitted at close)* |
 | 2026-09-19 *(clock, release session)* | **🔷 THE QUEUE'S RELEASE — `main` fast-forwarded to `421cbfe`, five services deployed, production reconciled and swept.** Owner: "drain the nats queue" (verified empty: 0 messages, 0 outstanding acks, 4 consumers) → "do ff main and watch rollout; also verify the prod tables" → all five `rollout status` green in 4.5 min, three Alembic revisions applied, schema verified column-by-column, `last_seq` unmoved through the cutover. Owner logged in (Clerk SDK 7.0.0's first real verification — passed) and clicked through the SPA. Then the three scripts, dry-run then `--apply` at the owner's "yes" each time: reconcile (35 recorded, 11 Q6-era orphans deleted, **counter already exact**), sweep (36 `latest/` deleted), audit (nothing). Bucket = ledger = meter. **Found on the way:** the reconcile's dry-run preview read an empty ledger and said `→ 0` (fixed, `8608c0c`, one mutation-checked test); the admin *Storage used* card is a 300 s Redis-cached bucket sum and showed the mid-sweep figure to the byte; one blank playwright `fetch_error` (nats-py's bare `asyncio.TimeoutError`, §3 row); **BUG-018 filed** (SPA caches the Clerk token for its own 60 s lifetime — owner's pre-existing "Failed to load" report; tabled until after Temporal). Docs swept: `CLAUDE.md` (status banner, queue bullet, six statuses, two key-decisions rows), backlog (banner, §1, §3, §4, Sequencing, two change-log rows), `open-bugs.md` (eight status blocks + BUG-018), `temporal-full-migration.md` (entry condition), this file | `19fd34e`, `8608c0c` + this closeout |
 | 2026-09-19 *(clock)* | **🔷 Dependabot cleared — 58/58 on the three scanned manifests, before the release.** Owner: "lets push dev to origin first" (done, `8ba7e85..51c8428`), then "lets deal with dependabot now before we merge with main". `api/`: seven packages re-locked, direct floors raised; the `cryptography>=50` fix **forced `clerk-backend-api` 7.0.0** (no 6.x allows it) — v7 inspected in a scratch venv, the two auth symbols and `users.get()`'s `email_addresses` shape unchanged. `frontend/`: `dompurify` via `overrides` (monaco pins it exactly), `react-router-dom` **→ 7.18.4** (two advisories have no 6.x patch; unreachable here; tree is trivially portable), three browserslist-family transitives. `http-worker/`: `x/net` 0.55.0. **BUG-013 step 3 folded in** — `npm ci` from the lock in `api/Dockerfile`, verified by a production-target build. Every alert re-checked locally against the new locks. 280 API + 29 contract + Go green. ⚠️ Caught in the audit: a `jq` set `overrides` rather than merging, dropping the `js-cookie` pin for one resolve. Docs: `open-bugs.md` (BUG-013 status + fix list), backlog (change-log row, §4 row), `CLAUDE.md` (BUG-006/013 in the open list), this file | `83607e2` + docs closeout |
 | 2026-09-20 *(clock)* | **🔷 BUG-015, BUG-016, BUG-017 BUILT.** Built one at a time at the owner's direction ("lets fix bug15; do not state the approach fix it and test it" → "pick up bug16" → "explain bug 17" → "build it"), each committed before the next, docs batched at the end. BUG-015: `wait_for_load_state(wait_state, timeout=timeout_ms)`; two tests on the kwarg (explicit 90 s and the worker default), both `KeyError: 'timeout'` on the old worker. BUG-016: `css` out of the route glob; the test feeds the registered glob to Patchright's own `glob_to_regex_pattern` and asserts per-URL, failing on the old glob with `route-chunk.css must not be aborted`; primer field row corrected. BUG-017: `unquote()` on both credential fields; `Field(description=…)` on `proxy_url`; playwright test asserts the decoded pair at `new_context`, Go `TestWithProxy` asserts the decoded `Proxy-Authorization` header at an `httptest` proxy (Go unchanged — a regression pin). **177 playwright (173 → 177), Go fetcher, 68 API job tests green.** At close the owner revoked the API key pasted on 2026-09-19 (*Outstanding* 6a). Docs swept: `open-bugs.md` (three status blocks), backlog (change-log row, three §4 rows, the sequencing line), `CLAUDE.md` (open list), this file | `9a72bb7`, `14c6136`, `f26c7ca` + docs closeout |
