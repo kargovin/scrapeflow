@@ -36,6 +36,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
 | **Phase 4 implementation backlog — the ordered task list (Tech Lead, 2026-09-20)** | `docs/project/phase4-implementation-backlog.md` — groups A–I are ADR-009 §16's named steps; one task per session; 🚀 marks the release points; its status table is the tracker. **Eight open items at the bottom need Architect/owner answers before the tasks that cite them** |
+| **Temporal persistence (A.1 — ✅ 2026-09-21, both halves)** | Local: `docker/docker-compose.yml` → `temporal-postgres` (host port **5434**) + `docker/temporal-postgres/init.sql`. Prod: infra repo `clusters/k3s-server/scrapeflow/infrastructure/temporal-postgres.yaml` (ConfigMap + StatefulSet `scrapeflow-temporal-postgresql` + Service; infra `de903a2`), Secret `scrapeflow-temporal-db-credentials` (owner-created, README §1), PVC `data-scrapeflow-temporal-postgresql-0` (10Gi, `local-path`). `POSTGRES_DB` creates `temporal`; the script creates `temporal_visibility`. Both verified in prod, 0 tables each. A.2's `temporal` service is the next compose block |
 | **The wire contract the API publishes through (P6)** | `api/app/messages.py` — and `coordinator/coordinator/messages.py`, a **deliberate duplicate** for the crawl lane (ADR-011 §6 rejected a shared package) |
 | **The dispatch-message builders (P9)** | `api/app/core/dispatch.py` — one builder per lane; every scrape dispatch site (`create_job`, `create_batch`, both scheduler paths) calls one. The only place a `ScrapeMessage` is constructed on the API side |
 | **Cross-service contract test + Go fixtures** | `contracts/` — the only test that feeds an API-produced message into each worker's real parser. Command in *Commands* below |
@@ -132,7 +133,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-20 *(clock)*
+## Current state — as of 2026-09-21 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -141,14 +142,63 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **A.1 is done on both halves (2026-09-21, two sessions).** Owner's ordering call for Group A:
+**"local setup first, then change on k8s" — per task**: each engine piece lands in
+`docker/docker-compose.yml`, is verified there, then its infra-repo manifest is written and verified
+in prod, *then* the next task (clarified in the second session — the first session's handoff had
+read it as all-of-Group-A-locally-first and pointed at A.2; corrected). So A.7's compose services
+arrive alongside A.1–A.6 (recorded in the backlog's *How to use this*).
+**Local (`f8e99bf`, `develop`):** the `temporal-postgres` service (own volume, own
+`TEMPORAL_POSTGRES_*` credentials, `POSTGRES_DB: temporal` hardcoded because it is a name the server
+is *configured with* in A.2, not a per-machine setting) + `docker/temporal-postgres/init.sql` (one
+`CREATE DATABASE temporal_visibility`). **k8s (infra `de903a2`, `main`):**
+`infrastructure/temporal-postgres.yaml` — the same script as a ConfigMap mounted at
+`/docker-entrypoint-initdb.d`, StatefulSet `scrapeflow-temporal-postgresql` cloned from
+`postgres.yaml` (`postgres:16`, `PGDATA=…/pgdata`, same probes/resources, 10Gi
+`volumeClaimTemplates`), ClusterIP Service, kustomization entry, README section for the
+owner-created Secret `scrapeflow-temporal-db-credentials` (user/password only). Flux applied it
+~35 s after the push, pod ready in 21 s; the boot log shows `POSTGRES_DB`'s `CREATE DATABASE` then
+the hook running `01-visibility-db.sql`; `\l` from the pod lists both, owned by `temporal`, 0 tables
+each — A.1's *Verify* line, in prod. **Next: A.2 locally** — the `temporal` auto-setup service,
+where the two names get wired to `DBNAME` / `VISIBILITY_DBNAME`. Things from the two builds:
+
+- ⚠️ **Host port 5433 was already bound** — by another project's Postgres container on the owner's
+  machine (`meridian-postgres`), not by anything of ScrapeFlow's. Moved to **5434**; the host port
+  is only a `psql`-from-host convenience and nothing depends on the number.
+- ⚠️ **The initdb hook is keyed on an empty `PGDATA`, not on the volume existing.** The first local
+  `up` failed on the port clash *after* the volume was created, and the hook still fired on the
+  retry because Postgres itself had never started. Had it started once, the reset is `docker volume
+  rm docker_temporal_postgres_data` locally — and on k8s **`kubectl -n scrapeflow delete pvc
+  data-scrapeflow-temporal-postgresql-0`**, because a `volumeClaimTemplates` PVC outlives the
+  StatefulSet and Flux removing the manifest does not remove it. Adding or editing the script
+  afterwards does nothing.
+- ⚠️ **A bind-mount of a file that does not exist yet creates a directory at that path on the
+  host.** Write `init.sql` before the first `up`. (Not a k8s concern — a ConfigMap mount is a
+  directory by construction.)
+- ⚠️ **`PGDATA=/var/lib/postgresql/data/pgdata` is load-bearing on k8s and irrelevant on compose.**
+  A fresh PVC's mount root holds `lost+found`, and `initdb` refuses a non-empty directory; a compose
+  named volume starts truly empty. Copied from the app manifest; drop it and the first boot fails.
+- ⚠️ **The infra repo's `main` was 13 commits behind after the 2026-09-19 release** — all Flux
+  `Automated image update` commits. `git pull --rebase` before every infra push; expect it after
+  every app release.
+- ⚠️ **Pre-commit stashes unstaged files during a commit** (`[WARNING] Unstaged files detected` →
+  stash → restore). Harmless when the unstaged file is a `.md`; it is the same mechanism as the
+  stash trap under the hot-reloading API, so **stage or exclude `migrations/` before committing
+  with a migration file unstaged.**
+- **Node headroom, read before the push:** memory limits at 54% of the node, CPU limits already
+  162% overcommitted — the latter is the pre-existing condition the backlog's A.2/A.8 note is about.
+  The A.8 open item (where the Temporal Postgres backup lives) is real: `local-path` is one node's
+  disk (`/var/lib/rancher/k3s/storage/pvc-76acde87…/`), no replication — same as the app DB today.
+
 🔷 **The Phase 4 implementation backlog exists (2026-09-20, Tech Lead persona) — pick up A.1 next.**
 `docs/project/phase4-implementation-backlog.md`: 56 engineering tasks + 3 docs items in nine groups
 that are ADR-009 §16's named steps in order (A engine up · B worker port · C pipeline lane · D job
 cutover · E batch and crawl · F schedule and webhook · G consumer deletion · H NATS removal · I API
 thinning). One task per session; 🚀 marks the 14 release points; the status table at the top is the
-tracker; a *Non-negotiables* table restates the rules an engineer must not revise. **Uncommitted at
-close** (the doc plus one pointer line each in `phase4-backlog.md` §2, `CLAUDE.md`, and this file's
-reference table). Four things a future session should know without opening it:
+tracker; a *Non-negotiables* table restates the rules an engineer must not revise. ✅ **Committed
+as `857ad6e`** (the doc plus one pointer line each in `phase4-backlog.md` §2, `CLAUDE.md`, and this
+file's reference table); **unpushed** as of 2026-09-21. Four things a future session should know
+without opening it:
 
 - **Three TL calls, all reversible, reasoning in the doc:** the workflow worker is a **second
   entrypoint of the api image** (`python -m app.workflows.worker_main`), not a new service — its
@@ -508,9 +558,12 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up A.1 in `phase4-implementation-backlog.md`** — and commit the backlog first (it is
-   uncommitted; four files). The eight open items at its foot are owner/Architect calls; none
-   blocks Group A.
+0. **Pick up A.2 locally in `phase4-implementation-backlog.md`** — the `temporal` auto-setup
+   compose service against the `temporal-postgres` A.1 built; `DBNAME`/`VISIBILITY_DBNAME` name the
+   two databases. **Per-task ordering: local → k8s → next task** — so A.2's infra manifest
+   (`temporal.yaml`) follows once its compose block is verified. ~~A.1~~ ✅ both halves 2026-09-21
+   (`f8e99bf` app, `de903a2` infra). The eight open items at the backlog's foot are owner/Architect
+   calls; none blocks Group A.
 1. **Write PRD-019 — conditional execution (layer A).** ✅ Numbered 2026-09-08 (owner's call) and given
    its `phase4-backlog.md` §2 row; **the document itself is unwritten.** It owes **four** things,
    all on that row: the Validate-precedent brief and the replay constraint (14c), the halt-early
@@ -586,11 +639,16 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them). **The BUG-014 fix
   (`b57211a`, 2026-09-19) is on top** — `api/` only, and it adds **the third revision** (`9a1ebad3fca2`,
   two FK constraint swaps; downgrade restores `NO ACTION`). **The Dependabot sweep (`83607e2`, 2026-09-19) is on top of that** — `api/` (`pyproject.toml`, `uv.lock`, `Dockerfile`), `frontend/` (`package.json`, lock), `http-worker/` (`go.mod`, `go.sum`); no Alembic revision, and the three services it touches are already in the five-service rebuild.
-- ✅ **2026-09-19 (release session): `main` fast-forwarded to `421cbfe` and pushed** (the release).
-  Then on `develop`, unpushed until this session's close: `19fd34e` (BUG-018 filed), `8608c0c`
-  (reconcile preview fix + §3 row) and this closeout. **`main` is 0 ahead / N behind `develop` by
-  exactly those commits** — all docs plus one script and one test; **nothing on `develop` needs a
-  release.** Re-check before quoting.
+- ✅ **Verified 2026-09-21 (second session) after fetch: `develop` is 2 ahead of `origin/develop`**
+  (`857ad6e` the implementation backlog, `f8e99bf` A.1's local half + backlog status), **0 behind;
+  `main` is 5 behind `develop`, 0 ahead** (`19fd34e`, `8608c0c`, `d1282c7`, `857ad6e`, `f8e99bf` —
+  docs, one script, one test, and the compose change). **Nothing on `develop` needs a release** —
+  A.1's compose block is local-dev only; its prod half went through the **infra repo** (`de903a2`,
+  0 ahead / 0 behind after the push), which is where engine-up changes land. This closeout adds one
+  docs commit. Re-check before quoting.
+- *Historical:* **2026-09-19 (release session): `main` fast-forwarded to `421cbfe` and pushed** (the
+  release). Then on `develop`: `19fd34e` (BUG-018 filed), `8608c0c` (reconcile preview fix + §3
+  row) and its closeout `d1282c7`.
 - *Historical, now released:* **`develop` was pushed to `origin/develop` twice on 2026-09-19**: `8ba7e85..51c8428` (14 commits —
   BUG-014, the BUG-003 fingerprint, BUG-015/016/017 and their closeouts) at session start, then the
   Dependabot sweep (`83607e2`), its docs closeout (`4a665e3`) and the session-close commit
@@ -678,6 +736,8 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-21 *(clock, second session)* | **🔷 A.1 — k8s half built and verified in prod; A.1 ✅.** Owner: "are we done with a1? we only did local setup; we also need to do k8s too right?" → the ordering is **per task** (local → k8s → next), not all-of-Group-A-locally-first; the previous handoff's "next: A.2 locally" corrected. Explained the local→k8s mapping (StatefulSet/PVC/Secret/ConfigMap, the `PGDATA` and PVC-outlives-StatefulSet traps) and that the *entrypoint*, not the StatefulSet, creates both databases; on "build it" wrote `infrastructure/temporal-postgres.yaml` + kustomization line + README Secret section in the infra repo, `kubectl apply --dry-run=server` clean, node headroom read. Owner created the Secret; push needed a rebase over 13 Flux image-update commits; Flux applied in ~35 s, pod ready in 21 s, boot log + `\l` from the pod = the Verify line. Committed A.1's local half + backlog on `develop`. Answered "where did we mention the volume" — `volumeClaimTemplates` → PVC `data-…-0`, `local-path`. | `f8e99bf` (app, `develop`); infra `de903a2` (`main`) |
+| 2026-09-21 *(clock)* | **🔷 A.1 — local half built.** Owner: "lets start with A.1 … lets first do local setup first and then change on k8s" → the Group A ordering call, recorded in the backlog. Explained the why (a second *instance*, two *databases*, who owns database existence vs schema) and let the owner drive; on "write only the docker-compose for new db" wrote the `temporal-postgres` service + volume; on "write the init script and bring up the new db" wrote `docker/temporal-postgres/init.sql` and started the service — first `up` failed on a host-port clash (5433 held by another project's container → 5434), second `up` ran the hook: `\l` lists `temporal` and `temporal_visibility`, 0 tables each. Answered "how does temporal know which db is which" — by name, `DBNAME`/`VISIBILITY_DBNAME` in A.2. Docs: backlog (ordering note, A.1/A.7 statuses and bodies), this file. Session closed at the owner's "i'll start a new session for next" | *(uncommitted at close; committed the next session as `f8e99bf` + this closeout)* |
 | 2026-09-20 *(clock)* | **🔷 Tech Lead persona — the Phase 4 implementation backlog written.** Owner: "take the persona of tech lead and divide the temporal stuff into a backlog list and i'll go through 1 by 1". Read ADR-009 (§2, §3–§11, §13, §15, §16, the closing blocks), `phase4-backlog.md` §2, `temporal-full-migration.md`, PRD-016 R1–R6, ADR-010's header, the infra repo's manifest layout and the code sites the tasks cite. Produced `docs/project/phase4-implementation-backlog.md` — 56 tasks + 3 docs items, nine groups = the §16 named steps, per-task why/location/what/verify/depends-on/cites, 14 🚀 release points, a status-table tracker, a non-negotiables table. **Three TL calls** (workflow worker = api-image entrypoint; Clean/Validate on the LLM deployment; crawl fetches on the Playwright deployment) and **eight open items** raised, two with teeth (D.2 dedup/diff must port at the job cutover for R5; I.1 Alembic-on-startup races at two replicas). Pointers added in `phase4-backlog.md` §2, `CLAUDE.md`, this file. Session closed at the owner's "done for now"; **uncommitted** | *(uncommitted at close)* |
 | 2026-09-19 *(clock, release session)* | **🔷 THE QUEUE'S RELEASE — `main` fast-forwarded to `421cbfe`, five services deployed, production reconciled and swept.** Owner: "drain the nats queue" (verified empty: 0 messages, 0 outstanding acks, 4 consumers) → "do ff main and watch rollout; also verify the prod tables" → all five `rollout status` green in 4.5 min, three Alembic revisions applied, schema verified column-by-column, `last_seq` unmoved through the cutover. Owner logged in (Clerk SDK 7.0.0's first real verification — passed) and clicked through the SPA. Then the three scripts, dry-run then `--apply` at the owner's "yes" each time: reconcile (35 recorded, 11 Q6-era orphans deleted, **counter already exact**), sweep (36 `latest/` deleted), audit (nothing). Bucket = ledger = meter. **Found on the way:** the reconcile's dry-run preview read an empty ledger and said `→ 0` (fixed, `8608c0c`, one mutation-checked test); the admin *Storage used* card is a 300 s Redis-cached bucket sum and showed the mid-sweep figure to the byte; one blank playwright `fetch_error` (nats-py's bare `asyncio.TimeoutError`, §3 row); **BUG-018 filed** (SPA caches the Clerk token for its own 60 s lifetime — owner's pre-existing "Failed to load" report; tabled until after Temporal). Docs swept: `CLAUDE.md` (status banner, queue bullet, six statuses, two key-decisions rows), backlog (banner, §1, §3, §4, Sequencing, two change-log rows), `open-bugs.md` (eight status blocks + BUG-018), `temporal-full-migration.md` (entry condition), this file | `19fd34e`, `8608c0c` + this closeout |
 | 2026-09-19 *(clock)* | **🔷 Dependabot cleared — 58/58 on the three scanned manifests, before the release.** Owner: "lets push dev to origin first" (done, `8ba7e85..51c8428`), then "lets deal with dependabot now before we merge with main". `api/`: seven packages re-locked, direct floors raised; the `cryptography>=50` fix **forced `clerk-backend-api` 7.0.0** (no 6.x allows it) — v7 inspected in a scratch venv, the two auth symbols and `users.get()`'s `email_addresses` shape unchanged. `frontend/`: `dompurify` via `overrides` (monaco pins it exactly), `react-router-dom` **→ 7.18.4** (two advisories have no 6.x patch; unreachable here; tree is trivially portable), three browserslist-family transitives. `http-worker/`: `x/net` 0.55.0. **BUG-013 step 3 folded in** — `npm ci` from the lock in `api/Dockerfile`, verified by a production-target build. Every alert re-checked locally against the new locks. 280 API + 29 contract + Go green. ⚠️ Caught in the audit: a `jq` set `overrides` rather than merging, dropping the `js-cookie` pin for one resolve. Docs: `open-bugs.md` (BUG-013 status + fix list), backlog (change-log row, §4 row), `CLAUDE.md` (BUG-006/013 in the open list), this file | `83607e2` + docs closeout |
