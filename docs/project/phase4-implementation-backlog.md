@@ -40,12 +40,12 @@
 |---|---|---|
 | **A** | **Engine up** | |
 | A.1 | Temporal persistence: second Postgres StatefulSet, two databases | ✅ 2026-09-21 (local + k8s; infra `de903a2`, verified in prod) |
-| A.2 | Temporal server Deployment (`temporalio/server` + schema init container, standard visibility) | 🟡 local ✅ 2026-09-22 · k8s ⬜ — TL call revised 2026-09-22: `auto-setup` is deprecated |
+| A.2 | Temporal server Deployment (`temporalio/server` + schema init container, standard visibility) | ✅ 2026-09-22 (local + k8s; infra `e8f32e1`, verified in prod) — TL call revised the same day: `auto-setup` is deprecated |
 | A.3 | Namespace registration init Job, retention 30 d | ⬜ |
 | A.4 | Temporal Web UI — ClusterIP only, no ingress | ⬜ |
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ⬜ |
 | A.6 | Workflow-worker Deployment in the infra repo | ⬜ |
-| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal`, `temporal-ui`, `workflow-worker` ⬜ |
+| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace`, `temporal-ui`, `workflow-worker` ⬜ |
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ⬜ |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
@@ -233,6 +233,25 @@ k8s init container relies on. ⚠️ Eight `error` lines in the server's first s
 (`Not enough hosts to serve the request`, `Queue reader unable to retrieve tasks`) are single-process
 start-order noise — history is up before matching joins the ring — and stop by themselves; do not
 chase them on k8s either.
+**k8s half ✅ 2026-09-22 (infra `e8f32e1`):** `infrastructure/temporal.yaml` — ConfigMap
+`scrapeflow-temporal-schema` (the script, a byte-identical copy; the app-repo file is canonical),
+ConfigMap `scrapeflow-temporal-dynamicconfig` (`production.yaml`, comment-only — **not** a copy of
+local's `development.yaml`: dynamic config is per-environment), Deployment `scrapeflow-temporal`
+(`strategy: Recreate` so a bump's schema step never runs beside the old server; init container
+`schema` on `admin-tools:1.31.0` + container `server` on `server:1.31.0`; tcpSocket probes on 7233;
+requests 100m/256Mi, limits 500m/1Gi), ClusterIP Service `scrapeflow-temporal:7233`. Flux applied
+~60 s after the push; the init container migrated prod's empty databases 0.0 → **1.19** (20 updates)
+and 0.0 → **1.14** (15 updates) in ~30 s; pod Ready 70 s after creation; `Updated dynamic config`
+logged; **zero** `error` lines at boot (the local noise did not occur); `operator cluster health` →
+SERVING from a one-off admin-tools pod; `\dt` = 40 + 3 tables, `schema_version.curr_version`
+1.19 / 1.14. **Idempotency verified:** `rollout restart` → 20 s → the new pod's `schema` log reads
+`found zero updates from current version 1.19` / `1.14`. Node after: CPU limits 168 % → **175 %**,
+memory 56 % → 59 % (A.8). Two things decided at build: **`NUM_HISTORY_SHARDS=4` is set explicitly on
+both halves** — it is immutable after first start (persisted in `cluster_metadata_info`; verified
+`4` in prod and local), so the image default is now a written decision; and the CLI for prod checks
+is `kubectl -n scrapeflow run <name> --restart=Never --image=temporalio/admin-tools:1.31.0 --command
+-- temporal operator cluster health --address scrapeflow-temporal:7233`, then `kubectl logs` — the
+`--rm -i` form loses the output to the pod teardown.
 
 #### A.3 — Namespace registration init Job
 
@@ -303,7 +322,7 @@ mounted like the api service so it hot-reloads). Temporal env on the `api` servi
 **Verify:** `HelloWorkflow` started via a one-line script shows in the local UI.
 **Depends on:** A.5
 **Progress:** `temporal-postgres` ✅ 2026-09-21 (A.1) · `temporal-schema` + `temporal` ✅ 2026-09-22
-(A.2). Next compose service is A.3's `temporal-namespace` one-shot, after A.2's k8s half.
+(A.2, both halves done). Next compose service is A.3's `temporal-namespace` one-shot.
 
 #### A.8 — 🚀 Engine-up release + proof
 

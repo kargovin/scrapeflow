@@ -37,7 +37,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
 | **Phase 4 implementation backlog — the ordered task list (Tech Lead, 2026-09-20)** | `docs/project/phase4-implementation-backlog.md` — groups A–I are ADR-009 §16's named steps; one task per session; 🚀 marks the release points; its status table is the tracker. **Eight open items at the bottom need Architect/owner answers before the tasks that cite them** |
 | **Temporal persistence (A.1 — ✅ 2026-09-21, both halves)** | Local: `docker/docker-compose.yml` → `temporal-postgres` (host port **5434**) + `docker/temporal-postgres/init.sql`. Prod: infra repo `clusters/k3s-server/scrapeflow/infrastructure/temporal-postgres.yaml` (ConfigMap + StatefulSet `scrapeflow-temporal-postgresql` + Service; infra `de903a2`), Secret `scrapeflow-temporal-db-credentials` (owner-created, README §1), PVC `data-scrapeflow-temporal-postgresql-0` (10Gi, `local-path`). `POSTGRES_DB` creates `temporal`; the script creates `temporal_visibility`. Both verified in prod, 0 tables each. A.2's schema step fills them |
-| **Temporal server (A.2 — 🟡 local ✅ 2026-09-22, k8s ⬜)** | Local: `docker/docker-compose.yml` → `temporal-schema` (admin-tools one-shot, runs `docker/temporal/setup-schema.sh` — **no `create`**, `SQL_PASSWORD`) then `temporal` (`temporalio/server`, `service_completed_successfully`, port 7233, `nc` healthcheck); `docker/temporal/dynamicconfig/development.yaml` (comment-only; C.13 writes the first key). Both images pinned through `${TEMPORAL_VERSION:-1.31.0}` — **bump the two together**. ⚠️ **`temporalio/auto-setup` is deprecated** (found by the owner 2026-09-22); the TL call was revised before build — backlog A.2 has the original struck through. Cluster health from the CLI: `docker compose run --rm --no-deps --entrypoint temporal temporal-schema operator cluster health --address temporal:7233`. k8s half: `infrastructure/temporal.yaml`, the init-container shape |
+| **Temporal server (A.2 — ✅ 2026-09-22, both halves)** | Local: `docker/docker-compose.yml` → `temporal-schema` (admin-tools one-shot, runs `docker/temporal/setup-schema.sh` — **no `create`**, `SQL_PASSWORD`) then `temporal` (`temporalio/server`, `service_completed_successfully`, port 7233, `nc` healthcheck); `docker/temporal/dynamicconfig/development.yaml` (comment-only; C.13 writes the first key). Both images pinned through `${TEMPORAL_VERSION:-1.31.0}` — **bump the two together**. ⚠️ **`temporalio/auto-setup` is deprecated** (found by the owner 2026-09-22); the TL call was revised before build — backlog A.2 has the original struck through. Cluster health from the CLI: `docker compose run --rm --no-deps --entrypoint temporal temporal-schema operator cluster health --address temporal:7233`. Prod: infra `clusters/k3s-server/scrapeflow/infrastructure/temporal.yaml` (infra `e8f32e1`) — ConfigMaps `scrapeflow-temporal-schema` (copy of the app-repo script, which is canonical) + `scrapeflow-temporal-dynamicconfig` (`production.yaml`, per-environment, not a copy), Deployment `scrapeflow-temporal` (`Recreate`; `schema` init container on admin-tools + `server`, same tag), ClusterIP **`scrapeflow-temporal:7233`** — the address A.5's worker will use. **`NUM_HISTORY_SHARDS=4` explicit on both halves; immutable after first start.** Prod CLI: `kubectl -n scrapeflow run <name> --restart=Never --image=temporalio/admin-tools:1.31.0 --command -- temporal operator cluster health --address scrapeflow-temporal:7233`, then `kubectl logs <name>` |
 | **The wire contract the API publishes through (P6)** | `api/app/messages.py` — and `coordinator/coordinator/messages.py`, a **deliberate duplicate** for the crawl lane (ADR-011 §6 rejected a shared package) |
 | **The dispatch-message builders (P9)** | `api/app/core/dispatch.py` — one builder per lane; every scrape dispatch site (`create_job`, `create_batch`, both scheduler paths) calls one. The only place a `ScrapeMessage` is constructed on the API side |
 | **Cross-service contract test + Go fixtures** | `contracts/` — the only test that feeds an API-produced message into each worker's real parser. Command in *Commands* below |
@@ -143,7 +143,39 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
-🔷 **A.2's local half is built and verified (2026-09-22) — and its TL call was reversed first.**
+🔷 **A.2 is done on both halves (2026-09-22, second session) — the engine is up in prod.** Owner's
+"build all" → `infrastructure/temporal.yaml` (four objects, A.1's ConfigMap pattern; the script
+spliced in by `sed` and `diff`-verified byte-identical) + the kustomization line, dry-run clean,
+committed as infra `e8f32e1`; the owner pushed (the classifier blocks a GitOps push — see below).
+Flux applied in ~60 s; the `schema` init container took prod's empty databases 0.0 → **1.19** and
+0.0 → **1.14** in ~30 s; pod Ready at +70 s; `Updated dynamic config`; **zero** `error` lines (the
+eight local boot-noise lines did not occur); `operator cluster health` → **SERVING**; 40 + 3 tables.
+`rollout restart` → 20 s → `found zero updates from current version 1.19` / `1.14` — the
+idempotency line, in prod. Node after: CPU limits 168 % → **175 %**, memory 56 % → 59 %. The app
+side got one commit (`a0008af`, `develop`): `NUM_HISTORY_SHARDS: 4` on the compose `temporal`
+service, verified by recreating the local server against its existing database. Things from the build:
+
+- ⚠️ **`NUM_HISTORY_SHARDS` is immutable after the first start** — persisted in
+  `cluster_metadata_info` (proto field 2; decoded `4` in both prod and local). Nothing in the
+  backlog said so. Set explicitly to the image default on both halves so it is a written decision;
+  changing it means wiping the Temporal database.
+- ⚠️ **The auto-mode classifier refuses `git push` to the infra repo** (*Protected-Scope IaC
+  Apply*) — a push there *is* a prod deploy. Commit, rebase, then the owner pushes with
+  `! git -C <infra repo> push origin main`. It allowed every read (`kubectl logs/exec/describe`),
+  `rollout restart`, and one-off `kubectl run` pods.
+- ⚠️ **`kubectl run --rm -i` loses a short-lived pod's output to its own teardown** — `cluster
+  health` printed nothing. Use `--restart=Never` without `--rm`, poll the phase, `kubectl logs`,
+  delete.
+- **The schema copy is deliberate and annotated** (A.1's precedent): kustomize cannot read across
+  repos, so the ConfigMap embeds the script; the app-repo file is canonical because the local half
+  runs first. The dynamic config is **not** a copy — per-environment by nature, so prod's is
+  `production.yaml`, allowed to diverge from local's `development.yaml`.
+- **`strategy: Recreate` is a decision here, not a default**: on a tag bump the new pod's init
+  container migrates the schema, and Recreate guarantees the old server is gone when it does.
+- **Next: A.3** — the namespace one-shot (`temporal-namespace` in compose, then a k8s Job); write
+  our own script (the reference one sets no retention and has the `$MAX_ATTdMPTS` typo).
+
+🔷 **A.2's local half was built and verified first (2026-09-22) — and its TL call was reversed before that.**
 The owner opened the `temporalio/auto-setup` Docker Hub page before build: **deprecated**, *"no
 longer maintained and will not receive updates"*, last tag ~8 months old — several minors behind
 `temporalio/server` 1.31.0, which C.13 (Worker Versioning) needs recent. Temporal's own reference
@@ -172,10 +204,7 @@ the k8s init container relies on. Things from the build:
   temporal temporal-schema` form for health checks; A.3's namespace one-shot uses the same image.
 - ⚠️ **The reference `create-namespace.sh` sets no retention and has a typo on its retry path**
   (`$MAX_ATTdMPTS` under `set -u`). A.3 writes its own; recorded in the backlog.
-- **Next: A.2's k8s half** — `infrastructure/temporal.yaml`: schema script as a ConfigMap (A.1's
-  pattern), Deployment with the admin-tools **init container** + server container, `dynamicconfig`
-  ConfigMap, ClusterIP on 7233, limits sized against §2d (CPU limits were already 162% overcommitted
-  on 2026-09-21). Then A.3.
+- ~~**Next: A.2's k8s half**~~ ✅ done the same day — the block above.
 
 🔷 **A.1 is done on both halves (2026-09-21, two sessions).** Owner's ordering call for Group A:
 **"local setup first, then change on k8s" — per task**: each engine piece lands in
@@ -593,11 +622,11 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up A.2's k8s half in `phase4-implementation-backlog.md`** — `infrastructure/temporal.yaml`
-   in the infra repo, the init-container shape A.2's body describes; the compose services are the
-   reference. **Per-task ordering: local → k8s → next task.** ~~A.2 local~~ ✅ 2026-09-22.
-   ~~A.1~~ ✅ both halves 2026-09-21 (`f8e99bf` app, `de903a2` infra). The eight open items at the
-   backlog's foot are owner/Architect calls; none blocks Group A.
+0. **Pick up A.3 in `phase4-implementation-backlog.md`** — namespace registration, local first
+   (`temporal-namespace` one-shot in compose, own script, retention 30 d), then the k8s Job.
+   **Per-task ordering: local → k8s → next task.** ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
+   app, `e8f32e1` infra). ~~A.1~~ ✅ both halves 2026-09-21 (`f8e99bf` app, `de903a2` infra). The
+   eight open items at the backlog's foot are owner/Architect calls; none blocks Group A.
 1. **Write PRD-019 — conditional execution (layer A).** ✅ Numbered 2026-09-08 (owner's call) and given
    its `phase4-backlog.md` §2 row; **the document itself is unwritten.** It owes **four** things,
    all on that row: the Validate-precedent brief and the replay constraint (14c), the halt-early
@@ -673,11 +702,11 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them). **The BUG-014 fix
   (`b57211a`, 2026-09-19) is on top** — `api/` only, and it adds **the third revision** (`9a1ebad3fca2`,
   two FK constraint swaps; downgrade restores `NO ACTION`). **The Dependabot sweep (`83607e2`, 2026-09-19) is on top of that** — `api/` (`pyproject.toml`, `uv.lock`, `Dockerfile`), `frontend/` (`package.json`, lock), `http-worker/` (`go.mod`, `go.sum`); no Alembic revision, and the three services it touches are already in the five-service rebuild.
-- ✅ **Verified 2026-09-22 after fetch, before this session's commits: `develop` is 3 ahead of
-  `origin/develop`** (`857ad6e`, `f8e99bf`, `94ca405`), **0 behind; `main` is 6 behind `develop`,
-  0 ahead.** This session adds two commits (A.2's local half; this closeout). **Nothing on `develop`
-  needs a release** — A.1's and A.2's compose blocks are local-dev only; their prod halves go
-  through the **infra repo** (`de903a2` for A.1; A.2's is next). Re-check before quoting.
+- ✅ **Verified 2026-09-22 (second session) after fetch: `develop` was 5 ahead of `origin/develop`,
+  0 behind; `main` 8 behind `develop`, 0 ahead** — then `a0008af` (compose shard count) and this
+  closeout add two. **Nothing on `develop` needs a release** — A.1's and A.2's compose blocks are
+  local-dev only; their prod halves went through the **infra repo** (`de903a2` for A.1, `e8f32e1`
+  for A.2, both on its `main` and deployed). Re-check before quoting.
 - *Historical:* **2026-09-19 (release session): `main` fast-forwarded to `421cbfe` and pushed** (the
   release). Then on `develop`: `19fd34e` (BUG-018 filed), `8608c0c` (reconcile preview fix + §3
   row) and its closeout `d1282c7`.
@@ -768,6 +797,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-22 *(clock, second session)* | **🔷 A.2 — k8s half built, deployed, verified in prod; A.2 ✅.** Read-in; owner: "lets do a2 k8s part; explain your approach" → the four-object manifest, the compose→k8s mapping (init container not Job; `Recreate` as a decision; tcpSocket probes; the two password names; mount the subdirectory only), sizing against the node (168 % CPU limits), and two things the backlog lacked: `NUM_HISTORY_SHARDS` is immutable after first start, and the CLI lives in admin-tools. "how will bind the setup and dynamicconfig files" → ConfigMap → volume → volumeMount, no exec bit, directory not subPath so dynamic config refreshes live. "ah okay we are duplicating it?" → yes for the script (kustomize cannot cross repos; A.1's precedent; app repo canonical), no for dynamic config (per-environment). "okay build all but dont commit" → manifest (script spliced by `sed`, `diff`-identical), kustomization line, `--dry-run=server` clean, compose `NUM_HISTORY_SHARDS: 4`, local server recreated and SERVING. "do all" → both commits; the classifier blocked the infra push (owner pushed). Flux ~60 s; schema 0.0 → 1.19 / 1.14; Ready +70 s; zero boot errors; SERVING; `rollout restart` → zero updates. Node 168 → 175 % CPU limits. Docs: backlog (A.2/A.7 rows, A.2 body, A.7 progress), infra README, this file | `a0008af` + this closeout; infra `e8f32e1` (`main`, deployed) |
 | 2026-09-22 *(clock)* | **🔷 A.2 — TL call reversed, then local half built and verified.** Read-in, then owner: "whats auto setup mode?" → explained the auto-setup entrypoint (wait → create → setup/update-schema ×2 → namespace → exec server) as Alembic-on-startup for Temporal. Owner: the Docker Hub page says **deprecated** → verified (last tag ~8 months old) and read the replacement — `samples-server/compose/docker-compose-postgres.yml`: `temporalio/server` + two `admin-tools` one-shots (schema, namespace). "update the backlog" → A.2 rewritten with the original call struck through, init-container shape for k8s, two-images-one-version trap, no-`create` rule; A.3 gains the reference confirmation + the typo warning; A.7 / A.1 / `temporal-full-migration.md` §7 swept. Explained dynamic config (static vs dynamic, value/constraints, what C.13/E.0 will add, what must *not* go there — `limit.blobSize`, retry policies, retention). Then, one block at a time on "go": `setup-schema.sh` → compose services → bring-up. Verified: schema 1.19 / 1.14, dynamic config accepted, SERVING, second `up` = zero updates. Docs: backlog (status, A.2 body, A.7), this file | A.2 commit + this closeout |
 | 2026-09-21 *(clock, second session)* | **🔷 A.1 — k8s half built and verified in prod; A.1 ✅.** Owner: "are we done with a1? we only did local setup; we also need to do k8s too right?" → the ordering is **per task** (local → k8s → next), not all-of-Group-A-locally-first; the previous handoff's "next: A.2 locally" corrected. Explained the local→k8s mapping (StatefulSet/PVC/Secret/ConfigMap, the `PGDATA` and PVC-outlives-StatefulSet traps) and that the *entrypoint*, not the StatefulSet, creates both databases; on "build it" wrote `infrastructure/temporal-postgres.yaml` + kustomization line + README Secret section in the infra repo, `kubectl apply --dry-run=server` clean, node headroom read. Owner created the Secret; push needed a rebase over 13 Flux image-update commits; Flux applied in ~35 s, pod ready in 21 s, boot log + `\l` from the pod = the Verify line. Committed A.1's local half + backlog on `develop`. Answered "where did we mention the volume" — `volumeClaimTemplates` → PVC `data-…-0`, `local-path`. | `f8e99bf` (app, `develop`); infra `de903a2` (`main`) |
 | 2026-09-21 *(clock)* | **🔷 A.1 — local half built.** Owner: "lets start with A.1 … lets first do local setup first and then change on k8s" → the Group A ordering call, recorded in the backlog. Explained the why (a second *instance*, two *databases*, who owns database existence vs schema) and let the owner drive; on "write only the docker-compose for new db" wrote the `temporal-postgres` service + volume; on "write the init script and bring up the new db" wrote `docker/temporal-postgres/init.sql` and started the service — first `up` failed on a host-port clash (5433 held by another project's container → 5434), second `up` ran the hook: `\l` lists `temporal` and `temporal_visibility`, 0 tables each. Answered "how does temporal know which db is which" — by name, `DBNAME`/`VISIBILITY_DBNAME` in A.2. Docs: backlog (ordering note, A.1/A.7 statuses and bodies), this file. Session closed at the owner's "i'll start a new session for next" | *(uncommitted at close; committed the next session as `f8e99bf` + this closeout)* |
