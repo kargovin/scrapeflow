@@ -80,6 +80,9 @@ services:
       POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal}
       DBNAME: temporal
       VISIBILITY_DBNAME: temporal_visibility
+      # Immutable after the first start (persisted in cluster_metadata_info) — the image
+      # default, written down so it is a decision. k8s sets the same value.
+      NUM_HISTORY_SHARDS: 4
       BIND_ON_IP: 0.0.0.0
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development.yaml
     volumes:
