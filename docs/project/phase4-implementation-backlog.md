@@ -9,7 +9,7 @@
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
 > **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
-> **Last updated:** 2026-09-21 · **Tracking:** the status table below is the tracker.
+> **Last updated:** 2026-09-22 · **Tracking:** the status table below is the tracker.
 
 ---
 
@@ -40,7 +40,7 @@
 |---|---|---|
 | **A** | **Engine up** | |
 | A.1 | Temporal persistence: second Postgres StatefulSet, two databases | ✅ 2026-09-21 (local + k8s; infra `de903a2`, verified in prod) |
-| A.2 | Temporal server Deployment (auto-setup image, standard visibility) | ⬜ |
+| A.2 | Temporal server Deployment (`temporalio/server` + schema init container, standard visibility) | 🟡 local ✅ 2026-09-22 · k8s ⬜ — TL call revised 2026-09-22: `auto-setup` is deprecated |
 | A.3 | Namespace registration init Job, retention 30 d | ⬜ |
 | A.4 | Temporal Web UI — ClusterIP only, no ingress | ⬜ |
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ⬜ |
@@ -144,7 +144,7 @@
 **What:** clone `infrastructure/postgres.yaml` → `infrastructure/temporal-postgres.yaml`: own
 StatefulSet, own PVC (10Gi), own Secret. **Two databases inside it: `temporal` and
 `temporal_visibility`** — provisioning one is §2a's "predictable way to lose an hour".
-**Verify:** `psql -l` from a pod shows both. Both empty (auto-setup fills them in A.2).
+**Verify:** `psql -l` from a pod shows both. Both empty (A.2's schema step fills them).
 **Depends on:** —
 **Local half ✅ 2026-09-21:** `docker/docker-compose.yml` → `temporal-postgres` (`postgres:16-alpine`,
 own `temporal_postgres_data` volume, host port **5434** — 5433 was taken by another project's
@@ -170,25 +170,86 @@ is reset by deleting it explicitly.
 
 #### A.2 — Temporal server
 
-**TL call:** the `temporalio/auto-setup` image as one Deployment, `DB=postgres12`, standard
-visibility, **no** Elasticsearch. Reasoning: it runs `temporal-sql-tool setup/update-schema` on
-every start, which is exactly the "server bump needs a schema step nothing in our deploy performs"
-trap §2a warns about, handled for free. Cost: a single process for all four services (frontend /
-history / matching / worker) — no HA, which §1 already accepts at homelab scale. The Helm chart is
-the reversal path if it ever matters.
-**What:** `infrastructure/temporal.yaml`: Deployment + ClusterIP Service on 7233; env from A.1's
-Secret; a `dynamicconfig` ConfigMap mounted (empty now — C.13 writes into it); resources sized
-against §2d (**limits, not requests, are the constraint** — do not overcommit further; see A.8).
-**Verify:** `tctl`/`temporal` CLI from a pod: `temporal operator cluster health` → SERVING.
+**TL call — revised 2026-09-22, before build.** ~~The original call (2026-09-20) was the
+`temporalio/auto-setup` image as one Deployment: it runs `temporal-sql-tool setup/update-schema` on
+every start, handling §2a's "server bump needs a schema step nothing in our deploy performs" trap
+for free.~~ **Reversed:** the owner found the image marked **deprecated on Docker Hub** (*"no
+longer maintained and will not receive updates"*); its last tag is ~8 months old — several minors
+behind `temporalio/server` (1.31.0 at the time of writing) — and C.13 wants a *recent* server.
+Temporal's own reference compose (`temporalio/samples-server` → `compose/docker-compose-postgres.yml`)
+now runs `temporalio/server` with the schema step **unbundled into a one-shot
+`temporalio/admin-tools` container**. The original reasoning stands; the mechanism moves from
+inside the image to inside our manifests.
+
+**Revised call:** `temporalio/server:<pinned>` as one Deployment, `DB=postgres12`, standard SQL
+visibility, **no** Elasticsearch. Cost unchanged: a single process for all four services (frontend /
+history / matching / worker) — no HA, which §1 already accepts at homelab scale; the Helm chart is
+the reversal path. **The schema step is ours now:** an **init container** on the same Deployment
+(`temporalio/admin-tools`, same tag) runs a committed script — `temporal-sql-tool --plugin
+postgres12 … setup-schema -v 0.0` then `update-schema -d
+/etc/temporal/schema/postgresql/v12/{temporal,visibility}/versioned`, once per database. It runs on
+**every pod start** and is idempotent (`update-schema` is a no-op when the database is already at
+the image's version) — exactly the property auto-setup had. A Job would not re-run on a server
+bump, which is why it is an init container and not one.
+⚠️ **No `create`.** The reference script creates both databases; ours must not — A.1 owns database
+existence (the instance creates databases, Temporal owns the schema).
+⚠️ **Two images, one version.** `server` and `admin-tools` are pinned to the **same tag and bumped
+together** — the schema `update-schema` applies is baked into admin-tools, and the server expects
+the matching version. Third-party images: pinned by hand, **not** under Flux image automation.
+`temporalio/ui` (A.4) is a separate version line.
+**What:** `infrastructure/temporal.yaml`: the schema script as a ConfigMap (A.1's `init.sql`
+pattern); Deployment — init container + server container — and ClusterIP Service on 7233; DB env
+from A.1's Secret (`POSTGRES_USER` / `POSTGRES_PWD` for the server, plus `SQL_PASSWORD` for the
+init container — `temporal-sql-tool` reads that one), `POSTGRES_SEEDS`, `DB_PORT`, `BIND_ON_IP=0.0.0.0`;
+`DBNAME=temporal` and `VISIBILITY_DBNAME=temporal_visibility` set explicitly; a `dynamicconfig`
+ConfigMap mounted with `DYNAMIC_CONFIG_FILE_PATH` pointing at it (no keys now — C.13 writes into
+it); resources sized against §2d (**limits, not requests, are the constraint** — do not overcommit
+further; see A.8).
+**Verify:** `temporal operator cluster health` → SERVING (the `temporal` CLI ships in admin-tools);
+`\dt` in both A.1 databases is no longer empty; **and a second start is a no-op on the schema
+step** — the init container's log reports the current version already equals the target. That
+last line is the idempotency check, and the one to re-run after every bump.
 **Depends on:** A.1
+**Local half:** two compose services. `temporal-schema` — `temporalio/admin-tools`, one-shot,
+`depends_on: temporal-postgres: condition: service_healthy`, `entrypoint: [/bin/sh]` running a
+bind-mounted `docker/temporal/setup-schema.sh`. `temporal` — `temporalio/server`,
+`depends_on: temporal-schema: condition: service_completed_successfully` (compose's analogue of the
+init container), the env above, `docker/temporal/dynamicconfig/` mounted, host port 7233, a
+`nc -z localhost 7233` healthcheck. Pin both tags through one variable with one default
+(`${TEMPORAL_VERSION:-1.31.0}` on both `image:` lines — the A.1 credentials pattern) so a bump is
+one edit.
+**Local half ✅ 2026-09-22:** `docker/temporal/setup-schema.sh` (no `create`; `SQL_PASSWORD`
+required; `DBNAME`/`VISIBILITY_DBNAME` defaulted to the server's names), the comment-only
+`docker/temporal/dynamicconfig/development.yaml`, and the `temporal-schema` + `temporal` services
+in `docker/docker-compose.yml`. Verified at 1.31.0: `temporal` stamped 0.0 → **1.19** (40 tables),
+`temporal_visibility` → **1.14** (3 tables) — the numbers to compare after a bump; the server logged
+`Updated dynamic config` for the keys-less file; healthy in < 20 s; `operator cluster health` →
+SERVING, run as `docker compose run --rm --no-deps --entrypoint temporal temporal-schema operator
+cluster health --address temporal:7233` (the CLI ships in admin-tools, not the server image).
+**Idempotency confirmed:** a second `up` re-ran the one-shot — `found zero updates from current
+version 1.19` / `1.14`, exit 0 — and `setup-schema -v 0.0` on a stamped database does **not** reset
+the version (that needs `--overwrite`), so the script re-runs safely as written, which is what the
+k8s init container relies on. ⚠️ Eight `error` lines in the server's first second of boot
+(`Not enough hosts to serve the request`, `Queue reader unable to retrieve tasks`) are single-process
+start-order noise — history is up before matching joins the ring — and stop by themselves; do not
+chase them on k8s either.
 
 #### A.3 — Namespace registration init Job
 
 **What:** clone `app/nats-init-job.yaml` → `app/temporal-init-job.yaml`: register namespace
 `scrapeflow` with **retention 30 d** (§2c — an operator dial, changeable later, no correctness
 role). Idempotent (namespace-exists is not an error).
+Temporal's reference compose (see A.2) does this the same way — a second one-shot
+`temporalio/admin-tools` container running `create-namespace.sh`: wait for `operator cluster
+health`, `describe`, `create` if missing — which confirms the Job shape over the server's
+`DEFAULT_NAMESPACE` env path. ⚠️ That script sets **no retention**, and its retry branch references
+a misspelled variable (`$MAX_ATTdMPTS` under `set -u`) so it fails if ever reached: **write ours, do
+not copy it.**
 **Verify:** `temporal operator namespace describe scrapeflow` shows the retention.
 **Depends on:** A.2
+**Local half:** a `temporal-namespace` one-shot compose service on the same image,
+`depends_on: temporal: condition: service_healthy`, running a bind-mounted
+`docker/temporal/create-namespace.sh`.
 
 #### A.4 — Temporal Web UI
 
@@ -235,15 +296,14 @@ mirroring `api`'s so it follows the same tag.
 
 #### A.7 — Local dev
 
-**What:** `docker/docker-compose.yml`: `temporal-postgres`, `temporal` (auto-setup), `temporal-ui`
+**What:** `docker/docker-compose.yml`: `temporal-postgres`, `temporal-schema` + `temporal` (A.2),
+`temporal-namespace` (A.3), `temporal-ui`
 (host port for the browser — fine locally), `workflow-worker` (api image, the A.6 command, `api/`
 mounted like the api service so it hot-reloads). Temporal env on the `api` service.
 **Verify:** `HelloWorkflow` started via a one-line script shows in the local UI.
 **Depends on:** A.5
-**Progress:** `temporal-postgres` ✅ 2026-09-21 (see A.1). Next compose service is `temporal`
-(A.2's auto-setup image) — it must set `DBNAME=temporal` and `VISIBILITY_DBNAME=temporal_visibility`
-explicitly (they are the image defaults, but the wiring should be readable from the file) and
-`depends_on: temporal-postgres: condition: service_healthy`.
+**Progress:** `temporal-postgres` ✅ 2026-09-21 (A.1) · `temporal-schema` + `temporal` ✅ 2026-09-22
+(A.2). Next compose service is A.3's `temporal-namespace` one-shot, after A.2's k8s half.
 
 #### A.8 — 🚀 Engine-up release + proof
 

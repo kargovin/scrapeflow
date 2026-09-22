@@ -1,0 +1,5 @@
+# Temporal dynamic config — operator dials the server re-reads on a ~10 s poll, no restart
+# needed. Each key maps to a list of {value, constraints}; empty constraints = global.
+# Empty on purpose: every dial is at its compiled-in default. C.13 (Worker Versioning)
+# writes the first entry. Do NOT raise limit.blobSize.* here — references, never content,
+# go into workflow history (phase4-implementation-backlog.md, Non-negotiables).

@@ -247,7 +247,9 @@ on it being reachable.
 
 New manifests in the infra repo (`govindappa-k8s-config`):
 
-- **Temporal Server** — via the official Helm chart or `auto-setup` image; needs its **own
+- **Temporal Server** — via the official Helm chart, or `temporalio/server` with an explicit
+  `admin-tools` schema step (⚠️ the `auto-setup` image is **deprecated** on Docker Hub — found
+  2026-09-22; `phase4-implementation-backlog.md` A.2 has the shape); needs its **own
   Postgres StatefulSet** (not a database on the app instance). ⚠️ Temporal wants **two databases
   inside** that instance — `temporal` and `temporal_visibility` — even on standard visibility;
   provisioning one is the predictable way to lose an hour. Elasticsearch/OpenSearch is optional and
