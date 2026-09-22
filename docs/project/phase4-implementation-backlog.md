@@ -245,7 +245,18 @@ and 0.0 → **1.14** (15 updates) in ~30 s; pod Ready 70 s after creation; `Upda
 logged; **zero** `error` lines at boot (the local noise did not occur); `operator cluster health` →
 SERVING from a one-off admin-tools pod; `\dt` = 40 + 3 tables, `schema_version.curr_version`
 1.19 / 1.14. **Idempotency verified:** `rollout restart` → 20 s → the new pod's `schema` log reads
-`found zero updates from current version 1.19` / `1.14`. Node after: CPU limits 168 % → **175 %**,
+`found zero updates from current version 1.19` / `1.14`.
+⚠️ **Two things the restart check itself taught, found at session close:** (1) **`kubectl rollout
+restart` on a Flux-managed Deployment costs *two* rollouts** — Flux strips the `restartedAt`
+annotation on its next reconcile, which is another pod-template change and triggers a second
+Recreate (~10 min later here). Restart a Flux-managed pod with `kubectl delete pod` instead: no
+template change, nothing to revert. (2) **A replacement pod can fail its first ringpop bootstrap**
+— it joins the ring from `cluster_membership`, whose rows still carry the *previous* pod's IP with
+a heartbeat seconds old, retries ~55 s, exceeds the 30 s max join and exits `fatal … failed to
+start ringpop`, exit 1. The kubelet restarts the container and the second attempt joins. Observed
+once (of two rollouts), self-healed in ~90 s, healthy since with 0 error lines. **Expected, do not
+chase it**; if it ever loops, the stale rows are in `temporal.cluster_membership` (`record_expiry`
+is 2 days out, so they are aged out by heartbeat, not by expiry). Node after: CPU limits 168 % → **175 %**,
 memory 56 % → 59 % (A.8). Two things decided at build: **`NUM_HISTORY_SHARDS=4` is set explicitly on
 both halves** — it is immutable after first start (persisted in `cluster_metadata_info`; verified
 `4` in prod and local), so the image default is now a written decision; and the CLI for prod checks

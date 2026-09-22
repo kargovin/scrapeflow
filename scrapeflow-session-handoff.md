@@ -151,7 +151,8 @@ Flux applied in ~60 s; the `schema` init container took prod's empty databases 0
 0.0 → **1.14** in ~30 s; pod Ready at +70 s; `Updated dynamic config`; **zero** `error` lines (the
 eight local boot-noise lines did not occur); `operator cluster health` → **SERVING**; 40 + 3 tables.
 `rollout restart` → 20 s → `found zero updates from current version 1.19` / `1.14` — the
-idempotency line, in prod. Node after: CPU limits 168 % → **175 %**, memory 56 % → 59 %. The app
+idempotency line, in prod. (That restart then cost a second rollout and one self-healing crash —
+the two bullets below; the pod has been up and `SERVING` with 0 error lines since 09:58 UTC.) Node after: CPU limits 168 % → **175 %**, memory 56 % → 59 %. The app
 side got one commit (`a0008af`, `develop`): `NUM_HISTORY_SHARDS: 4` on the compose `temporal`
 service, verified by recreating the local server against its existing database. Things from the build:
 
@@ -163,6 +164,19 @@ service, verified by recreating the local server against its existing database. 
   Apply*) — a push there *is* a prod deploy. Commit, rebase, then the owner pushes with
   `! git -C <infra repo> push origin main`. It allowed every read (`kubectl logs/exec/describe`),
   `rollout restart`, and one-off `kubectl run` pods.
+- 🔴 **`kubectl rollout restart` on a Flux-managed Deployment causes a SECOND rollout.** Flux
+  strips the `restartedAt` annotation on its next reconcile; that is another pod-template change,
+  so the Deployment rolls again (~10 min after the manual one here, back to the original
+  ReplicaSet hash). **Restart a Flux-managed pod with `kubectl delete pod`** — no template change,
+  nothing for Flux to revert. This applies to every Deployment in the namespace, not just Temporal.
+- ⚠️ **A replacement Temporal pod can fail its first ringpop bootstrap, and it self-heals.** The
+  new pod joins the ring from `cluster_membership`, whose rows still hold the *previous* pod's IP
+  with a heartbeat seconds old; it retries ~55 s, exceeds the 30 s max join, and exits
+  `fatal … failed to start ringpop` (exit 1). The kubelet restarts the container and the second
+  attempt joins. Seen once in two rollouts (the Flux-reverted one), ~90 s, healthy since with **0**
+  error lines and `SERVING`. **Expected on a pod replacement — do not chase it**; if it ever loops,
+  the stale rows are `temporal.cluster_membership` (aged out by heartbeat; `record_expiry` is 2 days
+  out and is not the mechanism). Worth knowing at A.8 and at every server bump.
 - ⚠️ **`kubectl run --rm -i` loses a short-lived pod's output to its own teardown** — `cluster
   health` printed nothing. Use `--restart=Never` without `--rm`, poll the phase, `kubectl logs`,
   delete.
