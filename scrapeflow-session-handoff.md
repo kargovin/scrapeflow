@@ -29,7 +29,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-018) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-019) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -45,7 +45,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **The run-counting views (P7)** | `api/app/models/quota_views.py` — `Table` objects on a private `MetaData` for the two views migration `86c780f55969` creates; `core/quota.py` reads them and nothing else does. `quota_run_units` = one row per attempted fetch (`monthly_runs`); `quota_active_submissions` = one row per submission holding a slot (`concurrent_jobs`). A new lane is one migration widening both |
 | **Crawl-quota audit (owner-run, read-only; ✅ run in prod 2026-09-19)** | `api/scripts/audit_crawl_quota.py` — what 90 days of crawls would have cost per user under P7's meters, and who holds slots now. Reads the views. Prod: *"No crawl pages since 2026-06-01. Nobody's numbers change."* ⚠️ On v1 every crawl is `running` forever (BUG-008) and holds a slot until cancelled — the script says so |
 | `latest/` production sweep (✅ **applied in prod 2026-09-19**) | `api/scripts/sweep_latest_objects.py` — dry-run by default. Prod: 36 objects / 21,938,965 bytes deleted, 0 failed, re-run finds 0. One-time; nothing writes `latest/` any more |
-| **Storage ledger reconcile (✅ applied in prod 2026-09-19; the standing auditor, idempotent)** | `api/scripts/reconcile_storage_ledger.py` — dry-run by default. Walks the bucket, records pre-ledger objects, deletes orphans, **recomputes** every counter. Prod: 35 recorded, 11 orphans deleted, counter already exact; second run a no-op. ⚠️ Its dry-run counter preview was wrong on a first run (`after=0`) — fixed `8608c0c`, see the release block. **How to run in prod:** `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python scripts/<name>.py [--apply]` — the image bakes `scripts/` and the pod has the DB/MinIO credentials |
+| **Storage ledger reconcile (✅ applied in prod 2026-09-19; the standing auditor, idempotent)** | `api/scripts/reconcile_storage_ledger.py` — dry-run by default. Walks the bucket, records pre-ledger objects, deletes orphans, **recomputes** every counter. Prod: 35 recorded, 11 orphans deleted, counter already exact; second run a no-op. ⚠️ Its dry-run counter preview was wrong on a first run (`after=0`) — fixed `8608c0c`, see the release block. **How to run in prod:** `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m scripts.<name> [--apply]` (⚠️ the `scripts/<name>.py` form fails to import `app` in a fresh container of the image — BUG-019) — the image bakes `scripts/` and the pod has the DB/MinIO credentials |
 | Multi-persona process starter prompts | `docs/process/` |
 | Anti-bot hardening record (ADR-008 companion) | `docs/guides/anti-bot-hardening.md` |
 | **crw engine comparison — DEFERRED until the Temporal pipeline is done** | `docs/guides/competitor-research.md` §crw (2026-09-19). §A = seven v1 bugs, none filed; §C = mechanisms owed at the batch-and-crawl cutover (per-host limiter, interactive/batch lanes) |
@@ -134,7 +134,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-22 *(clock)*
+## Current state — as of 2026-09-25 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -142,6 +142,39 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **A.3 is done on both halves (2026-09-25) — namespace `scrapeflow` registered, retention 30 d,
+local and prod.** Owner's "build on both, don't commit", then "push and verify". Local:
+`docker/temporal/create-namespace.sh` (canonical) + `temporal-namespace` one-shot in compose
+(app commit on `develop`). Prod: infra `app/temporal-init-job.yaml` — ConfigMap (byte-identical
+copy, `diff`-verified) + Job `scrapeflow-temporal-init` — first `kubectl apply`'d uncommitted
+(Complete in 11 s), then committed and pushed as infra `60b0aee`; **Flux adopted both objects in
+place** (its labels added, Job not recreated — `force: true` on `flux-system` was never needed).
+`namespace describe` from a one-off pod → `Registered`, `720h0m0s`, before and after adoption; 0
+server error lines. Locally also tested: re-run with retention hand-set to 72h → reset to 720h;
+unreachable address → exit 1. Things from the build:
+
+- ⚠️ **The CLI's `namespace create --retention` default is 72h, not 30 d.** ADR-009 §2c says 30 d
+  "is Temporal's default" — true of nothing we run. Unset would have meant 3 days. Recorded in the
+  script and the backlog; the ADR is immutable.
+- **The script converges, it does not only create** (the `nats-init-job.yaml` precedent):
+  existing → `update --retention`. The manifest owns retention; a hand change is reverted on the
+  next run. Re-running is also the recovery after a Temporal DB wipe (`kubectl delete job
+  scrapeflow-temporal-init`, Flux recreates it). No `ttlSecondsAfterFinished` on purpose — Flux
+  would recreate the deleted Job every 10 min.
+- **A Temporal namespace is a row in `temporal.namespaces`** (settings in an encoded `data` blob,
+  so `describe` is the check, not SQL), beside the server's own `temporal-system`. Not a tenant
+  boundary (ADR-009 §12) and not access control — self-hosted Temporal has no authorizer.
+- ⚠️ **The auto-mode classifier allowed `git push` to the infra repo this time** (contrary to the
+  A.2 note below) but **refused `kubectl exec` into the API pod** (*Production Reads*). Do not rely
+  on either.
+- 🔴 **BUG-019 filed** — found while checking A.3's Job list: the nightly cleanup CronJob has
+  **never succeeded in prod** (system Python without deps; `scripts/x.py` cannot import `app`; two
+  Fernet keys unset). Reproduced on the deployed image, not from a log (the pod went with the Job).
+  Owner's call: pick up later. ⚠️ Knock-on: the *How to run in prod* line in the reference table
+  (`/app/.venv/bin/python scripts/<name>.py`) fails in a fresh container of this image; use
+  `python -m scripts.<name>`.
+- **Next: A.4** — Temporal Web UI, ClusterIP only, no ingress (local `temporal-ui` first).
 
 🔷 **A.2 is done on both halves (2026-09-22, second session) — the engine is up in prod.** Owner's
 "build all" → `infrastructure/temporal.yaml` (four objects, A.1's ConfigMap pattern; the script
@@ -636,9 +669,10 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up A.3 in `phase4-implementation-backlog.md`** — namespace registration, local first
-   (`temporal-namespace` one-shot in compose, own script, retention 30 d), then the k8s Job.
-   **Per-task ordering: local → k8s → next task.** ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
+0. **Pick up A.4 in `phase4-implementation-backlog.md`** — Temporal Web UI, ClusterIP only, no
+   ingress; local `temporal-ui` first, then k8s + the port-forward line in the infra README.
+   **Per-task ordering: local → k8s → next task.** ~~A.3~~ ✅ both halves 2026-09-25 (infra
+   `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
    app, `e8f32e1` infra). ~~A.1~~ ✅ both halves 2026-09-21 (`f8e99bf` app, `de903a2` infra). The
    eight open items at the backlog's foot are owner/Architect calls; none blocks Group A.
 1. **Write PRD-019 — conditional execution (layer A).** ✅ Numbered 2026-09-08 (owner's call) and given
@@ -667,6 +701,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    are inert unless a `PATCH` adds a `schedule_cron` to one; delete them or don't (the reconcile
    kept their objects — they are attributable); (c) the Amazon job landed on `amazon.sg` because of the egress IP — if the `.com`
    listing is wanted, that job needs a US exit on the proxy.
+7a. **BUG-019 — cleanup CronJob never succeeded** (filed 2026-09-25). **Owner's call: later.**
+   Infra-only fix in `open-bugs.md`; trigger the first run by hand — it is a real delete.
 7. **BUG-018 — SPA token caching** (filed 2026-09-19, `19fd34e`). **Owner's call: after the
    Temporal pipeline.** Six frontend files; the writeup has the fix and what to capture.
 
@@ -811,6 +847,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-25 *(clock)* | **🔷 A.3 — namespace registration built, deployed, verified in prod; A.3 ✅. BUG-019 filed.** Read-in; owner asked where a namespace lives, what a namespace is, and whether other services' namespaces collide → explained (a row in `temporal.namespaces`; isolates IDs/queues/retention per namespace, not compute or access). Owner: "start A.3; build on both local and server but do not commit" → script + compose one-shot verified locally (create, drift-reset, unreachable → exit 1), k8s Job `kubectl apply`'d and verified. Spotted the cleanup CronJob `Failed`; owner: "check the logs" → pod gone, reproduced on the deployed image: never succeeded (BUG-019). Owner: "file it … push and verify on prod … commit dev and push origin, not prod" → BUG-019 filed, infra pushed + Flux adoption verified, app committed on `develop` and pushed. | infra `60b0aee` · app (this commit) |
 | 2026-09-22 *(clock, second session)* | **🔷 A.2 — k8s half built, deployed, verified in prod; A.2 ✅.** Read-in; owner: "lets do a2 k8s part; explain your approach" → the four-object manifest, the compose→k8s mapping (init container not Job; `Recreate` as a decision; tcpSocket probes; the two password names; mount the subdirectory only), sizing against the node (168 % CPU limits), and two things the backlog lacked: `NUM_HISTORY_SHARDS` is immutable after first start, and the CLI lives in admin-tools. "how will bind the setup and dynamicconfig files" → ConfigMap → volume → volumeMount, no exec bit, directory not subPath so dynamic config refreshes live. "ah okay we are duplicating it?" → yes for the script (kustomize cannot cross repos; A.1's precedent; app repo canonical), no for dynamic config (per-environment). "okay build all but dont commit" → manifest (script spliced by `sed`, `diff`-identical), kustomization line, `--dry-run=server` clean, compose `NUM_HISTORY_SHARDS: 4`, local server recreated and SERVING. "do all" → both commits; the classifier blocked the infra push (owner pushed). Flux ~60 s; schema 0.0 → 1.19 / 1.14; Ready +70 s; zero boot errors; SERVING; `rollout restart` → zero updates. Node 168 → 175 % CPU limits. Docs: backlog (A.2/A.7 rows, A.2 body, A.7 progress), infra README, this file | `a0008af` + this closeout; infra `e8f32e1` (`main`, deployed) |
 | 2026-09-22 *(clock)* | **🔷 A.2 — TL call reversed, then local half built and verified.** Read-in, then owner: "whats auto setup mode?" → explained the auto-setup entrypoint (wait → create → setup/update-schema ×2 → namespace → exec server) as Alembic-on-startup for Temporal. Owner: the Docker Hub page says **deprecated** → verified (last tag ~8 months old) and read the replacement — `samples-server/compose/docker-compose-postgres.yml`: `temporalio/server` + two `admin-tools` one-shots (schema, namespace). "update the backlog" → A.2 rewritten with the original call struck through, init-container shape for k8s, two-images-one-version trap, no-`create` rule; A.3 gains the reference confirmation + the typo warning; A.7 / A.1 / `temporal-full-migration.md` §7 swept. Explained dynamic config (static vs dynamic, value/constraints, what C.13/E.0 will add, what must *not* go there — `limit.blobSize`, retry policies, retention). Then, one block at a time on "go": `setup-schema.sh` → compose services → bring-up. Verified: schema 1.19 / 1.14, dynamic config accepted, SERVING, second `up` = zero updates. Docs: backlog (status, A.2 body, A.7), this file | A.2 commit + this closeout |
 | 2026-09-21 *(clock, second session)* | **🔷 A.1 — k8s half built and verified in prod; A.1 ✅.** Owner: "are we done with a1? we only did local setup; we also need to do k8s too right?" → the ordering is **per task** (local → k8s → next), not all-of-Group-A-locally-first; the previous handoff's "next: A.2 locally" corrected. Explained the local→k8s mapping (StatefulSet/PVC/Secret/ConfigMap, the `PGDATA` and PVC-outlives-StatefulSet traps) and that the *entrypoint*, not the StatefulSet, creates both databases; on "build it" wrote `infrastructure/temporal-postgres.yaml` + kustomization line + README Secret section in the infra repo, `kubectl apply --dry-run=server` clean, node headroom read. Owner created the Secret; push needed a rebase over 13 Flux image-update commits; Flux applied in ~35 s, pod ready in 21 s, boot log + `\l` from the pod = the Verify line. Committed A.1's local half + backlog on `develop`. Answered "where did we mention the volume" — `volumeClaimTemplates` → PVC `data-…-0`, `local-path`. | `f8e99bf` (app, `develop`); infra `de903a2` (`main`) |

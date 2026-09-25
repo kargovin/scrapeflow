@@ -41,11 +41,11 @@
 | **A** | **Engine up** | |
 | A.1 | Temporal persistence: second Postgres StatefulSet, two databases | ✅ 2026-09-21 (local + k8s; infra `de903a2`, verified in prod) |
 | A.2 | Temporal server Deployment (`temporalio/server` + schema init container, standard visibility) | ✅ 2026-09-22 (local + k8s; infra `e8f32e1`, verified in prod) — TL call revised the same day: `auto-setup` is deprecated |
-| A.3 | Namespace registration init Job, retention 30 d | ⬜ |
+| A.3 | Namespace registration init Job, retention 30 d | ✅ 2026-09-25 (local + k8s; infra `60b0aee`, verified in prod) |
 | A.4 | Temporal Web UI — ClusterIP only, no ingress | ⬜ |
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ⬜ |
 | A.6 | Workflow-worker Deployment in the infra repo | ⬜ |
-| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace`, `temporal-ui`, `workflow-worker` ⬜ |
+| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui`, `workflow-worker` ⬜ |
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ⬜ |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
@@ -280,6 +280,14 @@ not copy it.**
 **Local half:** a `temporal-namespace` one-shot compose service on the same image,
 `depends_on: temporal: condition: service_healthy`, running a bind-mounted
 `docker/temporal/create-namespace.sh`.
+**Built 2026-09-25:** `docker/temporal/create-namespace.sh` (canonical) + the `temporal-namespace`
+one-shot; infra `app/temporal-init-job.yaml` (ConfigMap with a byte-identical copy + Job
+`scrapeflow-temporal-init`, admin-tools at the server's tag), infra `60b0aee`. The script
+**converges**, like `nats-init-job.yaml`: missing → `create`, existing → `update --retention`, so
+the manifest owns retention and a hand change is reverted on the next run. ⚠️ **The CLI's
+`--retention` default is 72h, not 30 d** — ADR-009 §2c's "30 is Temporal's default" does not hold
+for `namespace create`; unset would have meant 3 days. ⚠️ No `ttlSecondsAfterFinished`: Flux would
+recreate a TTL-deleted Job every reconcile. Re-run = `kubectl delete job`, Flux recreates it.
 
 #### A.4 — Temporal Web UI
 
@@ -333,7 +341,8 @@ mounted like the api service so it hot-reloads). Temporal env on the `api` servi
 **Verify:** `HelloWorkflow` started via a one-line script shows in the local UI.
 **Depends on:** A.5
 **Progress:** `temporal-postgres` ✅ 2026-09-21 (A.1) · `temporal-schema` + `temporal` ✅ 2026-09-22
-(A.2, both halves done). Next compose service is A.3's `temporal-namespace` one-shot.
+(A.2, both halves done) · `temporal-namespace` ✅ 2026-09-25 (A.3, both halves done). Next compose
+service is A.4's `temporal-ui`.
 
 #### A.8 — 🚀 Engine-up release + proof
 

@@ -1833,6 +1833,56 @@ nothing — the request status is the evidence.
 
 ---
 
+## BUG-019 — The nightly cleanup CronJob has never succeeded in production
+
+**Severity:** Low (90-day retention has never run; old `job_runs` and their objects are kept, not
+lost — nothing is deleted wrongly, nothing else depends on it)
+**Discovered:** 2026-09-25, noticed while verifying A.3: `scrapeflow-cleanup-29838420` `Failed`
+(`BackoffLimitExceeded`, 7 attempts 03:00–03:06 UTC). The pod was gone with the Job, so the cause
+was reproduced on the deployed image (`421cbfe`), not read from its log.
+**Status:** 🔴 **Open — owner's call 2026-09-25: file it, pick it up later.** Not a Phase 4 item
+(backlog §4); the CronJob survives the migration. Infra repo only.
+
+### What happens
+
+`clusters/k3s-server/scrapeflow/app/cleanup-cronjob.yaml` runs
+`command: ["python", "scripts/cleanup_old_runs.py"]`. Three failures, each masked by the one
+before it:
+
+1. **`python` is the system interpreter** (`/usr/local/bin/python`). `api/Dockerfile` installs
+   every dependency with `uv sync` into **`/app/.venv`** only — true of every image since before the
+   CronJob was added (2026-04-16, infra `c45bf98`). → `ModuleNotFoundError: No module named
+   'sqlalchemy'`.
+2. **Run as a path, `sys.path[0]` is `scripts/`, not `/app`**, and the project is not installed
+   (`--no-install-project`). → `ModuleNotFoundError: No module named 'app'`.
+3. **`app.settings` validates two Fernet keys the CronJob never sets** — `LLM_KEY_ENCRYPTION_KEY`
+   and `CREDENTIALS_ENCRYPTION_KEY` (the API Deployment reads both from `scrapeflow-app-secrets`).
+   → `2 validation errors for Settings`.
+
+**It has never run.** The CronJob keeps 3 successful Jobs (`successfulJobsHistoryLimit: 3`) and
+holds none.
+
+### Fix
+
+In `cleanup-cronjob.yaml`:
+
+- `command: ["/app/.venv/bin/python", "-m", "scripts.cleanup_old_runs"]` — the image's `WORKDIR`
+  is `/app`, so `-m` puts `/app` on `sys.path`.
+- Add `LLM_KEY_ENCRYPTION_KEY` and `CREDENTIALS_ENCRYPTION_KEY` as `secretKeyRef`s to
+  `scrapeflow-app-secrets`, copied from `api.yaml`.
+
+Checked on the deployed image with placeholder values: gets past all three and into the script's
+own code. ⚠️ **The first successful run is a real delete** of every run older than 90 days (the
+backlog since April) — trigger it deliberately with `kubectl -n scrapeflow create job
+--from=cronjob/scrapeflow-cleanup cleanup-manual` and read its log, rather than meeting it at 03:00.
+
+⚠️ **Knock-on for the runbook:** the handoff's *"`kubectl exec … /app/.venv/bin/python
+scripts/<name>.py`"* line fails with failure 2 in a fresh container of this image; it evidently
+worked in the API pod on 2026-09-19 for a reason not established (prod exec was not available to
+check). `python -m scripts.<name>` works in both — prefer it.
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised
