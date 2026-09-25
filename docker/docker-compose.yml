@@ -96,6 +96,24 @@ services:
       retries: 30
       start_period: 30s
 
+  # Registers the `scrapeflow` namespace with 30-day retention (ADR-009 §2c), or resets the
+  # retention on an existing one. One-shot on the admin-tools image, which carries the
+  # `temporal` CLI; re-runs on every `up` and is a no-op beyond re-setting retention.
+  # Shows as `exited (0)` in `compose ps`. k8s: the scrapeflow-temporal-init Job.
+  temporal-namespace:
+    image: temporalio/admin-tools:${TEMPORAL_VERSION:-1.31.0}
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: scrapeflow
+      TEMPORAL_NAMESPACE_RETENTION: 720h
+    volumes:
+      - ./temporal/create-namespace.sh:/scripts/create-namespace.sh:ro
+    entrypoint: ['/bin/sh']
+    command: /scripts/create-namespace.sh
+
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
