@@ -42,10 +42,10 @@
 | A.1 | Temporal persistence: second Postgres StatefulSet, two databases | ✅ 2026-09-21 (local + k8s; infra `de903a2`, verified in prod) |
 | A.2 | Temporal server Deployment (`temporalio/server` + schema init container, standard visibility) | ✅ 2026-09-22 (local + k8s; infra `e8f32e1`, verified in prod) — TL call revised the same day: `auto-setup` is deprecated |
 | A.3 | Namespace registration init Job, retention 30 d | ✅ 2026-09-25 (local + k8s; infra `60b0aee`, verified in prod) |
-| A.4 | Temporal Web UI — ClusterIP only, no ingress | ⬜ |
+| A.4 | Temporal Web UI — ClusterIP only, no ingress | ✅ 2026-09-25 (local + k8s; infra `cd7b36c`, verified in prod) |
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ⬜ |
 | A.6 | Workflow-worker Deployment in the infra repo | ⬜ |
-| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui`, `workflow-worker` ⬜ |
+| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui` ✅ 2026-09-25 · `workflow-worker` ⬜ |
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ⬜ |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
@@ -296,6 +296,13 @@ recreate a TTL-deleted Job every reconcile. Re-run = `kubectl delete job`, Flux 
 tenant's runs share one listing). Access: `kubectl -n scrapeflow port-forward svc/temporal-ui 8080`.
 Document the port-forward line in the infra README.
 **Depends on:** A.2
+**Done 2026-09-25.** `temporalio/ui:2.54.1` (own version line — `TEMPORAL_UI_VERSION` in compose,
+not `TEMPORAL_VERSION`). Local: `temporal-ui` in compose, `http://localhost:8080`. Prod: infra
+`infrastructure/temporal-ui.yaml` — Deployment + ClusterIP Service **`scrapeflow-temporal-ui`**
+(prefixed like every other object; the line above predates it), `/healthz` probes. Access:
+`kubectl -n scrapeflow port-forward svc/scrapeflow-temporal-ui 8080`. `TEMPORAL_DEFAULT_NAMESPACE=scrapeflow`,
+`TEMPORAL_CORS_ORIGINS=http://localhost:8080` on both halves. Verified: `/healthz` OK, namespace
+`scrapeflow` `REGISTERED` with 30 d retention, server 1.31.0 seen through the UI's API; no Ingress.
 
 #### A.5 — Workflow-worker scaffold + `HelloWorkflow`
 

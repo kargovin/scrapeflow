@@ -114,6 +114,21 @@ services:
     entrypoint: ['/bin/sh']
     command: /scripts/create-namespace.sh
 
+  # Temporal Web UI — http://localhost:8080. A write-capable control plane with no auth of its
+  # own (ADR-009 §2b); in k8s it is ClusterIP only and reached by port-forward. Its own version
+  # line — not TEMPORAL_VERSION.
+  temporal-ui:
+    image: temporalio/ui:${TEMPORAL_UI_VERSION:-2.54.1}
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_DEFAULT_NAMESPACE: scrapeflow
+      TEMPORAL_CORS_ORIGINS: http://localhost:8080
+    ports:
+      - '8080:8080'
+
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes

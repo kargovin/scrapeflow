@@ -143,6 +143,21 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **A.4 is done on both halves (2026-09-25, second session) — Temporal Web UI, ClusterIP only.**
+Owner: "code up both and commit and push; this to dev and k8s to prod". Local: `temporal-ui` in
+compose (`temporalio/ui:${TEMPORAL_UI_VERSION:-2.54.1}`, `localhost:8080`). Prod: infra
+`infrastructure/temporal-ui.yaml` (Deployment + ClusterIP `scrapeflow-temporal-ui:8080`, `/healthz`
+probes, no Ingress) + kustomization line + README section and DNS row, infra `cd7b36c` — **the
+infra push was allowed this time**. Flux applied it; rollout green; through a port-forward:
+`/healthz` OK, namespace `scrapeflow` `REGISTERED` at 2592000 s (30 d), server 1.31.0; no real
+error lines. Notes:
+
+- **The UI is its own version line** (2.x) — not bumped with `TEMPORAL_VERSION`; separate compose var.
+- **Service is `scrapeflow-temporal-ui`**, not the backlog's `temporal-ui` — namespace prefix convention.
+  Port-forward: `kubectl -n scrapeflow port-forward svc/scrapeflow-temporal-ui 8080`.
+- `TEMPORAL_CORS_ORIGINS=http://localhost:8080` on both halves, so keep the forwarded port at 8080.
+- **Next: A.5** — workflow-worker scaffold in `api/` + `HelloWorkflow` (first application code of Phase 4's build).
+
 🔷 **A.3 is done on both halves (2026-09-25) — namespace `scrapeflow` registered, retention 30 d,
 local and prod.** Owner's "build on both, don't commit", then "push and verify". Local:
 `docker/temporal/create-namespace.sh` (canonical) + `temporal-namespace` one-shot in compose
@@ -174,7 +189,7 @@ unreachable address → exit 1. Things from the build:
   Owner's call: pick up later. ⚠️ Knock-on: the *How to run in prod* line in the reference table
   (`/app/.venv/bin/python scripts/<name>.py`) fails in a fresh container of this image; use
   `python -m scripts.<name>`.
-- **Next: A.4** — Temporal Web UI, ClusterIP only, no ingress (local `temporal-ui` first).
+- ~~**Next: A.4**~~ ✅ done the same day — the block above.
 
 🔷 **A.2 is done on both halves (2026-09-22, second session) — the engine is up in prod.** Owner's
 "build all" → `infrastructure/temporal.yaml` (four objects, A.1's ConfigMap pattern; the script
@@ -669,9 +684,10 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up A.4 in `phase4-implementation-backlog.md`** — Temporal Web UI, ClusterIP only, no
-   ingress; local `temporal-ui` first, then k8s + the port-forward line in the infra README.
-   **Per-task ordering: local → k8s → next task.** ~~A.3~~ ✅ both halves 2026-09-25 (infra
+0. **Pick up A.5 in `phase4-implementation-backlog.md`** — workflow-worker scaffold in `api/`
+   (`temporalio` dep, `app/workflows/`, `HelloWorkflow`, time-skipping test); A.6 is its k8s half.
+   **Per-task ordering: local → k8s → next task.** ~~A.4~~ ✅ both halves 2026-09-25 (infra
+   `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
    `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
    app, `e8f32e1` infra). ~~A.1~~ ✅ both halves 2026-09-21 (`f8e99bf` app, `de903a2` infra). The
    eight open items at the backlog's foot are owner/Architect calls; none blocks Group A.
@@ -847,6 +863,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-25 *(clock, second session)* | **🔷 A.4 — Temporal Web UI built, deployed, verified in prod; A.4 ✅.** Read-in; owner: "code up both and commit and push; this to dev and k8s to prod" → compose `temporal-ui` (2.54.1, own version var) verified against the local server and namespace; infra manifest (ClusterIP only, `/healthz` probes), kustomization line, README section + DNS row, `--dry-run=server` clean, committed and pushed; Flux applied, rollout green, verified through a port-forward. Docs: backlog (A.4/A.7 status, A.4 body), this file | infra `cd7b36c` · app (this commit) |
 | 2026-09-25 *(clock)* | **🔷 A.3 — namespace registration built, deployed, verified in prod; A.3 ✅. BUG-019 filed.** Read-in; owner asked where a namespace lives, what a namespace is, and whether other services' namespaces collide → explained (a row in `temporal.namespaces`; isolates IDs/queues/retention per namespace, not compute or access). Owner: "start A.3; build on both local and server but do not commit" → script + compose one-shot verified locally (create, drift-reset, unreachable → exit 1), k8s Job `kubectl apply`'d and verified. Spotted the cleanup CronJob `Failed`; owner: "check the logs" → pod gone, reproduced on the deployed image: never succeeded (BUG-019). Owner: "file it … push and verify on prod … commit dev and push origin, not prod" → BUG-019 filed, infra pushed + Flux adoption verified, app committed on `develop` and pushed. | infra `60b0aee` · app (this commit) |
 | 2026-09-22 *(clock, second session)* | **🔷 A.2 — k8s half built, deployed, verified in prod; A.2 ✅.** Read-in; owner: "lets do a2 k8s part; explain your approach" → the four-object manifest, the compose→k8s mapping (init container not Job; `Recreate` as a decision; tcpSocket probes; the two password names; mount the subdirectory only), sizing against the node (168 % CPU limits), and two things the backlog lacked: `NUM_HISTORY_SHARDS` is immutable after first start, and the CLI lives in admin-tools. "how will bind the setup and dynamicconfig files" → ConfigMap → volume → volumeMount, no exec bit, directory not subPath so dynamic config refreshes live. "ah okay we are duplicating it?" → yes for the script (kustomize cannot cross repos; A.1's precedent; app repo canonical), no for dynamic config (per-environment). "okay build all but dont commit" → manifest (script spliced by `sed`, `diff`-identical), kustomization line, `--dry-run=server` clean, compose `NUM_HISTORY_SHARDS: 4`, local server recreated and SERVING. "do all" → both commits; the classifier blocked the infra push (owner pushed). Flux ~60 s; schema 0.0 → 1.19 / 1.14; Ready +70 s; zero boot errors; SERVING; `rollout restart` → zero updates. Node 168 → 175 % CPU limits. Docs: backlog (A.2/A.7 rows, A.2 body, A.7 progress), infra README, this file | `a0008af` + this closeout; infra `e8f32e1` (`main`, deployed) |
 | 2026-09-22 *(clock)* | **🔷 A.2 — TL call reversed, then local half built and verified.** Read-in, then owner: "whats auto setup mode?" → explained the auto-setup entrypoint (wait → create → setup/update-schema ×2 → namespace → exec server) as Alembic-on-startup for Temporal. Owner: the Docker Hub page says **deprecated** → verified (last tag ~8 months old) and read the replacement — `samples-server/compose/docker-compose-postgres.yml`: `temporalio/server` + two `admin-tools` one-shots (schema, namespace). "update the backlog" → A.2 rewritten with the original call struck through, init-container shape for k8s, two-images-one-version trap, no-`create` rule; A.3 gains the reference confirmation + the typo warning; A.7 / A.1 / `temporal-full-migration.md` §7 swept. Explained dynamic config (static vs dynamic, value/constraints, what C.13/E.0 will add, what must *not* go there — `limit.blobSize`, retry policies, retention). Then, one block at a time on "go": `setup-schema.sh` → compose services → bring-up. Verified: schema 1.19 / 1.14, dynamic config accepted, SERVING, second `up` = zero updates. Docs: backlog (status, A.2 body, A.7), this file | A.2 commit + this closeout |
