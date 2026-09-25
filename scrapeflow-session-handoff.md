@@ -154,8 +154,13 @@ error lines. Notes:
 
 - **The UI is its own version line** (2.x) — not bumped with `TEMPORAL_VERSION`; separate compose var.
 - **Service is `scrapeflow-temporal-ui`**, not the backlog's `temporal-ui` — namespace prefix convention.
-  Port-forward: `kubectl -n scrapeflow port-forward svc/scrapeflow-temporal-ui 8080`.
-- `TEMPORAL_CORS_ORIGINS=http://localhost:8080` on both halves, so keep the forwarded port at 8080.
+  Port-forward: `kubectl -n scrapeflow port-forward svc/scrapeflow-temporal-ui 8081:8080` — **8081**,
+  because the local compose UI holds 8080 (the owner hit the clash; the first README said 8080).
+- **The forwarded port does not matter.** `TEMPORAL_CORS_ORIGINS=http://localhost:8080` is set on both
+  halves but is not a gate for the UI's own pages: a terminate call carrying `Origin:
+  http://localhost:8081` reached Temporal (404 *workflow not found*), and the same call without the
+  CSRF token got 400 — the CSRF token is the gate. My first write-up said "keep 8080"; it was untested
+  and wrong. Owner verified the prod UI in a browser on 8081: `scrapeflow`, 0 workflows, 2.54.1.
 - **Next: A.5** — workflow-worker scaffold in `api/` + `HelloWorkflow` (first application code of Phase 4's build).
 
 🔷 **A.3 is done on both halves (2026-09-25) — namespace `scrapeflow` registered, retention 30 d,

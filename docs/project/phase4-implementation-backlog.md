@@ -300,7 +300,7 @@ Document the port-forward line in the infra README.
 not `TEMPORAL_VERSION`). Local: `temporal-ui` in compose, `http://localhost:8080`. Prod: infra
 `infrastructure/temporal-ui.yaml` — Deployment + ClusterIP Service **`scrapeflow-temporal-ui`**
 (prefixed like every other object; the line above predates it), `/healthz` probes. Access:
-`kubectl -n scrapeflow port-forward svc/scrapeflow-temporal-ui 8080`. `TEMPORAL_DEFAULT_NAMESPACE=scrapeflow`,
+`kubectl -n scrapeflow port-forward svc/scrapeflow-temporal-ui 8081:8080` (8081: the local compose UI holds 8080; any free port works — writes are CSRF-token gated, not origin-gated, verified). `TEMPORAL_DEFAULT_NAMESPACE=scrapeflow`,
 `TEMPORAL_CORS_ORIGINS=http://localhost:8080` on both halves. Verified: `/healthz` OK, namespace
 `scrapeflow` `REGISTERED` with 30 d retention, server 1.31.0 seen through the UI's API; no Ingress.
 
