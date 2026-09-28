@@ -21,6 +21,7 @@ dependencies = [
     "croniter>=3.0.0",
     "cryptography>=50.0.0",
     "xxhash>=3.0.0",
+    "temporalio>=1.33.0",
 ]
 
 [project.optional-dependencies]

@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     nats_url: str = "nats://localhost:4222"
     nats_max_deliver: int = 3  # max delivery attempts before NATS stops redelivering (ADR-001)
 
+    # Temporal
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "scrapeflow"
+
     # MinIO
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "scrapeflow"
