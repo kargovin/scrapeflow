@@ -238,6 +238,29 @@ services:
         - action: rebuild
           path: ../api/pyproject.toml
 
+  # Temporal workflow worker — a second entrypoint of the api image, not a separate service
+  # (phase4-implementation-backlog A.5). No hot reload: restart it to pick up code changes.
+  # stop_grace_period sits above the worker's 20 s graceful_shutdown_timeout, as k8s's 30 s
+  # terminationGracePeriodSeconds does; Docker's 10 s default would SIGKILL mid-drain.
+  workflow-worker:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+      target: test
+    command: uv run python -m app.workflows.worker_main
+    env_file:
+      - ../.env
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: scrapeflow
+    volumes:
+      - ../api/app:/app/app
+    depends_on:
+      temporal-namespace:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   # ── Python Playwright worker ─────────────────────────────────────────────────
 
   playwright-worker:
