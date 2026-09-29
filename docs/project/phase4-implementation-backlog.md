@@ -51,7 +51,7 @@
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ✅ 2026-09-29 (local; nothing calls them until B.2) |
 | B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ✅ 2026-09-29 (local, compose service included; not released) |
-| B.3 | Go second Deployment (Temporal-bound) | ⬜ |
+| B.3 | Go second Deployment (Temporal-bound) | 🔷 2026-09-29 built, infra `ff78745` **unpushed** — pushes with B.5's image tag |
 | B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ⬜ |
 | B.5 | 🚀 Go port release | ⬜ |
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ⬜ |
@@ -558,6 +558,21 @@ activity boundary is a new wire; it gets a producer-side definition on day one.
 **What:** `app/http-worker-temporal.yaml` — same image, `WORKER_MODE=temporal`, Temporal env, **no
 NATS env, no DB env** (light-worker rule survives). `ImagePolicy` shared with the NATS one.
 **Depends on:** B.2
+
+**Built (2026-09-29, infra `ff78745`, unpushed):**
+- `app/http-worker-temporal.yaml` — Deployment `scrapeflow-http-worker-temporal`, container
+  `http-worker`, `scrapeflow-http-worker-policy` setter marker (no new `ImagePolicy`). Env: the NATS
+  Deployment's minus `NATS_URL`/`NATS_MAX_DELIVER`, plus `WORKER_MODE`/`TEMPORAL_*`;
+  `CREDENTIALS_ENCRYPTION_KEY` stays (`config.Load` requires it). `RollingUpdate` (stateless poller,
+  as A.6), grace 30 s over the 20 s `WorkerStopTimeout`, `wait-for-temporal` + `wait-for-minio`.
+  Resources copied from the NATS Deployment. Kustomization line + infra README section.
+- ⚠️ **The file still pins `421cbfe`'s tag**, which has no `WORKER_MODE` → crash-loop. Hand-set it
+  to the B.5 image before pushing (A.8's order: ff `main` → Flux tag bump → rebase → set tag → push).
+- `WORKER_POOL_SIZE` unset (NATS parity) → `runtime.NumCPU()`, the **node's** count, not the 500m
+  limit. Same on the NATS worker today.
+- **Verified:** `kubectl apply --dry-run=server` + `kubectl kustomize` clean; the local B.2 image
+  run with **only** the manifest's env on the compose network → `Temporal worker started …
+  task_queue=scrape-http`, SIGTERM → exit 0.
 
 #### B.4 — `ScrapeProbeWorkflow` + the §9 pre-gate
 
