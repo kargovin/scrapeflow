@@ -143,6 +143,28 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **A.6 is built and committed, NOT pushed (2026-09-29, second session) — held for A.8 by the
+owner's call ("do A6 complete and dont push until A8").** Infra `a81b81c` on the infra repo's `main`,
+1 ahead of `origin/main`: `app/workflow-worker.yaml` (Deployment `scrapeflow-workflow-worker`, api
+image, `uv run python -m app.workflows.worker_main`, `RollingUpdate`, grace 30 s, `wait-for-temporal`
+init container, 50m/128Mi → 250m/256Mi) + kustomization line + README *Workflow worker* section.
+`kubectl apply --dry-run=server` clean. Notes:
+
+- ⚠️ **Why it waits:** the manifest pins today's api tag (`421cbfe`), which has no `temporalio` and
+  no `app/workflows/` — pushed now, the pod crash-loops on import. **A.8 order: push `develop`, ff
+  `main` → wait for the new api image and Flux's tag-bump commit in the infra repo → rebase
+  `a81b81c` over it → push infra → verify.**
+- **No new `ImagePolicy`** — the `scrapeflow-api-policy` setter marker on the container is enough
+  (the cleanup CronJob's precedent). The backlog's "add an ImagePolicy entry" was over-specified.
+- **Both Fernet keys are in the env** — `app.settings` will not import without them (BUG-019's trap).
+- **Verified locally on the production-target image** (the compose worker uses the `test` target, so
+  it proved nothing about `appuser` or the prod stage): only the manifest's env → `Workflow worker
+  started`; `HelloWorkflow` → `COMPLETED` with the compose worker stopped; SIGTERM → exit 0 in
+  0.34 s. `uv run` builds the project into the venv on each start, same as the API CMD. The compose
+  `workflow-worker` was restarted afterwards and is running.
+- **Next: A.8** — the engine-up release (read its corrected text: admin-tools pod for the CLI; the
+  A.6 push order above; capacity numbers; the backup owner item).
+
 🔷 **A.5 is done, and A.7 with it (2026-09-26 → 09-29, one session) — the workflow worker exists
 locally and `HelloWorkflow` has run on the compose server.** Local only; A.6 is its k8s half.
 Built one checklist step at a time at the owner's direction, with the owner learning Temporal as it
@@ -730,9 +752,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up A.6 in `phase4-implementation-backlog.md`** — the workflow-worker Deployment in the
-   infra repo (the k8s half of A.5; its text was corrected on 2026-09-29 — `uv run`, not bare
-   `python`). Then A.8, the engine-up release. **Per-task ordering: local → k8s → next task.**
+0. **Pick up A.8 in `phase4-implementation-backlog.md`** — the engine-up release. ~~A.6~~ ✅
+   built 2026-09-29, infra `a81b81c` **committed, unpushed on purpose** — push it inside A.8, after
+   the new api image is tagged (order in *Current state*). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
    `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
@@ -910,6 +932,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-29 *(clock, second session)* | **🔷 A.6 built, held for A.8.** Read-in; flagged that prod's api image predates A.5, so A.6 cannot go out before A.8's ff. Owner: "do A6 complete and dont push until A8" → manifest + kustomization + README in the infra repo, server dry-run clean, committed unpushed. Verified the exact k8s command and env on a locally built **production-target** image as `appuser` against the compose Temporal: started, ran `HelloWorkflow`, drained on SIGTERM. Found: no new `ImagePolicy` needed (setter marker); both Fernet keys required. Docs: backlog (A.6 status + *Built* note, A.8 push order), this file | infra `a81b81c` (unpushed) + app docs commit |
 | 2026-09-26 → 09-29 *(clock, one session over four days)* | **🔷 A.5 built and verified locally; A.7 complete.** Read-in; owner: "list the A items as a checkbox", then "break up A5 into small parts" → a nine-step checklist, worked **one step (often one sub-item) at a time**, each committed on "commit". Long concept detours at the owner's request, all in plain words and diagrams mapped onto today's `/jobs` → NATS → workers → `result_consumer` flow: what a task queue is (a named to-do list on the server; workers poll), server vs workflow vs worker vs activity, why a worker is not generic (it runs only what it registered), why the LLM worker hosts no workflow, fixed vs variable recipes (`PipelineWorkflow` interprets a stored block list — ADR-009 §4/§6, Group C), the pipeline endpoints, the `app.state` client (C.5, not now), the signal/drain code line by line, the `docker compose run --entrypoint temporal` idiom, and that tests run on a private in-memory server. Owner decisions: queue naming, `RetryPolicy(maximum_attempts=3)`, dataclass inputs, 20 s drain, `WORKFLOW_QUEUE` in tests, the failure-path test. Owner ran 6h by hand from a printed procedure. **Found:** bare `python` in the api image has no packages → A.6's command corrected; A.8's CLI-in-pod step corrected; my own wrong "correction" of the test command withdrawn. 283 API tests. Docs: backlog (A.5/A.7 status, A.5 *Built* note, A.6/A.7/A.8 corrections), this file | `9a365d0`, `831b22f`, `3eea07f`, `a179e7c`, `c1ba298`, `147f3fb` + this closeout (all `develop`, unpushed) |
 | 2026-09-25 *(clock, second session)* | **🔷 A.4 — Temporal Web UI built, deployed, verified in prod; A.4 ✅.** Read-in; owner: "code up both and commit and push; this to dev and k8s to prod" → compose `temporal-ui` (2.54.1, own version var) verified against the local server and namespace; infra manifest (ClusterIP only, `/healthz` probes), kustomization line, README section + DNS row, `--dry-run=server` clean, committed and pushed; Flux applied, rollout green, verified through a port-forward. Owner opened it in a browser on 8081 (local compose holds 8080) → the README's "keep 8080" advice (mine, untested) tested and withdrawn: writes are CSRF-token gated, not origin-gated; docs now say `8081:8080`. Docs: backlog (A.4/A.7 status, A.4 body), infra README, this file. Session closed at the owner's "finish this session"; next is A.5 | infra `cd7b36c`, `eb94302` · app `fd71f69`, `26731eb` + this closeout |
 | 2026-09-25 *(clock)* | **🔷 A.3 — namespace registration built, deployed, verified in prod; A.3 ✅. BUG-019 filed.** Read-in; owner asked where a namespace lives, what a namespace is, and whether other services' namespaces collide → explained (a row in `temporal.namespaces`; isolates IDs/queues/retention per namespace, not compute or access). Owner: "start A.3; build on both local and server but do not commit" → script + compose one-shot verified locally (create, drift-reset, unreachable → exit 1), k8s Job `kubectl apply`'d and verified. Spotted the cleanup CronJob `Failed`; owner: "check the logs" → pod gone, reproduced on the deployed image: never succeeded (BUG-019). Owner: "file it … push and verify on prod … commit dev and push origin, not prod" → BUG-019 filed, infra pushed + Flux adoption verified, app committed on `develop` and pushed. | infra `60b0aee` · app (this commit) |

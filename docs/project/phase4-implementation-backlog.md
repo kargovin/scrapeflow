@@ -44,7 +44,7 @@
 | A.3 | Namespace registration init Job, retention 30 d | ✅ 2026-09-25 (local + k8s; infra `60b0aee`, verified in prod) |
 | A.4 | Temporal Web UI — ClusterIP only, no ingress | ✅ 2026-09-25 (local + k8s; infra `cd7b36c`, verified in prod) |
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ✅ 2026-09-29 (local; `HelloWorkflow` completed on the compose server) |
-| A.6 | Workflow-worker Deployment in the infra repo | ⬜ |
+| A.6 | Workflow-worker Deployment in the infra repo | ✅ 2026-09-29 (infra `a81b81c`, committed, **unpushed until A.8** — prod's image has no `app.workflows` yet; prod-target image verified locally) |
 | A.7 | Local dev: compose services for Temporal + workflow worker | ✅ `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui` ✅ 2026-09-25 · `workflow-worker` ✅ 2026-09-29 — **A.7 ✅** |
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ⬜ |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
@@ -362,6 +362,23 @@ mirroring `api`'s so it follows the same tag.
 Leave `terminationGracePeriodSeconds` at ≥ 30 s — the worker drains for up to 20 s (A.5).
 **Verify:** pod logs `Workflow worker started … task_queue=workflow`; Web UI (port-forward) lists the poller.
 **Depends on:** A.2, A.5
+**Built 2026-09-29** (infra `a81b81c`, **not pushed**): Deployment `scrapeflow-workflow-worker`,
+`RollingUpdate`, `terminationGracePeriodSeconds: 30`, a `wait-for-temporal` init container, 50m/128Mi
+requests, 250m/256Mi limits (the local worker sits at ~55 MiB). No Service (it only dials out).
+- **No new `ImagePolicy`.** The container carries the `scrapeflow-api-policy` setter marker, which is
+  how `cleanup-cronjob.yaml` already follows the api tag; the automation's `update.path` covers `app/`.
+- **Env is what `app.settings` needs, not only what Hello needs:** both Fernet keys are required at
+  import (BUG-019's third trap), plus the Temporal pair, `DATABASE_URL` and MinIO. No NATS, Redis or
+  Clerk — later tasks add what their activities use.
+- ⚠️ **Push only at A.8, after the new api image exists.** The manifest pins today's tag (`421cbfe`),
+  which has neither `temporalio` nor `app/workflows/` — pushed early, the pod crash-loops on import
+  until Flux bumps the tag. A.8 order: ff `main` → image built and Flux bumps the tag (rebase the
+  infra commit over its automation commits) → push infra.
+- **Verified locally on the production-target image** (not the compose `test` target): run as
+  `appuser` with only the manifest's env → `Workflow worker started … task_queue=workflow`;
+  `HelloWorkflow` (compose worker stopped) → `COMPLETED`; `docker stop` → exit 0 in 0.34 s after
+  `stopping`/`stopped`. `uv run` installs the project into `/app/.venv` at each start
+  (`Built scrapeflow-api`), as the API's own CMD does — works as non-root.
 
 #### A.7 — Local dev
 
@@ -383,7 +400,8 @@ sets **`stop_grace_period: 30s`** — Docker's 10 s default would SIGKILL mid-dr
 #### A.8 — 🚀 Engine-up release + proof
 
 **What:** ff `main` (the api image rebuilds for A.5; nothing else changes behaviour — no NATS
-message, no schema, no route). Flux applies A.1–A.6. Then:
+message, no schema, no route). Flux applies A.1–A.6 — ⚠️ **A.6 (infra `a81b81c`) is held back:
+push it only after the new api tag is built and Flux has bumped it** (see A.6's *Built* note). Then:
 1. Start `HelloWorkflow` and watch it complete in the port-forwarded UI. ⚠️ The api image has **no
    `temporal` CLI** — start it from a one-off `temporalio/admin-tools` pod (A.3's pattern), as A.7 did.
 2. **Capacity:** `kubectl describe node` — requests and **limit overcommit** before/after. Record
