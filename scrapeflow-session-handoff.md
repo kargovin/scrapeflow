@@ -164,8 +164,8 @@ backlog's A.8 *Done* note. Notes:
 - **A.8 review (same session) — found and recorded:** (1) 🔴 **C.5 never said the API Deployment
   needs `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`** — the default is `localhost:7233`, so every prod
   trigger would fail to connect. **Owner: do it in Group A → new task A.9** — `app/api.yaml` gains
-  the two env vars, infra `7ae6a9b`, **committed; push pending the owner's go** (restarts the API,
-  ~80 s). Local needed nothing (`.env`); `connect()` from the compose api verified. C.5 step 6 keeps
+  the two env vars, infra `7ae6a9b`, **pushed and verified in prod** (API restarted cleanly; `connect()`
+  from inside the API pod reached the server). Local needed nothing (`.env`); `connect()` from the compose api verified. C.5 step 6 keeps
   only the lazy-vs-eager decision.
   (2) Stale "next is engine up" lines in `phase4-backlog.md`, `temporal-full-migration.md`, this
   file's git block and the release-policy memory (which also said engine up needed no app release —
@@ -787,8 +787,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 0. **Pick up B.1 in `phase4-implementation-backlog.md`** — activity contracts; Group B (*worker
    port*) opens. ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
-   `ddde657`). **A.9** (Temporal env on the API) built, infra `7ae6a9b` — push + verify in prod if
-   not done. Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
+   `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
    `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`

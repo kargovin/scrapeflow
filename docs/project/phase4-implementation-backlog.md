@@ -47,7 +47,7 @@
 | A.6 | Workflow-worker Deployment in the infra repo | ✅ 2026-09-29 (infra `ddde657`, pushed inside A.8; verified in prod) |
 | A.7 | Local dev: compose services for Temporal + workflow worker | ✅ `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui` ✅ 2026-09-25 · `workflow-worker` ✅ 2026-09-29 — **A.7 ✅** |
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ✅ 2026-09-29 (`main` → `ce614d8`; `HelloWorkflow` COMPLETED in prod) |
-| A.9 | Temporal env on the API Deployment (added at the A.8 review) | ✅ 2026-09-29 local (already via `.env`) · infra `7ae6a9b` committed |
+| A.9 | Temporal env on the API Deployment (added at the A.8 review) | ✅ 2026-09-29 (local already via `.env`; infra `7ae6a9b`, verified in prod) — **Group A ✅** |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
 | B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ⬜ |
@@ -445,6 +445,9 @@ and `connect()` from inside the pod reaches the server. Pushing restarts the API
 **Depends on:** A.2
 **Built 2026-09-29:** infra `7ae6a9b`. Local verified: `connect()` from the compose api container →
 `temporal:7233`, namespace `scrapeflow`, server 1.31.0. Server dry-run clean; `kubectl diff` = the two vars.
+**Deployed 2026-09-29:** pushed on the owner's go; Flux applied, API `Recreate` green (new pod Ready
+in ~70 s), all five loops started, `/health` 200. `connect()` from inside the prod API pod (via
+`/app/.venv/bin/python`) → `scrapeflow-temporal:7233`, namespace `scrapeflow`, server 1.31.0.
 
 ---
 
