@@ -9,7 +9,7 @@
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
 > **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
-> **Last updated:** 2026-09-29 (Group A ✅ — engine up released; B.1 ✅; D.3 corrected) · **Tracking:** the status table below is the tracker.
+> **Last updated:** 2026-09-29 (Group A ✅ — engine up released; B.1 ✅; B.2 ✅; D.3 corrected) · **Tracking:** the status table below is the tracker.
 
 ---
 
@@ -50,7 +50,7 @@
 | A.9 | Temporal env on the API Deployment (added at the A.8 review) | ✅ 2026-09-29 (local already via `.env`; infra `7ae6a9b`, verified in prod) — **Group A ✅** |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ✅ 2026-09-29 (local; nothing calls them until B.2) |
-| B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ⬜ |
+| B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ✅ 2026-09-29 (local, compose service included; not released) |
 | B.3 | Go second Deployment (Temporal-bound) | ⬜ |
 | B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ⬜ |
 | B.5 | 🚀 Go port release | ⬜ |
@@ -520,6 +520,38 @@ activity boundary is a new wire; it gets a producer-side definition on day one.
 - Tests: `testsuite.TestActivityEnvironment` — one success, one transient (retryable error type),
   one terminal (non-retryable), one dead-target-site (terminal — §10's Go divergence).
 **Depends on:** B.1
+**Built 2026-09-29.** Decisions taken in the build, owner calls where marked:
+- **One binary, env-selected mode.** `main()` branches on `WORKER_MODE` (default `nats`, so the
+  existing Deployment needs no edit); no Dockerfile `CMD` change — unlike the api image, whose second
+  entrypoint is a different command. `NATS_URL` is required in nats mode only; `TEMPORAL_ADDRESS`
+  (default `localhost:7233`) and `TEMPORAL_NAMESPACE` (default `scrapeflow`) are new.
+- **Shared pipeline in `internal/scrape`** — fetch → format → upload (`Run`, returns path + size +
+  `ContentHash`) and the classifier, moved verbatim from `worker/errors.go` with its tests. Both
+  transports import it; neither imports the other, so H deletes `internal/worker` whole. Steps 1–3
+  (validate, proxy, robots) stay duplicated (~25 lines) — extracting them would reshape
+  `handleMessage`, whose failure branches are interleaved with publish/ack.
+- **`internal/activity/scrape.go`:** task queue `scrape-http`, activity name `Scrape` (both
+  constants — the Python side must use the identical strings). Error types: `InvalidInput`,
+  `ProxyError`, `RobotsDisallowed`, `ScrapeFailed` (all non-retryable) and `StorageTransient`
+  (retryable). Messages match the NATS path's. Comments mirror `handleMessage`'s step structure and
+  it logs the same `Received job` / `Using proxy for job` lines (owner). Heartbeats at each stage —
+  ⚠️ **the SDK sends the first heartbeat at once and throttles the rest**, so only the first is
+  observable in a short activity.
+- **Activity-only worker** (`DisableWorkflowWorker`) — without it the Go SDK also polls the queue for
+  workflow tasks. Pool = `WORKER_POOL_SIZE`; `WorkerStopTimeout` 20 s (A.5 parity).
+- ⚠️ **`go.temporal.io/sdk` v1.49 requires Go 1.26** — `go.mod`'s directive moved to 1.26 and the
+  Dockerfile builder to `golang:1.26-alpine`. Plus `github.com/cespare/xxhash/v2`;
+  `ContentHash` is pinned against Python's `xxhash` values, leading-zero case included.
+- **Compose `http-worker-temporal`** added (owner — the local half lands with the code): same build,
+  `WORKER_MODE=temporal`, no NATS env, depends on `minio` + `temporal-namespace`. B.3 is now the
+  k8s manifest only.
+- **Verified:** Go suite green, golangci-lint clean on the new code; a Python workflow on the compose
+  server called `Scrape` through the B.1 contracts → valid `ScrapeOutput`, size equal to MinIO's
+  stat; a dead site → `ScrapeFailed`, non-retryable; SIGTERM → exit 0 in 0.2 s; NATS mode starts
+  and consumes normally on the same image.
+- ⚠️ **B.3/B.5 ordering:** the current prod tag's binary has no `WORKER_MODE`, so the Temporal
+  manifest pushed before the B.5 image would run NATS mode with no `NATS_URL` and crash-loop —
+  A.6's trap. Push the manifest with the new tag.
 
 #### B.3 — Go second Deployment
 

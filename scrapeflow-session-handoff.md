@@ -150,6 +150,21 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **B.2 — GO `Scrape` ACTIVITY BUILT (2026-09-29, third session).** Local only, not released.
+One binary, `WORKER_MODE=nats|temporal` (default `nats`); `internal/scrape` = the shared pipeline +
+classifier; `internal/activity/scrape.go` = the activity on `scrape-http`, name `Scrape`; compose
+`http-worker-temporal` running. Decisions in the backlog's B.2 *Built* note. Notes:
+
+- ⚠️ **Temporal Go SDK v1.49 needs Go 1.26** — Dockerfile builder bumped to `golang:1.26-alpine`.
+- ⚠️ **The dev NATS stream holds ~1.69 M unprocessed messages and the compose `http-worker` is not
+  running** (pre-existing — test runs publish to dev NATS). Starting any NATS-mode worker drains it.
+- **Smoke-testing a Go activity from Python:** a throwaway workflow in the api container
+  (`UnsandboxedWorkflowRunner`, own task queue) calling `execute_activity("Scrape", …,
+  task_queue="scrape-http", result_type=ScrapeOutput)` — delete the object it writes afterwards.
+- pre-commit's `golangci-lint` is still scoped to `^worker/` (never runs); `golangci-lint run` by
+  hand finds two pre-existing errcheck hits in `worker_robots_test.go`.
+- **Next: B.3** — the k8s Deployment `app/http-worker-temporal.yaml`; mind the tag ordering above.
+
 🔷 **B.1 — ACTIVITY CONTRACTS BUILT (2026-09-29, third session). Group B opens.** Local only;
 nothing calls them until B.2. `api/app/workflows/activities/contracts.py` (`ScrapeInput/Output`,
 `LLMInput/Output`, `StoredObject`), a twin in each worker, `contracts/test_activity_contract.py` +
@@ -808,8 +823,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up B.2 in `phase4-implementation-backlog.md`** — the Go `Scrape` activity. ~~B.1~~ ✅
-   2026-09-29 (activity contracts, local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
+0. **Pick up B.3 in `phase4-implementation-backlog.md`** — the Go Temporal Deployment (k8s only;
+   the compose half shipped with B.2). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
