@@ -134,7 +134,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-25 *(clock)*
+## Current state — as of 2026-09-29 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -142,6 +142,47 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **A.5 is done, and A.7 with it (2026-09-26 → 09-29, one session) — the workflow worker exists
+locally and `HelloWorkflow` has run on the compose server.** Local only; A.6 is its k8s half.
+Built one checklist step at a time at the owner's direction, with the owner learning Temporal as it
+went (the session spent as long on *what a workflow / worker / task queue / activity is* as on
+code). Six commits on `develop`, **not pushed**: `9a365d0` (dep + settings + queue constant),
+`831b22f` (client), `3eea07f` (`HelloWorkflow`), `a179e7c` (worker entrypoint), `c1ba298` (tests +
+compose service), `147f3fb` (backlog). 283 API tests green (281 → 283). What exists:
+`api/app/workflows/` — `queues.py` (`WORKFLOW_QUEUE = "workflow"`), `client.py` (`connect()`),
+`hello.py`, `worker_main.py` (SIGTERM/SIGINT → 20 s drain, three log lines); compose
+`workflow-worker` (`stop_grace_period: 30s`, no hot reload). Owner calls taken — all recorded in the
+backlog's A.5 *Built* note:
+
+- **Queues are named after the worker pool** — short, hyphenated, no prefix; all workflows share
+  `workflow`. Later: `scrape-http`, `scrape-playwright`, `llm`, `content`.
+- **Every activity call states `task_queue=` and a `RetryPolicy`** (Hello: `maximum_attempts=3`,
+  arbitrary) — Temporal's default is unlimited retries. **Dataclass input per workflow and activity.**
+- **`graceful_shutdown_timeout=20s`** (SDK default 0 cancels in-flight activities at once).
+- **Not in the FastAPI lifespan yet** — the API gets a stored client at C.5, where lazy vs eager
+  connect is still to decide (eager = a Temporal outage stops the whole API from starting).
+
+Found in the build:
+
+- ⚠️ **Bare `python` in the api image has no packages** (system interpreter; the deps are in
+  `/app/.venv`) — BUG-019's trap again. **A.6's command in the backlog was `[python, -m, …]` and
+  would have crash-looped** — corrected to `uv run python -m app.workflows.worker_main`. Earlier in
+  this session I had also "corrected" the backlog's `uv run pytest` to `python -m pytest`; that was
+  wrong and withdrawn — API tests are `docker compose exec api uv run pytest`.
+- **`uv` as PID 1 forwards SIGTERM** — `docker compose stop` → exit 0 in 0.38 s. This is what k8s
+  will do. **A.8's "start Hello from inside the workflow-worker pod" cannot work** (no `temporal` CLI
+  in the api image) — corrected to a one-off admin-tools pod.
+- **Time-skipping test server = an 81 MB binary downloaded on first use** into the container's
+  `/tmp` (~13 s first run, ~1 s after, re-downloaded on container recreate). A separate in-memory
+  server in the `default` namespace — tests never touch the compose Temporal. Retry test
+  mutation-checked; 15 s of backoff ran in 0.2 s.
+- Starting a workflow by hand: `docker compose run --rm --no-deps --entrypoint temporal
+  temporal-namespace workflow execute --type HelloWorkflow --task-queue workflow --input
+  '{"name": "…"}'` (borrows the admin-tools image and network). `hello-step8` is in the local UI.
+- The local `workflow-worker` was left **running** in the dev stack.
+- **Next: A.6** — the workflow-worker Deployment in the infra repo (read the corrected A.6 text
+  first: `uv run`, ≥ 30 s grace period, app-DB + MinIO credentials, an `ImagePolicy` entry).
 
 🔷 **A.4 is done on both halves (2026-09-25, second session) — Temporal Web UI, ClusterIP only.**
 Owner: "code up both and commit and push; this to dev and k8s to prod". Local: `temporal-ui` in
@@ -689,9 +730,10 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up A.5 in `phase4-implementation-backlog.md`** — workflow-worker scaffold in `api/`
-   (`temporalio` dep, `app/workflows/`, `HelloWorkflow`, time-skipping test); A.6 is its k8s half.
-   **Per-task ordering: local → k8s → next task.** ~~A.4~~ ✅ both halves 2026-09-25 (infra
+0. **Pick up A.6 in `phase4-implementation-backlog.md`** — the workflow-worker Deployment in the
+   infra repo (the k8s half of A.5; its text was corrected on 2026-09-29 — `uv run`, not bare
+   `python`). Then A.8, the engine-up release. **Per-task ordering: local → k8s → next task.**
+   ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
    `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
    app, `e8f32e1` infra). ~~A.1~~ ✅ both halves 2026-09-21 (`f8e99bf` app, `de903a2` infra). The
@@ -868,6 +910,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-26 → 09-29 *(clock, one session over four days)* | **🔷 A.5 built and verified locally; A.7 complete.** Read-in; owner: "list the A items as a checkbox", then "break up A5 into small parts" → a nine-step checklist, worked **one step (often one sub-item) at a time**, each committed on "commit". Long concept detours at the owner's request, all in plain words and diagrams mapped onto today's `/jobs` → NATS → workers → `result_consumer` flow: what a task queue is (a named to-do list on the server; workers poll), server vs workflow vs worker vs activity, why a worker is not generic (it runs only what it registered), why the LLM worker hosts no workflow, fixed vs variable recipes (`PipelineWorkflow` interprets a stored block list — ADR-009 §4/§6, Group C), the pipeline endpoints, the `app.state` client (C.5, not now), the signal/drain code line by line, the `docker compose run --entrypoint temporal` idiom, and that tests run on a private in-memory server. Owner decisions: queue naming, `RetryPolicy(maximum_attempts=3)`, dataclass inputs, 20 s drain, `WORKFLOW_QUEUE` in tests, the failure-path test. Owner ran 6h by hand from a printed procedure. **Found:** bare `python` in the api image has no packages → A.6's command corrected; A.8's CLI-in-pod step corrected; my own wrong "correction" of the test command withdrawn. 283 API tests. Docs: backlog (A.5/A.7 status, A.5 *Built* note, A.6/A.7/A.8 corrections), this file | `9a365d0`, `831b22f`, `3eea07f`, `a179e7c`, `c1ba298`, `147f3fb` + this closeout (all `develop`, unpushed) |
 | 2026-09-25 *(clock, second session)* | **🔷 A.4 — Temporal Web UI built, deployed, verified in prod; A.4 ✅.** Read-in; owner: "code up both and commit and push; this to dev and k8s to prod" → compose `temporal-ui` (2.54.1, own version var) verified against the local server and namespace; infra manifest (ClusterIP only, `/healthz` probes), kustomization line, README section + DNS row, `--dry-run=server` clean, committed and pushed; Flux applied, rollout green, verified through a port-forward. Owner opened it in a browser on 8081 (local compose holds 8080) → the README's "keep 8080" advice (mine, untested) tested and withdrawn: writes are CSRF-token gated, not origin-gated; docs now say `8081:8080`. Docs: backlog (A.4/A.7 status, A.4 body), infra README, this file. Session closed at the owner's "finish this session"; next is A.5 | infra `cd7b36c`, `eb94302` · app `fd71f69`, `26731eb` + this closeout |
 | 2026-09-25 *(clock)* | **🔷 A.3 — namespace registration built, deployed, verified in prod; A.3 ✅. BUG-019 filed.** Read-in; owner asked where a namespace lives, what a namespace is, and whether other services' namespaces collide → explained (a row in `temporal.namespaces`; isolates IDs/queues/retention per namespace, not compute or access). Owner: "start A.3; build on both local and server but do not commit" → script + compose one-shot verified locally (create, drift-reset, unreachable → exit 1), k8s Job `kubectl apply`'d and verified. Spotted the cleanup CronJob `Failed`; owner: "check the logs" → pod gone, reproduced on the deployed image: never succeeded (BUG-019). Owner: "file it … push and verify on prod … commit dev and push origin, not prod" → BUG-019 filed, infra pushed + Flux adoption verified, app committed on `develop` and pushed. | infra `60b0aee` · app (this commit) |
 | 2026-09-22 *(clock, second session)* | **🔷 A.2 — k8s half built, deployed, verified in prod; A.2 ✅.** Read-in; owner: "lets do a2 k8s part; explain your approach" → the four-object manifest, the compose→k8s mapping (init container not Job; `Recreate` as a decision; tcpSocket probes; the two password names; mount the subdirectory only), sizing against the node (168 % CPU limits), and two things the backlog lacked: `NUM_HISTORY_SHARDS` is immutable after first start, and the CLI lives in admin-tools. "how will bind the setup and dynamicconfig files" → ConfigMap → volume → volumeMount, no exec bit, directory not subPath so dynamic config refreshes live. "ah okay we are duplicating it?" → yes for the script (kustomize cannot cross repos; A.1's precedent; app repo canonical), no for dynamic config (per-environment). "okay build all but dont commit" → manifest (script spliced by `sed`, `diff`-identical), kustomization line, `--dry-run=server` clean, compose `NUM_HISTORY_SHARDS: 4`, local server recreated and SERVING. "do all" → both commits; the classifier blocked the infra push (owner pushed). Flux ~60 s; schema 0.0 → 1.19 / 1.14; Ready +70 s; zero boot errors; SERVING; `rollout restart` → zero updates. Node 168 → 175 % CPU limits. Docs: backlog (A.2/A.7 rows, A.2 body, A.7 progress), infra README, this file | `a0008af` + this closeout; infra `e8f32e1` (`main`, deployed) |
