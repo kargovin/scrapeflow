@@ -52,11 +52,11 @@
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ✅ 2026-09-29 (local; nothing calls them until B.2) |
 | B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ✅ 2026-09-29 (local, compose service included; not released) |
 | B.3 | Go second Deployment (Temporal-bound) | 🔷 2026-09-29 built, infra `ff78745` **unpushed** — pushes with B.5's image tag |
-| B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ⬜ |
+| B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | 🔷 2026-09-29 built + verified locally; **the prod gate runs at B.5** |
 | B.5 | 🚀 Go port release | ⬜ |
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ⬜ |
 | B.7 | LLM second Deployment + 🚀 release | ⬜ |
-| B.8 | Playwright worker: `PlaywrightScrape` activity (bot wall raises, container contract) | ⬜ |
+| B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ⬜ |
 | B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ⬜ |
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |
 | C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ⬜ |
@@ -585,6 +585,23 @@ on the scraper queue with a given `ScrapeInput` and returns the output. A script
 no LLM, no nondeterminism). Record the result in the handoff.
 **Depends on:** B.3 deployed (A.8-style: ff `main` for B.2 first — B.5)
 
+**Built (2026-09-29, local):**
+- `api/app/workflows/probe.py` — `ScrapeProbeWorkflow(ScrapeInput) -> ScrapeOutput`, one call to
+  `SCRAPE_ACTIVITY` on `SCRAPE_HTTP_QUEUE` (both new constants — `contracts.py`, `queues.py`; must
+  equal Go's `ScrapeName`/`TaskQueue`). `schedule_to_start` 60 s (not retried — an unpolled queue
+  fails instead of hanging), `start_to_close` 90 s, `maximum_attempts=3`. Registered in
+  `worker_main.py`.
+- `api/scripts/probe_scrape.py <url> [--format]` — random UUID `artifact_id`, prints the output,
+  **then deletes the objects it wrote** (owner): no `job_runs` row, so no ledger row; exit 1 if a
+  delete fails. Prod: `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api --
+  /app/.venv/bin/python -m scripts.probe_scrape <url>`.
+- **Gate method:** a static URL (`example.com`) — dynamic pages differ per fetch. Compare the
+  probe's `content_hash` with the v1 run's `job_runs.content_hash`; no object download needed.
+- **Verified:** two tests (stand-in activity on `scrape-http` only; non-retryable → one attempt),
+  mutation-checked — routing to `workflow` fails both. 300 API tests. Compose end-to-end:
+  `example.com` → 713 B, `content_hash a6cdea39c93062d1`, object deleted, prefix empty after.
+  ⚠️ The compose `workflow-worker` has no hot reload — restart it after changing a workflow.
+
 #### B.5 — 🚀 Go port release
 
 **What:** ff `main`; `rollout status` on **both** http-worker Deployments; NATS consumer
@@ -618,9 +635,15 @@ no LLM, no nondeterminism). Record the result in the handoff.
 `LLM_REQUEST_TIMEOUT_SECONDS=180`). Release; `rollout status` on both.
 **Depends on:** B.6
 
-#### B.8 — Playwright worker: `PlaywrightScrape` activity
+#### B.8 — Playwright worker: `Scrape` activity on `scrape-playwright`
 
 **What:**
+- **Activity name `Scrape`, task queue `scrape-playwright`** (owner, 2026-09-29 — ~~`PlaywrightScrape`~~).
+  Same name and `ScrapeInput`/`ScrapeOutput` as Go; the queue picks the engine, as the NATS subject
+  does today (B.1 dropped `engine` for this). Reuse `SCRAPE_ACTIVITY`; add
+  `SCRAPE_PLAYWRIGHT_QUEUE`. ⚠️ Each worker polls **only its own** queue — both register `Scrape`,
+  so a misconfigured poller steals the other engine's tasks with no error. Longer start-to-close +
+  `heartbeat_timeout` than the http call (headed Chrome ~37 s, up to the job's `timeout_seconds`).
 - `temporalio` in `playwright-worker/pyproject.toml` — **add a lockfile** (same BUG-013 note).
 - `worker/activity.py`: wraps the existing `worker.py` scrape (Patchright, stealth, actions,
   `blocking.py`, `formatter`, screenshots, MinIO). Untouched internals.
@@ -640,8 +663,9 @@ no LLM, no nondeterminism). Record the result in the handoff.
 #### B.9 — Playwright second Deployment + 🚀 release + pre-gate on both engines
 
 **What:** `app/playwright-worker-temporal.yaml` (dshm volume, resources, Xvfb env — copy the NATS
-one exactly). Release; `rollout status` on both. Then B.4's probe with `engine=playwright`
-against a real page: v1 vs probe outputs compared on structure (headed Chrome is not byte-stable).
+one exactly). Release; `rollout status` on both. Then B.4's probe on `scrape-playwright`
+against a real page (⚠️ the probe hard-codes `SCRAPE_HTTP_QUEUE` and `ScrapeInput` has no `engine`
+— give the workflow and script a queue/engine argument here): v1 vs probe outputs compared on structure (headed Chrome is not byte-stable).
 **Depends on:** B.8, B.4
 
 ---
