@@ -9,7 +9,7 @@
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
 > **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
-> **Last updated:** 2026-09-22 · **Tracking:** the status table below is the tracker.
+> **Last updated:** 2026-09-29 (Group A ✅ — engine up released) · **Tracking:** the status table below is the tracker.
 
 ---
 
@@ -633,6 +633,11 @@ bug on a new lane (16e). Without the FK, the accounting activity's first insert 
    (§6 — the body never loads it), task queue = workflow-worker queue.
 5. Commit **before** start (the DB-row-is-the-recovery-path rule); if start fails, mark `failed`
    with a named error. ⚠️ Temporal down → the run fails loudly at trigger; it does not queue.
+6. *(Added at the A.8 review, 2026-09-29.)* **The API gets its Temporal client here** — a stored
+   client on `app.state`; decide **lazy vs eager connect** (eager = a Temporal outage stops the
+   whole API from starting; carried from A.5). ⚠️ **Infra half: add `TEMPORAL_ADDRESS` and
+   `TEMPORAL_NAMESPACE` to `app/api.yaml`** — only the workflow worker has them today, and the
+   setting's default is `localhost:7233`, so without the env every prod trigger fails to connect.
 - Tests: admission per meter; buffer; REJECT_DUPLICATE pinned (assert on the start call);
   definition passed as argument.
 **Depends on:** C.2, C.4, A.5
@@ -1081,4 +1086,6 @@ migration's stated payoff; record the before/after in the handoff.
 6. **I.1** — Alembic-on-startup under two replicas; no ADR covers it.
 7. **C.11** — BUG-009 is deferred past Phase 4 in `phase4-backlog.md` §4 but is made load-bearing
    by the pipeline lane; recommend pulling it in.
-8. **A.8** — where the Temporal Postgres backup lives.
+8. **A.8** — where the Temporal Postgres backup lives. ⚠️ **Checked at A.8 (2026-09-29): no backup
+   exists for either Postgres** — Temporal's *or the app's*; nothing in the infra repo. Answer before
+   Group C puts real in-flight work in Temporal.

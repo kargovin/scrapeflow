@@ -160,6 +160,15 @@ backlog's A.8 *Done* note. Notes:
   **Owner item, open**, and must be answered before Group C puts real in-flight work in Temporal.
 - The worker logs `started` ~21 s after `uv run`'s project build (250m CPU limit) — not a problem
   now, worth knowing when reading rollout timings.
+- **A.8 review (same session) — found and recorded:** (1) 🔴 **C.5 never said the API Deployment
+  needs `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`** — the default is `localhost:7233`, so every prod
+  trigger would fail to connect; now step 6 of C.5, with A.5's lazy-vs-eager call carried in.
+  (2) Stale "next is engine up" lines in `phase4-backlog.md`, `temporal-full-migration.md`, this
+  file's git block and the release-policy memory (which also said engine up needed no app release —
+  it did). (3) Backlog open item 8 widened: no backup for the **app** Postgres either.
+  ⚠️ **Not yet verified in prod: the worker's SIGTERM drain under k8s** (verified locally with `uv`
+  as PID 1). The next api release restarts it — `kubectl logs -f` the old pod through the rollout
+  for `Workflow worker stopping` → `stopped`.
 - **Next: B.1** — activity contracts (input/output types + the `contracts/` arm). Group B is the
   *worker port* §16 step: additive, nothing routes to it yet.
 
@@ -818,7 +827,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **Deployed code is `ce614d8`** (2026-09-29, A.8 engine up — api image only). Before it: `421cbfe` (2026-09-19, the queue's release), `b110591` (2026-07-28).
+- **Deployed code is `ce614d8`** (2026-09-29, A.8 engine up — api image only).
+  **Verified 2026-09-29 after the release:** `develop` = `origin/develop`; `main` behind `develop` by
+  docs-only closeout commits (not a release). Infra repo `main` = `origin/main` at `ddde657` + Flux commits. Before it: `421cbfe` (2026-09-19, the queue's release), `b110591` (2026-07-28).
 - 🔷 **Release policy, owner's call 2026-09-11 — the pre-migration queue ships as ONE release. ✅
   Executed 2026-09-19 exactly as written:** `main` moved once, `abf8ad9..421cbfe` (91 commits —
   P6, P9, P8, P7, BUG-014 → 017, the BUG-003 fingerprint, the Dependabot sweep and every docs
@@ -845,7 +856,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
     while still serving NATS, and nothing routes to them yet.
 - ✅ **The standing rule is unchanged: a `main` fast-forward is a release, not a tidy-up** —
   pushing it builds and deploys. Do not do it at session end; wait to be asked. (Asked and done
-  2026-09-19; the next one is the *engine up* step, or whatever the owner names.)
+  2026-09-19 and 2026-09-29 — *engine up*; the next is *worker port*'s B.5, or whatever the owner names.)
 - ⚠️ *Historical, now released:* **`5c7fbdf` is no longer the last application-code commit.** P6 (2026-09-04) is the first
   code change since 2026-08-28, and it touches **five services**: `api/`, `coordinator/`,
   `playwright-worker/`, `llm-worker/`, `http-worker/`, plus a new top-level `contracts/`.
@@ -857,7 +868,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
   **the second revision** (`86c780f55969`, two views, hand-written; downgrade drops them). **The BUG-014 fix
   (`b57211a`, 2026-09-19) is on top** — `api/` only, and it adds **the third revision** (`9a1ebad3fca2`,
   two FK constraint swaps; downgrade restores `NO ACTION`). **The Dependabot sweep (`83607e2`, 2026-09-19) is on top of that** — `api/` (`pyproject.toml`, `uv.lock`, `Dockerfile`), `frontend/` (`package.json`, lock), `http-worker/` (`go.mod`, `go.sum`); no Alembic revision, and the three services it touches are already in the five-service rebuild.
-- ✅ **Verified 2026-09-22 (second session) after fetch: `develop` was 5 ahead of `origin/develop`,
+- *Historical, superseded by the 2026-09-29 release:* **Verified 2026-09-22 (second session) after fetch: `develop` was 5 ahead of `origin/develop`,
   0 behind; `main` 8 behind `develop`, 0 ahead** — then `a0008af` (compose shard count) and this
   closeout add two. **Nothing on `develop` needs a release** — A.1's and A.2's compose blocks are
   local-dev only; their prod halves went through the **infra repo** (`de903a2` for A.1, `e8f32e1`

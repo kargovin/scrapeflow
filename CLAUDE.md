@@ -14,7 +14,7 @@ A self-hosted, multi-tenant web scraping platform. Primary use case: structured 
 
 ### Core stack
 - **API**: FastAPI (Python)
-- **Workers**: Go **http-worker**; Python **Playwright** + **LLM** workers; Python **crawl coordinator**
+- **Workers**: Go **http-worker**; Python **Playwright** + **LLM** workers; Python **crawl coordinator**; Temporal **workflow worker** (Phase 4 — the api image with a second entrypoint, `app.workflows.worker_main`; task queue `workflow`)
 - **Queue**: NATS JetStream
 - **DB**: PostgreSQL (metadata), MinIO (object storage / raw output)
 - **Cache / rate limiting**: Redis

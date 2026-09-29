@@ -279,7 +279,7 @@ Real work, untouched by the migration, but not blocking it. Revisit after Phase 
 
 ## Sequencing
 
-1. **Pre-Phase 4 (§1)** — ✅ **DONE. P1 → P5 were done; P6, P9, P8 and P7 were built by 2026-09-18 and RELEASED 2026-09-19 (`421cbfe`)** (BUG-007 was fixed by P8; BUG-014 → BUG-017 and the Dependabot sweep rode the same release). **Entry condition 16e is met; the next step is ADR-009 §16's *engine up*.**
+1. **Pre-Phase 4 (§1)** — ✅ **DONE. P1 → P5 were done; P6, P9, P8 and P7 were built by 2026-09-18 and RELEASED 2026-09-19 (`421cbfe`)** (BUG-007 was fixed by P8; BUG-014 → BUG-017 and the Dependabot sweep rode the same release). **Entry condition 16e is met.** ADR-009 §16's *engine up* was **released 2026-09-29 (`ce614d8`, infra `ddde657`)**; next is *worker port* — tracked in `phase4-implementation-backlog.md`.
    Neither blocks ADR-009 as *code*: the ADR should cite P6 as OQ-1's precedent, then P6 can be
    fixed in parallel with, or after, the ADR — before any batch traffic arrives, not before the
    design lands. **P7's *decision* is a hard input to ADR-009 §3/§8** (already made — PRD-016 OQ-4,
