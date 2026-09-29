@@ -334,6 +334,31 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Same image in Temporal mode: serves the Scrape activity on the scrape-http task queue.
+  http-worker-temporal:
+    build:
+      context: ../http-worker
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      WORKER_MODE: temporal
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: scrapeflow
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
+      MINIO_BUCKET: scrapeflow-results
+      MINIO_SECURE: 'false'
+      FETCH_TIMEOUT_SECS: '30'
+    depends_on:
+      minio:
+        condition: service_healthy
+      temporal-namespace:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   # ── Crawl coordinator ───────────────────────────────────────────────────────
 
   coordinator:

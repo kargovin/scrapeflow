@@ -151,3 +151,41 @@ func TestLoad_Defaults(t *testing.T) {
 		}
 	})
 }
+
+func TestLoad_WorkerMode(t *testing.T) {
+	t.Run("defaults to nats", func(t *testing.T) {
+		setRequiredVars(t)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.WorkerMode != ModeNATS {
+			t.Errorf("WorkerMode: got %q", cfg.WorkerMode)
+		}
+	})
+
+	t.Run("temporal mode does not need NATS_URL", func(t *testing.T) {
+		setRequiredVars(t)
+		t.Setenv("NATS_URL", "")
+		t.Setenv("WORKER_MODE", "temporal")
+		t.Setenv("TEMPORAL_ADDRESS", "temporal:7233")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.TemporalAddress != "temporal:7233" || cfg.TemporalNamespace != "scrapeflow" {
+			t.Errorf("temporal config: %q %q", cfg.TemporalAddress, cfg.TemporalNamespace)
+		}
+	})
+
+	t.Run("unknown mode returns error", func(t *testing.T) {
+		setRequiredVars(t)
+		t.Setenv("WORKER_MODE", "kafka")
+
+		if _, err := Load(); err == nil {
+			t.Fatal("expected error for an unknown WORKER_MODE")
+		}
+	})
+}

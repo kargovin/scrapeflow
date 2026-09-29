@@ -13,7 +13,10 @@ import (
 // Config holds all runtime configuration for the worker.
 // Fields map directly to environment variables set in Docker Compose.
 type Config struct {
-	// NATS
+	// WorkerMode selects the entry point: ModeNATS (default) or ModeTemporal.
+	WorkerMode string // WORKER_MODE
+
+	// NATS — required in nats mode only
 	NATSUrl        string // NATS_URL — e.g. nats://nats:4222
 	NATSMaxDeliver int    // NATS_MAX_DELIVER — max redelivery attempts before giving up
 
@@ -30,15 +33,29 @@ type Config struct {
 	// HTTP fetcher
 	FetchTimeoutSecs int // FETCH_TIMEOUT_SECS — per-URL HTTP timeout
 
+	// Temporal — used in temporal mode only
+	TemporalAddress   string // TEMPORAL_ADDRESS — e.g. temporal:7233
+	TemporalNamespace string // TEMPORAL_NAMESPACE
+
 	// Worker Runtime
 	WorkerPoolSize int // WORKER_POOL_SIZE — number of concurrent jobs to process
 }
 
+const (
+	ModeNATS     = "nats"
+	ModeTemporal = "temporal"
+)
+
 // Load reads configuration from environment variables.
 // It returns an error if any required variable is missing.
 func Load() (*Config, error) {
+	mode := envStr("WORKER_MODE", ModeNATS)
+	if mode != ModeNATS && mode != ModeTemporal {
+		return nil, fmt.Errorf("WORKER_MODE must be %q or %q, got %q", ModeNATS, ModeTemporal, mode)
+	}
+
 	natsURL := os.Getenv("NATS_URL")
-	if natsURL == "" {
+	if mode == ModeNATS && natsURL == "" {
 		return nil, fmt.Errorf("NATS_URL is required")
 	}
 
@@ -63,6 +80,8 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
+		WorkerMode: mode,
+
 		NATSUrl:        natsURL,
 		NATSMaxDeliver: envInt("NATS_MAX_DELIVER", 3),
 
@@ -73,6 +92,9 @@ func Load() (*Config, error) {
 		MinIOSecure:    envBool("MINIO_SECURE", false),
 
 		CredentialsEncryptionKey: credentialsKey,
+
+		TemporalAddress:   envStr("TEMPORAL_ADDRESS", "localhost:7233"),
+		TemporalNamespace: envStr("TEMPORAL_NAMESPACE", "scrapeflow"),
 
 		FetchTimeoutSecs: envInt("FETCH_TIMEOUT_SECS", 30),
 		WorkerPoolSize:   envInt("WORKER_POOL_SIZE", runtime.NumCPU()),

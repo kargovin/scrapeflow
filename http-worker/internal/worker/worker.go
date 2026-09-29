@@ -15,8 +15,8 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/kargovin/scrapeflow/http-worker/internal/fetcher"
-	"github.com/kargovin/scrapeflow/http-worker/internal/formatter"
 	"github.com/kargovin/scrapeflow/http-worker/internal/robots"
+	"github.com/kargovin/scrapeflow/http-worker/internal/scrape"
 	"github.com/kargovin/scrapeflow/http-worker/internal/storage"
 )
 
@@ -100,17 +100,11 @@ type jetStreamClient interface {
 	Publish(subj string, data []byte, opts ...nats.PubOpt) (*nats.PubAck, error)
 }
 
-// storageClient is the subset of storage.Client used by Worker.
-// The narrow interface lets unit tests inject a mock without a real MinIO connection.
-type storageClient interface {
-	Upload(ctx context.Context, artifactID, ext string, data []byte) (string, error)
-}
-
 // Worker holds the dependencies needed to process scrape jobs.
 type Worker struct {
 	js             jetStreamClient
 	fetcher        *fetcher.Fetcher
-	storage        storageClient
+	storage        scrape.Uploader
 	credentialsKey *fernet.Key // decoded once at startup; used to decrypt proxy URL per message
 }
 
@@ -322,9 +316,9 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 		if meta, merr := msg.Metadata(); merr == nil {
 			attempt = int(meta.NumDelivered)
 		}
-		kind := classify(err)
+		kind := scrape.Classify(err)
 
-		if kind == transient && attempt < maxDeliver {
+		if kind == scrape.Transient && attempt < maxDeliver {
 			delay := retryDelay(attempt, transientBaseDelay, transientMaxDelay)
 			slog.Warn("Transient failure, naking for redelivery",
 				"artifact_id", job.ArtifactID, "run_id", runID,
@@ -342,7 +336,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 		// Terminal, or the last attempt of a transient failure. Report and ack —
 		// redelivery cannot recover a dead site or a bad key, and we are out of retries.
 		errText := err.Error()
-		if kind == transient {
+		if kind == scrape.Transient {
 			errText = fmt.Sprintf("%s (gave up after %d attempts)", errText, attempt)
 		}
 		slog.Error("Job failed", "artifact_id", job.ArtifactID, "run_id", runID,
@@ -392,26 +386,14 @@ func (w *Worker) handleMessage(ctx context.Context, msg *nats.Msg, maxDeliver in
 
 // processJob runs the fetch → format → upload pipeline and returns the MinIO history path.
 // f is the per-job fetcher — either the worker's default or a proxy-configured one.
+// An upload failure comes back as *scrape.UploadError, which scrape.Classify can tell apart from a
+// net error raised by the fetcher against a dead site.
 func (w *Worker) processJob(ctx context.Context, job *ScrapeMessage, f *fetcher.Fetcher) (string, error) {
-	fetchResult, err := f.Fetch(ctx, job.URL)
+	result, err := scrape.Run(ctx, f, w.storage, job.ArtifactID, job.URL, job.OutputFormat, nil)
 	if err != nil {
-		return "", fmt.Errorf("fetch failed: %w", err)
+		return "", err
 	}
-
-	formatted, ext, err := formatter.Format(fetchResult.Body, job.OutputFormat, fetchResult.FinalURL)
-	if err != nil {
-		return "", fmt.Errorf("format failed: %w", err)
-	}
-
-	minioPath, err := w.storage.Upload(ctx, job.ArtifactID, ext, formatted)
-	if err != nil {
-		// Wrap in *uploadError so handleMessage can tell a MinIO write fault (a
-		// transient-retry candidate) apart from a net error raised by the fetcher
-		// against a dead site (terminal). See errors.go.
-		return "", &uploadError{err: fmt.Errorf("upload failed: %w", err)}
-	}
-
-	return minioPath, nil
+	return result.Path, nil
 }
 
 // publishResult serializes and publishes a result message to scrapeflow.jobs.result.
