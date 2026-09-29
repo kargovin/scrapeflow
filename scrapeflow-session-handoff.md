@@ -150,6 +150,23 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **B.3 + B.4 + B.5 — GO PORT RELEASED (2026-09-29, fourth session).** `main` ff `ce614d8..ef68942`
+(api, http-worker, playwright-worker, llm-worker built; no migration); B.3's manifest rebased, tag
+hand-set, pushed as infra **`e70fbe9`**. `scrapeflow-http-worker-temporal` polls `scrape-http` in prod
+beside the unchanged NATS worker; nothing routes to it yet. **B.4 gate passed:** `example.com` →
+`a6cdea39c93062d1` on v1 and on the probe. Detail in the backlog's B.3/B.4/B.5 notes. Notes:
+
+- ✅ **The workflow worker's SIGTERM drain is verified in prod** (A.8's open item) — old pod logged
+  `stopping` → `stopped` through the rollout.
+- ⚠️ **Gate URLs must be stable:** `govindappa.com` differs on every fetch (Cloudflare's injected
+  `__CF$cv$params` ray/timestamp) — its v1 ≠ probe mismatch was the page, not the paths. Fetch a
+  candidate twice before using it; match `output_format` on both sides.
+- **The owner runs the prod probe** — `kubectl exec … -m scripts.probe_scrape` writes (then deletes)
+  a MinIO object and the auto-mode classifier refuses it; reading prod DB rows needed the owner too.
+- **Owner: activity name `Scrape` is reused for Playwright** on `scrape-playwright` (B.8 renamed from
+  `PlaywrightScrape`; B.9 notes the probe needs a queue argument).
+- **Next: B.6** — the LLM worker's `LLMExtract` activity (add a lockfile — BUG-013).
+
 🔷 **B.2 — GO `Scrape` ACTIVITY BUILT (2026-09-29, third session).** Local only, not released.
 One binary, `WORKER_MODE=nats|temporal` (default `nats`); `internal/scrape` = the shared pipeline +
 classifier; `internal/activity/scrape.go` = the activity on `scrape-http`, name `Scrape`; compose
@@ -823,8 +840,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up B.3 in `phase4-implementation-backlog.md`** — the Go Temporal Deployment (k8s only;
-   the compose half shipped with B.2). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
+0. **Pick up B.6 in `phase4-implementation-backlog.md`** — the LLM worker's `LLMExtract` activity.
+   ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
@@ -869,11 +886,11 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **Deployed code is `ce614d8`** (2026-09-29, A.8 engine up — api image only).
-  **Verified 2026-09-29 at the third session's close, after fetch:** `develop` is **6 ahead of
-  `origin/develop` — unpushed** (B.1 + B.2 + docs + this closeout); `main` 10 behind `develop` + this
-  closeout. **B.1/B.2 are application code** (api + all three workers + compose) but additive — the next
-  `main` ff is B.5's release, not owed before it. Infra repo `main` = `origin/main` at `ddde657` + Flux commits. Before it: `421cbfe` (2026-09-19, the queue's release), `b110591` (2026-07-28).
+- **Deployed code is `ef68942`** (2026-09-29, B.5 Go port — api, http-, playwright-, llm-worker images; infra `e70fbe9`). Before it: `ce614d8` (A.8 engine up).
+  **At the B.5 release (fourth session):** `develop` = `origin/develop` = `main` = `origin/main` =
+  `ef68942`; only this session's docs closeout sits on `develop` after it (unpushed until committed
+  and pushed). Infra repo `main` = `origin/main` at `e70fbe9` + Flux commits. Earlier releases:
+  `421cbfe` (2026-09-19, the queue's release), `b110591` (2026-07-28).
 - 🔷 **Release policy, owner's call 2026-09-11 — the pre-migration queue ships as ONE release. ✅
   Executed 2026-09-19 exactly as written:** `main` moved once, `abf8ad9..421cbfe` (91 commits —
   P6, P9, P8, P7, BUG-014 → 017, the BUG-003 fingerprint, the Dependabot sweep and every docs
@@ -1007,6 +1024,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-29 *(clock, fourth session)* | **🔷 B.3 → B.4 → B.5 — GO PORT RELEASED.** Read-in. B.3 ("no need to explain"): infra manifest, dry-run clean, verified the manifest's exact env on the local image; owner Q&A on RollingUpdate vs Recreate (Ready ≠ works without a readiness probe) and on Flux setter markers (enough; `update.path` covers `app/`). B.4 built on "build b4; script deletes the object": workflow, two constants, script, two tests (mutation-checked), 300 API tests, compose end-to-end. Owner: reuse activity name `Scrape` for Playwright (B.8 renamed). **B.5 on "do b5 prod release":** `main` ff, four images, five rollouts green, B.3 rebased with hand-set tag and pushed, `go-worker` unchanged, workflow-worker drain verified in prod. Prod probe and DB read refused by the classifier → owner ran both. Gate: `example.com` equal on both paths; `govindappa.com` mismatch traced to Cloudflare's per-request script | `ccb277d`, `d7138cb`, `ef68942` (released) · infra `e70fbe9` (deployed) + this closeout |
 | 2026-09-29 *(clock, third session)* | **🔷 B.1 + B.2 built — Group B opens.** Read-in; mentoring on B.1's field set (why `engine` goes: the task queue picks the worker as the subject does today). Owner: Pydantic, drop `engine`, "build ScrapeInput" → then ScrapeOutput, LLM contracts, the three worker twins and the `contracts/` arm (fixtures both directions, mutation-checked; Go fixture regen needs `-count=1`). Owner: **no rationale docstrings** (memory). Q&A on showing `running` under Temporal → mirror activity (ADR-009 §11) → **D.3 corrected** (mirror `running`/`processing`; `running` = scheduled; `ScrapeInput` builders). Owner caught that I had settled two posed questions myself → asked, all confirmed as built (memory: ask before building). **B.2:** shared `internal/scrape`, `Scrape` activity, `WORKER_MODE`, Go 1.26 for SDK v1.49, cross-language smoke from a Python workflow, SIGTERM drain; owner code walkthrough (entrypoints, why three packages, activity name vs queue, registration); owner calls: two log lines, compose service in B.2. Found: dev NATS backlog ~1.69 M with no dev http-worker; pre-commit's golangci-lint path dead | `01c2087`, `21fcf26`, `804ccca`, `ecc968e`, `aa09e54` + this closeout (all `develop`, unpushed) |
 | 2026-09-29 *(clock, second session)* | **🔷 A.6 built, then A.8 — ENGINE UP RELEASED, then A.9 — GROUP A COMPLETE.** Read-in; flagged that prod's api image predates A.5, so A.6 cannot go out before A.8's ff. Owner: "do A6 complete and dont push until A8" → manifest + kustomization + README in the infra repo, server dry-run clean, committed unpushed. Verified the exact k8s command and env on a locally built **production-target** image as `appuser` against the compose Temporal: started, ran `HelloWorkflow`, drained on SIGTERM. Found: no new `ImagePolicy` needed (setter marker); both Fernet keys required. Docs: backlog (A.6 status + *Built* note, A.8 push order), this file. **Then owner: "go do prod deploy; this and k8s repo"** → `develop` pushed, `main` ff to `ce614d8`, api image built + Flux-bumped + rolled out, A.6 rebased with its tag hand-bumped and pushed (`ddde657`), worker Running, `HelloWorkflow` COMPLETED in prod, capacity before/after recorded, no backups found for either Postgres (owner item). Docs: backlog (A.6/A.8 status, A.8 *Done* note), `CLAUDE.md` (status banner, deployed code), this file. Owner Q&A in plain words: `worker_main` is the entrypoint of the *workflow-worker pool* only (scrape/LLM activities stay in their own services on their own queues); why it lives in the api image (shared domain logic, not only DB/MinIO calls); one image, two Deployments, two commands. **Owner: "do a review if we have missed anything"** → found C.5 never put the Temporal env on the API Deployment (default `localhost:7233`), stale engine-up pointers in three docs + memory, no backup for the app Postgres either; SIGTERM drain unverified in prod. **Owner: backups deferred post-Temporal (§4 row); "do 1 as part of stage A"** → **A.9** — `app/api.yaml` env, infra `7ae6a9b`, pushed on "push", API restarted cleanly, `connect()` verified from inside the prod API pod. Memory: release-policy corrected (engine up needed an app release; the new-manifest-tag rule; BUG-019 script form) and the test-command index line fixed | `ce614d8` (released) · infra `ddde657`, `7ae6a9b` (deployed) · docs `0ed557c`, `5df9839`, `39d84fa`, `05c37c9` + this closeout |
 | 2026-09-26 → 09-29 *(clock, one session over four days)* | **🔷 A.5 built and verified locally; A.7 complete.** Read-in; owner: "list the A items as a checkbox", then "break up A5 into small parts" → a nine-step checklist, worked **one step (often one sub-item) at a time**, each committed on "commit". Long concept detours at the owner's request, all in plain words and diagrams mapped onto today's `/jobs` → NATS → workers → `result_consumer` flow: what a task queue is (a named to-do list on the server; workers poll), server vs workflow vs worker vs activity, why a worker is not generic (it runs only what it registered), why the LLM worker hosts no workflow, fixed vs variable recipes (`PipelineWorkflow` interprets a stored block list — ADR-009 §4/§6, Group C), the pipeline endpoints, the `app.state` client (C.5, not now), the signal/drain code line by line, the `docker compose run --entrypoint temporal` idiom, and that tests run on a private in-memory server. Owner decisions: queue naming, `RetryPolicy(maximum_attempts=3)`, dataclass inputs, 20 s drain, `WORKFLOW_QUEUE` in tests, the failure-path test. Owner ran 6h by hand from a printed procedure. **Found:** bare `python` in the api image has no packages → A.6's command corrected; A.8's CLI-in-pod step corrected; my own wrong "correction" of the test command withdrawn. 283 API tests. Docs: backlog (A.5/A.7 status, A.5 *Built* note, A.6/A.7/A.8 corrections), this file | `9a365d0`, `831b22f`, `3eea07f`, `a179e7c`, `c1ba298`, `147f3fb` + this closeout (all `develop`, unpushed) |

@@ -51,9 +51,9 @@
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ✅ 2026-09-29 (local; nothing calls them until B.2) |
 | B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ✅ 2026-09-29 (local, compose service included; not released) |
-| B.3 | Go second Deployment (Temporal-bound) | 🔷 2026-09-29 built, infra `ff78745` **unpushed** — pushes with B.5's image tag |
-| B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | 🔷 2026-09-29 built + verified locally; **the prod gate runs at B.5** |
-| B.5 | 🚀 Go port release | ⬜ |
+| B.3 | Go second Deployment (Temporal-bound) | ✅ 2026-09-29 (infra `e70fbe9`, deployed with B.5) |
+| B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ✅ 2026-09-29 — **gate passed in prod** (`example.com`, v1 = v2 = `a6cdea39c93062d1`) |
+| B.5 | 🚀 Go port release | ✅ 2026-09-29 (`ef68942`, infra `e70fbe9`) — **Go port live beside NATS** |
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ⬜ |
 | B.7 | LLM second Deployment + 🚀 release | ⬜ |
 | B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ⬜ |
@@ -559,7 +559,7 @@ activity boundary is a new wire; it gets a producer-side definition on day one.
 NATS env, no DB env** (light-worker rule survives). `ImagePolicy` shared with the NATS one.
 **Depends on:** B.2
 
-**Built (2026-09-29, infra `ff78745`, unpushed):**
+**Built (2026-09-29; rebased and pushed at B.5 as infra `e70fbe9`):**
 - `app/http-worker-temporal.yaml` — Deployment `scrapeflow-http-worker-temporal`, container
   `http-worker`, `scrapeflow-http-worker-policy` setter marker (no new `ImagePolicy`). Env: the NATS
   Deployment's minus `NATS_URL`/`NATS_MAX_DELIVER`, plus `WORKER_MODE`/`TEMPORAL_*`;
@@ -607,6 +607,23 @@ no LLM, no nondeterminism). Record the result in the handoff.
 **What:** ff `main`; `rollout status` on **both** http-worker Deployments; NATS consumer
 `go-worker` unchanged (`nats consumer info --json`). Then B.4's gate against prod.
 **Depends on:** B.2, B.3
+
+**Done (2026-09-29):**
+- `main` ff `ce614d8..ef68942`; four images built (api, http-worker, playwright-worker, llm-worker —
+  the last two only for B.1's unused contract twins; no Alembic revision). Flux bumped all four;
+  `rollout status` green on api, http-worker, llm-worker, playwright-worker, workflow-worker.
+- B.3 rebased over the Flux bumps, **tag hand-set** to `main-1790703736-ef68942…`, pushed as infra
+  `e70fbe9`; `rollout status` green; `mode=temporal … task_queue=scrape-http`.
+- NATS http-worker on the new binary: `mode=nats`, subscribed. `go-worker` before = after: ack_wait
+  30 s, max_deliver 3, delivered seq 1126, 0 pending.
+- ✅ **A.8's open item closed:** the old workflow-worker pod logged `stopping` → `stopped` on the
+  rollout's SIGTERM — the drain is verified in prod.
+- **B.4 gate:** `example.com`, `html`, v1 (NATS) vs probe → both `a6cdea39c93062d1` (713 B, equal to
+  local). ⚠️ **Choose the gate URL by fetching it twice first:** `govindappa.com` differs on *every*
+  fetch (Cloudflare injects `__CF$cv$params={r:<ray>,t:<ts>}`), so v1 ≠ probe there says nothing
+  about the paths. Match `output_format` on both sides too.
+- The prod probe run needs the owner: `kubectl exec` into the api pod is a remote write (the
+  object is created, then deleted) and the auto-mode classifier refuses it.
 
 #### B.6 — LLM worker: `LLMExtract` activity
 
