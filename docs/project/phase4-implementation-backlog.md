@@ -9,7 +9,7 @@
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
 > **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
-> **Last updated:** 2026-09-29 (Group A ✅ — engine up released) · **Tracking:** the status table below is the tracker.
+> **Last updated:** 2026-09-29 (Group A ✅ — engine up released; B.1 ✅; D.3 corrected) · **Tracking:** the status table below is the tracker.
 
 ---
 
@@ -49,7 +49,7 @@
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ✅ 2026-09-29 (`main` → `ce614d8`; `HelloWorkflow` COMPLETED in prod) |
 | A.9 | Temporal env on the API Deployment (added at the A.8 review) | ✅ 2026-09-29 (local already via `.env`; infra `7ae6a9b`, verified in prod) — **Group A ✅** |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
-| B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
+| B.1 | Activity contracts: input/output types + `contracts/` arm | ✅ 2026-09-29 (local; nothing calls them until B.2) |
 | B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ⬜ |
 | B.3 | Go second Deployment (Temporal-bound) | ⬜ |
 | B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ⬜ |
@@ -473,6 +473,36 @@ activity boundary is a new wire; it gets a producer-side definition on day one.
   committed fixtures (**not optional** — the `null`→`""` silent variant is Python→Go only).
 **Verify:** the contract test command in the handoff's *Commands*, extended.
 **Depends on:** A.5
+**Built 2026-09-29.** Decisions taken in the build, owner calls where marked:
+- **Pydantic, not dataclasses (owner)** — supersedes A.5's dataclass convention for activity
+  contracts. `client.connect()` now passes `pydantic_data_converter`, which validates on decode
+  (so `min_length`/`Literal`/`pattern` are checked where the activity *receives* the input) and
+  still handles Hello's dataclasses. A `Worker` takes its converter from the client.
+- **Inputs drop every NATS-routing field:** `schema_version`, `run_id`, `crawl_context`, and
+  **`engine` (owner)** — no worker reads it; the task queue picks the worker, as the subject does
+  today, and the workflow reads the engine from the row to choose the queue. `output_format` and
+  `provider` tightened to `Literal`s. Credentials and the LLM key stay **ciphertext** — workflow
+  history stores inputs as plain JSON in the Temporal DB and the Web UI.
+- **Outputs return success only; a failure is raised** (B.2's `NonRetryableApplicationError`) —
+  the "error string on a terminal failure" above is withdrawn; two routes out of an activity for
+  one failure is the Q8 shape. `blocked:<vendor>` becomes the raised error's message.
+- **`StoredObject {path, size}`** for the result and every screenshot — `size`, not `bytes` (matches
+  `record_object(size=…)`, no builtin shadowing). The accountant needs neither `stat_minio_size`
+  nor a download. `content_hash` is required, `^[0-9a-f]{16}$` — Go must format with `%016x`
+  (`%x` drops leading zeros, ~1 in 16). `LLMOutput` is `result` only.
+- **Changing a contract:** add optional fields only (consumers ignore unknown fields); a breaking
+  change is a new activity type, not an edit — no stream to drain, queued tasks keep old payloads.
+- **Each service holds its own copy** (`playwright-worker/worker/contracts.py`,
+  `llm-worker/worker/contracts.py`, `http-worker/internal/activity/contracts.go`): the contract
+  test loads each file standalone, so they depend on pydantic only. Go's `ScrapeInput.Validate()`
+  must be the activity's first call — `encoding/json` enforces nothing. Go's slices are
+  `omitempty`: a nil slice marshals to `null`, which the API's `list[...] = []` rejects.
+- **`contracts/test_activity_contract.py`** (separate from the NATS test, so H deletes that one
+  whole): API inputs → the Playwright/LLM parsers; worker outputs → the API's models; field-set
+  drift both ways; all through the real converter. **Fixtures run both directions** —
+  `scrape_input_*.json` from Python for Go, `go_scrape_output.json` from Go for Python.
+  Mutation-checked (dropping `omitempty` fails the Python side). ⚠️ Regenerating the Go fixture
+  needs `go test -count=1` — a cached pass skips the write (hit in the build).
 
 #### B.2 — Go http-worker: `Scrape` activity + mode flag
 
@@ -846,6 +876,19 @@ behaviour (`result_consumer.py` deletes the result and fails the run) — **keep
 **Tests:** happy path; LLM-less job; failure → `job.failed` row; cancelled-before-result discards
 (precedence rule).
 **Depends on:** D.1, D.2, C.6
+**Corrected 2026-09-29 (B.1 review)** — two gaps in the text above:
+- **Mirror every transition users see today, not only `completed`** (R5): `running` before Scrape,
+  `processing` before LLM, `completed` / `failed` at the end — the same four states on the same
+  `job_status` channel. The scrape worker no longer reports `running`; the workflow does, through
+  C.6's mirror activity. ⚠️ **`running` now means *scheduled*, not *picked up*** — set a
+  `schedule_to_start_timeout` on the scrape call so a queue nobody polls fails the run instead of
+  showing `running` indefinitely. `nats_stream_seq` is no longer written (its reader, the
+  MaxDeliver advisory, dissolves with NATS).
+- **The input is not what `dispatch.py` builds today.** B.1's `ScrapeInput` drops `run_id`,
+  `engine`, `crawl_context` and `schema_version`, so the existing builders cannot produce it — add
+  a `ScrapeInput` builder per lane beside them, and keep the dispatch-vs-recovery equality tests
+  on it. Engine → task queue is **one helper beside `queues.py`**, not a ternary per call site
+  (today's is copied at five).
 
 #### D.4 — One dispatch switch + cancel path
 

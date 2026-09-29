@@ -103,6 +103,13 @@ docker run --rm -v "$PWD:/repo" -w /repo -e UPDATE_CONTRACT_FIXTURES=1 docker-ap
 BUG-005 (a JSON `null` unmarshalled to `""` with no error) exists *only* on the Python→Go
 wire, so a Python-only contract test would not reach the failure that actually shipped.
 
+The activity arm (B.1) is `contracts/test_activity_contract.py` — same command. Its fixtures run
+both ways; the Go-written one regenerates from the Go side, and **needs `-count=1`** (a cached
+pass skips the write):
+```bash
+cd http-worker && UPDATE_CONTRACT_FIXTURES=1 go test -count=1 ./internal/activity/
+```
+
 **MCP tests** (standalone image, not in compose):
 ```bash
 docker build -t scrapeflow-mcp mcp/
@@ -142,6 +149,22 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **B.1 — ACTIVITY CONTRACTS BUILT (2026-09-29, third session). Group B opens.** Local only;
+nothing calls them until B.2. `api/app/workflows/activities/contracts.py` (`ScrapeInput/Output`,
+`LLMInput/Output`, `StoredObject`), a twin in each worker, `contracts/test_activity_contract.py` +
+`contracts/fixtures/activity/`, and `pydantic_data_converter` on `client.connect()`. Decisions in
+the backlog's B.1 *Built* note — Pydantic (owner), `engine` dropped (owner), failures raised not
+returned, `size` per object, `content_hash` pinned to 16 hex. Notes:
+
+- **D.3 corrected** (backlog): `JobWorkflow` must mirror `running` and `processing`, not only
+  `completed` — the scrape worker no longer reports `running`, the workflow does via C.6's mirror
+  activity; `running` now means *scheduled*, so the scrape call needs a `schedule_to_start_timeout`.
+  And `dispatch.py`'s builders cannot produce `ScrapeInput` — D.3 adds one per lane.
+- **Owner: no rationale docstrings in code** — terse trap comments only; decisions go in the backlog.
+- ⚠️ The pre-commit `golangci-lint` hook is scoped to `files: ^worker/`, which does not exist — Go
+  lint has never run in pre-commit. One-line fix (`^http-worker/`), not made.
+- **Next: B.2** — the Go `Scrape` activity + `WORKER_MODE` flag; call `ScrapeInput.Validate()` first.
 
 🔷 **A.8 — ENGINE UP RELEASED (2026-09-29, second session). Group A is complete; Temporal runs in
 prod and `HelloWorkflow` completed there.** Owner: "go do prod deploy; this and k8s repo". `develop`
@@ -785,8 +808,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up B.1 in `phase4-implementation-backlog.md`** — activity contracts; Group B (*worker
-   port*) opens. ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
+0. **Pick up B.2 in `phase4-implementation-backlog.md`** — the Go `Scrape` activity. ~~B.1~~ ✅
+   2026-09-29 (activity contracts, local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
