@@ -143,7 +143,27 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
-🔷 **A.6 is built and committed, NOT pushed (2026-09-29, second session) — held for A.8 by the
+🔷 **A.8 — ENGINE UP RELEASED (2026-09-29, second session). Group A is complete; Temporal runs in
+prod and `HelloWorkflow` completed there.** Owner: "go do prod deploy; this and k8s repo". `develop`
+pushed, `main` ff `421cbfe..ce614d8` (24 commits, `api` the only image built, no migration). Flux
+bumped the api tag (infra `8a5a729`), API `Recreate` green, `/health` 200, all five loops started.
+A.6 rebased over the bump, **its tag hand-set to the new image before pushing** (the rebased file
+still pinned `421cbfe` → a crash-loop until the next automation pass), pushed as infra **`ddde657`**
+(the classifier allowed it). Worker pod Running, 0 restarts; one-off admin-tools pod → pollers listed,
+`HelloWorkflow` `a8-engine-up-proof` → **COMPLETED, "Hello, production", 140 ms**. Full record in the
+backlog's A.8 *Done* note. Notes:
+
+- **Capacity** before → after: CPU requests 30 → 31 %, **limits 176 → 179 %**; memory limits 59 →
+  60 %. §2d warning written beside the numbers: throttling on the history service looks like a
+  workflow bug.
+- 🔴 **No backups exist for either Postgres** (Temporal's or the app's) — nothing in the infra repo.
+  **Owner item, open**, and must be answered before Group C puts real in-flight work in Temporal.
+- The worker logs `started` ~21 s after `uv run`'s project build (250m CPU limit) — not a problem
+  now, worth knowing when reading rollout timings.
+- **Next: B.1** — activity contracts (input/output types + the `contracts/` arm). Group B is the
+  *worker port* §16 step: additive, nothing routes to it yet.
+
+🔷 *(Superseded by A.8 above — pushed as `ddde657`.)* **A.6 was built and committed, NOT pushed (2026-09-29, second session) — held for A.8 by the
 owner's call ("do A6 complete and dont push until A8").** Infra `a81b81c` on the infra repo's `main`,
 1 ahead of `origin/main`: `app/workflow-worker.yaml` (Deployment `scrapeflow-workflow-worker`, api
 image, `uv run python -m app.workflows.worker_main`, `RollingUpdate`, grace 30 s, `wait-for-temporal`
@@ -752,9 +772,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up A.8 in `phase4-implementation-backlog.md`** — the engine-up release. ~~A.6~~ ✅
-   built 2026-09-29, infra `a81b81c` **committed, unpushed on purpose** — push it inside A.8, after
-   the new api image is tagged (order in *Current state*). **Per-task ordering: local → k8s → next task.**
+0. **Pick up B.1 in `phase4-implementation-backlog.md`** — activity contracts; Group B (*worker
+   port*) opens. ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
+   `ddde657`). 🔴 **Owner item from A.8: no Postgres backups exist** — decide before Group C. **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
    `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
@@ -798,7 +818,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **Deployed code is `421cbfe`** (2026-09-19, the queue's release). Before it: `b110591` (2026-07-28).
+- **Deployed code is `ce614d8`** (2026-09-29, A.8 engine up — api image only). Before it: `421cbfe` (2026-09-19, the queue's release), `b110591` (2026-07-28).
 - 🔷 **Release policy, owner's call 2026-09-11 — the pre-migration queue ships as ONE release. ✅
   Executed 2026-09-19 exactly as written:** `main` moved once, `abf8ad9..421cbfe` (91 commits —
   P6, P9, P8, P7, BUG-014 → 017, the BUG-003 fingerprint, the Dependabot sweep and every docs
@@ -932,7 +952,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
-| 2026-09-29 *(clock, second session)* | **🔷 A.6 built, held for A.8.** Read-in; flagged that prod's api image predates A.5, so A.6 cannot go out before A.8's ff. Owner: "do A6 complete and dont push until A8" → manifest + kustomization + README in the infra repo, server dry-run clean, committed unpushed. Verified the exact k8s command and env on a locally built **production-target** image as `appuser` against the compose Temporal: started, ran `HelloWorkflow`, drained on SIGTERM. Found: no new `ImagePolicy` needed (setter marker); both Fernet keys required. Docs: backlog (A.6 status + *Built* note, A.8 push order), this file | infra `a81b81c` (unpushed) + app docs commit |
+| 2026-09-29 *(clock, second session)* | **🔷 A.6 built, then A.8 — ENGINE UP RELEASED.** Read-in; flagged that prod's api image predates A.5, so A.6 cannot go out before A.8's ff. Owner: "do A6 complete and dont push until A8" → manifest + kustomization + README in the infra repo, server dry-run clean, committed unpushed. Verified the exact k8s command and env on a locally built **production-target** image as `appuser` against the compose Temporal: started, ran `HelloWorkflow`, drained on SIGTERM. Found: no new `ImagePolicy` needed (setter marker); both Fernet keys required. Docs: backlog (A.6 status + *Built* note, A.8 push order), this file. **Then owner: "go do prod deploy; this and k8s repo"** → `develop` pushed, `main` ff to `ce614d8`, api image built + Flux-bumped + rolled out, A.6 rebased with its tag hand-bumped and pushed (`ddde657`), worker Running, `HelloWorkflow` COMPLETED in prod, capacity before/after recorded, no backups found for either Postgres (owner item). Docs: backlog (A.6/A.8 status, A.8 *Done* note), `CLAUDE.md` (status banner, deployed code), this file | `ce614d8` (released) · infra `ddde657` (deployed) + this closeout |
 | 2026-09-26 → 09-29 *(clock, one session over four days)* | **🔷 A.5 built and verified locally; A.7 complete.** Read-in; owner: "list the A items as a checkbox", then "break up A5 into small parts" → a nine-step checklist, worked **one step (often one sub-item) at a time**, each committed on "commit". Long concept detours at the owner's request, all in plain words and diagrams mapped onto today's `/jobs` → NATS → workers → `result_consumer` flow: what a task queue is (a named to-do list on the server; workers poll), server vs workflow vs worker vs activity, why a worker is not generic (it runs only what it registered), why the LLM worker hosts no workflow, fixed vs variable recipes (`PipelineWorkflow` interprets a stored block list — ADR-009 §4/§6, Group C), the pipeline endpoints, the `app.state` client (C.5, not now), the signal/drain code line by line, the `docker compose run --entrypoint temporal` idiom, and that tests run on a private in-memory server. Owner decisions: queue naming, `RetryPolicy(maximum_attempts=3)`, dataclass inputs, 20 s drain, `WORKFLOW_QUEUE` in tests, the failure-path test. Owner ran 6h by hand from a printed procedure. **Found:** bare `python` in the api image has no packages → A.6's command corrected; A.8's CLI-in-pod step corrected; my own wrong "correction" of the test command withdrawn. 283 API tests. Docs: backlog (A.5/A.7 status, A.5 *Built* note, A.6/A.7/A.8 corrections), this file | `9a365d0`, `831b22f`, `3eea07f`, `a179e7c`, `c1ba298`, `147f3fb` + this closeout (all `develop`, unpushed) |
 | 2026-09-25 *(clock, second session)* | **🔷 A.4 — Temporal Web UI built, deployed, verified in prod; A.4 ✅.** Read-in; owner: "code up both and commit and push; this to dev and k8s to prod" → compose `temporal-ui` (2.54.1, own version var) verified against the local server and namespace; infra manifest (ClusterIP only, `/healthz` probes), kustomization line, README section + DNS row, `--dry-run=server` clean, committed and pushed; Flux applied, rollout green, verified through a port-forward. Owner opened it in a browser on 8081 (local compose holds 8080) → the README's "keep 8080" advice (mine, untested) tested and withdrawn: writes are CSRF-token gated, not origin-gated; docs now say `8081:8080`. Docs: backlog (A.4/A.7 status, A.4 body), infra README, this file. Session closed at the owner's "finish this session"; next is A.5 | infra `cd7b36c`, `eb94302` · app `fd71f69`, `26731eb` + this closeout |
 | 2026-09-25 *(clock)* | **🔷 A.3 — namespace registration built, deployed, verified in prod; A.3 ✅. BUG-019 filed.** Read-in; owner asked where a namespace lives, what a namespace is, and whether other services' namespaces collide → explained (a row in `temporal.namespaces`; isolates IDs/queues/retention per namespace, not compute or access). Owner: "start A.3; build on both local and server but do not commit" → script + compose one-shot verified locally (create, drift-reset, unreachable → exit 1), k8s Job `kubectl apply`'d and verified. Spotted the cleanup CronJob `Failed`; owner: "check the logs" → pod gone, reproduced on the deployed image: never succeeded (BUG-019). Owner: "file it … push and verify on prod … commit dev and push origin, not prod" → BUG-019 filed, infra pushed + Flux adoption verified, app committed on `develop` and pushed. | infra `60b0aee` · app (this commit) |

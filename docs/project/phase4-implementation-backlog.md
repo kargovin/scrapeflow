@@ -44,9 +44,9 @@
 | A.3 | Namespace registration init Job, retention 30 d | ✅ 2026-09-25 (local + k8s; infra `60b0aee`, verified in prod) |
 | A.4 | Temporal Web UI — ClusterIP only, no ingress | ✅ 2026-09-25 (local + k8s; infra `cd7b36c`, verified in prod) |
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ✅ 2026-09-29 (local; `HelloWorkflow` completed on the compose server) |
-| A.6 | Workflow-worker Deployment in the infra repo | ✅ 2026-09-29 (infra `a81b81c`, committed, **unpushed until A.8** — prod's image has no `app.workflows` yet; prod-target image verified locally) |
+| A.6 | Workflow-worker Deployment in the infra repo | ✅ 2026-09-29 (infra `ddde657`, pushed inside A.8; verified in prod) |
 | A.7 | Local dev: compose services for Temporal + workflow worker | ✅ `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui` ✅ 2026-09-25 · `workflow-worker` ✅ 2026-09-29 — **A.7 ✅** |
-| A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ⬜ |
+| A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ✅ 2026-09-29 (`main` → `ce614d8`; `HelloWorkflow` COMPLETED in prod) — **Group A ✅** |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
 | B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ⬜ |
@@ -362,7 +362,7 @@ mirroring `api`'s so it follows the same tag.
 Leave `terminationGracePeriodSeconds` at ≥ 30 s — the worker drains for up to 20 s (A.5).
 **Verify:** pod logs `Workflow worker started … task_queue=workflow`; Web UI (port-forward) lists the poller.
 **Depends on:** A.2, A.5
-**Built 2026-09-29** (infra `a81b81c`, **not pushed**): Deployment `scrapeflow-workflow-worker`,
+**Built 2026-09-29** (infra `a81b81c`, pushed inside A.8 as **`ddde657`** after a rebase + tag bump): Deployment `scrapeflow-workflow-worker`,
 `RollingUpdate`, `terminationGracePeriodSeconds: 30`, a `wait-for-temporal` init container, 50m/128Mi
 requests, 250m/256Mi limits (the local worker sits at ~55 MiB). No Service (it only dials out).
 - **No new `ImagePolicy`.** The container carries the `scrapeflow-api-policy` setter marker, which is
@@ -410,6 +410,25 @@ push it only after the new api tag is built and Flux has bumped it** (see A.6's 
 3. **Backups:** the Temporal PG is now in-flight work (§10 risks). ⚠️ **Owner item:** name where
    its backup lives, or record that it does not yet. Not blocking; must not be silent.
 **Depends on:** A.1–A.7
+**Done 2026-09-29.** `main` `421cbfe..ce614d8` (24 commits; `api` the only image built, no Alembic
+revision). Flux bumped the api tag (infra `8a5a729`) → API `Recreate` green, `/health` 200. Then A.6:
+rebased over the bump, **its own tag hand-set to the new one before pushing** (the rebased file still
+pinned `421cbfe`, which would have crash-looped until the next automation pass), pushed as infra
+`ddde657`. Worker pod Running, 0 restarts; `Workflow worker started … address=scrapeflow-temporal:7233
+… task_queue=workflow` ~21 s after `uv run`'s project build.
+1. **Proof:** one-off `temporalio/admin-tools:1.31.0` pod → `task-queue describe` lists workflow + activity
+   pollers `25@scrapeflow-workflow-worker-…`; `HelloWorkflow` id `a8-engine-up-proof` →
+   **`COMPLETED`, `"Hello, production"`, 140 ms**, 11 history events.
+2. **Capacity** (`kubectl describe node`), before → after: CPU requests 2470m (30 %) → **2520m (31 %)**,
+   limits 14100m (176 %) → **14350m (179 %)**; memory requests 4284Mi (13 %) → **4412Mi (13 %)**,
+   limits 19050Mi (59 %) → **19306Mi (60 %)**. Live: worker 41m / 65Mi, server 26m / 88Mi.
+   **§2d: a headed render + a history burst = CFS throttling on the history service that *looks
+   like a workflow bug*.** CPU limits are 179 % overcommitted — if a workflow stalls under load,
+   check the Temporal server's throttling before the workflow code.
+3. **Backups: none exist — for the Temporal Postgres *or* the app Postgres.** Searched the infra repo
+   (no `pg_dump`, Velero or backup manifest; the only CronJob is `scrapeflow-cleanup`). Recorded, not
+   decided — ⚠️ **owner item still open:** name where backups will live before Group C puts real
+   in-flight work in Temporal.
 
 ---
 
