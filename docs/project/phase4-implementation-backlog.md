@@ -43,9 +43,9 @@
 | A.2 | Temporal server Deployment (`temporalio/server` + schema init container, standard visibility) | ✅ 2026-09-22 (local + k8s; infra `e8f32e1`, verified in prod) — TL call revised the same day: `auto-setup` is deprecated |
 | A.3 | Namespace registration init Job, retention 30 d | ✅ 2026-09-25 (local + k8s; infra `60b0aee`, verified in prod) |
 | A.4 | Temporal Web UI — ClusterIP only, no ingress | ✅ 2026-09-25 (local + k8s; infra `cd7b36c`, verified in prod) |
-| A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ⬜ |
+| A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ✅ 2026-09-29 (local; `HelloWorkflow` completed on the compose server) |
 | A.6 | Workflow-worker Deployment in the infra repo | ⬜ |
-| A.7 | Local dev: compose services for Temporal + workflow worker | 🟡 `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui` ✅ 2026-09-25 · `workflow-worker` ⬜ |
+| A.7 | Local dev: compose services for Temporal + workflow worker | ✅ `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui` ✅ 2026-09-25 · `workflow-worker` ✅ 2026-09-29 — **A.7 ✅** |
 | A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ⬜ |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
@@ -324,38 +324,68 @@ rollout (the ~80 s window). Accepted — fix-forward is the standing posture, an
   names are contract, like NATS subjects), `hello.py` (`HelloWorkflow` + one activity),
   `worker_main.py` (registers workflows + workflow-worker-queue activities, runs the worker,
   handles SIGTERM).
-- `api/app/config.py`: the two settings above.
+- ~~`api/app/config.py`~~ `api/app/settings.py` (there is no `config.py`): the two settings above.
 - Tests: `temporalio.testing.WorkflowEnvironment` time-skipping; one test runs `HelloWorkflow`.
   **This establishes the workflow test pattern every later group reuses.**
 **Verify:** `docker compose exec api uv run pytest tests/test_workflows_hello.py`.
 **Depends on:** — (can be built before A.1–A.4 land; needs A.7 to run locally)
+**Built 2026-09-29** (`9a365d0`, `831b22f`, `3eea07f`, `a179e7c` + the test/compose commit). Decisions
+taken in the build, all owner calls:
+- **Queue naming: after the worker *pool*, short, hyphenated, no prefix** — `workflow` now; later
+  `scrape-http`, `scrape-playwright`, `llm`, `content`. The Temporal namespace already scopes them.
+  Every workflow shares `workflow` (they all run in this pod); a queue per workflow type is wrong.
+- **Every activity call states `task_queue=` explicitly** and sets a `RetryPolicy` — Hello uses
+  `maximum_attempts=3` (arbitrary). Temporal's default is *unlimited* retries; R4 wants one visible
+  layer, so no call may rely on the default.
+- **One dataclass input per workflow and per activity** (`HelloWorkflowInput`, `SayHelloInput`) —
+  a field can be added without breaking in-flight runs; a positional argument cannot.
+- **`graceful_shutdown_timeout=20s`** on the `Worker` (default is **0**: in-flight activities are
+  cancelled at once). 20 s sits under k8s's default 30 s `terminationGracePeriodSeconds`.
+- `client.connect()` has **no `disconnect()`** — a Temporal `Client` has no close/drain (verified). It
+  is **not** in the FastAPI lifespan yet; that is C.5, with a lazy-vs-eager connect decision there.
+Found in the build:
+- ⚠️ **Bare `python` in the api image is the system interpreter with no packages** — every command
+  must be `uv run python …` (the BUG-019 trap). A.6's command below is corrected for it.
+- The time-skipping test server is an **81 MB binary downloaded on first use** into the container's
+  `/tmp` (first run ~13 s, then ~1 s; re-downloaded when the container is recreated). No CI runs
+  pytest, so nothing else is affected. Tests use `WORKFLOW_QUEUE` — each test's server is private.
+- The retry test is mutation-checked (`maximum_attempts=5` → `[1, 2, 3, 4, 5] != [1, 2, 3]`), and
+  runs 15 s of backoff in 0.2 s — time-skipping confirmed. 283 API tests green (281 → 283).
 
 #### A.6 — Workflow-worker Deployment
 
-**What:** `app/workflow-worker.yaml`: api image, `command: [python, -m, app.workflows.worker_main]`,
+**What:** `app/workflow-worker.yaml`: api image, `command: [uv, run, python, -m, app.workflows.worker_main]`
+(⚠️ **not** bare `python` — system interpreter, no packages; found in A.5),
 **app-DB + MinIO credentials** (this is the *only* pod on the v2 side with DB access — §8d), Temporal
 env, `replicas: 1`, `RollingUpdate` (stateless polling — safe). Add an `ImagePolicy`/automation entry
 mirroring `api`'s so it follows the same tag.
-**Verify:** pod logs `worker started` naming the queue; Web UI (port-forward) lists the poller.
+Leave `terminationGracePeriodSeconds` at ≥ 30 s — the worker drains for up to 20 s (A.5).
+**Verify:** pod logs `Workflow worker started … task_queue=workflow`; Web UI (port-forward) lists the poller.
 **Depends on:** A.2, A.5
 
 #### A.7 — Local dev
 
 **What:** `docker/docker-compose.yml`: `temporal-postgres`, `temporal-schema` + `temporal` (A.2),
 `temporal-namespace` (A.3), `temporal-ui`
-(host port for the browser — fine locally), `workflow-worker` (api image, the A.6 command, `api/`
-mounted like the api service so it hot-reloads). Temporal env on the `api` service.
+(host port for the browser — fine locally), `workflow-worker` (api image, the A.6 command, `api/app`
+mounted — ~~so it hot-reloads~~ **no hot reload; restart it after a code change**). Temporal env on
+the `api` service ~~explicitly~~ — it comes from the root `.env` via `env_file`.
 **Verify:** `HelloWorkflow` started via a one-line script shows in the local UI.
 **Depends on:** A.5
 **Progress:** `temporal-postgres` ✅ 2026-09-21 (A.1) · `temporal-schema` + `temporal` ✅ 2026-09-22
-(A.2, both halves done) · `temporal-namespace` ✅ 2026-09-25 (A.3, both halves done). Next compose
-service is A.4's `temporal-ui`.
+(A.2, both halves done) · `temporal-namespace` ✅ 2026-09-25 (A.3, both halves done) · `temporal-ui`
+✅ 2026-09-25 (A.4) · `workflow-worker` ✅ 2026-09-29 (A.5). **A.7 complete.** The worker service
+sets **`stop_grace_period: 30s`** — Docker's 10 s default would SIGKILL mid-drain. Verified:
+`HelloWorkflow` started with the admin-tools CLI (`workflow execute --type HelloWorkflow
+--task-queue workflow --input '{"name": …}'`) → `COMPLETED`, `"Hello, Karthik"`, visible in the UI;
+`docker compose stop` with **`uv` as PID 1** → exit 0 in 0.38 s, so `uv run` forwards SIGTERM.
 
 #### A.8 — 🚀 Engine-up release + proof
 
 **What:** ff `main` (the api image rebuilds for A.5; nothing else changes behaviour — no NATS
 message, no schema, no route). Flux applies A.1–A.6. Then:
-1. Start `HelloWorkflow` from inside the workflow-worker pod; watch it complete in the port-forwarded UI.
+1. Start `HelloWorkflow` and watch it complete in the port-forwarded UI. ⚠️ The api image has **no
+   `temporal` CLI** — start it from a one-off `temporalio/admin-tools` pod (A.3's pattern), as A.7 did.
 2. **Capacity:** `kubectl describe node` — requests and **limit overcommit** before/after. Record
    both in the handoff. §2d: a headed render + a history burst = CFS throttling on the history
    service that *looks like a workflow bug*. Write that sentence next to the numbers.
