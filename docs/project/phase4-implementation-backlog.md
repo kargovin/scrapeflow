@@ -481,12 +481,13 @@ activity boundary is a new wire; it gets a producer-side definition on day one.
 - **Inputs drop every NATS-routing field:** `schema_version`, `run_id`, `crawl_context`, and
   **`engine` (owner)** — no worker reads it; the task queue picks the worker, as the subject does
   today, and the workflow reads the engine from the row to choose the queue. `output_format` and
-  `provider` tightened to `Literal`s. Credentials and the LLM key stay **ciphertext** — workflow
+  `provider` tightened to `Literal`s (owner, confirmed after build). Credentials and the LLM key stay **ciphertext** — workflow
   history stores inputs as plain JSON in the Temporal DB and the Web UI.
-- **Outputs return success only; a failure is raised** (B.2's `NonRetryableApplicationError`) —
+- **Outputs return success only; a failure is raised** (owner, confirmed after build; B.2's `NonRetryableApplicationError`) —
   the "error string on a terminal failure" above is withdrawn; two routes out of an activity for
   one failure is the Q8 shape. `blocked:<vendor>` becomes the raised error's message.
-- **`StoredObject {path, size}`** for the result and every screenshot — `size`, not `bytes` (matches
+- **The worker reports size and `content_hash` (owner, confirmed after build)** —
+  `StoredObject {path, size}` for the result and every screenshot; `size`, not `bytes` (matches
   `record_object(size=…)`, no builtin shadowing). The accountant needs neither `stat_minio_size`
   nor a download. `content_hash` is required, `^[0-9a-f]{16}$` — Go must format with `%016x`
   (`%x` drops leading zeros, ~1 in 16). `LLMOutput` is `result` only.
