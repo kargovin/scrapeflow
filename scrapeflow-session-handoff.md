@@ -156,16 +156,20 @@ backlog's A.8 *Done* note. Notes:
 - **Capacity** before → after: CPU requests 30 → 31 %, **limits 176 → 179 %**; memory limits 59 →
   60 %. §2d warning written beside the numbers: throttling on the history service looks like a
   workflow bug.
-- 🔴 **No backups exist for either Postgres** (Temporal's or the app's) — nothing in the infra repo.
-  **Owner item, open**, and must be answered before Group C puts real in-flight work in Temporal.
+- **No backups exist for either Postgres** (Temporal's or the app's) — nothing in the infra repo.
+  ⏸ **Owner's call: deferred until after the Temporal migration** ("the data is mostly junk as of
+  now") — a `phase4-backlog.md` §4 row; revisit before the data stops being junk.
 - The worker logs `started` ~21 s after `uv run`'s project build (250m CPU limit) — not a problem
   now, worth knowing when reading rollout timings.
 - **A.8 review (same session) — found and recorded:** (1) 🔴 **C.5 never said the API Deployment
   needs `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`** — the default is `localhost:7233`, so every prod
-  trigger would fail to connect; now step 6 of C.5, with A.5's lazy-vs-eager call carried in.
+  trigger would fail to connect. **Owner: do it in Group A → new task A.9** — `app/api.yaml` gains
+  the two env vars, infra `7ae6a9b`, **committed; push pending the owner's go** (restarts the API,
+  ~80 s). Local needed nothing (`.env`); `connect()` from the compose api verified. C.5 step 6 keeps
+  only the lazy-vs-eager decision.
   (2) Stale "next is engine up" lines in `phase4-backlog.md`, `temporal-full-migration.md`, this
   file's git block and the release-policy memory (which also said engine up needed no app release —
-  it did). (3) Backlog open item 8 widened: no backup for the **app** Postgres either.
+  it did). (3) No backup for the **app** Postgres either — both deferred (above).
   ⚠️ **Not yet verified in prod: the worker's SIGTERM drain under k8s** (verified locally with `uv`
   as PID 1). The next api release restarts it — `kubectl logs -f` the old pod through the rollout
   for `Workflow worker stopping` → `stopped`.
@@ -783,7 +787,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 0. **Pick up B.1 in `phase4-implementation-backlog.md`** — activity contracts; Group B (*worker
    port*) opens. ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
-   `ddde657`). 🔴 **Owner item from A.8: no Postgres backups exist** — decide before Group C. **Per-task ordering: local → k8s → next task.**
+   `ddde657`). **A.9** (Temporal env on the API) built, infra `7ae6a9b` — push + verify in prod if
+   not done. Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
    `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
    `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`

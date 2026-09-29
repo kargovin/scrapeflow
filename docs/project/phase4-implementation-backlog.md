@@ -46,7 +46,8 @@
 | A.5 | Workflow-worker scaffold in `api/` + `HelloWorkflow` | ✅ 2026-09-29 (local; `HelloWorkflow` completed on the compose server) |
 | A.6 | Workflow-worker Deployment in the infra repo | ✅ 2026-09-29 (infra `ddde657`, pushed inside A.8; verified in prod) |
 | A.7 | Local dev: compose services for Temporal + workflow worker | ✅ `temporal-postgres` ✅ 2026-09-21 · `temporal-schema` + `temporal` ✅ 2026-09-22 · `temporal-namespace` ✅ 2026-09-25 · `temporal-ui` ✅ 2026-09-25 · `workflow-worker` ✅ 2026-09-29 — **A.7 ✅** |
-| A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ✅ 2026-09-29 (`main` → `ce614d8`; `HelloWorkflow` COMPLETED in prod) — **Group A ✅** |
+| A.8 | 🚀 Engine-up release + prove `HelloWorkflow` in prod; capacity + backup check | ✅ 2026-09-29 (`main` → `ce614d8`; `HelloWorkflow` COMPLETED in prod) |
+| A.9 | Temporal env on the API Deployment (added at the A.8 review) | ✅ 2026-09-29 local (already via `.env`) · infra `7ae6a9b` committed |
 | **B** | **Worker port** (Go → LLM → Playwright) | |
 | B.1 | Activity contracts: input/output types + `contracts/` arm | ⬜ |
 | B.2 | Go http-worker: `Scrape` activity entry point + mode flag | ⬜ |
@@ -426,9 +427,24 @@ pinned `421cbfe`, which would have crash-looped until the next automation pass),
    like a workflow bug*.** CPU limits are 179 % overcommitted — if a workflow stalls under load,
    check the Temporal server's throttling before the workflow code.
 3. **Backups: none exist — for the Temporal Postgres *or* the app Postgres.** Searched the infra repo
-   (no `pg_dump`, Velero or backup manifest; the only CronJob is `scrapeflow-cleanup`). Recorded, not
-   decided — ⚠️ **owner item still open:** name where backups will live before Group C puts real
-   in-flight work in Temporal.
+   (no `pg_dump`, Velero or backup manifest; the only CronJob is `scrapeflow-cleanup`). **Owner's
+   call (2026-09-29): deferred until after the Temporal migration** — the data is mostly junk today.
+   Recorded in `phase4-backlog.md` §4.
+
+#### A.9 — Temporal env on the API Deployment
+
+*Added 2026-09-29 by the A.8 review; owner's call to land it in Group A rather than inside C.5.*
+**Why:** the API starts, signals and queries workflows from C.5 on, but only the workflow worker's
+manifest carried `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`. The setting defaults to `localhost:7233`,
+so the first prod trigger would fail to connect — and C.5 never said to add them.
+**What:** `app/api.yaml` — `TEMPORAL_ADDRESS=scrapeflow-temporal:7233`, `TEMPORAL_NAMESPACE=scrapeflow`.
+Local: nothing to do — the compose `api` service already reads both from the root `.env` (`.env.example`
+carries them). No app code: nothing on the API reads them until C.5.
+**Verify:** `kubectl diff` shows only the two env vars; after Flux applies, the API pod's env has them
+and `connect()` from inside the pod reaches the server. Pushing restarts the API (`Recreate`, ~80 s).
+**Depends on:** A.2
+**Built 2026-09-29:** infra `7ae6a9b`. Local verified: `connect()` from the compose api container →
+`temporal:7233`, namespace `scrapeflow`, server 1.31.0. Server dry-run clean; `kubectl diff` = the two vars.
 
 ---
 
@@ -635,9 +651,7 @@ bug on a new lane (16e). Without the FK, the accounting activity's first insert 
    with a named error. ⚠️ Temporal down → the run fails loudly at trigger; it does not queue.
 6. *(Added at the A.8 review, 2026-09-29.)* **The API gets its Temporal client here** — a stored
    client on `app.state`; decide **lazy vs eager connect** (eager = a Temporal outage stops the
-   whole API from starting; carried from A.5). ⚠️ **Infra half: add `TEMPORAL_ADDRESS` and
-   `TEMPORAL_NAMESPACE` to `app/api.yaml`** — only the workflow worker has them today, and the
-   setting's default is `localhost:7233`, so without the env every prod trigger fails to connect.
+   whole API from starting; carried from A.5). The prod env it reads was added in **A.9**.
 - Tests: admission per meter; buffer; REJECT_DUPLICATE pinned (assert on the start call);
   definition passed as argument.
 **Depends on:** C.2, C.4, A.5
@@ -1086,6 +1100,5 @@ migration's stated payoff; record the before/after in the handoff.
 6. **I.1** — Alembic-on-startup under two replicas; no ADR covers it.
 7. **C.11** — BUG-009 is deferred past Phase 4 in `phase4-backlog.md` §4 but is made load-bearing
    by the pipeline lane; recommend pulling it in.
-8. **A.8** — where the Temporal Postgres backup lives. ⚠️ **Checked at A.8 (2026-09-29): no backup
-   exists for either Postgres** — Temporal's *or the app's*; nothing in the infra repo. Answer before
-   Group C puts real in-flight work in Temporal.
+8. ~~**A.8** — where the Temporal Postgres backup lives.~~ **Answered 2026-09-29: nowhere, for
+   either Postgres — deferred past the migration by the owner** (data is junk today). `phase4-backlog.md` §4.
