@@ -1,0 +1,14 @@
+{
+  "artifact_id": "3f8b7a12-0c44-4e7a-9a1e-1b2c3d4e5f60",
+  "credentials": {
+    "encrypted_cookies": null,
+    "encrypted_proxy_url": "gAAAAAB_proxy"
+  },
+  "options": {
+    "actions": null,
+    "respect_robots": true
+  },
+  "output_format": "markdown",
+  "playwright_options": null,
+  "url": "https://example.com/"
+}
