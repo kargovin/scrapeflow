@@ -5,3 +5,6 @@
 # Do not move these to settings.py — they are not env-configurable by design.
 
 WORKFLOW_QUEUE = "workflow"
+
+# Polled by the Go http-worker in WORKER_MODE=temporal.
+SCRAPE_HTTP_QUEUE = "scrape-http"
