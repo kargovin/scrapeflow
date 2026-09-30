@@ -700,9 +700,14 @@ no LLM, no nondeterminism). Record the result in the handoff.
   re-raise (6 fail), no heartbeat task (1), `except BaseException` (1). 117 llm-worker, 50 contract.
 - **Smoke (compose network, `WORKER_MODE=temporal`):** `temporal_worker_started … task_queue=llm`,
   poller listed on `llm` (activity), SIGTERM → `stopping` → `stopped`, exit 0 in ~0.6 s.
-- ⚠️ The llm-worker image has no `PYTHONUNBUFFERED` — structlog's stdout is block-buffered to a
-  pipe, so the last lines before a SIGKILL are lost (they were in the first smoke run). Not changed;
-  B.7 / owner call.
+- ~~The llm-worker image has no `PYTHONUNBUFFERED`, so the last lines before a SIGKILL are lost.~~
+  **Withdrawn 2026-09-30:** structlog's `PrintLogger.msg` prints with `flush=True`, so no structlog
+  line is held back; the first smoke run's missing `stopping` line was never *written* (the ignored
+  SIGTERM above). `PYTHONUNBUFFERED` would change nothing here.
+- ⚠️ **`llm.py` logs through stdlib `logging`, which nothing configures** — INFO is dropped and
+  WARNING goes bare to stderr. So *"LLM endpoint warm after cold start"* is never printed (the stub
+  run's 20 s cold start left no line), and the truncation warning is unformatted. Pre-existing, both
+  modes. Fix: structlog in `llm.py`. Open — owner call, B.7 or later.
 - Exit prints aiohttp `Unclosed connector` noise (miniopy's session is never closed) — same on the
   NATS path; harmless.
 - **Step 6 — local end to end.** Compose `llm-worker-temporal` (`WORKER_MODE=temporal`, no NATS env,

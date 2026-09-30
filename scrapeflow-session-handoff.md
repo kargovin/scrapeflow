@@ -177,7 +177,10 @@ in plain terms), then owner: "agree on all your recommendations" → recorded as
 - Local: compose `llm-worker-temporal` is **running**; the NATS `llm-worker` is not (the dev stream
   still holds ~1.69 M messages — do not start it). The llm-worker suite now downloads the Temporal
   test server on first use (~10 s).
-- Open, not asked: `PYTHONUNBUFFERED=1` on the llm-worker image (last log lines lost on SIGKILL).
+- ~~`PYTHONUNBUFFERED=1` on the llm-worker image~~ — **withdrawn**: structlog flushes every line; the
+  lines "lost" in the first smoke run were never written (the ignored SIGTERM). **Open instead:**
+  `llm.py` logs via unconfigured stdlib `logging`, so the cold-start *"warm after"* INFO line is never
+  printed and the truncation WARNING is unformatted — fix is structlog there; owner call, B.7 or later.
 - **Next: B.7** — `app/llm-worker-temporal.yaml` (NATS env out, `LLM_REQUEST_TIMEOUT_SECONDS=180`,
   grace ~420 s), then the release (ff `main` — also ships BUG-020), then the BUG-020 check and a
   prod `probe_llm.py` run.
