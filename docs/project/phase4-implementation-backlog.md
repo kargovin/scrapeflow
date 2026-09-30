@@ -903,9 +903,8 @@ against a real page (⚠️ the probe hard-codes `SCRAPE_HTTP_QUEUE` and `Scrape
   `18f1a13f59dcc2ad`. **Headed Chrome is byte-stable on this page** — two local renders gave the same
   hash — so an exact match is the test. The 12.7 KB (vs 713 B raw) is example.com's own script
   splitting its text into one `<span>` per letter, not an injection.
-  ⚠️ **Check the v1 job's engine before comparing:** the first v1 submission ran on the Go worker
-  (`a6cdea39c93062d1` = B.4's HTTP hash); the Playwright pod never logged it. `create_job` routes by
-  `body.engine` — the request carried no `playwright`.
+  A first v1 submission was sent as `engine: http` by mistake (owner) — it returned B.4's HTTP hash
+  `a6cdea39c93062d1`; not a routing fault.
   ⚠️ v1 jobs may run through the platform-default proxy (the HTTP job logged `Using proxy`); the probe
   sends no credentials. A mismatch on a geo-sensitive page is the proxy first.
 
