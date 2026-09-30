@@ -57,7 +57,7 @@
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ✅ 2026-09-30 (local; compose service + `LLMProbeWorkflow` end to end). 🔴 Found an Anthropic-path prod bug on the way — fixed locally, not released |
 | B.7 | LLM second Deployment + 🚀 release | ✅ 2026-09-30 (`1717032`, infra `3179f48`) — **LLM port live beside NATS**; BUG-020 closed on the owner's prod probe (401) |
 | B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ✅ 2026-09-30 (`c405124`, released with B.9 `a11cce6`; compose service end to end). Render pipeline extracted to `worker/scrape.py`, shared with NATS |
-| B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ✅ 2026-09-30 released (`a11cce6`, infra `9ebb305`) — **Playwright port live beside NATS**; the prod gate is the owner's |
+| B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ✅ 2026-09-30 released (`a11cce6`, infra `9ebb305`) — **Playwright port live beside NATS; gate passed in prod** (`example.com` → `18f1a13f59dcc2ad` on both) |
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |
 | C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ⬜ |
 | C.2 | Widen both quota views + the ledger CHECK for the pipeline lane | ⬜ |
@@ -898,9 +898,16 @@ against a real page (⚠️ the probe hard-codes `SCRAPE_HTTP_QUEUE` and `Scrape
   recorded prod Chrome version; the pre-release one was not captured.
 - **Capacity** before → after: CPU requests 32 → 39 %, **limits 191 → 216 %**; memory requests 14 →
   17 %, limits 62 → 75 %. Idle, each Playwright pod ≈ 5m CPU / ~300 Mi.
-- ⚠️ **Open — the owner runs the gate** (the classifier refuses the probe's prod write): `example.com`,
-  `html`, v1 Playwright job vs `probe_scrape --engine playwright`, compare `content_hash`; headed
-  Chrome may not be byte-stable, so a mismatch is judged on structure (size, content), not failed.
+- ✅ **Gate passed (owner ran it):** `example.com`, `html` — `probe_scrape --engine playwright` →
+  12,747 B, `18f1a13f59dcc2ad`; v1 job `fe5b27eb…` (`engine: playwright`) → `job_runs.content_hash`
+  `18f1a13f59dcc2ad`. **Headed Chrome is byte-stable on this page** — two local renders gave the same
+  hash — so an exact match is the test. The 12.7 KB (vs 713 B raw) is example.com's own script
+  splitting its text into one `<span>` per letter, not an injection.
+  ⚠️ **Check the v1 job's engine before comparing:** the first v1 submission ran on the Go worker
+  (`a6cdea39c93062d1` = B.4's HTTP hash); the Playwright pod never logged it. `create_job` routes by
+  `body.engine` — the request carried no `playwright`.
+  ⚠️ v1 jobs may run through the platform-default proxy (the HTTP job logged `Using proxy`); the probe
+  sends no credentials. A mismatch on a geo-sensitive page is the proxy first.
 
 ---
 

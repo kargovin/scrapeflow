@@ -165,8 +165,9 @@ the NATS worker (poller listed by `task-queue describe`). Detail in the backlog'
   after this release — first recorded value.
 - ✅ **BUG-020 CLOSED** — owner's prod `probe_llm.py` with a fake key → `401 … API key is invalid.`
 - **Probe:** `scripts/probe_scrape.py --engine http|playwright` (`a11cce6`).
-- ⚠️ **Open — owner runs B.9's gate** (the classifier refuses prod probe writes): v1 Playwright job
-  vs `probe_scrape --engine playwright` on `example.com` `html`, compare `content_hash`.
+- ✅ **B.9's gate passed** (owner ran it): v1 Playwright job and `probe_scrape --engine playwright`
+  both `18f1a13f59dcc2ad` (12,747 B — example.com's script wraps each letter in a `<span>`; headed
+  Chrome is byte-stable on it). ⚠️ The first v1 try ran on the Go worker — confirm `engine` first.
 - 🔴 **New, not filed — 10 Dependabot alerts on `api/uv.lock`, PyJWT 2.13.0 (1 critical, 5 high),
   all published 2026-09-30, fixed in 2.14.0.** PyJWT is transitive via `clerk-backend-api` — the
   API's JWT verification path. Owner's call pending (see *Outstanding*).
@@ -965,7 +966,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.1 in `phase4-implementation-backlog.md`** — Group C (pipeline lane) opens; read its group header and the eight open items at the backlog's foot first. **Before it: (a) the owner's B.9 prod gate; (b) owner's call on the PyJWT alerts** (10 on `api/uv.lock`, fix = 2.14.0, a release). ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.1 in `phase4-implementation-backlog.md`** — Group C (pipeline lane) opens; read its group header and the eight open items at the backlog's foot first. **Before it: owner's call on the PyJWT alerts** (10 on `api/uv.lock`, fix = 2.14.0, a release). ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
