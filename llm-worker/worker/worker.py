@@ -15,7 +15,7 @@ from .config import settings
 from .errors import TRANSIENT, classify, describe, retry_delay
 from .llm import call_llm
 from .models import JobMessage, ResultMessage
-from .storage import upload
+from .storage import fetch_content, upload
 
 log = structlog.get_logger()
 
@@ -24,22 +24,6 @@ RESULT_SUBJECT = "scrapeflow.jobs.result"
 
 async def publish_result(js: Any, result: ResultMessage) -> None:
     await js.publish(RESULT_SUBJECT, result.to_nats_bytes())
-
-
-async def fetch_content(minio: Minio, raw_minio_path: str) -> str:
-    """Read raw scrape content from MinIO; return as a UTF-8 string.
-
-    raw_minio_path is bucket-qualified: "{bucket}/history/{artifact_id}/scrape.{ext}"
-    """
-    bucket = settings.minio_bucket
-    object_key = raw_minio_path[len(bucket) + 1 :]
-    response = await minio.get_object(bucket, object_key)
-    try:
-        data = await response.read()
-    finally:
-        response.close()
-        await response.release()
-    return data.decode("utf-8")
 
 
 async def handle_message(msg: Any, js: Any, minio: Minio) -> None:

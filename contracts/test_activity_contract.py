@@ -35,6 +35,7 @@ def _load(name: str, relpath: str):
 api = _load("activity_contract_api", "api/app/workflows/activities/contracts.py")
 playwright = _load("activity_contract_playwright", "playwright-worker/worker/contracts.py")
 llm = _load("activity_contract_llm", "llm-worker/worker/contracts.py")
+api_queues = _load("activity_contract_api_queues", "api/app/workflows/queues.py")
 
 ARTIFACT_ID = "3f8b7a12-0c44-4e7a-9a1e-1b2c3d4e5f60"
 
@@ -229,6 +230,12 @@ def test_workers_accept_every_input_field_the_api_sends(producer, consumer):
 )
 def test_api_accepts_every_output_field_the_workers_send(producer, consumer):
     assert set(producer.model_fields) <= set(consumer.model_fields)
+
+
+def test_llm_worker_registers_the_name_and_queue_the_api_calls():
+    # A mismatch raises nothing: the task waits on an unpolled queue until it times out.
+    assert llm.LLM_EXTRACT_ACTIVITY == api.LLM_EXTRACT_ACTIVITY
+    assert llm.LLM_QUEUE == api_queues.LLM_QUEUE
 
 
 # ---------------------------------------------------------------------------

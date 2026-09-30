@@ -11,6 +11,9 @@ ArtifactId = Annotated[str, StringConstraints(min_length=1)]
 # Registered by the Go worker under this name (internal/activity.ScrapeName); must match exactly.
 SCRAPE_ACTIVITY = "Scrape"
 
+# Registered by the LLM worker under this name (worker/contracts.py); must match exactly.
+LLM_EXTRACT_ACTIVITY = "LLMExtract"
+
 
 class Credentials(BaseModel):
     """Per-job secrets as Fernet ciphertext — workflow history stores inputs in plain JSON."""

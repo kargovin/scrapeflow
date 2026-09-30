@@ -8,7 +8,7 @@ from temporalio.worker import Worker
 from app.settings import settings
 from app.workflows.client import connect
 from app.workflows.hello import HelloWorkflow, say_hello
-from app.workflows.probe import ScrapeProbeWorkflow
+from app.workflows.probe import LLMProbeWorkflow, ScrapeProbeWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 
 logger = structlog.get_logger()
@@ -19,7 +19,7 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=WORKFLOW_QUEUE,
-        workflows=[HelloWorkflow, ScrapeProbeWorkflow],
+        workflows=[HelloWorkflow, ScrapeProbeWorkflow, LLMProbeWorkflow],
         activities=[say_hello],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )

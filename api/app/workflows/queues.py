@@ -8,3 +8,6 @@ WORKFLOW_QUEUE = "workflow"
 
 # Polled by the Go http-worker in WORKER_MODE=temporal.
 SCRAPE_HTTP_QUEUE = "scrape-http"
+
+# Polled by the LLM worker in WORKER_MODE=temporal.
+LLM_QUEUE = "llm"

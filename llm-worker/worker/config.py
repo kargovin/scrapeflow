@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import field_validator
@@ -11,7 +12,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
     )
+    # nats = the NATS consumer (main.py); temporal = the LLMExtract activity worker
+    # (temporal_main.py). One image, two Deployments.
+    worker_mode: Literal["nats", "temporal"] = "nats"
     nats_url: str = "nats://localhost:4222"
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "scrapeflow"
+    # Temporal mode: how long SIGTERM waits for in-flight activities before
+    # cancelling them. Covers one full warm-up + request (~360s in prod), so a
+    # rollout does not cancel a call and re-bill the user's key on the retry.
+    # The pod's terminationGracePeriodSeconds must exceed it.
+    llm_graceful_shutdown_seconds: float = 400.0
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "scrapeflow"
     minio_secret_key: str = "scrapeflow_secret"
@@ -34,9 +45,11 @@ class Settings(BaseSettings):
     # a whole job: the heartbeat below does that. This is the orphan-recovery window — how
     # long a message sits before redelivery when a worker dies mid-job.
     llm_ack_wait_seconds: int = 120
-    # How often to send msg.in_progress() while a job runs (must be < ack_wait).
-    # This, not ack_wait, is what keeps a long LLM call from being redelivered.
-    llm_heartbeat_seconds: int = 30
+    # How often to heartbeat while a job runs — msg.in_progress() in NATS mode
+    # (must be < ack_wait), activity.heartbeat() in Temporal mode (must be < the
+    # caller's heartbeat_timeout). This, not ack_wait, is what keeps a long LLM
+    # call from being redelivered.
+    llm_heartbeat_seconds: float = 30
 
     # ── Q5 option B — transient-failure redelivery ────────────────────────────
     # Total deliveries of one message before the worker gives up and publishes a

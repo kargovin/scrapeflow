@@ -20,6 +20,22 @@ from miniopy_async import Minio
 from .config import settings
 
 
+async def fetch_content(minio: Minio, raw_minio_path: str) -> str:
+    """Read raw scrape content from MinIO; return as a UTF-8 string.
+
+    raw_minio_path is bucket-qualified: "{bucket}/history/{artifact_id}/scrape.{ext}"
+    """
+    bucket = settings.minio_bucket
+    object_key = raw_minio_path[len(bucket) + 1 :]
+    response = await minio.get_object(bucket, object_key)
+    try:
+        data = await response.read()
+    finally:
+        response.close()
+        await response.release()
+    return data.decode("utf-8")
+
+
 async def upload(minio: Minio, artifact_id: str, data: bytes) -> str:
     """Upload the structured JSON result; return the fully-qualified object path."""
     bucket = settings.minio_bucket

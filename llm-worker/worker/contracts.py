@@ -6,6 +6,11 @@ from pydantic import BaseModel, Field, StringConstraints
 
 NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 
+# Must equal the API's LLM_EXTRACT_ACTIVITY and LLM_QUEUE — a mismatch raises no error; the task
+# waits on a queue nobody polls until its timeout fires.
+LLM_EXTRACT_ACTIVITY = "LLMExtract"
+LLM_QUEUE = "llm"
+
 
 class LLMInput(BaseModel):
     artifact_id: NonEmptyStr

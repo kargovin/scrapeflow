@@ -1,6 +1,8 @@
 """
 LLM worker — entry point (Python/asyncio, user-provided Anthropic/OpenAI key).
 
+WORKER_MODE=temporal runs temporal_main.run instead; the sequence below is the NATS mode.
+
 Startup sequence (spec §4.3):
   1. Load config from env vars (requires LLM_KEY_ENCRYPTION_KEY)
   2. Connect to NATS, verify SCRAPEFLOW stream exists
@@ -9,17 +11,25 @@ Startup sequence (spec §4.3):
   5. Run worker loop (concurrency capped by LLM_MAX_WORKERS)
 """
 
-import asyncio
 import signal
+import sys
 
-import nats
-import nats.errors
-import structlog
-from miniopy_async import Minio
-from nats.js.api import ConsumerConfig
+if __name__ == "__main__":
+    # As PID 1 the process ignores a SIGTERM it has no handler for, and the imports below
+    # take ~4 s (anthropic, openai, nats). Nothing is in flight yet, so exit at once; run()
+    # replaces this with its graceful handler.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
-from .config import settings
-from .worker import handle_message
+import asyncio  # noqa: E402
+
+import nats  # noqa: E402
+import nats.errors  # noqa: E402
+import structlog  # noqa: E402
+from miniopy_async import Minio  # noqa: E402
+from nats.js.api import ConsumerConfig  # noqa: E402
+
+from .config import settings  # noqa: E402
+from .worker import handle_message  # noqa: E402
 
 log = structlog.get_logger()
 
@@ -161,4 +171,9 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    if settings.worker_mode == "temporal":
+        from .temporal_main import run as run_temporal
+
+        asyncio.run(run_temporal())
+    else:
+        asyncio.run(run())

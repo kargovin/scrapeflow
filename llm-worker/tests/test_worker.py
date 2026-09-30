@@ -5,7 +5,7 @@ Verifies the full ADR-002 job lifecycle without any live infrastructure.
 NATS, MinIO, and both LLM providers are all mocked.
 
 Patching strategy — all patches are applied at the import site in worker.worker:
-  - worker.worker.fetch_content  (defined in same module)
+  - worker.worker.fetch_content  (imported from worker.storage)
   - worker.worker.call_llm       (imported from worker.llm)
   - worker.worker.upload         (imported from worker.storage)
 
