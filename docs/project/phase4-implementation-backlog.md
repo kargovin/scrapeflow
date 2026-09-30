@@ -55,7 +55,7 @@
 | B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ✅ 2026-09-29 — **gate passed in prod** (`example.com`, v1 = v2 = `a6cdea39c93062d1`) |
 | B.5 | 🚀 Go port release | ✅ 2026-09-29 (`ef68942`, infra `e70fbe9`) — **Go port live beside NATS** |
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ✅ 2026-09-30 (local; compose service + `LLMProbeWorkflow` end to end). 🔴 Found an Anthropic-path prod bug on the way — fixed locally, not released |
-| B.7 | LLM second Deployment + 🚀 release | ✅ 2026-09-30 (`1717032`, infra `3179f48`) — **LLM port live beside NATS**; BUG-020's prod probe is the owner's |
+| B.7 | LLM second Deployment + 🚀 release | ✅ 2026-09-30 (`1717032`, infra `3179f48`) — **LLM port live beside NATS**; BUG-020 closed on the owner's prod probe (401) |
 | B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ✅ 2026-09-30 (local, `c405124`, not released; compose service end to end). Render pipeline extracted to `worker/scrape.py`, shared with NATS |
 | B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ⬜ |
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |

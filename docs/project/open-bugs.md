@@ -1895,10 +1895,12 @@ any request leaves the pod. Observed impact: none found — the current llm-work
 checked.
 **Discovered:** 2026-09-30, B.6 step 6 — `LLMProbeWorkflow` with a deliberately fake Anthropic key
 was expected to return a 401 and returned a `TypeError` instead.
-**Status:** 🟡 **Fixed in `f2738fb`, RELEASED 2026-09-30 with B.7 (`main` `1717032`) — owner's call:
-no hotfix.** First half of the after-release check done: the new NATS llm-worker pod runs `anthropic`
-1.9.0 / `openai` 3.22.1 (the lockfile's) and its `llm.py` carries the fix. **Open: the owner's prod
-`probe_llm.py` run with a fake Anthropic key** — close this bug on its `401`.
+**Status:** ✅ **CLOSED 2026-09-30 — fixed in `f2738fb`, released with B.7 (`main` `1717032`), verified
+in prod.** The NATS llm-worker pod runs `anthropic` 1.9.0 / `openai` 3.22.1 (the lockfile's) with the
+fixed `llm.py`; the owner's prod `probe_llm.py` run with a fake Anthropic key returned
+`LLMFailed: AuthenticationError: Error code: 401 … 'API key is invalid.'` — the request reached
+Anthropic — and deleted its object. The probe runs `LLMExtract` on the Temporal llm-worker, which
+is the same image and `llm.py` as the NATS one.
 
 ### What happens
 
