@@ -1406,6 +1406,9 @@ them without changing what ships. Verified by a `--target production` build (`np
 226 packages from the lock, bundle builds). The four unlocked Python services are still exactly
 as filed. Sequencing of the rest is the owner's call. Deliberately carved out of BUG-006 rather
 than folded into it; see *Relationship to BUG-006* below.
+**Update 2026-09-30:** `llm-worker/` locked in B.6 (`fa43db2`, released with B.7 `1717032`) and
+`playwright-worker/` in B.8 (`c405124`, unreleased) — each has a `uv.lock` and a Dockerfile that runs
+`uv sync --frozen --no-install-project`. **Two remain: `coordinator/` and `mcp/`.**
 
 ### What happens
 

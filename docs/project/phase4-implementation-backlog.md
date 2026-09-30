@@ -56,7 +56,7 @@
 | B.5 | 🚀 Go port release | ✅ 2026-09-29 (`ef68942`, infra `e70fbe9`) — **Go port live beside NATS** |
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ✅ 2026-09-30 (local; compose service + `LLMProbeWorkflow` end to end). 🔴 Found an Anthropic-path prod bug on the way — fixed locally, not released |
 | B.7 | LLM second Deployment + 🚀 release | ✅ 2026-09-30 (`1717032`, infra `3179f48`) — **LLM port live beside NATS**; BUG-020's prod probe is the owner's |
-| B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ⬜ |
+| B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ✅ 2026-09-30 (local, `c405124`, not released; compose service end to end). Render pipeline extracted to `worker/scrape.py`, shared with NATS |
 | B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ⬜ |
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |
 | C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ⬜ |
@@ -804,6 +804,61 @@ fake Anthropic key → `LLMFailed: AuthenticationError … 401`, not `TypeError`
 - Tests: `ActivityEnvironment`; a wall fixture (the Myntra 481 B body) → non-retryable; a normal
   page → output; a MinIO 5xx → retryable.
 **Depends on:** B.1
+
+**Built 2026-09-30 (local) — `c405124`. Not released; B.9 ships it.** Owner wrote the activity's first steps (robots), then "build all".
+- **Render pipeline shared, as Go's `internal/scrape` (owner: "mimic go; extract it until nats is
+  present").** `worker/scrape.py`: `render()` owns one context end to end (cookies, image blocking,
+  CSP, goto, load wait, actions, `detect_block`, format, upload) + `decrypt_credentials()`. A wall
+  raises `BlockedPage(detection)` — `worker.py` turns it into its `failed` publish, the activity into
+  a non-retryable error. Callers keep robots, the transport and failure handling. H deletes
+  `worker.py`; `scrape.py` stays.
+- **`worker/activity.py`:** `PlayWrightScrapeActivities(minio, browser).playwright_scrape`, registered
+  as `Scrape` (`SCRAPE_ACTIVITY`); queue `SCRAPE_PLAYWRIGHT_QUEUE = "scrape-playwright"`, twin in the
+  API's `queues.py`; the contract test asserts both and that the two scrape queues differ. Error
+  types: `RobotsDisallowed`, `Blocked` (message `blocked:<vendor>`), `ScrapeFailed` (non-retryable),
+  `StorageTransient`. Robots runs before the `try` (nothing to clean up, nothing to classify);
+  credentials are decrypted inside it so `InvalidToken` reaches `classify()`. `content_hash` =
+  `xxhash.xxh64(bytes).hexdigest()` in the activity (NATS gains no dependency). Screenshot sizes via
+  `stat_object` — `execute_actions` returns paths only. Heartbeat task every
+  `playwright_heartbeat_seconds`. Docstring states the caller's start-to-close: ≥ 2 ×
+  `timeout_seconds` + actions + upload, per job (BUG-015 gives `goto` and the load wait a full budget each).
+- **`worker/temporal_main.py`:** signal handlers → Temporal → MinIO → Chrome (same launch as
+  `main.py`) → activity-only `Worker`, `max_concurrent_activities = playwright_max_workers`; browser
+  closed after the drain. `main.py` branches on `WORKER_MODE` and installs an early SIGTERM exit
+  before its imports (B.6's fix). **`entrypoint.sh` is unchanged** — both modes exec `worker.main`.
+- ⚠️ **`playwright_graceful_shutdown_seconds = 150` is a placeholder — owner's call.** Covers a default
+  job (60 s + 60 s + upload), not the 300 s `timeout_seconds` maximum; a longer scrape is cancelled on
+  a rollout and re-rendered. B.9's `terminationGracePeriodSeconds` must exceed it (compose: 170 s).
+- **Lockfile (BUG-013):** `uv.lock`; the builder runs `uv sync --frozen --no-install-project` into
+  `/opt/venv` against the image's Python 3.10 (`UV_PYTHON=python3`, no downloads); the
+  `python3.10-venv` apt step is gone. Resolved: `patchright` 1.63.0, `temporalio` 1.33.0 (= api),
+  `xxhash` 4.0.1. ⚠️ **Not compared against prod's resolved versions** (the classifier refused the
+  read) — `kubectl -n scrapeflow exec deploy/scrapeflow-playwright-worker -- /opt/venv/bin/pip freeze`
+  against the lock before B.9; a `patchright` jump changes the stealth layer.
+- **NATS behaviour, three small changes from the move:** a `new_context`/`new_page` failure is now
+  classified (terminal → `failed` + ack) instead of escaping unacked; a `context.close()` failure is
+  suppressed; the context closes before the ack/nak. Decryption still sits above `worker.py`'s `try`
+  (a bad key escapes unacked — latent, NATS-only, deleted by H).
+- **Tests:** `tests/test_activity.py` (16) — output/size/hash, hash keeps leading zeros, format →
+  key, screenshot sizes, action warning, heartbeats, Myntra wall → `Blocked` not uploaded, robots
+  disallow (no context) and fetch failure (proceeds), dead site, bad key (no context), proxy decoded,
+  MinIO 5xx / unreachable → retryable, `NoSuchBucket` → non-retryable, cancel passes through and
+  closes. `tests/test_entrypoint.py` (3) — ends in `exec python -m worker.main`, no `xvfb-run`, waits
+  for the socket first. `test_main.py`: patches retargeted to `worker.scrape.*` + a NATS wall test.
+  **202 worker, 51 contract.** Mutation-checked: wall retryable, no `BlockedPage` branch (activity
+  and NATS — the NATS one was uncovered until the new test), no heartbeat, hash via `%x`, decrypt
+  outside the `try`, robots fail-closed, no context close.
+- **Local end to end:** compose `playwright-worker-temporal` (`WORKER_MODE=temporal`, no NATS env,
+  `stop_grace_period: 170s`) — PID 1 `python -m worker.main` as `appuser`, headed Chrome,
+  `temporal_worker_started … task_queue=scrape-playwright`. A throwaway workflow in the api container
+  → `Scrape` on `scrape-playwright` → example.com markdown, 1359 B, `6cc61c07b397fc58`, deleted.
+  SIGTERM at 0.5/1/2/4 s → exit 0; running → `stopping` → `stopped`, exit 0.
+- ⚠️ **Found, pre-existing, not fixed (entrypoint preserved exactly):** restarting a *stopped* compose
+  container reuses its filesystem, so `/tmp/.X99-lock` from the last run makes Xvfb fail (`Server is
+  already active for display 99`), the socket wait passes on the stale socket, and Chrome dies with
+  `Missing X server`. Both compose playwright services; `restart: unless-stopped` would loop on it.
+  **Not prod:** the manifest mounts no `/tmp` volume, so a k8s restart starts from a fresh layer.
+  Fix if wanted: `rm -f /tmp/.X${SERVERNUM}-lock /tmp/.X11-unix/X${SERVERNUM}` before Xvfb.
 
 #### B.9 — Playwright second Deployment + 🚀 release + pre-gate on both engines
 

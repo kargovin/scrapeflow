@@ -141,7 +141,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-30 *(clock, second session)*
+## Current state — as of 2026-09-30 *(clock, third session)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +149,35 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **B.8 — PLAYWRIGHT `Scrape` ACTIVITY BUILT (2026-09-30, third session).** Local, committed on
+`develop` as **`c405124`**, **not pushed, not released — B.9 ships it.** The owner wrote the activity's
+first steps (robots) with Q&A, then "build activity.py", "mimic go; extract it", "build all". Detail
+in the backlog's B.8 *Built* note. Notes:
+
+- **Render pipeline now shared, as Go's `internal/scrape`:** `playwright-worker/worker/scrape.py`
+  (`render()`, `decrypt_credentials()`, `BlockedPage`). `worker.py` (NATS) and `activity.py`
+  (Temporal) keep only robots, transport and failure handling. A fix to the render goes in one
+  place now. Three small NATS behaviour changes from the move (backlog note).
+- **Error types:** `RobotsDisallowed`, `Blocked` (`blocked:<vendor>`), `ScrapeFailed` — all
+  non-retryable — and `StorageTransient`. Robots sits above the `try`; decryption inside it.
+- **`entrypoint.sh` unchanged** — both modes exec `worker.main`, which branches on `WORKER_MODE`.
+  New `tests/test_entrypoint.py` pins the `exec python` / no-`xvfb-run` contract.
+- **Lockfile** (`playwright-worker/uv.lock`, install-from-lock in the Dockerfile) — BUG-013 now has
+  **two** manifests left unlocked (`coordinator/`, `mcp/`).
+- **202 worker + 51 contract tests**, mutation-checked; compose `playwright-worker-temporal` is
+  **running** and scraped example.com through `scrape-playwright` end to end.
+- ⚠️ **Owner items before B.9:** (1) `playwright_graceful_shutdown_seconds = 150` is a placeholder —
+  covers a default job, not the 300 s maximum; B.9's `terminationGracePeriodSeconds` must exceed the
+  final value. (2) Compare prod's resolved versions against the lock (the classifier refused my
+  read): `kubectl -n scrapeflow exec deploy/scrapeflow-playwright-worker -- /opt/venv/bin/pip
+  freeze` — the lock has `patchright` 1.63.0; a jump changes the stealth layer.
+- ⚠️ **Found, pre-existing, not fixed:** restarting a *stopped* compose playwright container fails —
+  stale `/tmp/.X99-lock` → Xvfb refuses → Chrome `Missing X server`. Local only (prod mounts no
+  `/tmp` volume). Use `up -d --force-recreate`. One-line entrypoint fix in the backlog note; the
+  entrypoint was kept exactly as B.8 asked.
+- **Next: B.9** — `app/playwright-worker-temporal.yaml` (copy the NATS one; hand-set the tag), the
+  release, and B.4's probe with a queue argument on `scrape-playwright`.
 
 🔷 **B.7 — LLM PORT RELEASED (2026-09-30, second session).** Owner: "okay do b7". `main` ff
 `ef68942..1717032` (api + llm-worker built); infra rebased over Flux's two bumps (⚠️ `1807870`
@@ -912,7 +941,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up B.8 in `phase4-implementation-backlog.md`** — the Playwright `Scrape` activity. First: the owner's prod `probe_llm.py` run closes BUG-020. ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up B.9 in `phase4-implementation-backlog.md`** — the Playwright Deployment + 🚀 release. First the two owner items in the B.8 block above (graceful-shutdown value; prod `pip freeze` vs the lock), and the owner's prod `probe_llm.py` run still closes BUG-020. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -958,6 +987,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-09-30, third session close (verified after fetch):** `develop` is ahead of `origin/develop` — `6a85d40`, `36f2781` (B.7 docs), **`c405124` (B.8 code)** and this closeout — **unpushed**. `main` = `origin/main` = `1717032`, unchanged. Infra repo untouched this session.
 - **2026-09-30, after B.7 (verified):** `develop` = `origin/develop` = `main` = `origin/main` = `1717032` — **released**; this session's docs closeout sits on `develop` after it. **Infra repo:** `origin/main` = `3179f48` (`bbc101a` workflow-worker venv python + `3179f48` llm-worker-temporal), 0 ahead.
 - **Deployed code is `1717032`** (2026-09-30, B.7 — api + llm-worker images). Before it: `ef68942`.
 - *Historical, superseded by B.7:* **2026-09-30 close (verified after fetch):** `develop` is **10 ahead** of `origin/develop`, 0 behind — `d2e0295` (09-29 close), `f2738fb` (BUG-020), `fa43db2` (B.6), `1207f69`, `012b0c0`, `dc086a0` (llm.py → structlog), `698fbdd`, `63e7fbe` (workflow-worker SIGTERM + venv python), `0e54897`, `b75e076` (BUG-021) — **unpushed**. `main` = `origin/main` = `ef68942`. **Infra repo: 1 ahead — `1807870`** (workflow-worker command → `/app/.venv/bin/python`), **unpushed, goes out with B.7**.
@@ -1099,6 +1129,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-30 *(clock, third session)* | **🔷 B.8 built (local).** Read-in; owner: "build b8 but dont commit", then took over ("im building this myself"). Q&A while the owner wrote the robots step: raise, don't return (Go's empty struct is only a placeholder); four fixes to the draft (missing `await`, fail-open, structlog call, activity name `Scrape`); why robots sits above the `try` (nothing to clean up or classify). Owner: "only build activity.py" → full activity; "do the temporal_main edits" → entry point, duplicate heartbeat setting removed, shutdown placeholder; live against compose Temporal. "mimic go; extract it" → `worker/scrape.py` shared by both modes. "build all" → lockfile, `WORKER_MODE`, API queue + contract, tests (activity, entrypoint, NATS wall — mutation-checked, the NATS branch was uncovered), compose service end to end. Found the stale-Xvfb-lock restart failure (local only). Prod `pip freeze` refused by the classifier → owner item | `c405124` + this close |
 | 2026-09-30 *(clock, second session)* | **🔷 B.7 — LLM PORT RELEASED.** Read-in; owner: "okay do b7". Infra `app/llm-worker-temporal.yaml` (grace 420 s, no NATS env) + kustomization + README; 120 llm-worker / 50 contract / 302 API green; prod baseline taken. `main` ff `ef68942..1717032` (api + llm-worker); Flux bumps; infra rebase — `1807870` conflicted with the api tag bump, kept both; tag hand-set; classifier refused the infra push, owner pushed `3179f48`. Verified: poller on `llm`, workflow-worker PID 1 = venv python, NATS consumer unchanged, `anthropic` 1.9.0 with the fix. **Open: the owner's prod `probe_llm.py` 401 closes BUG-020.** | `6a85d40`, close; infra `bbc101a`, `3179f48` |
 | 2026-09-30 *(clock)* | **🔷 B.6 built (local) + BUG-020 filed and fixed.** Read-in; mentoring on B.6's design and its NATS mirror; the five open questions re-explained in plain terms → owner agreed all five (recorded). Built steps 1–5 (lockfile + caps, settings, activity, Temporal entry point, tests — mutation-checked); smoke test found the PID-1 early-SIGTERM stall (fixed). Step 6: compose service + `LLMProbeWorkflow`/`probe_llm.py`; stub cold-start run green; fake-key run found **BUG-020** (Anthropic broken in prod, `anthropic` 1.9.0) → fixed, filed. Owner: release waits for B.7. Then: "what would PYTHONUNBUFFERED do" → withdrawn (structlog flushes), found `llm.py`'s stdlib logging dropping INFO → switched to structlog; "also fix the kill bug for api" → reproduced a `uv run` PID-1 stall on the workflow worker, fixed (venv python + handlers, verified on the prod target as `appuser`), infra `1807870` held for B.7; API's own `uv run uvicorn` → **BUG-021** (fix later). | `f2738fb`, `fa43db2`, `1207f69`, `012b0c0`, `dc086a0`, `698fbdd`, `63e7fbe`, `0e54897`, `b75e076` + this close; infra `1807870` |
 | 2026-09-29 *(clock, fourth session)* | **🔷 B.3 → B.4 → B.5 — GO PORT RELEASED.** Read-in. B.3 ("no need to explain"): infra manifest, dry-run clean, verified the manifest's exact env on the local image; owner Q&A on RollingUpdate vs Recreate (Ready ≠ works without a readiness probe) and on Flux setter markers (enough; `update.path` covers `app/`). B.4 built on "build b4; script deletes the object": workflow, two constants, script, two tests (mutation-checked), 300 API tests, compose end-to-end. Owner: reuse activity name `Scrape` for Playwright (B.8 renamed). **B.5 on "do b5 prod release":** `main` ff, four images, five rollouts green, B.3 rebased with hand-set tag and pushed, `go-worker` unchanged, workflow-worker drain verified in prod. Prod probe and DB read refused by the classifier → owner ran both. Gate: `example.com` equal on both paths; `govindappa.com` mismatch traced to Cloudflare's per-request script | `ccb277d`, `d7138cb`, `ef68942` (released) · infra `e70fbe9` (deployed) + this closeout |
