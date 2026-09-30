@@ -707,7 +707,9 @@ no LLM, no nondeterminism). Record the result in the handoff.
 - ⚠️ **`llm.py` logs through stdlib `logging`, which nothing configures** — INFO is dropped and
   WARNING goes bare to stderr. So *"LLM endpoint warm after cold start"* is never printed (the stub
   run's 20 s cold start left no line), and the truncation warning is unformatted. Pre-existing, both
-  modes. Fix: structlog in `llm.py`. Open — owner call, B.7 or later.
+  modes. ✅ **Fixed the same day (owner: "switch to structlog")** — events `llm_endpoint_warm`
+  (`attempts`, `waited_s`, `status`) and `content_truncated`; tests capture both (mutation-checked);
+  stub re-run logged `llm_endpoint_warm attempts=7 … waited_s=12.2`. Ships with B.7.
 - Exit prints aiohttp `Unclosed connector` noise (miniopy's session is never closed) — same on the
   NATS path; harmless.
 - **Step 6 — local end to end.** Compose `llm-worker-temporal` (`WORKER_MODE=temporal`, no NATS env,

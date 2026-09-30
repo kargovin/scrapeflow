@@ -180,7 +180,8 @@ in plain terms), then owner: "agree on all your recommendations" → recorded as
 - ~~`PYTHONUNBUFFERED=1` on the llm-worker image~~ — **withdrawn**: structlog flushes every line; the
   lines "lost" in the first smoke run were never written (the ignored SIGTERM). **Open instead:**
   `llm.py` logs via unconfigured stdlib `logging`, so the cold-start *"warm after"* INFO line is never
-  printed and the truncation WARNING is unformatted — fix is structlog there; owner call, B.7 or later.
+  printed and the truncation WARNING is unformatted — ✅ **switched to structlog the same day**
+  (`llm_endpoint_warm`, `content_truncated`; verified on the stub). Ships with B.7.
 - **Next: B.7** — `app/llm-worker-temporal.yaml` (NATS env out, `LLM_REQUEST_TIMEOUT_SECONDS=180`,
   grace ~420 s), then the release (ff `main` — also ships BUG-020), then the BUG-020 check and a
   prod `probe_llm.py` run.
