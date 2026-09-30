@@ -16,7 +16,14 @@ import pytest
 from cryptography.fernet import Fernet
 
 from worker.config import settings
-from worker.llm import _call_anthropic, _call_openai_compatible, _decrypt_key, call_llm
+from worker.llm import (
+    _anthropic_client,
+    _call_anthropic,
+    _call_openai_compatible,
+    _decrypt_key,
+    _openai_client,
+    call_llm,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -287,3 +294,26 @@ async def test_call_openai_compatible_pins_max_retries():
 
     _, kwargs = mock_cls.call_args
     assert kwargs["max_retries"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Real SDK clients — every other test here mocks the constructors, which is how
+# anthropic>=1.4 rejecting an httpx.Timeout reached production unnoticed.
+# ---------------------------------------------------------------------------
+
+
+def test_real_anthropic_client_accepts_our_timeout_and_retry_pin():
+    client = _anthropic_client("sk-ant-test")
+
+    assert client.timeout.read == float(settings.llm_request_timeout_seconds)
+    assert client.timeout.connect == 10.0
+    assert client.max_retries == settings.llm_max_retries
+
+
+@pytest.mark.parametrize("base_url", [None, "https://model--x.modal.run/v1"])
+def test_real_openai_client_accepts_our_timeout_and_retry_pin(base_url):
+    client = _openai_client("sk-test", base_url)
+
+    assert client.timeout.read == float(settings.llm_request_timeout_seconds)
+    assert client.timeout.connect == 10.0
+    assert client.max_retries == settings.llm_max_retries

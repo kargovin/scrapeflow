@@ -6,6 +6,7 @@ from typing import Any
 
 import anthropic
 import httpx
+import openai
 from cryptography.fernet import Fernet
 from openai import AsyncOpenAI
 
@@ -27,12 +28,31 @@ def _decrypt_key(encrypted_api_key: str) -> str:
     return fernet.decrypt(encrypted_api_key.encode()).decode()
 
 
-def _make_timeout() -> httpx.Timeout:
-    return httpx.Timeout(
+def _make_timeout(timeout_cls: type) -> Any:
+    # Each SDK's own Timeout class: anthropic>=1.4 raises TypeError on an httpx.Timeout (its
+    # client is httpx2).
+    return timeout_cls(
         connect=10.0,
         read=float(settings.llm_request_timeout_seconds),
         write=10.0,
         pool=5.0,
+    )
+
+
+def _anthropic_client(api_key: str) -> anthropic.AsyncAnthropic:
+    return anthropic.AsyncAnthropic(
+        api_key=api_key,
+        timeout=_make_timeout(anthropic.Timeout),
+        max_retries=settings.llm_max_retries,
+    )
+
+
+def _openai_client(api_key: str, base_url: str | None) -> AsyncOpenAI:
+    return AsyncOpenAI(
+        api_key=api_key,
+        base_url=base_url or None,
+        timeout=_make_timeout(openai.Timeout),
+        max_retries=settings.llm_max_retries,
     )
 
 
@@ -111,11 +131,7 @@ async def _call_anthropic(
     content: str,
     output_schema: dict[str, Any],
 ) -> dict[str, Any]:
-    client = anthropic.AsyncAnthropic(
-        api_key=api_key,
-        timeout=_make_timeout(),
-        max_retries=settings.llm_max_retries,
-    )
+    client = _anthropic_client(api_key)
     response = await client.messages.create(
         model=model,
         max_tokens=4096,
@@ -134,12 +150,7 @@ async def _call_openai_compatible(
     content: str,
     output_schema: dict[str, Any],
 ) -> dict[str, Any]:
-    client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url or None,
-        timeout=_make_timeout(),
-        max_retries=settings.llm_max_retries,
-    )
+    client = _openai_client(api_key, base_url)
     response = await client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": f"Extract data from:\n\n{content}"}],
