@@ -14,22 +14,42 @@ with workflow.unsafe.imports_passed_through():
         ScrapeInput,
         ScrapeOutput,
     )
-    from app.workflows.queues import LLM_QUEUE, SCRAPE_HTTP_QUEUE
+    from app.workflows.queues import LLM_QUEUE, SCRAPE_HTTP_QUEUE, SCRAPE_PLAYWRIGHT_QUEUE
 
 # Not retried: a queue nobody polls fails here instead of waiting forever.
 _SCHEDULE_TO_START = timedelta(seconds=60)
 
 
-async def _scrape(input: ScrapeInput) -> ScrapeOutput:
+Engine = Literal["http", "playwright"]
+
+
+async def _scrape(input: ScrapeInput, engine: Engine = "http") -> ScrapeOutput:
+    if engine == "playwright":
+        # goto and wait_for_load_state each get timeout_seconds (BUG-015), + actions and upload.
+        render_s = (input.playwright_options or {}).get("timeout_seconds", 60)
+        timeouts = {
+            "start_to_close_timeout": timedelta(seconds=2 * render_s + 60),
+            # The activity heartbeats every 30 s.
+            "heartbeat_timeout": timedelta(seconds=90),
+        }
+        queue = SCRAPE_PLAYWRIGHT_QUEUE
+    else:
+        timeouts = {"start_to_close_timeout": timedelta(seconds=90)}
+        queue = SCRAPE_HTTP_QUEUE
     return await workflow.execute_activity(
         SCRAPE_ACTIVITY,
         input,
-        task_queue=SCRAPE_HTTP_QUEUE,
+        task_queue=queue,
         result_type=ScrapeOutput,
         schedule_to_start_timeout=_SCHEDULE_TO_START,
-        start_to_close_timeout=timedelta(seconds=90),
         retry_policy=RetryPolicy(maximum_attempts=3),
+        **timeouts,
     )
+
+
+class ScrapeProbeInput(BaseModel):
+    scrape: ScrapeInput
+    engine: Engine = "http"
 
 
 @workflow.defn
@@ -37,8 +57,8 @@ class ScrapeProbeWorkflow:
     """Operator-only: one Scrape activity, no DB, no ledger row — scripts/probe_scrape.py starts it."""
 
     @workflow.run
-    async def run(self, input: ScrapeInput) -> ScrapeOutput:
-        return await _scrape(input)
+    async def run(self, input: ScrapeProbeInput) -> ScrapeOutput:
+        return await _scrape(input.scrape, input.engine)
 
 
 class LLMProbeInput(BaseModel):

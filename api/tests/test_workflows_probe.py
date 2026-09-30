@@ -1,4 +1,5 @@
 import uuid
+from datetime import timedelta
 
 import pytest
 from temporalio import activity
@@ -16,23 +17,36 @@ from app.workflows.activities.contracts import (
     ScrapeInput,
     ScrapeOutput,
 )
-from app.workflows.probe import LLMProbeInput, LLMProbeWorkflow, ScrapeProbeWorkflow
-from app.workflows.queues import LLM_QUEUE, SCRAPE_HTTP_QUEUE, WORKFLOW_QUEUE
+from app.workflows.probe import (
+    LLMProbeInput,
+    LLMProbeWorkflow,
+    ScrapeProbeInput,
+    ScrapeProbeWorkflow,
+)
+from app.workflows.queues import (
+    LLM_QUEUE,
+    SCRAPE_HTTP_QUEUE,
+    SCRAPE_PLAYWRIGHT_QUEUE,
+    WORKFLOW_QUEUE,
+)
 
-# The stand-in for the Go activity is registered on SCRAPE_HTTP_QUEUE only, so a workflow that
-# routed the call anywhere else would never reach it.
+# Each stand-in is registered on one scrape queue only, so a workflow that routed the call
+# anywhere else would never reach it.
 
 PROBE_INPUT = ScrapeInput(artifact_id="a1", url="https://example.com", output_format="html")
 
 
-async def _run(env: WorkflowEnvironment, scrape) -> ScrapeOutput:
+async def _run(
+    env: WorkflowEnvironment, scrape, input: ScrapeInput = PROBE_INPUT, engine: str = "http"
+) -> ScrapeOutput:
+    queue = SCRAPE_PLAYWRIGHT_QUEUE if engine == "playwright" else SCRAPE_HTTP_QUEUE
     async with (
         Worker(env.client, task_queue=WORKFLOW_QUEUE, workflows=[ScrapeProbeWorkflow]),
-        Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
+        Worker(env.client, task_queue=queue, activities=[scrape]),
     ):
         return await env.client.execute_workflow(
             ScrapeProbeWorkflow.run,
-            PROBE_INPUT,
+            ScrapeProbeInput(scrape=input, engine=engine),
             id=f"scrape-probe-{uuid.uuid4()}",
             task_queue=WORKFLOW_QUEUE,
         )
@@ -59,6 +73,29 @@ async def test_probe_returns_the_scrape_output():
     assert received == [PROBE_INPUT]
     assert output.result.path == "scrapeflow-results/history/a1/scrape.html"
     assert output.content_hash == "00c0ffee12345678"
+
+
+async def test_playwright_probe_routes_to_its_queue_with_a_budget_from_the_input():
+    seen: list[tuple[timedelta | None, timedelta | None]] = []
+
+    @activity.defn(name=SCRAPE_ACTIVITY)
+    async def scrape(input: ScrapeInput) -> ScrapeOutput:
+        info = activity.info()
+        seen.append((info.start_to_close_timeout, info.heartbeat_timeout))
+        return ScrapeOutput.model_validate(
+            {
+                "result": {"path": "scrapeflow-results/history/a1/scrape.html", "size": 42},
+                "content_hash": "00c0ffee12345678",
+            }
+        )
+
+    slow = PROBE_INPUT.model_copy(update={"playwright_options": {"timeout_seconds": 300}})
+    async with await WorkflowEnvironment.start_time_skipping(
+        data_converter=pydantic_data_converter
+    ) as env:
+        await _run(env, scrape, slow, engine="playwright")
+
+    assert seen == [(timedelta(seconds=660), timedelta(seconds=90))]
 
 
 async def test_probe_does_not_retry_a_non_retryable_failure():

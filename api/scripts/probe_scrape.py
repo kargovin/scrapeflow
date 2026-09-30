@@ -1,14 +1,15 @@
-"""Run one URL through ScrapeProbeWorkflow (the Go `Scrape` activity), print the output, then
-delete the objects it wrote.
+"""Run one URL through ScrapeProbeWorkflow (the `Scrape` activity on the chosen engine's queue),
+print the output, then delete the objects it wrote.
 
 Usage:
 
     # local (from ./docker)
-    docker compose exec api uv run python -m scripts.probe_scrape https://example.com [--format html]
+    docker compose exec api uv run python -m scripts.probe_scrape https://example.com \\
+        [--format html] [--engine http|playwright]
 
     # prod
     kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- \\
-        /app/.venv/bin/python -m scripts.probe_scrape https://example.com
+        /app/.venv/bin/python -m scripts.probe_scrape https://example.com --engine playwright
 """
 
 import argparse
@@ -21,7 +22,7 @@ from app.core.minio import close_client, create_client
 from app.core.storage import delete_minio_object
 from app.workflows.activities.contracts import ScrapeInput
 from app.workflows.client import connect
-from app.workflows.probe import ScrapeProbeWorkflow
+from app.workflows.probe import ScrapeProbeInput, ScrapeProbeWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 
 
@@ -31,13 +32,17 @@ async def main() -> int:
     )
     parser.add_argument("url")
     parser.add_argument("--format", choices=["html", "markdown", "json"], default="html")
+    parser.add_argument("--engine", choices=["http", "playwright"], default="http")
     args = parser.parse_args()
 
     artifact_id = str(uuid.uuid4())
     client = await connect()
     output = await client.execute_workflow(
         ScrapeProbeWorkflow.run,
-        ScrapeInput(artifact_id=artifact_id, url=args.url, output_format=args.format),
+        ScrapeProbeInput(
+            scrape=ScrapeInput(artifact_id=artifact_id, url=args.url, output_format=args.format),
+            engine=args.engine,
+        ),
         id=f"scrape-probe-{artifact_id}",
         task_queue=WORKFLOW_QUEUE,
     )
