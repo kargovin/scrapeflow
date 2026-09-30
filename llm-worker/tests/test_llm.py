@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
+from structlog.testing import capture_logs
 
 from worker.config import settings
 from worker.llm import (
@@ -116,7 +117,9 @@ async def test_call_llm_truncates_content_over_limit():
     long_content = "x" * (settings.llm_max_content_chars + 500)
 
     with patch.object(settings, "llm_key_encryption_key", key.decode()):
-        with patch("worker.llm._call_anthropic", new_callable=AsyncMock) as mock_a:
+        with patch(
+            "worker.llm._call_anthropic", new_callable=AsyncMock
+        ) as mock_a, capture_logs() as logs:
             mock_a.return_value = {}
             await call_llm(
                 encrypted_api_key=encrypted,
@@ -130,6 +133,10 @@ async def test_call_llm_truncates_content_over_limit():
     # _call_anthropic(api_key, model, content, output_schema) — content is args[2]
     called_content: str = mock_a.call_args.args[2]
     assert len(called_content) == settings.llm_max_content_chars
+    [event] = [e for e in logs if e["event"] == "content_truncated"]
+    assert event["log_level"] == "warning"
+    assert event["original_len"] == settings.llm_max_content_chars + 500
+    assert event["truncated_to"] == settings.llm_max_content_chars
 
 
 async def test_call_llm_does_not_truncate_content_under_limit():

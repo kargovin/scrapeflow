@@ -1,19 +1,19 @@
 import asyncio
 import json
-import logging
 import time
 from typing import Any
 
 import anthropic
 import httpx
 import openai
+import structlog
 from cryptography.fernet import Fernet
 from openai import AsyncOpenAI
 
 from worker.config import settings
 from worker.errors import WarmupTimeout
 
-logger = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 # base_url -> monotonic timestamp of the last successful probe. Lets a hot
 # endpoint skip the probe round-trip entirely (see llm_warm_cache_seconds).
@@ -101,18 +101,16 @@ async def ensure_ready(base_url: str, api_key: str) -> None:
                     time.monotonic() + settings.llm_warm_cache_seconds
                 )
                 if attempts > 1:
-                    logger.info(
-                        "LLM endpoint warm after cold start",
-                        extra={
-                            "base_url": base_url,
-                            "attempts": attempts,
-                            "status": response.status_code,
-                            "waited_s": round(
-                                time.monotonic()
-                                - (deadline - settings.llm_warmup_max_wait_seconds),
-                                1,
-                            ),
-                        },
+                    log.info(
+                        "llm_endpoint_warm",
+                        base_url=base_url,
+                        attempts=attempts,
+                        status=response.status_code,
+                        waited_s=round(
+                            time.monotonic()
+                            - (deadline - settings.llm_warmup_max_wait_seconds),
+                            1,
+                        ),
                     )
                 return
 
@@ -179,12 +177,10 @@ async def call_llm(
     api_key = _decrypt_key(encrypted_api_key)
 
     if len(content) > settings.llm_max_content_chars:
-        logger.warning(
-            "Content truncated before LLM call",
-            extra={
-                "original_len": len(content),
-                "truncated_to": settings.llm_max_content_chars,
-            },
+        log.warning(
+            "content_truncated",
+            original_len=len(content),
+            truncated_to=settings.llm_max_content_chars,
         )
         content = content[: settings.llm_max_content_chars]
 

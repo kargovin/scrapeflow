@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from worker import llm
 from worker.errors import WarmupTimeout
@@ -40,11 +41,12 @@ def _client_returning(*side_effects):
 
 async def test_returns_immediately_when_endpoint_is_up():
     patcher, client = _client_returning(httpx.Response(200))
-    with patcher:
+    with patcher, capture_logs() as logs:
         await llm.ensure_ready(_BASE, _KEY)
 
     assert client.get.await_count == 1
     assert client.get.await_args.args[0] == f"{_BASE}/models"
+    assert not [e for e in logs if e["event"] == "llm_endpoint_warm"]
 
 
 async def test_polls_until_endpoint_wakes():
@@ -54,10 +56,18 @@ async def test_polls_until_endpoint_wakes():
         httpx.ConnectError("refused"),
         httpx.Response(200),
     )
-    with patcher, patch("worker.llm.asyncio.sleep", new_callable=AsyncMock):
+    with patcher, patch(
+        "worker.llm.asyncio.sleep", new_callable=AsyncMock
+    ), capture_logs() as logs:
         await llm.ensure_ready(_BASE, _KEY)
 
     assert client.get.await_count == 3
+    # The only record that a cold start happened.
+    [event] = [e for e in logs if e["event"] == "llm_endpoint_warm"]
+    assert event["log_level"] == "info"
+    assert event["attempts"] == 3
+    assert event["base_url"] == _BASE
+    assert event["status"] == 200
 
 
 async def test_sends_bearer_token():
