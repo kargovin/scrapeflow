@@ -9,5 +9,9 @@ WORKFLOW_QUEUE = "workflow"
 # Polled by the Go http-worker in WORKER_MODE=temporal.
 SCRAPE_HTTP_QUEUE = "scrape-http"
 
+# Polled by the Playwright worker in WORKER_MODE=temporal. Both scrape workers register the
+# same activity name ("Scrape"), so the queue alone picks the engine.
+SCRAPE_PLAYWRIGHT_QUEUE = "scrape-playwright"
+
 # Polled by the LLM worker in WORKER_MODE=temporal.
 LLM_QUEUE = "llm"

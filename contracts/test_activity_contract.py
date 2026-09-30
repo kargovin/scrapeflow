@@ -232,6 +232,13 @@ def test_api_accepts_every_output_field_the_workers_send(producer, consumer):
     assert set(producer.model_fields) <= set(consumer.model_fields)
 
 
+def test_playwright_worker_registers_the_name_and_queue_the_api_calls():
+    assert playwright.SCRAPE_ACTIVITY == api.SCRAPE_ACTIVITY
+    assert playwright.SCRAPE_PLAYWRIGHT_QUEUE == api_queues.SCRAPE_PLAYWRIGHT_QUEUE
+    # Both engines register "Scrape"; a shared queue would let either steal the other's tasks.
+    assert api_queues.SCRAPE_PLAYWRIGHT_QUEUE != api_queues.SCRAPE_HTTP_QUEUE
+
+
 def test_llm_worker_registers_the_name_and_queue_the_api_calls():
     # A mismatch raises nothing: the task waits on an unpolled queue until it times out.
     assert llm.LLM_EXTRACT_ACTIVITY == api.LLM_EXTRACT_ACTIVITY

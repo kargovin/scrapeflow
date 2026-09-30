@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import field_validator
@@ -11,7 +12,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
     )
+    # nats = the NATS consumer (main.py); temporal = the Scrape activity worker
+    # (temporal_main.py). One image, two Deployments.
+    worker_mode: Literal["nats", "temporal"] = "nats"
     nats_url: str = "nats://localhost:4222"
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "scrapeflow"
+    # Temporal mode: how long SIGTERM waits for in-flight scrapes before cancelling
+    # them; a cancelled scrape is re-rendered on the retry. Covers a default job
+    # (goto + wait_for_load_state at 60 s each, plus actions and upload) — not the
+    # 300 s timeout_seconds maximum. The pod's terminationGracePeriodSeconds must exceed it.
+    playwright_graceful_shutdown_seconds: float = 150.0
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "scrapeflow"
     minio_secret_key: str = "scrapeflow_secret"
@@ -26,7 +37,9 @@ class Settings(BaseSettings):
     # (max_deliver is unlimited). This sets an explicit floor; the in-progress heartbeat
     # below additionally resets the timer mid-job so even jobs longer than this never expire.
     playwright_ack_wait_seconds: int = 120
-    # How often to send msg.in_progress() while a job runs (must be < ack_wait).
+    # How often to heartbeat while a job runs — msg.in_progress() in NATS mode
+    # (must be < ack_wait), activity.heartbeat() in Temporal mode (must be < the
+    # caller's heartbeat_timeout).
     playwright_heartbeat_seconds: int = 30
     # ── UF-003 3a — transient-failure redelivery (ported from the LLM worker) ──
     # Total deliveries of one message before the worker gives up and publishes a

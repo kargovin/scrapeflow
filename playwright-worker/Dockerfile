@@ -1,12 +1,12 @@
 FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy AS builder
 
 WORKDIR /build
-RUN apt-get update && apt-get install -y --no-install-recommends python3.10-venv && rm -rf /var/lib/apt/lists/*
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# The venv is copied to the runtime stage, so it must link the image's own interpreter.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never UV_PYTHON=python3
 
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
 
 FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 

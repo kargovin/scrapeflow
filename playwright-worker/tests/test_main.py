@@ -4,9 +4,9 @@ Unit tests for worker/worker.py — handle_message().
 These tests verify the full ADR-002 job lifecycle without any live
 infrastructure. NATS, MinIO, and the Playwright browser are all AsyncMocks.
 
-The `upload` function is patched at 'worker.worker.upload' (the name as it
-appears in the module under test, not where it's defined in storage.py).
-This is the standard unittest.mock rule for patching imported names.
+`upload` and `execute_actions` are patched at 'worker.scrape.*' — the render
+pipeline moved to scrape.py, and unittest.mock patches the name where it is
+looked up, not where it is defined.
 
 Lifecycle summary being tested:
   1. Parse JobMessage from msg.data — ack+skip if malformed
@@ -46,10 +46,10 @@ async def _run(msg, js=None, browser=None, extra_patches=None):
     js = js or AsyncMock()
     if browser is None:
         browser, _, _ = make_browser()
-    patches = [patch("worker.worker.upload", new_callable=AsyncMock)]
+    patches = [patch("worker.scrape.upload", new_callable=AsyncMock)]
     if extra_patches:
         patches.extend(extra_patches)
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
     return js, mock_upload
@@ -367,7 +367,7 @@ async def test_robots_allowed_proceeds_to_running():
 
     with patch("worker.worker.is_disallowed", new_callable=AsyncMock) as mock_check:
         mock_check.return_value = False
-        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
             mock_upload.return_value = _FAKE_MINIO_PATH
             await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -388,7 +388,7 @@ async def test_respect_robots_false_skips_check():
 
     with patch("worker.worker.is_disallowed", new_callable=AsyncMock) as mock_check:
         mock_check.return_value = True  # would block, but should never be called
-        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
             mock_upload.return_value = _FAKE_MINIO_PATH
             await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -412,7 +412,7 @@ async def test_proxy_passed_to_new_context():
     )
     browser, _, _ = make_browser()
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -440,7 +440,7 @@ async def test_proxy_credentials_are_percent_decoded():
     )
     browser, _, _ = make_browser()
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -459,7 +459,7 @@ async def test_no_proxy_calls_new_context_without_proxy():
     msg = make_nats_msg()
     browser, _, _ = make_browser()
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -488,7 +488,7 @@ async def test_cookies_injected_before_goto():
     )
     page.goto = AsyncMock(side_effect=lambda *a, **kw: call_order.append("goto"))
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -510,7 +510,7 @@ async def test_cookie_domain_inferred_from_url():
     captured = []
     context.add_cookies = AsyncMock(side_effect=lambda c: captured.extend(c))
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.return_value = _FAKE_MINIO_PATH
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -542,9 +542,9 @@ async def test_csp_route_registered_before_goto():
     page.route = AsyncMock(side_effect=track_route)
     page.goto = AsyncMock(side_effect=lambda *a, **kw: call_order.append("goto"))
 
-    with patch("worker.worker.execute_actions", new_callable=AsyncMock) as mock_actions:
+    with patch("worker.scrape.execute_actions", new_callable=AsyncMock) as mock_actions:
         mock_actions.return_value = ([], [])
-        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
             mock_upload.return_value = _FAKE_MINIO_PATH
             await handle_message(
                 msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT
@@ -571,9 +571,9 @@ async def test_csp_handler_injects_all_directives():
 
     page.route = AsyncMock(side_effect=track_route)
 
-    with patch("worker.worker.execute_actions", new_callable=AsyncMock) as mock_actions:
+    with patch("worker.scrape.execute_actions", new_callable=AsyncMock) as mock_actions:
         mock_actions.return_value = ([], [])
-        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
             mock_upload.return_value = _FAKE_MINIO_PATH
             await handle_message(
                 msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT
@@ -623,13 +623,13 @@ async def test_execute_actions_called_after_goto():
     call_order = []
     page.goto = AsyncMock(side_effect=lambda *a, **kw: call_order.append("goto"))
 
-    with patch("worker.worker.execute_actions", new_callable=AsyncMock) as mock_actions:
+    with patch("worker.scrape.execute_actions", new_callable=AsyncMock) as mock_actions:
         mock_actions.return_value = ([], [])
         mock_actions.side_effect = lambda *a, **kw: (
             call_order.append("actions"),
             ([], []),
         )[1]
-        with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+        with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
             mock_upload.return_value = _FAKE_MINIO_PATH
             await handle_message(
                 msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT
@@ -654,7 +654,7 @@ async def test_minio_down_naks_and_does_not_ack():
     js = AsyncMock()
     browser, _, _ = make_browser()
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.side_effect = aiohttp.ClientConnectionError("connection refused")
         await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -672,7 +672,7 @@ async def test_minio_down_nak_uses_exponential_backoff():
     msg = make_nats_msg(num_delivered=2)
     browser, _, _ = make_browser()
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.side_effect = aiohttp.ClientConnectionError("refused")
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -687,7 +687,7 @@ async def test_minio_down_final_attempt_publishes_failed_and_acks():
     js = AsyncMock()
     browser, _, _ = make_browser()
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.side_effect = aiohttp.ClientConnectionError("refused")
         await handle_message(msg, js, AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -703,7 +703,7 @@ async def test_context_closed_on_transient_nak():
     msg = make_nats_msg(num_delivered=1)
     browser, context, _ = make_browser()
 
-    with patch("worker.worker.upload", new_callable=AsyncMock) as mock_upload:
+    with patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload:
         mock_upload.side_effect = aiohttp.ClientConnectionError("refused")
         await handle_message(msg, AsyncMock(), AsyncMock(), browser, _DEFAULT_TIMEOUT)
 
@@ -721,3 +721,26 @@ async def test_terminal_failure_does_not_nak():
 
     msg.nak.assert_not_called()
     msg.ack.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Bot wall (BUG-003) — scrape.render raises BlockedPage
+# ---------------------------------------------------------------------------
+
+
+async def test_bot_wall_publishes_failed_with_the_vendor_error_and_acks():
+    from tests.test_blocking import MYNTRA_MAINTENANCE_WALL
+
+    msg = make_nats_msg()
+    js = AsyncMock()
+    browser, context, _ = make_browser(html=MYNTRA_MAINTENANCE_WALL)
+
+    js, mock_upload = await _run(msg, js=js, browser=browser)
+
+    last = json.loads(js.publish.call_args_list[-1].args[1])
+    assert last["status"] == "failed"
+    assert last["error"].startswith("blocked:")
+    mock_upload.assert_not_called()
+    msg.ack.assert_called_once()
+    msg.nak.assert_not_called()
+    context.close.assert_called_once()

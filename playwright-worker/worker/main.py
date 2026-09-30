@@ -1,6 +1,9 @@
 """
 Playwright worker — entry point (Python/asyncio, Chromium via Playwright).
 
+WORKER_MODE=temporal runs temporal_main.run instead; the sequence below is the NATS mode.
+entrypoint.sh execs this module in both modes, so the Xvfb/pid-1 contract is shared.
+
 Startup sequence (spec §4.2):
   1. Load config from env vars
   2. Connect to NATS, verify SCRAPEFLOW stream exists
@@ -10,22 +13,30 @@ Startup sequence (spec §4.2):
   6. Run worker loop (concurrency capped by PLAYWRIGHT_MAX_WORKERS)
 """
 
-import asyncio
 import signal
+import sys
 
-import nats
-import nats.errors
-import structlog
-from miniopy_async import Minio
-from nats.js.api import ConsumerConfig
+if __name__ == "__main__":
+    # As PID 1 the process ignores a SIGTERM it has no handler for, and the imports below
+    # take seconds. Nothing is in flight yet, so exit at once; run() replaces this with
+    # its graceful handler.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+import asyncio  # noqa: E402
+
+import nats  # noqa: E402
+import nats.errors  # noqa: E402
+import structlog  # noqa: E402
+from miniopy_async import Minio  # noqa: E402
+from nats.js.api import ConsumerConfig  # noqa: E402
 
 # Patchright is a drop-in Playwright fork: it patches the CDP Runtime.enable leak
 # and removes navigator.webdriver, which are the automation tells that were failing
 # bot detection. The async API is import-compatible with playwright.async_api.
-from patchright.async_api import async_playwright
+from patchright.async_api import async_playwright  # noqa: E402
 
-from .config import settings
-from .worker import handle_message
+from .config import settings  # noqa: E402
+from .worker import handle_message  # noqa: E402
 
 log = structlog.get_logger()
 
@@ -200,4 +211,9 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    if settings.worker_mode == "temporal":
+        from .temporal_main import run as run_temporal
+
+        asyncio.run(run_temporal())
+    else:
+        asyncio.run(run())

@@ -5,6 +5,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, StringConstraints
 
 NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
+SCRAPE_ACTIVITY = "Scrape"
+SCRAPE_PLAYWRIGHT_QUEUE = "scrape-playwright"
 
 
 class PlaywrightOptions(BaseModel):
