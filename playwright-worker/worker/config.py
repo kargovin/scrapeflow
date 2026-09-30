@@ -19,10 +19,11 @@ class Settings(BaseSettings):
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "scrapeflow"
     # Temporal mode: how long SIGTERM waits for in-flight scrapes before cancelling
-    # them; a cancelled scrape is re-rendered on the retry. Covers a default job
-    # (goto + wait_for_load_state at 60 s each, plus actions and upload) — not the
-    # 300 s timeout_seconds maximum. The pod's terminationGracePeriodSeconds must exceed it.
-    playwright_graceful_shutdown_seconds: float = 150.0
+    # them; a cancelled scrape is re-rendered on the retry. Covers the 300 s
+    # timeout_seconds maximum (goto + wait_for_load_state at 300 s each) + 30 s for
+    # upload; page actions are uncapped, so a long action list can still be cut.
+    # The pod's terminationGracePeriodSeconds must exceed it.
+    playwright_graceful_shutdown_seconds: float = 630.0
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "scrapeflow"
     minio_secret_key: str = "scrapeflow_secret"

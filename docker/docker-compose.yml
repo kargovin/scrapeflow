@@ -308,8 +308,8 @@ services:
         condition: service_healthy
       temporal-namespace:
         condition: service_completed_successfully
-    # Above PLAYWRIGHT_GRACEFUL_SHUTDOWN_SECONDS (150): an in-flight scrape finishes before the kill.
-    stop_grace_period: 170s
+    # Above PLAYWRIGHT_GRACEFUL_SHUTDOWN_SECONDS (630): an in-flight scrape finishes before the kill.
+    stop_grace_period: 660s
     restart: unless-stopped
 
   llm-worker:

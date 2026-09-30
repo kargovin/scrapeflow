@@ -826,15 +826,23 @@ fake Anthropic key → `LLMFailed: AuthenticationError … 401`, not `TypeError`
   `main.py`) → activity-only `Worker`, `max_concurrent_activities = playwright_max_workers`; browser
   closed after the drain. `main.py` branches on `WORKER_MODE` and installs an early SIGTERM exit
   before its imports (B.6's fix). **`entrypoint.sh` is unchanged** — both modes exec `worker.main`.
-- ⚠️ **`playwright_graceful_shutdown_seconds = 150` is a placeholder — owner's call.** Covers a default
-  job (60 s + 60 s + upload), not the 300 s `timeout_seconds` maximum; a longer scrape is cancelled on
-  a rollout and re-rendered. B.9's `terminationGracePeriodSeconds` must exceed it (compose: 170 s).
+- ~~`playwright_graceful_shutdown_seconds = 150` is a placeholder~~ → **630 s** (owner delegated the
+  call, 2026-09-30): covers the 300 s `timeout_seconds` maximum (`goto` + `wait_for_load_state` at 300 s
+  each) + 30 s upload. The wait is paid only while a scrape is in flight — an idle pod exits at once —
+  and the Temporal worker stops polling on SIGTERM, so the new pod takes new work during the drain.
+  Page actions are uncapped (a list of `wait`s has no ceiling), so no value covers every job; a longer
+  one is cancelled and re-rendered on the retry. **B.9's `terminationGracePeriodSeconds` = 660 s**
+  (compose `stop_grace_period`: 660 s).
 - **Lockfile (BUG-013):** `uv.lock`; the builder runs `uv sync --frozen --no-install-project` into
   `/opt/venv` against the image's Python 3.10 (`UV_PYTHON=python3`, no downloads); the
   `python3.10-venv` apt step is gone. Resolved: `patchright` 1.63.0, `temporalio` 1.33.0 (= api),
-  `xxhash` 4.0.1. ⚠️ **Not compared against prod's resolved versions** (the classifier refused the
-  read) — `kubectl -n scrapeflow exec deploy/scrapeflow-playwright-worker -- /opt/venv/bin/pip freeze`
-  against the lock before B.9; a `patchright` jump changes the stealth layer.
+  `xxhash` 4.0.1. ✅ **Compared against prod's `pip freeze` 2026-09-30 (owner ran it):** identical
+  except `cryptography` 50.0.1 → 50.0.2 (patch; Fernet only) and the additions (`temporalio` and its
+  deps, `xxhash`). **`patchright` 1.63.0 on both — the stealth layer's Python half is unchanged.**
+  ⚠️ **The Chrome binary is not locked:** `RUN patchright install chrome` fetches the current Google
+  Chrome stable at build time, so every image build can ship a different Chrome (true of every
+  release since ADR-008, not new in B.8). B.9 records `google-chrome --version` in both pods after the
+  rollout — the first thing to check if a working target starts walling.
 - **NATS behaviour, three small changes from the move:** a `new_context`/`new_page` failure is now
   classified (terminal → `failed` + ack) instead of escaping unacked; a `context.close()` failure is
   suppressed; the context closes before the ack/nak. Decryption still sits above `worker.py`'s `try`
@@ -863,7 +871,8 @@ fake Anthropic key → `LLMFailed: AuthenticationError … 401`, not `TypeError`
 #### B.9 — Playwright second Deployment + 🚀 release + pre-gate on both engines
 
 **What:** `app/playwright-worker-temporal.yaml` (dshm volume, resources, Xvfb env — copy the NATS
-one exactly). Release; `rollout status` on both. Then B.4's probe on `scrape-playwright`
+one exactly; add `terminationGracePeriodSeconds: 660` — above the 630 s graceful shutdown, B.8).
+Release; `rollout status` on both; `google-chrome --version` in both pods (the binary is not locked, B.8). Then B.4's probe on `scrape-playwright`
 against a real page (⚠️ the probe hard-codes `SCRAPE_HTTP_QUEUE` and `ScrapeInput` has no `engine`
 — give the workflow and script a queue/engine argument here): v1 vs probe outputs compared on structure (headed Chrome is not byte-stable).
 **Depends on:** B.8, B.4
