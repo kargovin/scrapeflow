@@ -55,7 +55,7 @@
 | B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ✅ 2026-09-29 — **gate passed in prod** (`example.com`, v1 = v2 = `a6cdea39c93062d1`) |
 | B.5 | 🚀 Go port release | ✅ 2026-09-29 (`ef68942`, infra `e70fbe9`) — **Go port live beside NATS** |
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ✅ 2026-09-30 (local; compose service + `LLMProbeWorkflow` end to end). 🔴 Found an Anthropic-path prod bug on the way — fixed locally, not released |
-| B.7 | LLM second Deployment + 🚀 release | ⬜ |
+| B.7 | LLM second Deployment + 🚀 release | ✅ 2026-09-30 (`1717032`, infra `3179f48`) — **LLM port live beside NATS**; BUG-020's prod probe is the owner's |
 | B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ⬜ |
 | B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ⬜ |
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |
@@ -757,6 +757,28 @@ image alike, so order does not matter) and verify `kubectl exec … cat /proc/1/
 from B.6's lockfile too. After it: the pod's `anthropic.__version__` = 1.9.0, and `probe_llm.py` with a
 fake Anthropic key → `LLMFailed: AuthenticationError … 401`, not `TypeError` (BUG-020 → *After the release*).
 **Depends on:** B.6
+
+**Done (2026-09-30):**
+- Infra `app/llm-worker-temporal.yaml` — Deployment `scrapeflow-llm-worker-temporal`, `RollingUpdate`,
+  `terminationGracePeriodSeconds: 420`, `wait-for-temporal` + `wait-for-minio`, the NATS one's
+  resources (50m/128Mi → 500m/512Mi) and LLM env minus `NATS_URL`, plus `WORKER_MODE=temporal` and
+  the two `TEMPORAL_*`. Kustomization line + README section. Server dry-run clean.
+- Before: 120 llm-worker, 50 contract, 302 API tests green. Prod baseline: `python-llm-worker`
+  ack_wait 120 s, max_deliver 3, delivered seq 1005, 0 pending; node CPU limits 185 %.
+- `main` ff `ef68942..1717032`; api + llm-worker built, the other three skipped. Flux bumped both
+  (infra `ab38bdb`, `6cc4dbf`); `rollout status` green on api, llm-worker, workflow-worker.
+- Infra rebased over the bumps — ⚠️ **`1807870` conflicted with the api tag bump** (its `command:`
+  line sits under the `image:` line): kept the new tag + the venv command → `bbc101a`. New manifest's
+  tag **hand-set** to `main-1790760130-1717032…` → `3179f48`. The classifier refused the infra push;
+  the owner pushed `6cc4dbf..3179f48`.
+- **Verified:** `scrapeflow-llm-worker-temporal` rolled out, `temporal_worker_started … task_queue=llm
+  graceful_shutdown_s=400.0`; `task-queue describe --task-queue llm` (one-off admin-tools pod) lists
+  the pod as the activity poller. Workflow worker rolled out, `/proc/1/cmdline` =
+  `/app/.venv/bin/python -m app.workflows.worker_main`. NATS llm-worker: `subscribed … ack_wait=120
+  max_deliver=3`, consumer before = after. BUG-020's first half: the pod runs `anthropic` 1.9.0 /
+  `openai` 3.22.1 with the fixed `llm.py`.
+- **Owner's:** the prod `probe_llm.py` run with a fake Anthropic key → `LLMFailed:
+  AuthenticationError … 401` (needs `kubectl exec -it`).
 
 #### B.8 — Playwright worker: `Scrape` activity on `scrape-playwright`
 

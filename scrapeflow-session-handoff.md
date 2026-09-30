@@ -150,6 +150,23 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **B.7 — LLM PORT RELEASED (2026-09-30, second session).** Owner: "okay do b7". `main` ff
+`ef68942..1717032` (api + llm-worker built); infra rebased over Flux's two bumps (⚠️ `1807870`
+conflicted with the api tag bump — kept both → `bbc101a`), new manifest's tag hand-set → `3179f48`;
+**the classifier refused the infra push again — the owner pushed.** `scrapeflow-llm-worker-temporal`
+polls `llm` in prod beside the unchanged NATS worker (poller listed by `task-queue describe`);
+workflow worker's PID 1 = `/app/.venv/bin/python`. Detail in the backlog's B.7 *Done* note. Notes:
+
+- **BUG-020 half-verified:** the NATS pod runs `anthropic` 1.9.0 with the fixed `llm.py`. **Open —
+  the owner runs the prod probe** (fake Anthropic key → expect `LLMFailed … 401`, not `TypeError`):
+  `kubectl -n scrapeflow exec -it deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m
+  scripts.probe_llm https://example.com --provider anthropic --model claude-haiku-4-5-20251001`.
+  Close BUG-020 on its 401.
+- Node CPU limits 185 % → ~191 % with the new pod (500m).
+- The new worker logs `temporal_worker_started` ~7 s after `minio_connected` (500m CPU) — normal.
+- **Next: B.8** — the Playwright `Scrape` activity on `scrape-playwright` (lockfile, bot wall raises
+  non-retryable, entrypoint contract preserved exactly).
+
 🔷 **B.6 — LLM `LLMExtract` ACTIVITY BUILT (2026-09-30). BUG-020 found and fixed on the way.**
 Local only, committed on `develop` (`f2738fb` BUG-020, `fa43db2` B.6), **not pushed, not released —
 owner: ship with B.7, no hotfix.** Mentoring first (design + how it mirrors NATS, five open questions
@@ -895,7 +912,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up B.7 in `phase4-implementation-backlog.md`** — the LLM worker's Temporal Deployment + 🚀 release; it also ships **BUG-020's fix** (owner: no hotfix). ~~B.6~~ ✅ 2026-09-30 (local; `fa43db2`, `f2738fb`).
+0. **Pick up B.8 in `phase4-implementation-backlog.md`** — the Playwright `Scrape` activity. First: the owner's prod `probe_llm.py` run closes BUG-020. ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -941,7 +958,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-09-30 close (verified after fetch):** `develop` is **10 ahead** of `origin/develop`, 0 behind — `d2e0295` (09-29 close), `f2738fb` (BUG-020), `fa43db2` (B.6), `1207f69`, `012b0c0`, `dc086a0` (llm.py → structlog), `698fbdd`, `63e7fbe` (workflow-worker SIGTERM + venv python), `0e54897`, `b75e076` (BUG-021) — **unpushed**. `main` = `origin/main` = `ef68942`. **Infra repo: 1 ahead — `1807870`** (workflow-worker command → `/app/.venv/bin/python`), **unpushed, goes out with B.7**.
+- **2026-09-30, after B.7 (verified):** `develop` = `origin/develop` = `main` = `origin/main` = `1717032` — **released**; this session's docs closeout sits on `develop` after it. **Infra repo:** `origin/main` = `3179f48` (`bbc101a` workflow-worker venv python + `3179f48` llm-worker-temporal), 0 ahead.
+- **Deployed code is `1717032`** (2026-09-30, B.7 — api + llm-worker images). Before it: `ef68942`.
+- *Historical, superseded by B.7:* **2026-09-30 close (verified after fetch):** `develop` is **10 ahead** of `origin/develop`, 0 behind — `d2e0295` (09-29 close), `f2738fb` (BUG-020), `fa43db2` (B.6), `1207f69`, `012b0c0`, `dc086a0` (llm.py → structlog), `698fbdd`, `63e7fbe` (workflow-worker SIGTERM + venv python), `0e54897`, `b75e076` (BUG-021) — **unpushed**. `main` = `origin/main` = `ef68942`. **Infra repo: 1 ahead — `1807870`** (workflow-worker command → `/app/.venv/bin/python`), **unpushed, goes out with B.7**.
 - **Deployed code is `ef68942`** (2026-09-29, B.5 Go port — api, http-, playwright-, llm-worker images; infra `e70fbe9`). Before it: `ce614d8` (A.8 engine up).
   **At the B.5 release (fourth session):** `develop` = `origin/develop` = `main` = `origin/main` =
   `ef68942`; only this session's docs closeout sits on `develop` after it (unpushed until committed

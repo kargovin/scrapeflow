@@ -1892,8 +1892,10 @@ any request leaves the pod. Observed impact: none found — the current llm-work
 checked.
 **Discovered:** 2026-09-30, B.6 step 6 — `LLMProbeWorkflow` with a deliberately fake Anthropic key
 was expected to return a 401 and returned a `TypeError` instead.
-**Status:** 🟡 **Fixed in `f2738fb` (`develop`), not released — owner's call 2026-09-30: ships with
-B.7's release, not a hotfix.**
+**Status:** 🟡 **Fixed in `f2738fb`, RELEASED 2026-09-30 with B.7 (`main` `1717032`) — owner's call:
+no hotfix.** First half of the after-release check done: the new NATS llm-worker pod runs `anthropic`
+1.9.0 / `openai` 3.22.1 (the lockfile's) and its `llm.py` carries the fix. **Open: the owner's prod
+`probe_llm.py` run with a fake Anthropic key** — close this bug on its `401`.
 
 ### What happens
 
