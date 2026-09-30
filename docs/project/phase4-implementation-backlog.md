@@ -692,8 +692,15 @@ no LLM, no nondeterminism). Record the result in the handoff.
   installs `sys.exit` on SIGTERM before its imports (nothing is in flight yet), and `temporal_main`
   installs the graceful handler before connecting. Verified at 0.5/1/2/3/4/5/7 s → exit 0. The
   early handler also covers NATS mode's startup — the one change to that path. ⚠️ **The api's
-  `worker_main.py` (A.5, in prod) has the same shape** — handlers after `Worker()`; its 30 s grace
-  bounds the cost. Not changed.
+  `worker_main.py` (A.5, in prod) had the same shape — ✅ fixed the same day (owner).** Its window
+  was worse and mostly not ours: **`uv run` as PID 1 ignores SIGTERM during its own startup**
+  (reproduced: stop at 0.3–1 s → exit 137 after the full timeout; at 2–3 s uv forwards it and the
+  importing child dies, exit 143; ≥ 5 s drains). In prod that uv phase is the ~21 s project build.
+  Fix: command `/app/.venv/bin/python -m app.workflows.worker_main` (compose + infra `1807870`,
+  **unpushed**) + the same two handlers in `worker_main.py`. Verified on compose and on the
+  **production-target image as `appuser`**: every early stop → exit 0 in ~0.3 s; `started` at ~3 s
+  instead of ~5 s; Hello + the LLM probe run through it. ⚠️ **The API Deployment itself still runs
+  `uv run uvicorn …`** (Dockerfile `CMD`) — same uv window; not changed.
 - **Tests:** `tests/test_activity.py` (11) — success + size, input passthrough, 429 / 401 / unknown
   / warm-up timeout / MinIO-unreachable on fetch and on upload, cancel passes through as
   `CancelledError`, heartbeats through a 7-probe cold start, bad input. **Mutation-checked:** raw
@@ -744,6 +751,8 @@ no LLM, no nondeterminism). Record the result in the handoff.
 **What:** `app/llm-worker-temporal.yaml` (same env as the NATS one minus NATS; keep
 `LLM_REQUEST_TIMEOUT_SECONDS=180`). **`terminationGracePeriodSeconds` ≈ 420 s** — above B.6's
 ≈ 400 s graceful shutdown, or k8s kills the pod at its own deadline first. Release; `rollout status` on both.
+**Also push infra `1807870`** (workflow-worker command → venv python; works on the old and new api
+image alike, so order does not matter) and verify `kubectl exec … cat /proc/1/cmdline` shows it.
 **Carries BUG-020's fix (owner, 2026-09-30 — no hotfix):** the release rebuilds the NATS llm-worker
 from B.6's lockfile too. After it: the pod's `anthropic.__version__` = 1.9.0, and `probe_llm.py` with a
 fake Anthropic key → `LLMFailed: AuthenticationError … 401`, not `TypeError` (BUG-020 → *After the release*).

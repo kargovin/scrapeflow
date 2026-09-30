@@ -167,8 +167,12 @@ in plain terms), then owner: "agree on all your recommendations" → recorded as
 - ⚠️ **PID 1 ignores a SIGTERM it has no handler for.** The llm-worker's imports take ~3.9 s, so an
   early SIGTERM stalled until the stop timeout (reproduced; in prod that is ~420 s). Fixed in
   `main.py` (handler before imports) + `temporal_main.py` (before connecting). **The api's
-  `worker_main.py` (in prod) has the same shape** — 30 s grace bounds it; not changed, owner not
-  yet asked.
+  `worker_main.py` (in prod) had it too — ✅ fixed (owner: "also fix the kill bug for api").** There
+  the window was mostly **`uv run` as PID 1** ignoring SIGTERM during its own startup (~21 s in
+  prod). Command now `/app/.venv/bin/python -m app.workflows.worker_main` — compose + **infra
+  `1807870`, committed, NOT pushed** (push it at B.7) — plus the two handlers. Verified on the
+  production-target image as `appuser`. ⚠️ The API Deployment still runs `uv run uvicorn` — same uv
+  window, not changed, owner not asked.
 - **New operator tool: `scripts/probe_llm.py`** (`LLMProbeWorkflow`: Scrape → LLMExtract). Key via
   `PROBE_LLM_API_KEY` or a prompt; prints the extraction; the **script** (not the workflow) deletes
   by prefix. Prod form needs `kubectl exec -it`. It is B.7's release check.
@@ -183,7 +187,7 @@ in plain terms), then owner: "agree on all your recommendations" → recorded as
   printed and the truncation WARNING is unformatted — ✅ **switched to structlog the same day**
   (`llm_endpoint_warm`, `content_truncated`; verified on the stub). Ships with B.7.
 - **Next: B.7** — `app/llm-worker-temporal.yaml` (NATS env out, `LLM_REQUEST_TIMEOUT_SECONDS=180`,
-  grace ~420 s), then the release (ff `main` — also ships BUG-020), then the BUG-020 check and a
+  grace ~420 s), push infra `1807870` with it, then the release (ff `main` — also ships BUG-020), then the BUG-020 check and a
   prod `probe_llm.py` run.
 
 🔷 **B.3 + B.4 + B.5 — GO PORT RELEASED (2026-09-29, fourth session).** `main` ff `ce614d8..ef68942`
