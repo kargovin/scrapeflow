@@ -168,9 +168,14 @@ the NATS worker (poller listed by `task-queue describe`). Detail in the backlog'
 - ✅ **B.9's gate passed** (owner ran it): v1 Playwright job and `probe_scrape --engine playwright`
   both `18f1a13f59dcc2ad` (12,747 B — example.com's script wraps each letter in a `<span>`; headed
   Chrome is byte-stable on it). ⚠️ The first v1 try ran on the Go worker — confirm `engine` first.
-- 🔴 **New, not filed — 10 Dependabot alerts on `api/uv.lock`, PyJWT 2.13.0 (1 critical, 5 high),
-  all published 2026-09-30, fixed in 2.14.0.** PyJWT is transitive via `clerk-backend-api` — the
-  API's JWT verification path. Owner's call pending (see *Outstanding*).
+- 🟡 **10 Dependabot alerts on `api/uv.lock` — PyJWT 2.13.0 (1 critical, 5 high), published
+  2026-09-30, fixed in 2.14.0.** Transitive via `clerk-backend-api` (JWKS → `RSAAlgorithm.from_jwk` →
+  `jwt.decode(algorithms=['RS256'])`). Owner: "fix the pyjwt alerts" → `uv lock --upgrade-package
+  pyjwt` → **2.15.1**, nothing else moved (`api: pyjwt …` commit). ⚠️ **Every API test mocks
+  `authenticate_request`**, so the suite never runs PyJWT — verified instead by Clerk's real
+  `verify_token` with a local RSA key and a stubbed `_fetch_jwks`: valid RS256 accepted; wrong key,
+  expired, wrong `azp`, tampered payload, HS256-with-public-PEM and `alg: none` all rejected. 303 API
+  + 51 contract tests. **Alerts close and prod is fixed only on a `main` release (api image).**
 - Local: compose `playwright-worker-temporal` rebuilt (logs `graceful_shutdown_s=630.0`);
   `workflow-worker` restarted to load the new probe.
 - **Next: Group C — C.1 (pipeline schema).**
@@ -966,7 +971,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.1 in `phase4-implementation-backlog.md`** — Group C (pipeline lane) opens; read its group header and the eight open items at the backlog's foot first. **Before it: owner's call on the PyJWT alerts** (10 on `api/uv.lock`, fix = 2.14.0, a release). ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.1 in `phase4-implementation-backlog.md`** — Group C (pipeline lane) opens; read its group header and the eight open items at the backlog's foot first. **Before it: release the PyJWT bump** (committed on `develop`; api image only). ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
