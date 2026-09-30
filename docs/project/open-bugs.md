@@ -1966,6 +1966,50 @@ Anthropic key — expect `LLMFailed: AuthenticationError … 401`, not `TypeErro
 
 ---
 
+## BUG-021 — The API container starts under `uv run`, which ignores a SIGTERM during its own startup
+
+**Severity:** Low. A stop that lands in the API pod's first seconds is ignored until the grace period
+(default **30 s**) ends in a SIGKILL. With `strategy: Recreate` the next pod waits for that, so the
+worst case adds ~30 s to one rollout's downtime — and uvicorn may start serving inside that window
+and be killed mid-request. Needs a stop within the pod's first seconds of life, so it is rare.
+**Discovered:** 2026-09-30, while fixing the same defect in the workflow worker (B.6 session).
+**Status:** 🔴 **Open — owner's call 2026-09-30: file it, fix later.**
+
+### What happens
+
+`api/Dockerfile`'s `CMD ["uv", "run", "uvicorn", "app.main:app", …]` makes **`uv` PID 1**, and the
+Deployment (`app/api.yaml`) does not override it. PID 1 ignores a signal it has no handler for, and
+`uv` installs its forwarding only once it has spawned the child. So a SIGTERM during uv's own start
+— which includes building the project into `/app/.venv` on every start (`Built scrapeflow-api`,
+~21 s under the workflow worker's 250m CPU limit) — is dropped.
+
+**Reproduced on the workflow worker, which had the identical command shape** (not separately on the
+API): stop at 0.3–1 s → exit 137 after the full stop timeout; at 2–3 s uv forwards it and the
+importing child dies (exit 143); from ~5 s the process's own handler drains cleanly. The workflow
+worker was fixed on 2026-09-30 (`63e7fbe`, infra `1807870`); the API was left by owner's call.
+
+### Fix sketch
+
+- `CMD ["/app/.venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port",
+  "8000"]` (or `/app/.venv/bin/uvicorn`) — Python as PID 1, no per-start project build. The compose
+  `api` service keeps `uv run … --reload` or moves too; dev only.
+- ⚠️ **Then Python-as-PID-1 has its own window**: until uvicorn installs its handlers, an unhandled
+  SIGTERM is ignored too. Check where uvicorn installs them relative to importing `app.main` (the
+  slow part); if after, add an early `signal.signal(SIGTERM, …)` exit, as `worker_main.py` does.
+- Verify on the **production target** as `appuser` (the compose `test` target proves nothing about
+  it): stop at 0.5 / 2 / 8 s → exit 0, and `/health` still 200 after a normal start.
+- Same shape anywhere else an image's PID 1 is `uv run` — the cleanup CronJob runs `python` directly
+  (BUG-019), so it is not affected.
+
+### Interactions
+
+- **B.6 session:** same root class as the llm-worker's import-window stall (fixed in `fa43db2`) and
+  the workflow worker's (fixed in `63e7fbe`).
+- **I.2 (API thinning, `replicas: 2` + `RollingUpdate`)** removes the downtime half of the cost but
+  not the stall; fix before or with it.
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised

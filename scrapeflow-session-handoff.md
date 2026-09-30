@@ -29,7 +29,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-020) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-021) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -172,7 +172,7 @@ in plain terms), then owner: "agree on all your recommendations" → recorded as
   prod). Command now `/app/.venv/bin/python -m app.workflows.worker_main` — compose + **infra
   `1807870`, committed, NOT pushed** (push it at B.7) — plus the two handlers. Verified on the
   production-target image as `appuser`. ⚠️ The API Deployment still runs `uv run uvicorn` — same uv
-  window, not changed, owner not asked.
+  window; **filed as BUG-021, owner's call: fix later.**
 - **New operator tool: `scripts/probe_llm.py`** (`LLMProbeWorkflow`: Scrape → LLMExtract). Key via
   `PROBE_LLM_API_KEY` or a prompt; prints the extraction; the **script** (not the workflow) deletes
   by prefix. Prod form needs `kubectl exec -it`. It is B.7's release check.
