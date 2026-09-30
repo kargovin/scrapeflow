@@ -247,7 +247,8 @@ services:
       context: ..
       dockerfile: api/Dockerfile
       target: test
-    command: uv run python -m app.workflows.worker_main
+    # The venv's python as PID 1, not `uv run` — see worker_main.py's SIGTERM note.
+    command: /app/.venv/bin/python -m app.workflows.worker_main
     env_file:
       - ../.env
     environment:

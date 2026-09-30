@@ -1,5 +1,13 @@
-import asyncio
 import signal
+import sys
+
+if __name__ == "__main__":
+    # Run as PID 1 (`python -m`, not `uv run` — uv as PID 1 ignores SIGTERM during its own startup):
+    # PID 1 ignores a SIGTERM it has no handler for, and the imports below take seconds. Nothing is
+    # in flight yet, so exit at once; main() replaces this with its graceful handler.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+import asyncio
 from datetime import timedelta
 
 import structlog
@@ -15,6 +23,12 @@ logger = structlog.get_logger()
 
 
 async def main() -> None:
+    # Before connect(): a SIGTERM during startup must not fall between the two handlers.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
     client = await connect()
     worker = Worker(
         client,
@@ -23,11 +37,6 @@ async def main() -> None:
         activities=[say_hello],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )
-
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
 
     async with worker:
         logger.info(
