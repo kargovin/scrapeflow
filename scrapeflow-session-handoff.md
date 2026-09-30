@@ -168,7 +168,11 @@ the NATS worker (poller listed by `task-queue describe`). Detail in the backlog'
 - ✅ **B.9's gate passed** (owner ran it): v1 Playwright job and `probe_scrape --engine playwright`
   both `18f1a13f59dcc2ad` (12,747 B — example.com's script wraps each letter in a `<span>`; headed
   Chrome is byte-stable on it). ⚠️ The first v1 try ran on the Go worker — confirm `engine` first.
-- 🟡 **10 Dependabot alerts on `api/uv.lock` — PyJWT 2.13.0 (1 critical, 5 high), published
+- ✅ **PyJWT RELEASED** — `main` ff `a11cce6..6675f17` (api image only; Flux `17a842b`, no infra
+  change). Prod API pod runs **PyJWT 2.15.1**, `/health` 200, no error lines; all 10 alerts now
+  `fixed`. Only **#119** (DOMPurify, low, `frontend/`, fixed in 3.4.16) is open — not touched.
+  Dependabot now graphs `uv` on `/llm-worker` and `/playwright-worker` (BUG-006 note added).
+- 🟡 *(Detail)* **10 Dependabot alerts on `api/uv.lock` — PyJWT 2.13.0 (1 critical, 5 high), published
   2026-09-30, fixed in 2.14.0.** Transitive via `clerk-backend-api` (JWKS → `RSAAlgorithm.from_jwk` →
   `jwt.decode(algorithms=['RS256'])`). Owner: "fix the pyjwt alerts" → `uv lock --upgrade-package
   pyjwt` → **2.15.1**, nothing else moved (`api: pyjwt …` commit). ⚠️ **Every API test mocks
@@ -178,7 +182,7 @@ the NATS worker (poller listed by `task-queue describe`). Detail in the backlog'
   + 51 contract tests. **Alerts close and prod is fixed only on a `main` release (api image).**
 - Local: compose `playwright-worker-temporal` rebuilt (logs `graceful_shutdown_s=630.0`);
   `workflow-worker` restarted to load the new probe.
-- **Next: Group C — C.1 (pipeline schema).**
+- **Next: Group C — C.1 (pipeline schema)** — owner: "we'll start c tomorrow".
 
 🔷 **B.8 — PLAYWRIGHT `Scrape` ACTIVITY BUILT (2026-09-30, third session).** Local, committed on
 `develop` as **`c405124`**, **not pushed, not released — B.9 ships it.** The owner wrote the activity's
@@ -971,7 +975,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.1 in `phase4-implementation-backlog.md`** — Group C (pipeline lane) opens; read its group header and the eight open items at the backlog's foot first. **Before it: release the PyJWT bump** (committed on `develop`; api image only). ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.1 in `phase4-implementation-backlog.md`** — Group C (pipeline lane) opens; read its group header and the eight open items at the backlog's foot first. ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1017,8 +1021,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-09-30, fourth session (B.9 release, verified):** `develop` = `origin/develop` = `main` = `origin/main` = `a11cce6` — **released**; this session's docs closeout sits on `develop` after it. **Infra:** `origin/main` = `9ebb305` (Flux `47ca730`, `9e69931` + the playwright-worker-temporal manifest), 0 ahead.
-- **Deployed code is `a11cce6`** (2026-09-30, B.9 — api + playwright-worker images). Before it: `1717032`.
+- **2026-09-30, fourth session close (verified after fetch):** `develop` = `origin/develop` = `main` = `origin/main` = `6675f17` (PyJWT release) — this closeout commit sits on `develop` after it. **Infra:** `origin/main` = `17a842b` (Flux api bump) after `9ebb305` (playwright-worker-temporal), 0 ahead.
+- **Deployed code is `6675f17`** (2026-09-30, PyJWT — api image). Before it: `a11cce6` (B.9 — api + playwright-worker images), `1717032`.
 - *Historical, superseded by B.9:* **2026-09-30, third session close (verified after fetch):** `develop` is ahead of `origin/develop` — `6a85d40`, `36f2781` (B.7 docs), **`c405124` (B.8 code)** and this closeout — **unpushed**. `main` = `origin/main` = `1717032`, unchanged. Infra repo untouched this session.
 - **2026-09-30, after B.7 (verified):** `develop` = `origin/develop` = `main` = `origin/main` = `1717032` — **released**; this session's docs closeout sits on `develop` after it. **Infra repo:** `origin/main` = `3179f48` (`bbc101a` workflow-worker venv python + `3179f48` llm-worker-temporal), 0 ahead.
 - **Deployed code is `1717032`** (2026-09-30, B.7 — api + llm-worker images). Before it: `ef68942`.
@@ -1161,6 +1165,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-30 *(clock, fourth session)* | **🔷 B.9 — PLAYWRIGHT PORT RELEASED; Group B complete. BUG-020 closed. PyJWT released.** Read-in; owner's prod `pip freeze` matched the lock (`patchright` 1.63.0; Chrome binary unlocked — noted). Owner delegated the graceful-shutdown call → 630 s / grace 660 s. BUG-020 closed on the owner's prod probe (401). B.9: probe `--engine`, infra manifest, release `a11cce6` + infra `9ebb305`, both Playwright Deployments green, poller listed, Chrome 154.0.8037.92; gate passed after a first v1 try ran on the HTTP engine (`18f1a13f59dcc2ad` both). PyJWT 2.13.0 → 2.15.1 (10 alerts), verified through Clerk's real `verify_token`, released `6675f17`, alerts fixed. | `cdbb8c2`, `43be066`, `a11cce6`, `5da9460`, `33bb2db`, `e57f163`, `6675f17`, this closeout; infra `9ebb305` |
 | 2026-09-30 *(clock, third session)* | **🔷 B.8 built (local).** Read-in; owner: "build b8 but dont commit", then took over ("im building this myself"). Q&A while the owner wrote the robots step: raise, don't return (Go's empty struct is only a placeholder); four fixes to the draft (missing `await`, fail-open, structlog call, activity name `Scrape`); why robots sits above the `try` (nothing to clean up or classify). Owner: "only build activity.py" → full activity; "do the temporal_main edits" → entry point, duplicate heartbeat setting removed, shutdown placeholder; live against compose Temporal. "mimic go; extract it" → `worker/scrape.py` shared by both modes. "build all" → lockfile, `WORKER_MODE`, API queue + contract, tests (activity, entrypoint, NATS wall — mutation-checked, the NATS branch was uncovered), compose service end to end. Found the stale-Xvfb-lock restart failure (local only). Prod `pip freeze` refused by the classifier → owner item | `c405124` + this close |
 | 2026-09-30 *(clock, second session)* | **🔷 B.7 — LLM PORT RELEASED.** Read-in; owner: "okay do b7". Infra `app/llm-worker-temporal.yaml` (grace 420 s, no NATS env) + kustomization + README; 120 llm-worker / 50 contract / 302 API green; prod baseline taken. `main` ff `ef68942..1717032` (api + llm-worker); Flux bumps; infra rebase — `1807870` conflicted with the api tag bump, kept both; tag hand-set; classifier refused the infra push, owner pushed `3179f48`. Verified: poller on `llm`, workflow-worker PID 1 = venv python, NATS consumer unchanged, `anthropic` 1.9.0 with the fix. **Open: the owner's prod `probe_llm.py` 401 closes BUG-020.** | `6a85d40`, close; infra `bbc101a`, `3179f48` |
 | 2026-09-30 *(clock)* | **🔷 B.6 built (local) + BUG-020 filed and fixed.** Read-in; mentoring on B.6's design and its NATS mirror; the five open questions re-explained in plain terms → owner agreed all five (recorded). Built steps 1–5 (lockfile + caps, settings, activity, Temporal entry point, tests — mutation-checked); smoke test found the PID-1 early-SIGTERM stall (fixed). Step 6: compose service + `LLMProbeWorkflow`/`probe_llm.py`; stub cold-start run green; fake-key run found **BUG-020** (Anthropic broken in prod, `anthropic` 1.9.0) → fixed, filed. Owner: release waits for B.7. Then: "what would PYTHONUNBUFFERED do" → withdrawn (structlog flushes), found `llm.py`'s stdlib logging dropping INFO → switched to structlog; "also fix the kill bug for api" → reproduced a `uv run` PID-1 stall on the workflow worker, fixed (venv python + handlers, verified on the prod target as `appuser`), infra `1807870` held for B.7; API's own `uv run uvicorn` → **BUG-021** (fix later). | `f2738fb`, `fa43db2`, `1207f69`, `012b0c0`, `dc086a0`, `698fbdd`, `63e7fbe`, `0e54897`, `b75e076` + this close; infra `1807870` |

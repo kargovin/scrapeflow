@@ -566,6 +566,11 @@ stopped being theoretical: it produced a real outage, and it shifts what the fix
 **lockfiles, not scanning coverage.** The addendum is filed at the end rather than inline because
 it is dated evidence about this bug, not a revision of it; this pointer exists so the two are never
 read apart.
+**Coverage update 2026-09-30:** Dependabot's dependency graph now runs `uv` on `/api`,
+`/llm-worker` and `/playwright-worker` (the B.6 and B.8 lockfiles) and `go_modules` on
+`/http-worker`; `/coordinator` and `/mcp` get only a `pip` pass over an unlocked manifest, so their
+resolved versions are still unknown. The same day it raised 10 PyJWT alerts on `api/uv.lock` (fixed
+by the 2.15.1 bump, released `6675f17`) and one low DOMPurify alert on `frontend/` (#119, open).
 
 ### What happens
 
