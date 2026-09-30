@@ -54,7 +54,7 @@
 | B.3 | Go second Deployment (Temporal-bound) | ✅ 2026-09-29 (infra `e70fbe9`, deployed with B.5) |
 | B.4 | `ScrapeProbeWorkflow` + the §9 pre-gate on the Go activity | ✅ 2026-09-29 — **gate passed in prod** (`example.com`, v1 = v2 = `a6cdea39c93062d1`) |
 | B.5 | 🚀 Go port release | ✅ 2026-09-29 (`ef68942`, infra `e70fbe9`) — **Go port live beside NATS** |
-| B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ⬜ |
+| B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ✅ 2026-09-30 (local; compose service + `LLMProbeWorkflow` end to end). 🔴 Found an Anthropic-path prod bug on the way — fixed locally, not released |
 | B.7 | LLM second Deployment + 🚀 release | ⬜ |
 | B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ⬜ |
 | B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ⬜ |
@@ -646,10 +646,100 @@ no LLM, no nondeterminism). Record the result in the handoff.
   429 → retryable; 401 → non-retryable; unknown → non-retryable.
 **Depends on:** B.1
 
+**Owner calls (2026-09-30, before build):**
+- **Lockfile + capped majors.** `uv.lock`, Dockerfile installs from it (as `api/`). `anthropic` and
+  `openai` capped below their next major (`>=<locked>,<next>`): `errors.py` matches their exception
+  class names, so a major that renames one silently turns a transient into TERMINAL. A major bump is
+  a deliberate cap raise + a re-check of `errors.py`. Check whether the lockfile brings `llm-worker/`
+  into Dependabot's view (BUG-006, `.github/dependabot.yml`).
+- **Coarse error types, as Go's.** `ApplicationError.type` ∈ `LLMFailed` (non-retryable),
+  `LLMTransient`, `StorageTransient` (retryable); `message` = `describe(exc)`, which keeps the exact
+  class name. Every exception goes through `classify()` — the SDK retries any non-`ApplicationError`,
+  which would silently undo the fail-closed default. `CancelledError` is not caught.
+- **Graceful shutdown covers one full call:** `graceful_shutdown_timeout` ≈ 400 s (not A.5's 20 s),
+  so a rollout does not cancel an in-flight call and re-bill the user's key on the retry. Only paid
+  when a call is running. B.7 sets `terminationGracePeriodSeconds` above it.
+- **Retry numbers for C.7 — today's NATS values, copied, not re-decided:** `LLMExtract` is called
+  with `RetryPolicy(initial_interval=5s, backoff_coefficient=2, maximum_interval=60s,
+  maximum_attempts=3)`. Temporal's default is unlimited attempts. A heartbeat timeout counts as an
+  attempt, as a NATS redelivery does today.
+- **Malformed input:** a test sends the activity a bad input to confirm the SDK's behaviour (expected:
+  retryable decode failure — 3 instant attempts, no LLM call, then a visible failure). If so, accept
+  it; no hand-rolled validation.
+
+**Built 2026-09-30 (local) — `fa43db2` (B.6), `f2738fb` (BUG-020's fix). Not released; B.7 ships both.**
+- **Lockfile:** `llm-worker/uv.lock`; the Dockerfile builder runs `uv sync --frozen --no-install-project`
+  into `/opt/venv` (`UV_PYTHON_DOWNLOADS=never` — the venv must link the image's interpreter);
+  runtime stage and `CMD` unchanged. Resolved: `anthropic` 1.9.0 (`<2`), `openai` 3.22.1 (`<4`),
+  `temporalio` 1.33.0 (= `api/`).
+- **`worker/activity.py`:** `LLMActivities(minio).llm_extract`, registered as `LLMExtract` (constant
+  in `worker/contracts.py`, twin `LLM_EXTRACT_ACTIVITY` in the API's; queue `llm`, twin `LLM_QUEUE`
+  in `queues.py` — the contract test asserts both pairs). Error type by stage: fetch/upload →
+  `StorageTransient`, llm → `LLMTransient`. `fetch_content` moved to `storage.py` beside `upload`
+  so H deletes `worker.py` whole.
+- **`worker/temporal_main.py`:** activity-only `Worker` (the Python SDK polls no workflow queue when
+  given no workflows — no `DisableWorkflowWorker` equivalent needed), `max_concurrent_activities =
+  llm_max_workers`, `graceful_shutdown_timeout = llm_graceful_shutdown_seconds` (400).
+  `main.py` branches on `WORKER_MODE`; `llm_heartbeat_seconds` serves both modes (now a float).
+- **Decode failure confirmed in the SDK source** (`temporalio/worker/_activity.py`): a plain
+  `ApplicationError("Failed decoding arguments")` — retryable. Pinned by a time-skipping test:
+  `MAXIMUM_ATTEMPTS_REACHED`, the body never runs. The llm-worker suite now downloads the
+  test-server binary on first use (~10 s per fresh container).
+- 🔴 **Found in the smoke test — an early SIGTERM was ignored.** PID 1 ignores a signal it has no
+  handler for; the imports take ~3.9 s (`anthropic` 1.6, `openai` 0.7, `nats` 0.65) and the loop
+  handlers were installed only after connect + `Worker()`. Reproduced: SIGTERM at 1–7 s → exit 137
+  after the full stop timeout; in prod that is the ~420 s grace period. Fixed twice over: `main.py`
+  installs `sys.exit` on SIGTERM before its imports (nothing is in flight yet), and `temporal_main`
+  installs the graceful handler before connecting. Verified at 0.5/1/2/3/4/5/7 s → exit 0. The
+  early handler also covers NATS mode's startup — the one change to that path. ⚠️ **The api's
+  `worker_main.py` (A.5, in prod) has the same shape** — handlers after `Worker()`; its 30 s grace
+  bounds the cost. Not changed.
+- **Tests:** `tests/test_activity.py` (11) — success + size, input passthrough, 429 / 401 / unknown
+  / warm-up timeout / MinIO-unreachable on fetch and on upload, cancel passes through as
+  `CancelledError`, heartbeats through a 7-probe cold start, bad input. **Mutation-checked:** raw
+  re-raise (6 fail), no heartbeat task (1), `except BaseException` (1). 117 llm-worker, 50 contract.
+- **Smoke (compose network, `WORKER_MODE=temporal`):** `temporal_worker_started … task_queue=llm`,
+  poller listed on `llm` (activity), SIGTERM → `stopping` → `stopped`, exit 0 in ~0.6 s.
+- ⚠️ The llm-worker image has no `PYTHONUNBUFFERED` — structlog's stdout is block-buffered to a
+  pipe, so the last lines before a SIGKILL are lost (they were in the first smoke run). Not changed;
+  B.7 / owner call.
+- Exit prints aiohttp `Unclosed connector` noise (miniopy's session is never closed) — same on the
+  NATS path; harmless.
+- **Step 6 — local end to end.** Compose `llm-worker-temporal` (`WORKER_MODE=temporal`, no NATS env,
+  `stop_grace_period: 420s`). **`LLMProbeWorkflow`** (`api/app/workflows/probe.py`, registered on the
+  workflow worker): `Scrape` on `scrape-http`, then `LLMExtract` on `llm` against the object it
+  wrote — the R6 recipe minus the webhook. LLM call: `schedule_to_start` 60 s, `start_to_close`
+  400 s, `heartbeat_timeout` 90 s, the 5 s / ×2 / 60 s / 3 policy. **`scripts/probe_llm.py <url>
+  --provider … --model … [--base-url]`**: key from `PROBE_LLM_API_KEY` or a prompt, encrypted with
+  `LLM_KEY_ENCRYPTION_KEY`; prints the output and the extraction; deletes **by prefix**
+  `history/{artifact_id}/` — a failed LLM step never returns the scrape's path. Prod: `kubectl exec
+  -it deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m scripts.probe_llm …` (B.7's check).
+  Two workflow tests (routing mutation-checked). **Runs:** a stub OpenAI-compatible endpoint that
+  refused connections for 20 s → one `/models` probe after boot, one chat call, `llm.json` beside
+  `scrape.md`, both deleted; a fake Anthropic key → one attempt, `LLMFailed`, scrape deleted.
+- 🔴 **BUG-020 found by that run — the Anthropic path is broken in production.** `llm.py` passed an
+  `httpx.Timeout`; `anthropic` ≥ **1.4.0 (2026-09-04)** uses `httpx2` and raises `TypeError` on it
+  (1.3.0 accepted it). Classified TERMINAL, so every `provider=anthropic` job fails without reaching
+  Anthropic. **Prod's llm-worker runs `anthropic` 1.9.0** (checked in the pod) — unpinned
+  `pip install .` at the 2026-09-19 and 2026-09-29 releases. The current pod's logs (since
+  2026-09-29 17:44) show no LLM jobs. `openai` 3.22 also sits on `httpx2` but still accepts *and
+  enforces* an `httpx.Timeout` (measured: 2 s budget → `APITimeoutError` at 2.1 s). Missed because
+  every test mocks the SDK constructors. **Fix (local):** `_make_timeout(anthropic.Timeout |
+  openai.Timeout)` — each SDK's own class — via `_anthropic_client` / `_openai_client`, plus
+  real-client tests that assert the timeout and the `max_retries` pin (mutation-checked). Re-run:
+  the fake key now reaches Anthropic → 401 `AuthenticationError` → `LLMFailed`, one attempt.
+- **Cause chain across the boundary:** `raise err from exc` sends the original exception too, as a
+  nested `ApplicationError` whose `type` is its class name. So `ActivityError.cause` = ours
+  (`LLMFailed`/…), and *its* `.cause` = e.g. `AuthenticationError`. Read the first one (C.7).
+
 #### B.7 — LLM second Deployment + 🚀 release
 
 **What:** `app/llm-worker-temporal.yaml` (same env as the NATS one minus NATS; keep
-`LLM_REQUEST_TIMEOUT_SECONDS=180`). Release; `rollout status` on both.
+`LLM_REQUEST_TIMEOUT_SECONDS=180`). **`terminationGracePeriodSeconds` ≈ 420 s** — above B.6's
+≈ 400 s graceful shutdown, or k8s kills the pod at its own deadline first. Release; `rollout status` on both.
+**Carries BUG-020's fix (owner, 2026-09-30 — no hotfix):** the release rebuilds the NATS llm-worker
+from B.6's lockfile too. After it: the pod's `anthropic.__version__` = 1.9.0, and `probe_llm.py` with a
+fake Anthropic key → `LLMFailed: AuthenticationError … 401`, not `TypeError` (BUG-020 → *After the release*).
 **Depends on:** B.6
 
 #### B.8 — Playwright worker: `Scrape` activity on `scrape-playwright`
@@ -804,11 +894,19 @@ a review rule, add it to the PR checklist):
   (Scrape → the engine's scraper queue; LLM → LLM queue; Clean/Validate → C.8's home; Webhook →
   workflow-worker queue) with `start_to_close` from the declared budget (**LLM ≥ 360 s in prod**,
   B.6), `heartbeat_timeout` set where the activity heartbeats, `RetryPolicy` per block type
-  (non-retryable errors are raised by the activity, not listed here — §10) → `record_storage` for
+  (non-retryable errors are raised by the activity, not listed here — §10; **LLM: B.6's owner
+  call — 5 s / ×2 / 60 s cap / 3 attempts, never the unlimited default**) → `record_storage` for
   content blocks → mirror `completed` with refs.
 - References only: an activity returns `result_path`, never bytes (§5). Effect blocks pass their
   input ref through.
 - Terminal failure: mirror `failed` (block + run), remaining blocks `skipped`; stop.
+  ⚠️ **The error text is the workflow's to finish:** neither `ApplicationError` nor the
+  `ActivityError` the workflow catches carries an attempt count — only `retry_state`. On
+  `MAXIMUM_ATTEMPTS_REACHED` append `(gave up after {maximum_attempts} attempts)` to the cause's
+  message, as the NATS worker does today; the activity cannot, since it does not know which
+  attempt is the last (B.6).
+  Read the label from `ActivityError.cause` — one level deeper is the original exception, also an
+  `ApplicationError`, typed by its class name (B.6).
 - Cancellation (R3 + 15d): at every block boundary `check_cancelled`; on `True` mirror the run
   `cancelled`, remaining `skipped`, **completed blocks' outputs stay** (R3). Also handle
   `asyncio.CancelledError` from a workflow cancel (C.10) at the same boundaries.

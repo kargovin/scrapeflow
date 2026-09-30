@@ -29,7 +29,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-019) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-020) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -141,7 +141,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-29 *(clock)*
+## Current state — as of 2026-09-30 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +149,38 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **B.6 — LLM `LLMExtract` ACTIVITY BUILT (2026-09-30). BUG-020 found and fixed on the way.**
+Local only, committed on `develop` (`f2738fb` BUG-020, `fa43db2` B.6), **not pushed, not released —
+owner: ship with B.7, no hotfix.** Mentoring first (design + how it mirrors NATS, five open questions
+in plain terms), then owner: "agree on all your recommendations" → recorded as B.6 *Owner calls*, then
+"build 1-5", then "do step 6". Detail in the backlog's B.6 *Built* note. Notes:
+
+- **Owner calls (all recorded in B.6):** capped majors (`anthropic <2`, `openai <4`) + `uv.lock`;
+  coarse error types `LLMFailed` / `LLMTransient` / `StorageTransient`; graceful shutdown ~400 s
+  (B.7: `terminationGracePeriodSeconds` ~420 s); C.7 copies the NATS retry numbers (5 s / ×2 / 60 s /
+  3 — written into C.7); decode failure accepted as retryable (confirmed in the SDK source + a test).
+- 🔴 **BUG-020 — every `provider=anthropic` job fails in prod.** `anthropic` ≥ 1.4 (prod: 1.9.0,
+  read in the pod) rejects the `httpx.Timeout` `llm.py` passed. Found by the fake-key probe run.
+  Fixed: each SDK's own `Timeout` + real-client tests. **B.7's release carries it; its after-release
+  check is in BUG-020 and B.7.** The prod pod's logs (since 09-29 17:44) show no LLM jobs.
+- ⚠️ **PID 1 ignores a SIGTERM it has no handler for.** The llm-worker's imports take ~3.9 s, so an
+  early SIGTERM stalled until the stop timeout (reproduced; in prod that is ~420 s). Fixed in
+  `main.py` (handler before imports) + `temporal_main.py` (before connecting). **The api's
+  `worker_main.py` (in prod) has the same shape** — 30 s grace bounds it; not changed, owner not
+  yet asked.
+- **New operator tool: `scripts/probe_llm.py`** (`LLMProbeWorkflow`: Scrape → LLMExtract). Key via
+  `PROBE_LLM_API_KEY` or a prompt; prints the extraction; the **script** (not the workflow) deletes
+  by prefix. Prod form needs `kubectl exec -it`. It is B.7's release check.
+- **Cause chain across Temporal:** `ActivityError.cause` = our labelled `ApplicationError`; one level
+  deeper = the original exception, also an `ApplicationError` typed by class name (C.7 note added).
+- Local: compose `llm-worker-temporal` is **running**; the NATS `llm-worker` is not (the dev stream
+  still holds ~1.69 M messages — do not start it). The llm-worker suite now downloads the Temporal
+  test server on first use (~10 s).
+- Open, not asked: `PYTHONUNBUFFERED=1` on the llm-worker image (last log lines lost on SIGKILL).
+- **Next: B.7** — `app/llm-worker-temporal.yaml` (NATS env out, `LLM_REQUEST_TIMEOUT_SECONDS=180`,
+  grace ~420 s), then the release (ff `main` — also ships BUG-020), then the BUG-020 check and a
+  prod `probe_llm.py` run.
 
 🔷 **B.3 + B.4 + B.5 — GO PORT RELEASED (2026-09-29, fourth session).** `main` ff `ce614d8..ef68942`
 (api, http-worker, playwright-worker, llm-worker built; no migration); B.3's manifest rebased, tag
@@ -840,7 +872,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up B.6 in `phase4-implementation-backlog.md`** — the LLM worker's `LLMExtract` activity.
+0. **Pick up B.7 in `phase4-implementation-backlog.md`** — the LLM worker's Temporal Deployment + 🚀 release; it also ships **BUG-020's fix** (owner: no hotfix). ~~B.6~~ ✅ 2026-09-30 (local; `fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -886,6 +918,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-09-30 close:** `develop` carries `d2e0295` (09-29 close), `f2738fb` (BUG-020), `fa43db2` (B.6) and this session's docs close — **unpushed**; `main` = `origin/main` = `ef68942`. Re-check after fetch before quoting.
 - **Deployed code is `ef68942`** (2026-09-29, B.5 Go port — api, http-, playwright-, llm-worker images; infra `e70fbe9`). Before it: `ce614d8` (A.8 engine up).
   **At the B.5 release (fourth session):** `develop` = `origin/develop` = `main` = `origin/main` =
   `ef68942`; only this session's docs closeout sits on `develop` after it (unpushed until committed
@@ -1024,6 +1057,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-09-30 *(clock)* | **🔷 B.6 built (local) + BUG-020 filed and fixed.** Read-in; mentoring on B.6's design and its NATS mirror; the five open questions re-explained in plain terms → owner agreed all five (recorded). Built steps 1–5 (lockfile + caps, settings, activity, Temporal entry point, tests — mutation-checked); smoke test found the PID-1 early-SIGTERM stall (fixed). Step 6: compose service + `LLMProbeWorkflow`/`probe_llm.py`; stub cold-start run green; fake-key run found **BUG-020** (Anthropic broken in prod, `anthropic` 1.9.0) → fixed, filed. Owner: release waits for B.7. | `f2738fb`, `fa43db2`, docs close |
 | 2026-09-29 *(clock, fourth session)* | **🔷 B.3 → B.4 → B.5 — GO PORT RELEASED.** Read-in. B.3 ("no need to explain"): infra manifest, dry-run clean, verified the manifest's exact env on the local image; owner Q&A on RollingUpdate vs Recreate (Ready ≠ works without a readiness probe) and on Flux setter markers (enough; `update.path` covers `app/`). B.4 built on "build b4; script deletes the object": workflow, two constants, script, two tests (mutation-checked), 300 API tests, compose end-to-end. Owner: reuse activity name `Scrape` for Playwright (B.8 renamed). **B.5 on "do b5 prod release":** `main` ff, four images, five rollouts green, B.3 rebased with hand-set tag and pushed, `go-worker` unchanged, workflow-worker drain verified in prod. Prod probe and DB read refused by the classifier → owner ran both. Gate: `example.com` equal on both paths; `govindappa.com` mismatch traced to Cloudflare's per-request script | `ccb277d`, `d7138cb`, `ef68942` (released) · infra `e70fbe9` (deployed) + this closeout |
 | 2026-09-29 *(clock, third session)* | **🔷 B.1 + B.2 built — Group B opens.** Read-in; mentoring on B.1's field set (why `engine` goes: the task queue picks the worker as the subject does today). Owner: Pydantic, drop `engine`, "build ScrapeInput" → then ScrapeOutput, LLM contracts, the three worker twins and the `contracts/` arm (fixtures both directions, mutation-checked; Go fixture regen needs `-count=1`). Owner: **no rationale docstrings** (memory). Q&A on showing `running` under Temporal → mirror activity (ADR-009 §11) → **D.3 corrected** (mirror `running`/`processing`; `running` = scheduled; `ScrapeInput` builders). Owner caught that I had settled two posed questions myself → asked, all confirmed as built (memory: ask before building). **B.2:** shared `internal/scrape`, `Scrape` activity, `WORKER_MODE`, Go 1.26 for SDK v1.49, cross-language smoke from a Python workflow, SIGTERM drain; owner code walkthrough (entrypoints, why three packages, activity name vs queue, registration); owner calls: two log lines, compose service in B.2. Found: dev NATS backlog ~1.69 M with no dev http-worker; pre-commit's golangci-lint path dead | `01c2087`, `21fcf26`, `804ccca`, `ecc968e`, `aa09e54` + this closeout (all `develop`, unpushed) |
 | 2026-09-29 *(clock, second session)* | **🔷 A.6 built, then A.8 — ENGINE UP RELEASED, then A.9 — GROUP A COMPLETE.** Read-in; flagged that prod's api image predates A.5, so A.6 cannot go out before A.8's ff. Owner: "do A6 complete and dont push until A8" → manifest + kustomization + README in the infra repo, server dry-run clean, committed unpushed. Verified the exact k8s command and env on a locally built **production-target** image as `appuser` against the compose Temporal: started, ran `HelloWorkflow`, drained on SIGTERM. Found: no new `ImagePolicy` needed (setter marker); both Fernet keys required. Docs: backlog (A.6 status + *Built* note, A.8 push order), this file. **Then owner: "go do prod deploy; this and k8s repo"** → `develop` pushed, `main` ff to `ce614d8`, api image built + Flux-bumped + rolled out, A.6 rebased with its tag hand-bumped and pushed (`ddde657`), worker Running, `HelloWorkflow` COMPLETED in prod, capacity before/after recorded, no backups found for either Postgres (owner item). Docs: backlog (A.6/A.8 status, A.8 *Done* note), `CLAUDE.md` (status banner, deployed code), this file. Owner Q&A in plain words: `worker_main` is the entrypoint of the *workflow-worker pool* only (scrape/LLM activities stay in their own services on their own queues); why it lives in the api image (shared domain logic, not only DB/MinIO calls); one image, two Deployments, two commands. **Owner: "do a review if we have missed anything"** → found C.5 never put the Temporal env on the API Deployment (default `localhost:7233`), stale engine-up pointers in three docs + memory, no backup for the app Postgres either; SIGTERM drain unverified in prod. **Owner: backups deferred post-Temporal (§4 row); "do 1 as part of stage A"** → **A.9** — `app/api.yaml` env, infra `7ae6a9b`, pushed on "push", API restarted cleanly, `connect()` verified from inside the prod API pod. Memory: release-policy corrected (engine up needed an app release; the new-manifest-tag rule; BUG-019 script form) and the test-command index line fixed | `ce614d8` (released) · infra `ddde657`, `7ae6a9b` (deployed) · docs `0ed557c`, `5df9839`, `39d84fa`, `05c37c9` + this closeout |

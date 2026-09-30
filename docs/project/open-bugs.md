@@ -1881,6 +1881,89 @@ scripts/<name>.py`"* line fails with failure 2 in a fresh container of this imag
 worked in the API pod on 2026-09-19 for a reason not established (prod exec was not available to
 check). `python -m scripts.<name>` works in both — prefer it.
 
+
+---
+
+## BUG-020 — Every `provider=anthropic` LLM job fails in production: the SDK rejects our `httpx.Timeout`
+
+**Severity:** High for the feature — the Anthropic half of LLM extraction fails on every job, before
+any request leaves the pod. Observed impact: none found — the current llm-worker pod's logs (since
+2026-09-29 17:44 UTC) hold no LLM jobs at all; earlier pods' logs are gone and the prod DB was not
+checked.
+**Discovered:** 2026-09-30, B.6 step 6 — `LLMProbeWorkflow` with a deliberately fake Anthropic key
+was expected to return a 401 and returned a `TypeError` instead.
+**Status:** 🟡 **Fixed in `f2738fb` (`develop`), not released — owner's call 2026-09-30: ships with
+B.7's release, not a hotfix.**
+
+### What happens
+
+```
+TypeError: Invalid `timeout` argument; `httpx.Timeout` is from the `httpx` package, but this SDK
+uses `httpx2`. Use `httpx2.Timeout` instead.
+```
+
+raised by `anthropic.AsyncAnthropic(...)` inside `_call_anthropic`. `errors.classify()` does not know
+`TypeError`, so it is **terminal** — the fail-closed default doing its job: one `failed`, no retry,
+nothing billed. The run's error is that string; the user's key and schema are never tried.
+
+### Root cause
+
+`llm-worker/worker/llm.py` built one `httpx.Timeout` and passed it to **both** SDK clients.
+`anthropic` moved to **`httpx2`** at 1.0.0 (2026-08-20) — the migration that already caused the
+2026-09-04 crash-loop (BUG-006 addendum) — and from **1.4.0 (2026-09-04)** its constructor
+type-checks the timeout. Tested each release in a clean container:
+
+| `anthropic` | `httpx.Timeout` |
+|---|---|
+| 1.0.0, 1.3.0 | accepted |
+| 1.4.0 → 1.9.0 | **`TypeError`** |
+
+**Since when:** every llm-worker image built after 2026-09-04 by the unpinned `pip install .` —
+the **2026-09-19 release** (latest `anthropic` that day: 1.7.0, rejecting) and the **2026-09-29
+release**. **Prod's pod runs `anthropic` 1.9.0 / `openai` 3.21.0** (read in the pod 2026-09-30).
+The 09-19 image was not inspected, so "broken since 2026-09-19" is inferred from the release dates.
+
+**The OpenAI-compatible path is not affected — checked, not assumed.** `openai` 3.21/3.22 also sits
+on `httpx2`, but still accepts an `httpx.Timeout` **and enforces it**: a 2 s read budget against a
+server that answers in 8 s raised `APITimeoutError` at 2.1 s. Nothing promises that stays true, so
+the fix covers it too.
+
+### Why no test caught it
+
+Every `llm-worker` test mocks the SDK constructors (`worker.llm.anthropic.AsyncAnthropic`,
+`worker.llm.AsyncOpenAI`), so no test ever built a real client. **And a real-client test would
+still have passed locally:** the local image was three weeks old and held `anthropic` 1.3.0, which
+accepts the argument. That is BUG-013 exactly — the tested image and the deployed image are
+different artifacts sharing a commit SHA.
+
+### Fix
+
+- `_make_timeout(timeout_cls)` builds **each SDK's own** `Timeout` class (`anthropic.Timeout`,
+  `openai.Timeout` — both re-export the class their client uses), via two helpers,
+  `_anthropic_client` / `_openai_client`.
+- **Real-client tests** in `tests/test_llm.py` build both clients from those helpers with no mocks
+  and assert the read/connect timeout and the `max_retries` pin. Mutation-checked: `httpx.Timeout`
+  back → the Anthropic test fails.
+- **The lockfile B.6 added** (`llm-worker/uv.lock`, `anthropic` 1.9.0, capped `<2`) makes the tested
+  version the shipped version — without it, the tests above prove nothing about prod.
+- **Verified end to end** (compose, `scripts/probe_llm.py`): the fake key now reaches Anthropic →
+  `401 AuthenticationError` → `LLMFailed`, one attempt.
+
+The fix is in `call_llm`, which both transports share, so the **NATS worker gets it too** — B.7's
+`main` fast-forward rebuilds `llm-worker` from the lockfile.
+
+**After the release:** `kubectl -n scrapeflow exec deploy/scrapeflow-llm-worker -- python -c "import
+anthropic; print(anthropic.__version__)"` → 1.9.0, then `probe_llm.py` against prod with a fake
+Anthropic key — expect `LLMFailed: AuthenticationError … 401`, not `TypeError`.
+
+### Interactions
+
+- **BUG-006 addendum / BUG-013:** the second realised instance of the same `httpx` → `httpx2`
+  migration. The first failed **loudly** (import error, crash-loop, caught at deploy); this one fails
+  **only at call time, only for one provider** — silent until someone used it. Lockfile + capped
+  majors (B.6) is the structural fix; the real-client test is the detector.
+- **B.6:** found by its step 6. Not a Temporal bug — `call_llm` is shared code.
+
 ---
 
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
