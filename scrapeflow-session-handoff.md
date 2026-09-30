@@ -141,7 +141,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-09-30 *(clock, third session)*
+## Current state — as of 2026-09-30 *(clock, fourth session)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +149,30 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **B.9 — PLAYWRIGHT PORT RELEASED; GROUP B COMPLETE (2026-09-30, fourth session).** Owner: "yes
+finish out with b9". `main` ff `1717032..a11cce6` (api + playwright-worker built, no migration);
+infra rebased over Flux's two bumps, new manifest's tag hand-set → **`9ebb305`** (the classifier
+allowed the push). `scrapeflow-playwright-worker-temporal` polls `scrape-playwright` in prod beside
+the NATS worker (poller listed by `task-queue describe`). Detail in the backlog's B.9 *Done* note.
+
+- **Owner calls this session:** graceful shutdown **630 s** / grace **660 s** (delegated to me —
+  covers `timeout_seconds` 300 × 2 + upload; actions are uncapped, so nothing covers every job).
+  Resources copied from the NATS Deployment as-is (CPU limits 191 → 216 %).
+- **Prod `pip freeze` vs `playwright-worker/uv.lock`:** identical but `cryptography` 50.0.1 → 50.0.2
+  and the Temporal additions; `patchright` 1.63.0 both. ⚠️ **The Chrome binary is not locked**
+  (`patchright install chrome` = current stable at build). **Chrome 154.0.8037.92** in both pods
+  after this release — first recorded value.
+- ✅ **BUG-020 CLOSED** — owner's prod `probe_llm.py` with a fake key → `401 … API key is invalid.`
+- **Probe:** `scripts/probe_scrape.py --engine http|playwright` (`a11cce6`).
+- ⚠️ **Open — owner runs B.9's gate** (the classifier refuses prod probe writes): v1 Playwright job
+  vs `probe_scrape --engine playwright` on `example.com` `html`, compare `content_hash`.
+- 🔴 **New, not filed — 10 Dependabot alerts on `api/uv.lock`, PyJWT 2.13.0 (1 critical, 5 high),
+  all published 2026-09-30, fixed in 2.14.0.** PyJWT is transitive via `clerk-backend-api` — the
+  API's JWT verification path. Owner's call pending (see *Outstanding*).
+- Local: compose `playwright-worker-temporal` rebuilt (logs `graceful_shutdown_s=630.0`);
+  `workflow-worker` restarted to load the new probe.
+- **Next: Group C — C.1 (pipeline schema).**
 
 🔷 **B.8 — PLAYWRIGHT `Scrape` ACTIVITY BUILT (2026-09-30, third session).** Local, committed on
 `develop` as **`c405124`**, **not pushed, not released — B.9 ships it.** The owner wrote the activity's
@@ -941,7 +965,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up B.9 in `phase4-implementation-backlog.md`** — the Playwright Deployment + 🚀 release. First the two owner items in the B.8 block above (graceful-shutdown value; prod `pip freeze` vs the lock), and the owner's prod `probe_llm.py` run still closes BUG-020. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.1 in `phase4-implementation-backlog.md`** — Group C (pipeline lane) opens; read its group header and the eight open items at the backlog's foot first. **Before it: (a) the owner's B.9 prod gate; (b) owner's call on the PyJWT alerts** (10 on `api/uv.lock`, fix = 2.14.0, a release). ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -987,7 +1011,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-09-30, third session close (verified after fetch):** `develop` is ahead of `origin/develop` — `6a85d40`, `36f2781` (B.7 docs), **`c405124` (B.8 code)** and this closeout — **unpushed**. `main` = `origin/main` = `1717032`, unchanged. Infra repo untouched this session.
+- **2026-09-30, fourth session (B.9 release, verified):** `develop` = `origin/develop` = `main` = `origin/main` = `a11cce6` — **released**; this session's docs closeout sits on `develop` after it. **Infra:** `origin/main` = `9ebb305` (Flux `47ca730`, `9e69931` + the playwright-worker-temporal manifest), 0 ahead.
+- **Deployed code is `a11cce6`** (2026-09-30, B.9 — api + playwright-worker images). Before it: `1717032`.
+- *Historical, superseded by B.9:* **2026-09-30, third session close (verified after fetch):** `develop` is ahead of `origin/develop` — `6a85d40`, `36f2781` (B.7 docs), **`c405124` (B.8 code)** and this closeout — **unpushed**. `main` = `origin/main` = `1717032`, unchanged. Infra repo untouched this session.
 - **2026-09-30, after B.7 (verified):** `develop` = `origin/develop` = `main` = `origin/main` = `1717032` — **released**; this session's docs closeout sits on `develop` after it. **Infra repo:** `origin/main` = `3179f48` (`bbc101a` workflow-worker venv python + `3179f48` llm-worker-temporal), 0 ahead.
 - **Deployed code is `1717032`** (2026-09-30, B.7 — api + llm-worker images). Before it: `ef68942`.
 - *Historical, superseded by B.7:* **2026-09-30 close (verified after fetch):** `develop` is **10 ahead** of `origin/develop`, 0 behind — `d2e0295` (09-29 close), `f2738fb` (BUG-020), `fa43db2` (B.6), `1207f69`, `012b0c0`, `dc086a0` (llm.py → structlog), `698fbdd`, `63e7fbe` (workflow-worker SIGTERM + venv python), `0e54897`, `b75e076` (BUG-021) — **unpushed**. `main` = `origin/main` = `ef68942`. **Infra repo: 1 ahead — `1807870`** (workflow-worker command → `/app/.venv/bin/python`), **unpushed, goes out with B.7**.

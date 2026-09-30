@@ -56,8 +56,8 @@
 | B.5 | 🚀 Go port release | ✅ 2026-09-29 (`ef68942`, infra `e70fbe9`) — **Go port live beside NATS** |
 | B.6 | LLM worker: `LLMExtract` activity (cold start, classifier, heartbeat) | ✅ 2026-09-30 (local; compose service + `LLMProbeWorkflow` end to end). 🔴 Found an Anthropic-path prod bug on the way — fixed locally, not released |
 | B.7 | LLM second Deployment + 🚀 release | ✅ 2026-09-30 (`1717032`, infra `3179f48`) — **LLM port live beside NATS**; BUG-020 closed on the owner's prod probe (401) |
-| B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ✅ 2026-09-30 (local, `c405124`, not released; compose service end to end). Render pipeline extracted to `worker/scrape.py`, shared with NATS |
-| B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ⬜ |
+| B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ✅ 2026-09-30 (`c405124`, released with B.9 `a11cce6`; compose service end to end). Render pipeline extracted to `worker/scrape.py`, shared with NATS |
+| B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ✅ 2026-09-30 released (`a11cce6`, infra `9ebb305`) — **Playwright port live beside NATS**; the prod gate is the owner's |
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |
 | C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ⬜ |
 | C.2 | Widen both quota views + the ledger CHECK for the pipeline lane | ⬜ |
@@ -876,6 +876,31 @@ Release; `rollout status` on both; `google-chrome --version` in both pods (the b
 against a real page (⚠️ the probe hard-codes `SCRAPE_HTTP_QUEUE` and `ScrapeInput` has no `engine`
 — give the workflow and script a queue/engine argument here): v1 vs probe outputs compared on structure (headed Chrome is not byte-stable).
 **Depends on:** B.8, B.4
+
+**Done (2026-09-30, released):**
+- **Probe (`a11cce6`):** `ScrapeProbeInput(scrape, engine)`; `scripts/probe_scrape.py --engine
+  http|playwright`. Playwright → `scrape-playwright`, `start_to_close = 2 × timeout_seconds + 60 s`
+  (default 60 → 180 s), `heartbeat_timeout = 90 s`; http unchanged (90 s). One new test pins queue +
+  both timeouts (mutation-checked: `1 ×` fails it); 303 API tests. Compose: `example.com` markdown
+  through both engines, objects deleted.
+- **Graceful shutdown 150 → 630 s (`cdbb8c2`, owner delegated the call)** — see B.8's note;
+  `terminationGracePeriodSeconds: 660`. The NATS manifest has no dshm volume or Xvfb env (this
+  task's *What* said so; `--disable-dev-shm-usage` handles it in-app) — nothing to copy.
+- **Release:** `main` ff `1717032..a11cce6` — `api` + `playwright-worker` built, no Alembic revision.
+  Flux bumped api / workflow-worker / cleanup CronJob / NATS playwright-worker (infra `47ca730`,
+  `9e69931`); the new manifest was rebased over them, **tag hand-set** to
+  `main-1790793252-a11cce6…`, pushed as infra **`9ebb305`** (the classifier allowed the push).
+- **Verified:** `rollout status` green on `scrapeflow-api`, `-workflow-worker`, `-playwright-worker`,
+  `-playwright-worker-temporal`. New pod logs `browser_launched channel=chrome headless=False` →
+  `temporal_worker_started … graceful_shutdown_s=630.0 task_queue=scrape-playwright`; `task-queue
+  describe` (one-off admin-tools pod) lists its poller. The NATS pod re-subscribed
+  (`python-playwright-worker`, durable untouched). **Chrome 154.0.8037.92 in both pods** — the first
+  recorded prod Chrome version; the pre-release one was not captured.
+- **Capacity** before → after: CPU requests 32 → 39 %, **limits 191 → 216 %**; memory requests 14 →
+  17 %, limits 62 → 75 %. Idle, each Playwright pod ≈ 5m CPU / ~300 Mi.
+- ⚠️ **Open — the owner runs the gate** (the classifier refuses the probe's prod write): `example.com`,
+  `html`, v1 Playwright job vs `probe_scrape --engine playwright`, compare `content_hash`; headed
+  Chrome may not be byte-stable, so a mismatch is judged on structure (size, content), not failed.
 
 ---
 
