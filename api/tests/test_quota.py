@@ -794,3 +794,128 @@ async def test_batch_items_each_count_toward_monthly_runs(
     assert resp.status_code == 429
     assert resp.json()["detail"]["quota_type"] == "monthly_runs"
     await _drop_batches(quota_user.id)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline lane (C.2) — one unit per run; a slot only while a block is running
+# ---------------------------------------------------------------------------
+
+from app.models.pipeline import (  # noqa: E402
+    Pipeline,
+    PipelineRun,
+    PipelineRunBlock,
+    PipelineVersion,
+)
+
+
+async def _make_pipeline_run(user_id, *, status="running", block_statuses=("running",)):
+    """One pipeline run with one block row per entry in `block_statuses`.
+    Cleanup is the user cascade."""
+    async with AsyncSessionLocal() as db:
+        pipeline = Pipeline(user_id=user_id, name=f"p-{uuid.uuid4().hex}")
+        db.add(pipeline)
+        await db.flush()
+        version = PipelineVersion(pipeline_id=pipeline.id, version=1, definition={})
+        db.add(version)
+        await db.flush()
+        run = PipelineRun(
+            pipeline_id=pipeline.id,
+            pipeline_version_id=version.id,
+            user_id=user_id,
+            status=status,
+            workflow_id=f"pipeline-run-{uuid.uuid4()}",
+        )
+        db.add(run)
+        await db.flush()
+        for i, block_status in enumerate(block_statuses):
+            db.add(
+                PipelineRunBlock(
+                    pipeline_run_id=run.id,
+                    block_id=f"b{i}",
+                    position=i,
+                    type="scrape",
+                    status=block_status,
+                )
+            )
+        await db.commit()
+        return run.id
+
+
+async def test_pipeline_runs_count_toward_monthly_runs(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """One unit per run, whatever its block count or outcome."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, monthly_runs_limit=2))
+        await db.commit()
+    await _make_pipeline_run(
+        quota_user.id, status="completed", block_statuses=("completed", "completed", "completed")
+    )
+    await _make_pipeline_run(quota_user.id, status="failed", block_statuses=("failed",))
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    detail = resp.json()["detail"]
+    assert detail["quota_type"] == "monthly_runs"
+    assert "2/2" in detail["message"]
+
+
+async def test_pipeline_run_with_a_running_block_holds_a_slot(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
+        await db.commit()
+    await _make_pipeline_run(quota_user.id, block_statuses=("completed", "running", "pending"))
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["quota_type"] == "concurrent_jobs"
+
+
+async def test_pipeline_run_is_one_slot_however_many_blocks_run(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=2))
+        await db.commit()
+    await _make_pipeline_run(quota_user.id, block_statuses=("running", "running", "running"))
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 201, resp.text
+
+
+async def test_waiting_pipeline_run_holds_no_slot(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """ADR-009 15a: a run parked on a timer holds nothing."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
+        await db.commit()
+    await _make_pipeline_run(quota_user.id, block_statuses=("completed", "completed", "waiting"))
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 201, resp.text
+
+
+async def test_terminal_pipeline_run_with_a_stale_running_block_holds_no_slot(
+    quota_client, quota_user, quota_headers, mock_jetstream
+):
+    """A block left `running` by a failed mirror write must not pin the slot."""
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
+        await db.commit()
+    await _make_pipeline_run(quota_user.id, status="failed", block_statuses=("running",))
+
+    resp = await quota_client.post(
+        "/jobs", json={"url": "https://example.com"}, headers=quota_headers
+    )
+    assert resp.status_code == 201, resp.text

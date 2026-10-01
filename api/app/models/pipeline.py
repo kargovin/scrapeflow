@@ -112,6 +112,12 @@ class PipelineRun(Base):
         UniqueConstraint("workflow_id", name="uq_pipeline_runs_workflow_id"),
         Index("idx_pipeline_runs_user_id_created_at", "user_id", "created_at"),
         Index("idx_pipeline_runs_pipeline_id_created_at", "pipeline_id", "created_at"),
+        # Serves the quota_active_submissions pipeline arm.
+        Index(
+            "idx_pipeline_runs_user_id_running",
+            "user_id",
+            postgresql_where=text("status = 'running'"),
+        ),
     )
 
     def __repr__(self) -> str:

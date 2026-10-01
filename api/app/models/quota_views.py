@@ -1,6 +1,7 @@
 """The run-counting views (ADR-009 §3, backlog P7) — read-only Table objects.
 
-These are database *views*, created by migration 86c780f55969 and read by
+These are database *views*, created by migration 86c780f55969 (pipeline arms added by
+9db1dcda44f7) and read by
 `app/core/quota.py`. They are the single definition of what each count meter counts:
 
 quota_run_units          — one row per attempted fetch, every lane. `monthly_runs`.

@@ -41,6 +41,14 @@ class StorageObject(Base):
     crawl_page_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("crawl_pages.id", ondelete="CASCADE"), nullable=True
     )
+    pipeline_run_block_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "pipeline_run_blocks.id",
+            ondelete="CASCADE",
+            name="fk_storage_objects_pipeline_run_block_id",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -48,7 +56,7 @@ class StorageObject(Base):
     __table_args__ = (
         CheckConstraint("bytes >= 0", name="ck_storage_objects_bytes_nonnegative"),
         CheckConstraint(
-            "num_nonnulls(job_run_id, crawl_page_id) = 1",
+            "num_nonnulls(job_run_id, crawl_page_id, pipeline_run_block_id) = 1",
             name="ck_storage_objects_one_producer",
         ),
         Index("idx_storage_objects_user_id", "user_id"),
@@ -61,6 +69,11 @@ class StorageObject(Base):
             "idx_storage_objects_crawl_page_id",
             "crawl_page_id",
             postgresql_where=text("crawl_page_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_storage_objects_pipeline_run_block_id",
+            "pipeline_run_block_id",
+            postgresql_where=text("pipeline_run_block_id IS NOT NULL"),
         ),
     )
 

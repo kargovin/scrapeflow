@@ -573,3 +573,116 @@ async def test_reconcile_dry_run_previews_the_counter_it_would_set(db_user):
         async with AsyncSessionLocal() as db:
             await db.execute(delete(User).where(User.id == unseen.id))
             await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline lane (C.2) — block-keyed rows, released per run
+# ---------------------------------------------------------------------------
+
+
+async def _make_pipeline_blocks(user_id, n=2):
+    from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
+
+    async with AsyncSessionLocal() as db:
+        pipeline = Pipeline(user_id=user_id, name=f"p-{uuid.uuid4().hex}")
+        db.add(pipeline)
+        await db.flush()
+        version = PipelineVersion(pipeline_id=pipeline.id, version=1, definition={})
+        db.add(version)
+        await db.flush()
+        run = PipelineRun(
+            pipeline_id=pipeline.id,
+            pipeline_version_id=version.id,
+            user_id=user_id,
+            status="completed",
+            workflow_id=f"pipeline-run-{uuid.uuid4()}",
+        )
+        db.add(run)
+        await db.flush()
+        blocks = [
+            PipelineRunBlock(
+                pipeline_run_id=run.id,
+                block_id=f"b{i}",
+                position=i,
+                type="scrape",
+                status="completed",
+            )
+            for i in range(n)
+        ]
+        db.add_all(blocks)
+        await db.commit()
+        return run.id, [b.id for b in blocks]
+
+
+async def test_pipeline_block_objects_are_recorded_and_released(db_user):
+    from app.core.ledger import record_object, release_pipeline_run_objects
+
+    run_id, (b0, b1) = await _make_pipeline_blocks(db_user.id)
+    k0 = f"{BUCKET}/history/{b0}/scrape.html"
+    k1 = f"{BUCKET}/history/{b1}/llm.json"
+    async with AsyncSessionLocal() as db:
+        assert await record_object(
+            db, user_id=db_user.id, object_key=k0, size=100, pipeline_run_block_id=b0
+        )
+        assert await record_object(
+            db, user_id=db_user.id, object_key=k1, size=20, pipeline_run_block_id=b1
+        )
+        assert not await record_object(
+            db, user_id=db_user.id, object_key=k0, size=100, pipeline_run_block_id=b0
+        )
+        await db.commit()
+    assert await _used(db_user.id) == 120
+
+    minio = AsyncMock()
+    async with AsyncSessionLocal() as db:
+        outcome = await release_pipeline_run_objects(db, minio, run_id, "test")
+        await db.commit()
+
+    assert (outcome.released, outcome.freed_bytes, outcome.failed) == (2, 120, 0)
+    assert await _used(db_user.id) == 0
+    removed = {f"{c.args[0]}/{c.args[1]}" for c in minio.remove_object.await_args_list}
+    assert removed == {k0, k1}
+    async with AsyncSessionLocal() as db:
+        left = await db.scalar(
+            select(StorageObject).where(StorageObject.pipeline_run_block_id.in_([b0, b1]))
+        )
+        assert left is None
+
+
+async def test_pipeline_ledger_row_cascades_with_its_block(db_user):
+    from app.models.pipeline import PipelineRunBlock
+
+    _, (b0,) = await _make_pipeline_blocks(db_user.id, n=1)
+    async with AsyncSessionLocal() as db:
+        db.add(
+            StorageObject(
+                user_id=db_user.id,
+                object_key=f"{BUCKET}/history/{b0}/scrape.html",
+                bytes=1,
+                pipeline_run_block_id=b0,
+            )
+        )
+        await db.commit()
+        await db.execute(delete(PipelineRunBlock).where(PipelineRunBlock.id == b0))
+        await db.commit()
+        left = await db.scalar(
+            select(StorageObject).where(StorageObject.pipeline_run_block_id == b0)
+        )
+        assert left is None
+
+
+async def test_one_producer_check_rejects_a_pipeline_row_with_a_second_producer(db_user):
+    _, (b0,) = await _make_pipeline_blocks(db_user.id, n=1)
+    async with AsyncSessionLocal() as db:
+        page_id = uuid.uuid4()  # never reaches the FK check — the CHECK fires first
+        db.add(
+            StorageObject(
+                user_id=db_user.id,
+                object_key=f"{BUCKET}/x/{uuid.uuid4()}",
+                bytes=1,
+                pipeline_run_block_id=b0,
+                crawl_page_id=page_id,
+            )
+        )
+        with pytest.raises(IntegrityError, match="ck_storage_objects_one_producer"):
+            await db.commit()

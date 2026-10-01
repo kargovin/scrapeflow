@@ -38,6 +38,7 @@ from app.models.batch import Batch, BatchItem
 from app.models.crawl import CrawlPage
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.models.pipeline import PipelineRunBlock
 from app.models.storage_object import StorageObject
 
 logger = structlog.get_logger()
@@ -51,6 +52,7 @@ async def record_object(
     size: int,
     job_run_id: uuid.UUID | None = None,
     crawl_page_id: uuid.UUID | None = None,
+    pipeline_run_block_id: uuid.UUID | None = None,
 ) -> bool:
     """Record one stored object and charge its bytes. Returns True if the row is new.
 
@@ -61,8 +63,10 @@ async def record_object(
     inserted = await db.scalar(
         text("""
             INSERT INTO storage_objects
-                (id, user_id, object_key, bytes, job_run_id, crawl_page_id, created_at)
-            VALUES (:id, :user_id, :object_key, :bytes, :job_run_id, :crawl_page_id, NOW())
+                (id, user_id, object_key, bytes,
+                 job_run_id, crawl_page_id, pipeline_run_block_id, created_at)
+            VALUES (:id, :user_id, :object_key, :bytes,
+                    :job_run_id, :crawl_page_id, :pipeline_run_block_id, NOW())
             ON CONFLICT (object_key) DO NOTHING
             RETURNING id
         """),
@@ -73,6 +77,7 @@ async def record_object(
             "bytes": size,
             "job_run_id": job_run_id,
             "crawl_page_id": crawl_page_id,
+            "pipeline_run_block_id": pipeline_run_block_id,
         },
     )
     if inserted is None:
@@ -117,6 +122,15 @@ async def objects_for_crawl(db: AsyncSession, crawl_id: uuid.UUID) -> list[Stora
     page_ids = select(CrawlPage.id).where(CrawlPage.crawl_id == crawl_id)
     result = await db.execute(
         select(StorageObject).where(StorageObject.crawl_page_id.in_(page_ids))
+    )
+    return list(result.scalars().all())
+
+
+async def objects_for_pipeline_run(db: AsyncSession, run_id: uuid.UUID) -> list[StorageObject]:
+    """Every object any block of the pipeline run produced."""
+    block_ids = select(PipelineRunBlock.id).where(PipelineRunBlock.pipeline_run_id == run_id)
+    result = await db.execute(
+        select(StorageObject).where(StorageObject.pipeline_run_block_id.in_(block_ids))
     )
     return list(result.scalars().all())
 
@@ -187,6 +201,13 @@ async def release_crawl_objects(
     """Release everything a crawl's pages hold. No legacy branch: crawl pages were never
     charged before the ledger, so there is nothing older than a row to fall back to."""
     return await release_objects(db, minio, await objects_for_crawl(db, crawl_id), label)
+
+
+async def release_pipeline_run_objects(
+    db: AsyncSession, minio: Minio, run_id: uuid.UUID, label: str
+) -> ReleaseOutcome:
+    """Release everything a pipeline run's blocks hold. No legacy branch."""
+    return await release_objects(db, minio, await objects_for_pipeline_run(db, run_id), label)
 
 
 async def release_user_objects(

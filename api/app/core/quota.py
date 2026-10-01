@@ -2,9 +2,11 @@
 
 Three dimensions:
   monthly_runs    — attempted fetches since first-of-month, from the quota_run_units view:
-                    job run = 1, batch of N = N, crawl of N pages = N (ADR-009 §8)
+                    job run = 1, batch of N = N, crawl of N pages = N, pipeline run = 1
+                    (ADR-009 §8)
   concurrent_jobs — submissions in flight, from the quota_active_submissions view: a job
-                    run, a batch of any size and a crawl of any size each hold one slot
+                    run, a batch of any size and a crawl of any size each hold one slot;
+                    a pipeline run holds one only while a block is `running` (15a)
   storage_bytes   — cumulative MinIO bytes tracked in user_quotas.storage_bytes_used,
                     a materialised sum over the storage_objects ledger (core/ledger.py);
                     only the ledger moves it, in the same transaction as the row
