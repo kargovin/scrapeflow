@@ -150,6 +150,24 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **C.2 — PIPELINE LANE ON THE THREE METERS (2026-10-01, second session).** Local, `develop`
+**`b5d0f94`** (code) + this closeout, pushed to `origin/develop`; **not released** (`main` unchanged at `6675f17`).
+Owner: "build this", then "close out c2 and commit". Detail in the backlog's C.2 *Built* note.
+
+- **Owner calls (asked before building):** (a) **own revision** — migration 4.5 `9db1dcda44f7`, not
+  folded into 4.4; (b) **a run holds a slot only if the run is `running` AND ≥1 block is `running`** —
+  narrower than 15a's literal wording, so a block stranded `running` by a failed mirror write cannot
+  pin a slot.
+- **Built:** both views dropped and recreated with a `pipeline` arm (v1 arms byte-identical, diffed via
+  `pg_get_viewdef`); `storage_objects.pipeline_run_block_id` + widened one-producer CHECK;
+  `idx_pipeline_runs_user_id_running`; ledger `record_object(pipeline_run_block_id=…)` +
+  `release_pipeline_run_objects`. Downgrade restores 4.2 exactly and fails while pipeline ledger rows exist.
+- **Verified:** round trip, `alembic check` (dedup false positive only), 8 new tests each
+  mutation-checked against its own wrong schema, **311 API tests**. Local dev DB is at `9db1dcda44f7`.
+- Reconcile script needs no change (matches rows before attributing). `CLAUDE.md` view-binding column
+  list now includes the pipeline columns.
+- **Next: C.3** — block catalog, per-type config schemas, save-time validator (`api/app/pipelines/`).
+
 🔷 **C.1 — PIPELINE SCHEMA BUILT; GROUP C OPENS (2026-10-01).** Local, `develop` **`9bdb3a5`**,
 pushed to `origin/develop`; **not released** (`main` unchanged at `6675f17`). Mostly a concepts
 session at the owner's request ("understanding the temporal way of building software").
@@ -1000,7 +1018,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.2 in `phase4-implementation-backlog.md`** (widen both quota views + the ledger FK/CHECK for the pipeline lane). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.3 in `phase4-implementation-backlog.md`** (block catalog + per-type config schemas + save-time validator). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1046,7 +1064,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-10-01 close (verified after fetch):** `develop` = `origin/develop` = `9bdb3a5` (C.1) before this closeout commit, which is pushed after it. `main` = `origin/main` = `6675f17`, unchanged — **C.1 is unreleased**; it ships with Group C's release (C.14). Infra repo untouched.
+- **2026-10-01, second session close:** `develop` = `b5d0f94` (C.2) + this closeout, **pushed to `origin/develop`** (owner: "close out and push to origin"). `main` = `origin/main` = `6675f17`, unchanged — C.1 and C.2 are unreleased; they ship with C.14. Infra repo untouched.
+- *Historical:* **2026-10-01 close (verified after fetch):** `develop` = `origin/develop` = `9bdb3a5` (C.1) before this closeout commit, which is pushed after it. `main` = `origin/main` = `6675f17`, unchanged — **C.1 is unreleased**; it ships with Group C's release (C.14). Infra repo untouched.
 - *Historical:* **2026-09-30, fourth session close (verified after fetch):** `develop` = `origin/develop` = `main` = `origin/main` = `6675f17` (PyJWT release) — this closeout commit sits on `develop` after it. **Infra:** `origin/main` = `17a842b` (Flux api bump) after `9ebb305` (playwright-worker-temporal), 0 ahead.
 - **Deployed code is `6675f17`** (2026-09-30, PyJWT — api image). Before it: `a11cce6` (B.9 — api + playwright-worker images), `1717032`.
 - *Historical, superseded by B.9:* **2026-09-30, third session close (verified after fetch):** `develop` is ahead of `origin/develop` — `6a85d40`, `36f2781` (B.7 docs), **`c405124` (B.8 code)** and this closeout — **unpushed**. `main` = `origin/main` = `1717032`, unchanged. Infra repo untouched this session.
@@ -1191,6 +1210,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-01 *(clock, second session)* | **🔷 C.2 built (local).** Read-in. Two open questions asked before building: own revision (4.5) and the slot rule (run `running` AND a `running` block) — both took the recommendation. Built models, migration 4.5 (views + CHECK hand-written), ledger kwarg + release helper, 8 tests; round trip with `pg_get_viewdef` diffs, five schema mutations each failing its own test, 311 tests. Owner: "close out c2 and commit". | `b5d0f94` + this closeout |
 | 2026-10-01 *(clock)* | **🔷 C.1 built (local) — Group C opens.** Read-in. Concepts at the owner's request: what a pipeline is (recipe of blocks, `PipelineWorkflow` as interpreter, Group C = the API→Temporal→Postgres bridge, D reuses it); the four C.1 tables; failed-run artifacts and the four retry layers. Owner calls: run-level `error`, `result_path` only on `completed`, indexes delegated. My RESTRICT-vs-NO ACTION "trap" tested on dev Postgres and withdrawn; FK explanation redone from scratch after the owner said it mixed everything. Built models + migration 4.4 (round trip, `alembic check`, constraint behaviour in a rolled-back transaction, 303 tests); owner: "commit and push dev". | `9bdb3a5` + this closeout |
 | 2026-09-30 *(clock, fourth session)* | **🔷 B.9 — PLAYWRIGHT PORT RELEASED; Group B complete. BUG-020 closed. PyJWT released.** Read-in; owner's prod `pip freeze` matched the lock (`patchright` 1.63.0; Chrome binary unlocked — noted). Owner delegated the graceful-shutdown call → 630 s / grace 660 s. BUG-020 closed on the owner's prod probe (401). B.9: probe `--engine`, infra manifest, release `a11cce6` + infra `9ebb305`, both Playwright Deployments green, poller listed, Chrome 154.0.8037.92; gate passed (`18f1a13f59dcc2ad` both; a first v1 try sent as `http` by mistake is ignored). PyJWT 2.13.0 → 2.15.1 (10 alerts), verified through Clerk's real `verify_token`, released `6675f17`, alerts fixed. | `cdbb8c2`, `43be066`, `a11cce6`, `5da9460`, `33bb2db`, `e57f163`, `6675f17`, this closeout; infra `9ebb305` |
 | 2026-09-30 *(clock, third session)* | **🔷 B.8 built (local).** Read-in; owner: "build b8 but dont commit", then took over ("im building this myself"). Q&A while the owner wrote the robots step: raise, don't return (Go's empty struct is only a placeholder); four fixes to the draft (missing `await`, fail-open, structlog call, activity name `Scrape`); why robots sits above the `try` (nothing to clean up or classify). Owner: "only build activity.py" → full activity; "do the temporal_main edits" → entry point, duplicate heartbeat setting removed, shutdown placeholder; live against compose Temporal. "mimic go; extract it" → `worker/scrape.py` shared by both modes. "build all" → lockfile, `WORKER_MODE`, API queue + contract, tests (activity, entrypoint, NATS wall — mutation-checked, the NATS branch was uncovered), compose service end to end. Found the stale-Xvfb-lock restart failure (local only). Prod `pip freeze` refused by the classifier → owner item | `c405124` + this close |
