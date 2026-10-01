@@ -6,6 +6,12 @@ from app.models.job import Job  # noqa: F401
 from app.models.job_runs import JobRun  # noqa: F401
 from app.models.job_secrets import JobSecrets  # noqa: F401
 from app.models.llm_keys import UserLLMKey  # noqa: F401
+from app.models.pipeline import (  # noqa: F401
+    Pipeline,
+    PipelineRun,
+    PipelineRunBlock,
+    PipelineVersion,
+)
 from app.models.storage_object import StorageObject  # noqa: F401
 from app.models.user import User  # noqa: F401
 from app.models.user_quota import UserQuota  # noqa: F401
