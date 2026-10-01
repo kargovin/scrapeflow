@@ -59,7 +59,7 @@
 | B.8 | Playwright worker: `Scrape` activity on `scrape-playwright` (bot wall raises, container contract) | ✅ 2026-09-30 (`c405124`, released with B.9 `a11cce6`; compose service end to end). Render pipeline extracted to `worker/scrape.py`, shared with NATS |
 | B.9 | Playwright second Deployment + 🚀 release; pre-gate on both engines | ✅ 2026-09-30 released (`a11cce6`, infra `9ebb305`) — **Playwright port live beside NATS; gate passed in prod** (`example.com` → `18f1a13f59dcc2ad` on both) |
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |
-| C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ⬜ |
+| C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ✅ 2026-10-01 (local; `9bdb3a5`, migration 4.4 `cff9ec8fedbe`) — **Group C opens** |
 | C.2 | Widen both quota views + the ledger CHECK for the pipeline lane | ⬜ |
 | C.3 | Block catalog, per-type config schemas, save-time validator | ⬜ |
 | C.4 | Pipelines CRUD API + versioning + delete semantics + admin routes | ⬜ |
@@ -934,6 +934,30 @@ strip the `idx_webhook_deliveries_dedup` false positive; name every FK):
   `finished_at`, `collected_at` nullable (8c: *collected* renders as collected, never as 404)).
 **Verify:** `alembic check` reports only the standing false positive; models + views round-trip.
 **Depends on:** A.5 (models live in `api/app/models/`)
+
+**Built 2026-10-01 (local) — `9bdb3a5`, migration 4.4 `cff9ec8fedbe`. Not released.** Owner: "build the
+models", then "do the migration locally". `api/app/models/pipeline.py` (four classes, no ORM relationships).
+- **Owner calls (2026-10-01):** (a) `pipeline_runs.error` added — set on every `failed` run, as
+  `"<block_id>: <block error>"` when a block caused it, the run-level reason otherwise (e.g. C.5's
+  start failure); `NULL` on `cancelled`. Blocks keep their own `error`. (b) `pipeline_runs.result_path`
+  is `NULL` unless the run is `completed` — **not** enforced by a CHECK; C.6's mirror owns it.
+  Indexes delegated to me.
+- **Delete rules:** CASCADE on every `user_id`, on `pipeline_versions.pipeline_id` and on
+  `pipeline_run_blocks.pipeline_run_id`. **No `ondelete`** on `pipeline_runs.pipeline_id` /
+  `pipeline_version_id` — a pipeline or version with runs cannot be deleted. That closes C.4's
+  check-then-delete race (a run inserted between "any runs?" and `DELETE`); C.4 catches the FK error
+  and falls back to the soft delete. RESTRICT vs NO ACTION verified identical on Postgres 16 (multi-path
+  user cascade succeeds both ways) — no trap.
+- **Indexes:** `(user_id, created_at)` and `(pipeline_id, created_at)` on runs; `UNIQUE (workflow_id)`;
+  `UNIQUE (pipeline_run_id, block_id)` on blocks. None on `pipeline_version_id`; the `status = 'running'`
+  partial index is C.2's, beside the view that reads it.
+- No CHECK on block `type` (catalog is code, C.3). Runs carry `created_at` + `finished_at`, no
+  `started_at` (inserted `running`). `pipelines.updated_at` uses `onupdate` — set it explicitly on any
+  `update()` path.
+- **Verified:** upgrade → downgrade → upgrade clean; `alembic check` shows only the dedup false
+  positive; in a rolled-back transaction: block status defaults `pending`, pipeline delete with a run
+  refused, `processing` refused, soft-deleted name still 409s, user delete removes all four. 303 API
+  tests. Pre-commit ruff reformatted the migration (cosmetic).
 
 #### C.2 — Widen both quota views + the ledger CHECK
 
