@@ -141,7 +141,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-01 *(clock)*
+## Current state — as of 2026-10-05 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +149,24 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **C.3 — BLOCK CATALOG + SAVE-TIME VALIDATOR (built 2026-10-02, walked through 2026-10-05).** Local,
+`develop` **`9fc7198`** (code) + this closeout — built uncommitted while the owner was AFK, committed on "do the commit as two". Not pushed, not released. Detail and every
+design call in the backlog's C.3 *Built* note.
+
+- **Built:** `api/app/pipelines/catalog.py` (five `BlockType`s: versioned Pydantic configs, reference types
+  `page:html|markdown|json` / `extraction`, `kind`, `bindable_fields`, `secret_fields`, `check_input`,
+  `Timing` → per-block budget) + `validator.py` (`validate()` → normalized definition or every problem,
+  each naming its block). Three settings; jobs' actions check extracted to `validate_page_actions()`.
+- **Verified:** 60 tests, 13 mutations each caught by its own tests, **371 API tests**.
+- **Owner feedback (memory saved):** (1) build a **working MVP end to end first**, then refactor to
+  prod-ready — C.3 was built hardened before anything used it and was hard to follow; (2) when building,
+  always give the **illustrated API call → rows → workflow → activities walkthrough** — that is what made
+  C.3 make sense.
+- ⚠️ **Open item 9 (backlog):** the LLM block's encrypted key has no route into the workflow — decide at
+  C.5/C.7. For C.4: encrypt Scrape's `secret_fields`; key ownership + SSRF checks are C.4's.
+- **Next: C.4** — Pipelines CRUD + versioning. Per the MVP rule, consider a thin C.7 slice (R6 recipe
+  through the real workers) early so the remaining Group C pieces have something to plug into.
 
 🔷 **C.2 — PIPELINE LANE ON THE THREE METERS (2026-10-01, second session).** Local, `develop`
 **`b5d0f94`** (code) + this closeout, pushed to `origin/develop`; **not released** (`main` unchanged at `6675f17`).

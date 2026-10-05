@@ -9,7 +9,7 @@
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
 > **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
-> **Last updated:** 2026-10-01 (C.2 ✅ — pipeline lane on the three meters; C.1 ✅) · **Tracking:** the status table below is the tracker.
+> **Last updated:** 2026-10-05 (C.3 ✅ — block catalog + save-time validator; C.2 ✅; C.1 ✅) · **Tracking:** the status table below is the tracker.
 
 ---
 
@@ -61,7 +61,7 @@
 | **C** | **Pipeline lane** (layer A — PRD-016, R6 gate) | |
 | C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ✅ 2026-10-01 (local; `9bdb3a5`, migration 4.4 `cff9ec8fedbe`) — **Group C opens** |
 | C.2 | Widen both quota views + the ledger CHECK for the pipeline lane | ✅ 2026-10-01 (local; `b5d0f94`, migration 4.5 `9db1dcda44f7`) |
-| C.3 | Block catalog, per-type config schemas, save-time validator | ⬜ |
+| C.3 | Block catalog, per-type config schemas, save-time validator | ✅ 2026-10-05 (local; `9fc7198`; built 10-02 while the owner was AFK, walked through 10-05) |
 | C.4 | Pipelines CRUD API + versioning + delete semantics + admin routes | ⬜ |
 | C.5 | Run trigger: admission (three meters + headroom buffer), row insert, workflow start | ⬜ |
 | C.6 | Workflow-worker DB activities: mirror, accounting, cancel-check | ⬜ |
@@ -1020,6 +1020,63 @@ bug on a new lane (16e). Without the FK, the accounting activity's first insert 
 - Tests: one per validation rule, positive + negative; the R6 recipe validates.
 **Depends on:** C.1
 
+**Built 2026-10-02 (local) — `9fc7198` (committed 2026-10-05), not released.** Owner: "build c3 but do not commit", while AFK —
+so every call below is **mine and reversible**; the owner walked through the catalog, the API → Temporal
+flow and the validator on 2026-10-05 and closed it without changing any. `api/app/pipelines/catalog.py`
+(pure: five `BlockType`s, versioned config models, reference types, timing) + `validator.py`
+(`validate(raw) -> ValidatedPipeline` or `PipelineValidationError` listing **every** problem, each naming
+its block). Settings `max_blocks_per_pipeline` (20), `max_pipelines_per_user` (50, enforced by C.4),
+`pipeline_max_run_seconds` (86400). `schemas/jobs.py`: the actions check extracted to
+`validate_page_actions()`, shared with Scrape — job behaviour unchanged.
+- **Definition shape:** `{"inputs": {name: {"type": "url"}}, "time_budget_seconds": int|null,
+  "blocks": [{"id", "type", "input": <previous block id>|null, "config_schema_version", "config"}]}`.
+  A binding is `{"$input": "<name>"}` in place of a bindable field's value (Scrape `url` only — §4).
+  `validate()` returns a **normalized** definition for C.4 to store: versions stamped, config defaults
+  filled (so a later default change does not alter a pinned version), bindings kept.
+- **Reference types carry the page format:** `page:html|markdown|json`, `extraction`. Clean consumes
+  `page:html` only (a markdown scrape → Clean is refused at save); LLM consumes any page, not an
+  extraction; effect blocks pass their input type through.
+- **Validate rules:** `json_schema`, `present`, `type`, `compare` (JSON Pointer paths; ordered ops need
+  a number) need JSON input (`page:json`/`extraction`); **added** `contains` and `min_length` for text
+  pages — R2's "guard scraped content before an LLM call" had no rule that could read a page.
+- **Timing lives in the catalog** (`Timing`, read by C.7): retry numbers 5 s / ×2 / 60 s / 3 for
+  Scrape, Clean, Validate, LLM (all three NATS workers' numbers); Webhook = 15c's ladder (20 s attempt,
+  30 s ×10 cap 7200 s, 5 attempts). Attempts: Scrape http 90 s, playwright `2×timeout_seconds+60` +
+  90 s heartbeat (the probe's), LLM 400 s + heartbeat, **Clean/Validate 60 s (a guess — C.8 confirms)**.
+  A block's budget = every attempt at its limit incl. 60 s `schedule_to_start` + every backoff wait =
+  its `schedule_to_close`. Run need = Σ(budget + **60 s per-block allowance for C.6's activities** —
+  C.6 must fit inside it). R6 recipe: 12,970 s. **No per-block budget override** — `maximum_attempts`
+  ends retries first, so a larger `schedule_to_close` would be a dead knob; Playwright's
+  `timeout_seconds` is the user's real one.
+- **Stricter than jobs, deliberately (save-time is the point):** `actions`/`playwright_options` refused
+  on `engine: http` (jobs refuse actions, silently ignore options); LLM `output_schema` must have
+  `"type": "object"` at its root (both providers need it); a declared-but-unused run input is refused.
+  **`proxy_provider` left out** — stored on jobs, read nowhere.
+- **Starting-block rule (§8) is its own function**, and a test proves it: a second Scrape naming the
+  previous block passes the chain rule and is still refused.
+- ⚠️ **For C.4:** (1) Scrape's `proxy_url`/`cookies` are user secrets (`BlockType.secret_fields`) — the
+  stored definition is returned by GET and becomes workflow input, so C.4 must encrypt them out
+  (the activity contract already carries Fernet ciphertext). (2) DB/network checks are C.4's: LLM key
+  ownership, SSRF on a literal Scrape/Webhook URL and the key's `base_url`, the per-user count.
+  (3) Block IDs are required here — C.4 assigns missing ones before calling `validate()`.
+- ⚠️ **Not done — `jsonschema` is not an API dependency.** The `json_schema` rule's schema and the LLM
+  `output_schema` are checked for shape only, not meta-validated. Owner's call whether to add it to the
+  API lock; C.8 needs it in the LLM image either way to evaluate the rule.
+- ⚠️ **For C.7:** do not call `validate()` in the workflow body — it reads settings, so an operator
+  limit change could fail a replay. Use the catalog (`config_versions[v].model_validate`, `.timing`).
+- **Verified:** 60 tests (one per rule, positive + negative; R6 recipe validates; a stored definition
+  re-validates to itself); 13 mutations — each rule switched off in turn — each failed its own tests.
+  **371 API tests.** Ruff clean except two pre-existing UP042 hits in `schemas/jobs.py`.
+- **Known weakness:** the type walk and the budget check run only once every block's config parses and
+  the chain holds, so a definition with a config error *and* a type mismatch needs two saves to see both.
+  Steps before that gate report together.
+- **2026-10-05:** effect blocks' `produces` is `_pass_through` (asserts an input exists) — the lambda
+  was typed `str | None` against a `str` field.
+- ⚠️ **Gap found in the walkthrough — for C.5 / C.7:** `LLMExtract` needs the user's provider, `base_url`
+  and **encrypted key**, but the definition holds only `llm_key_id` and the workflow body cannot read
+  `user_llm_keys`. Either C.5 resolves the key and passes the ciphertext in the workflow arguments (as
+  Scrape's `Credentials` already travel), or a C.6 DB activity fetches it. Open item 9.
+
 #### C.4 — Pipelines CRUD + versioning + delete + admin
 
 **What:** `routers/pipelines.py`: `POST/GET/PATCH/DELETE /pipelines[/{id}]`, `GET /pipelines/{id}/versions`.
@@ -1519,3 +1576,6 @@ migration's stated payoff; record the before/after in the handoff.
    by the pipeline lane; recommend pulling it in.
 8. ~~**A.8** — where the Temporal Postgres backup lives.~~ **Answered 2026-09-29: nowhere, for
    either Postgres — deferred past the migration by the owner** (data is junk today). `phase4-backlog.md` §4.
+9. **C.5 / C.7** — where the LLM block's key comes from: the definition holds `llm_key_id` only, the
+   workflow cannot read `user_llm_keys`. C.5 resolving it into the workflow arguments (Fernet ciphertext,
+   like Scrape's `Credentials`) vs a C.6 DB activity. Found 2026-10-05 (C.3 *Built* note).
