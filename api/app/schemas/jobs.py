@@ -24,6 +24,32 @@ _VALID_ACTION_TYPES = frozenset(
 )
 
 
+def validate_page_actions(v: list[dict] | None) -> list[dict] | None:
+    """Shared by jobs and the pipeline Scrape block."""
+    if v is None:
+        return v
+    if len(v) > 20:
+        raise ValueError("max 20 actions per job")
+    for action in v:
+        action_type = action.get("type")
+        if action_type not in _VALID_ACTION_TYPES:
+            raise ValueError(f"unknown action type: {action_type!r}")
+        if action_type == "wait":
+            ms = action.get("milliseconds")
+            try:
+                if not (1 <= int(ms) <= 10000):
+                    raise ValueError
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "wait.milliseconds must be an integer between 1 and 10000"
+                ) from exc
+        elif action_type in {"click", "type", "wait_for_selector"}:
+            selector = action.get("selector")
+            if not selector or not isinstance(selector, str):
+                raise ValueError(f"{action_type}.selector must be a non-empty string")
+    return v
+
+
 class Engine(str, enum.Enum):
     http = "http"
     playwright = "playwright"
@@ -92,28 +118,7 @@ class _MutableJobFields(BaseModel):
     @field_validator("actions")
     @classmethod
     def validate_actions(cls, v: list[dict] | None) -> list[dict] | None:
-        if v is None:
-            return v
-        if len(v) > 20:
-            raise ValueError("max 20 actions per job")
-        for action in v:
-            action_type = action.get("type")
-            if action_type not in _VALID_ACTION_TYPES:
-                raise ValueError(f"unknown action type: {action_type!r}")
-            if action_type == "wait":
-                ms = action.get("milliseconds")
-                try:
-                    if not (1 <= int(ms) <= 10000):
-                        raise ValueError
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "wait.milliseconds must be an integer between 1 and 10000"
-                    ) from exc
-            elif action_type in {"click", "type", "wait_for_selector"}:
-                selector = action.get("selector")
-                if not selector or not isinstance(selector, str):
-                    raise ValueError(f"{action_type}.selector must be a non-empty string")
-        return v
+        return validate_page_actions(v)
 
 
 class JobPatch(_MutableJobFields):
