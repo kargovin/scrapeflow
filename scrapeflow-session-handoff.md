@@ -141,7 +141,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-05 *(clock)*
+## Current state — as of 2026-10-07 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +149,30 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **C.4–C.7 — MVP SLICE BUILT END TO END (2026-10-05 → 10-07, one session).** Local, `develop`,
+**uncommitted** (owner: "do not commit yet" — read first). Not pushed, not released. Owner chose
+**MVP mode**: a thin slice through C.4–C.7 first, refactor to the full specs next. Detail: backlog
+*C.4–C.7 — MVP slice* note (between C.7 and C.8).
+
+- **Works locally:** `POST/GET /pipelines`, `POST /pipelines/{id}/runs` → `PipelineWorkflow` →
+  Scrape (Go) / LLMExtract (llm-worker) → mirror activities → `GET /pipelines/{id}/runs/{run_id}`.
+  Live on compose: scrape-only `completed`; scrape → LLM with a fake key `failed` at `extract` (401).
+- **Owner calls:** secret fields refused in the MVP (422); LLM key resolved at trigger, ciphertext in
+  the workflow input (**open item 9 answered**); lazy Temporal client; failed run → pending blocks
+  `skipped`. **Backlog additions:** C.4 — optional `version` on the run trigger (run two versions side
+  by side; built with `PATCH`); C.7 — typed stored definitions + safety net (a `KeyError` in a
+  workflow body fails the workflow *task*, retried forever — **verified** on the test server: the
+  workflow stayed `RUNNING`).
+- ⚠️ **Correction made mid-session:** I said the scrape workers check SSRF — **they don't**; the API
+  is the only check. `create_run` checks every scrape URL and LLM `base_url`.
+- **Concepts walked through** (owner learning): commit-before-start, `REJECT_DUPLICATE`, the
+  mirror (why an activity, why the workflow queue), `start_workflow` vs `execute_workflow`, why
+  `steps.py` is workflow code not an activity, the alias in the latest-version subquery, flush vs
+  commit for the 409, multi-entity `select` → row tuples, run status vs block status.
+- **393 API tests.** Compose `workflow-worker` restarted on the new code.
+- **Next session: production refactor of C.4–C.7** to their full backlog specs (the MVP note's
+  *Deferred* list + the two additions above), then commit. Build order is the owner's call.
 
 🔷 **C.3 — BLOCK CATALOG + SAVE-TIME VALIDATOR (built 2026-10-02, walked through 2026-10-05).** Local,
 `develop` **`9fc7198`** (code) + this closeout — built uncommitted while the owner was AFK, committed on "do the commit as two". Not pushed, not released. Detail and every

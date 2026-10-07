@@ -62,10 +62,10 @@
 | C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ✅ 2026-10-01 (local; `9bdb3a5`, migration 4.4 `cff9ec8fedbe`) — **Group C opens** |
 | C.2 | Widen both quota views + the ledger CHECK for the pipeline lane | ✅ 2026-10-01 (local; `b5d0f94`, migration 4.5 `9db1dcda44f7`) |
 | C.3 | Block catalog, per-type config schemas, save-time validator | ✅ 2026-10-05 (local; `9fc7198`; built 10-02 while the owner was AFK, walked through 10-05) |
-| C.4 | Pipelines CRUD API + versioning + delete semantics + admin routes | ⬜ |
-| C.5 | Run trigger: admission (three meters + headroom buffer), row insert, workflow start | ⬜ |
-| C.6 | Workflow-worker DB activities: mirror, accounting, cancel-check | ⬜ |
-| C.7 | `PipelineWorkflow` body | ⬜ |
+| C.4 | Pipelines CRUD API + versioning + delete semantics + admin routes | 🟡 MVP 2026-10-07 (local, uncommitted) — create + read only; see *C.4–C.7 MVP slice* |
+| C.5 | Run trigger: admission (three meters + headroom buffer), row insert, workflow start | 🟡 MVP 2026-10-07 (local, uncommitted) — no storage meter / buffer; see *MVP slice* |
+| C.6 | Workflow-worker DB activities: mirror, accounting, cancel-check | 🟡 MVP 2026-10-07 (local, uncommitted) — mirror only; see *MVP slice* |
+| C.7 | `PipelineWorkflow` body | 🟡 MVP 2026-10-07 (local, uncommitted) — scrape + llm_extract; see *MVP slice* |
 | C.8 | Clean + Validate activities | ⬜ |
 | C.9 | Webhook activity: wire contract, SSRF, four-timeout ladder, `waiting` | ⬜ |
 | C.10 | Cancellation: API cancel + workflow cancel + boundary re-check | ⬜ |
@@ -1085,6 +1085,15 @@ its block). Settings `max_blocks_per_pipeline` (20), `max_pipelines_per_user` (5
   client sends IDs; the server never regenerates one it was given.
 - Delete: no runs → hard delete; runs → soft delete, name held, 409 on reuse (§6).
 - Cross-tenant 404; `/admin/pipelines*` list + read (R5).
+- *(Added 2026-10-06, owner's call.)* **Run a chosen version:** `POST /pipelines/{id}/runs` takes
+  an optional `version` (int ≥ 1; omitted = latest), so two versions can be run side by side and
+  compared. Not a revert — a revert is a `PATCH` re-saving the old definition as a new version.
+  Lands in C.5's trigger: only the version lookup branches; the rest of `create_run` reads
+  `version.id` + `version.definition` either way. Unknown version → 404. Trigger-time checks (key
+  ownership, SSRF, runnable block types) apply to an old version unchanged; `validate()` does not
+  re-run — an old version is checked against the rules of the day it was saved. Built with
+  `PATCH` (nothing to choose between before it). Test: v1 and v2 runs pin their own
+  `pipeline_version_id` and pass their own definition to the workflow.
 - Tests: CRUD, 404, 409, version increments, ID stability, soft-delete branch.
 **Depends on:** C.3
 
@@ -1152,9 +1161,73 @@ a review rule, add it to the PR checklist):
   `cancelled`, remaining `skipped`, **completed blocks' outputs stay** (R3). Also handle
   `asyncio.CancelledError` from a workflow cancel (C.10) at the same boundaries.
 - Result: mirror `pipeline_runs.result_path` = last **content** block's output (§5).
+- *(Added 2026-10-06, owner's call — a refactor of the MVP slice.)* **Typed stored definitions.**
+  The MVP reads `pipeline_versions.definition` back as a raw dict, in the trigger and in the
+  workflow (`block["config"]["output_format"]`). ⚠️ **A missing key in a workflow body is a
+  `KeyError`, not an `ApplicationError` — it fails the workflow *task*, which Temporal retries
+  forever:** the run sits `running`, holding a concurrency slot, with no error and no mirror write.
+  Not reachable in the MVP (every stored definition is normalized, one config version per type);
+  reachable from the first `V2` config, a hand edit or a migration bug. Four parts:
+  1. **Parse at the trigger, before any row is written** — the definition into a typed model, each
+     block's `config` through `CATALOG[type].config_versions[config_schema_version]`. Unreadable →
+     a named error, no run created. **Parse, do not re-run `validate()`'s rules** — a pinned
+     version keeps the rules of the day it was saved (§4, §6); re-validating would strand old
+     versions when a rule tightens.
+  2. **Typed workflow input** — `PipelineRunInput` carries parsed blocks, not `dict[str, Any]`;
+     `_execute` reads attributes. The Pydantic data converter is already on the client.
+  3. **Historical config shapes** (§4's obligation) — when a `V2` config lands, either the
+     interpreter handles each version, or a `v1 → v2` upgrade runs at parse time so it sees only
+     the latest. Undecided; decide with the first `V2`.
+  4. **Safety net** — any unexpected exception in `_execute` becomes a non-retryable
+     `ApplicationError`, so a bug fails the run instead of hanging its workflow task.
+  Tests: an unreadable stored definition → no run row, named error; a `KeyError` in `_execute`
+  → run `failed`, not stuck.
 - Tests (time-skipping env, activities mocked): R6 recipe happy path; block failure → skipped
   tail; cancel at boundary; storage wall → completed + named error; the budget composition.
 **Depends on:** C.6, B.1
+
+#### C.4–C.7 — MVP slice *(built 2026-10-05 → 10-07; local, uncommitted)*
+
+**Owner's call 2026-10-05:** build a thin working slice end to end first, refactor to the full task
+specs after ("MVP mode; once I'm comfortable we'll refactor"). C.4–C.7 stay 🟡 until their full
+specs above are met; this note is what exists. **Next session: the production refactor of C.4–C.7.**
+
+- **C.4** — `POST /pipelines`, `GET /pipelines`, `GET /pipelines/{id}` (latest version)
+  (`api/app/routers/pipelines.py`, `api/app/schemas/pipelines.py`). Missing block IDs get 8 hex
+  chars before `validate()`; the normalized definition is stored as version 1. LLM key not owned →
+  404; name taken → 409 from `uq_pipelines_user_id_name`. ⚠️ **IDs are generated in Python so both
+  INSERTs run inside `commit()`** — a `flush()` to get the ID raised the `IntegrityError` outside
+  the `try` → 500. Scrape's `proxy_url`/`cookies` refused with 422 (owner: no plaintext secrets
+  stored; encryption is the refactor's).
+- **C.5** — `POST /pipelines/{id}/runs` (202) + `GET /pipelines/{id}/runs/{run_id}` (run + blocks by
+  position). Order: ownership → runnable block types (`scrape`, `llm_extract`) → run inputs
+  exactly the declared names → **SSRF on every scrape URL (literal or bound) and every LLM key's
+  `base_url`** → keys still exist (422) → `monthly_runs` + `concurrent_jobs` → commit run
+  (`running`) + blocks (`pending`) → `start_workflow(id=pipeline-run-{id}, REJECT_DUPLICATE,
+  queue workflow)`. Start failure → run `failed`, `could not start workflow: …`, 503. Temporal
+  client **lazy** (`get_temporal` in `app/workflows/client.py`, kept on `app.state`) — owner's call;
+  a Temporal outage fails runs, not API startup. Open item 9 answered (below).
+- **C.6** — `api/app/workflows/activities/db.py`: `mirror_block_status`, `mirror_run_status` on the
+  workflow queue; a mirror matching ≠ 1 row raises non-retryable. **A `failed` run marks its
+  still-`pending` blocks `skipped` in the same transaction** (owner, 2026-10-07).
+- **C.7** — `api/app/workflows/pipeline.py`: `PipelineWorkflow` interprets the definition as a dict;
+  `artifact_id` = the block's `pipeline_run_blocks.id` (ADR-011); a block failure mirrors block +
+  run `failed` (`"<block>: <Type>: <message>"`) and raises non-retryable.
+  `api/app/workflows/steps.py`: the Scrape / LLMExtract calls, moved unchanged out of `probe.py`.
+- **Verified:** 393 API tests (+22), mutation-checked (REJECT_DUPLICATE, commit-before-start, SSRF,
+  input_ref mirror, rowcount guard, skipped tail). Live on compose: a scrape-only run `completed`; a
+  scrape → LLM run with a fake Anthropic key `failed` with `extract: LLMFailed: AuthenticationError
+  … 401`, fetch `completed`. Test user and objects removed after.
+- ⚠️ **Neither scrape worker checks SSRF** — the API is the only check (`create_job`, now
+  `create_run`). Any new dispatch site must check before the fetch is scheduled.
+- **Deferred to the refactor** (each task's spec above): C.4 `PATCH` + ID carry-through, `DELETE`,
+  `/versions`, admin routes, `max_pipelines_per_user`, secret encryption, run-a-chosen-version;
+  C.5 storage meter + headroom buffer, typed parse of the stored definition; C.6 `pg_notify`,
+  cancel precedence, **`record_storage` (MVP artifacts are uncharged, and nothing deletes them)**,
+  `check_cancelled`, storage wall; C.7 typed definitions + safety net, budgets from the catalog,
+  the `MAXIMUM_ATTEMPTS_REACHED` text, cancellation, Clean/Validate/Webhook, result = last
+  *content* block.
+- Prod: nothing — needs a release (api image; the workflow worker registers the new workflow).
 
 #### C.8 — Clean + Validate activities
 
@@ -1576,6 +1649,10 @@ migration's stated payoff; record the before/after in the handoff.
    by the pipeline lane; recommend pulling it in.
 8. ~~**A.8** — where the Temporal Postgres backup lives.~~ **Answered 2026-09-29: nowhere, for
    either Postgres — deferred past the migration by the owner** (data is junk today). `phase4-backlog.md` §4.
-9. **C.5 / C.7** — where the LLM block's key comes from: the definition holds `llm_key_id` only, the
+9. ~~**C.5 / C.7** — where the LLM block's key comes from: the definition holds `llm_key_id` only, the
    workflow cannot read `user_llm_keys`. C.5 resolving it into the workflow arguments (Fernet ciphertext,
-   like Scrape's `Credentials`) vs a C.6 DB activity. Found 2026-10-05 (C.3 *Built* note).
+   like Scrape's `Credentials`) vs a C.6 DB activity. Found 2026-10-05 (C.3 *Built* note).~~
+   **Answered 2026-10-06 (owner): C.5 resolves it** — the trigger loads the owned keys and passes
+   `{provider, encrypted_api_key, base_url}` per `llm_key_id` in `PipelineRunInput.llm_keys`, as
+   `LLMProbeWorkflow` does. Accepted cost: a key deleted or rotated mid-run is not seen by that run.
+   Built in the *C.4–C.7 MVP slice*.
