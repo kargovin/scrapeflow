@@ -1,6 +1,7 @@
 """C.6 + C.7 (MVP) — PipelineWorkflow and the two mirror activities."""
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
@@ -9,7 +10,8 @@ from temporalio.client import WorkflowFailureError
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+from temporalio.worker.workflow_sandbox import RestrictedWorkflowAccessError
 
 from app.core.db import AsyncSessionLocal
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
@@ -74,7 +76,7 @@ RUN_INPUT = PipelineRunInput(
 )
 
 
-async def _run(llm_extract):
+async def _run(llm_extract, run_input=RUN_INPUT, timeout=timedelta(seconds=30), **worker_kwargs):
     mirrored: list = []
     scraped: list[ScrapeInput] = []
 
@@ -102,6 +104,7 @@ async def _run(llm_extract):
                 task_queue=WORKFLOW_QUEUE,
                 workflows=[PipelineWorkflow],
                 activities=[mirror_block, mirror_run],
+                **worker_kwargs,
             ),
             Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
             Worker(env.client, task_queue=LLM_QUEUE, activities=[llm_extract]),
@@ -109,9 +112,11 @@ async def _run(llm_extract):
             try:
                 result = await env.client.execute_workflow(
                     PipelineWorkflow.run,
-                    RUN_INPUT,
+                    run_input,
                     id=f"pipeline-run-{uuid.uuid4()}",
                     task_queue=WORKFLOW_QUEUE,
+                    # A failing workflow task retries forever, in real time: no time skipping.
+                    execution_timeout=timeout,
                 )
             except WorkflowFailureError as exc:
                 result = exc
@@ -161,6 +166,48 @@ async def test_a_failed_block_fails_the_block_the_run_and_the_workflow():
         ),
         MirrorRunInput(run_id="r1", status="failed", error="extract: LLMFailed: 401 invalid key"),
     ]
+
+
+@activity.defn(name=LLM_EXTRACT_ACTIVITY)
+async def _unreached_llm_extract(input: LLMInput) -> LLMOutput:
+    raise AssertionError("LLMExtract must not run")
+
+
+async def test_an_unexpected_exception_fails_the_run_instead_of_hanging():
+    blocks = [dict(DEFINITION["blocks"][0]), DEFINITION["blocks"][1]]
+    blocks[0]["config"] = {k: v for k, v in blocks[0]["config"].items() if k != "output_format"}
+    run_input = RUN_INPUT.model_copy(update={"definition": {**DEFINITION, "blocks": blocks}})
+
+    result, mirrored, scraped = await _run(_unreached_llm_extract, run_input)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert isinstance(result.cause, ApplicationError)
+    assert result.cause.non_retryable
+    assert scraped == []
+    error = "internal error: KeyError: 'output_format'"
+    assert mirrored == [
+        MirrorBlockInput(run_id="r1", block_id="fetch", status="running"),
+        MirrorBlockInput(run_id="r1", block_id="fetch", status="failed", error=error),
+        MirrorRunInput(run_id="r1", status="failed", error=f"fetch: {error}"),
+    ]
+
+
+async def test_a_nondeterminism_error_is_left_to_the_workflow_task(monkeypatch):
+    async def restricted(*args):
+        raise RestrictedWorkflowAccessError("os.environ")
+
+    # Unsandboxed, so the patched method is the one the worker runs.
+    monkeypatch.setattr(PipelineWorkflow, "_execute", restricted)
+
+    result, mirrored, _ = await _run(
+        _unreached_llm_extract,
+        timeout=timedelta(seconds=3),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+
+    assert isinstance(result, WorkflowFailureError)
+    assert not isinstance(result.cause, ApplicationError)
+    assert mirrored == [MirrorBlockInput(run_id="r1", block_id="fetch", status="running")]
 
 
 # ---------------------------------------------------------------------------

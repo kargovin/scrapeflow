@@ -55,6 +55,16 @@ def resolve_url(config: dict[str, Any], inputs: dict[str, str]) -> str:
     return inputs[url["$input"]] if isinstance(url, dict) else url
 
 
+def _failure_message(exc: Exception) -> str:
+    if isinstance(exc, ActivityError):
+        return str(exc.cause or exc)
+    if isinstance(exc, ApplicationError):
+        return str(exc)
+    # Not a FailureError: left to propagate, it fails the workflow task, which Temporal
+    # retries forever — the run stays running and holds its slot.
+    return f"internal error: {type(exc).__name__}: {exc}"
+
+
 async def _mirror(activity: str, input: BaseModel) -> None:
     await workflow.execute_activity(
         activity,
@@ -84,8 +94,11 @@ class PipelineWorkflow:
             )
             try:
                 output_ref = await self._execute(block, input, input_ref)
-            except (ActivityError, ApplicationError) as exc:
-                message = str(exc.cause or exc) if isinstance(exc, ActivityError) else str(exc)
+            except workflow.NondeterminismError:
+                # Code no longer matches history: the task retries until a deploy fixes it.
+                raise
+            except Exception as exc:
+                message = _failure_message(exc)
                 await _mirror(
                     MIRROR_BLOCK_ACTIVITY,
                     MirrorBlockInput(

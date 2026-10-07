@@ -1180,6 +1180,22 @@ a review rule, add it to the PR checklist):
      the latest. Undecided; decide with the first `V2`.
   4. **Safety net** — any unexpected exception in `_execute` becomes a non-retryable
      `ApplicationError`, so a bug fails the run instead of hanging its workflow task.
+     ✅ **Built 2026-10-07** (owner: "agree with your recommendations; build it"). One
+     `except Exception` shares the known-failure path; `_failure_message()` labels the rest
+     `internal error: <Type>: <message>` (owner's call — the type stays visible to the user, the
+     traceback rides in the workflow failure's cause). ⚠️ **`workflow.NondeterminismError` (and its
+     sandbox subclass `RestrictedWorkflowAccessError`) is re-raised, not netted** — both are plain
+     `Exception` subclasses; a code-vs-history mismatch is fixed by a deploy, and failing the run
+     would destroy it. ⚠️ **No Temporal knob replaces the net**: `failure_exception_types`, an
+     `execution_timeout` and a workflow `retry_policy` each end (or never reach) the workflow
+     without running the mirror, so `pipeline_runs` stays `running`. ⚠️ **A failing workflow task
+     retries in real time — the time-skipping test server cannot skip it**, so tests bound
+     `execution_timeout` (30 s default, 3 s for the pass-through test). Tests: a scrape config
+     missing `output_format` → block + run `failed`, Scrape never called; a
+     `RestrictedWorkflowAccessError` → no `failed` mirror, the workflow times out. Both mutations
+     (net removed; pass-through removed) caught by their own test. 395 API tests. Parts 1–3 still
+     owed — the `block["id"]` / `block.get("input")` reads in `run()` sit outside the net until
+     part 2 makes them attributes.
   Tests: an unreadable stored definition → no run row, named error; a `KeyError` in `_execute`
   → run `failed`, not stuck.
 - Tests (time-skipping env, activities mocked): R6 recipe happy path; block failure → skipped
