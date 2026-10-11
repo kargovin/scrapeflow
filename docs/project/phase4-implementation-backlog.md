@@ -62,10 +62,10 @@
 | C.1 | Schema: `pipelines`, `pipeline_versions`, `pipeline_runs`, `pipeline_run_blocks` | ✅ 2026-10-01 (local; `9bdb3a5`, migration 4.4 `cff9ec8fedbe`) — **Group C opens** |
 | C.2 | Widen both quota views + the ledger CHECK for the pipeline lane | ✅ 2026-10-01 (local; `b5d0f94`, migration 4.5 `9db1dcda44f7`) |
 | C.3 | Block catalog, per-type config schemas, save-time validator | ✅ 2026-10-05 (local; `9fc7198`; built 10-02 while the owner was AFK, walked through 10-05) |
-| C.4 | Pipelines CRUD API + versioning + delete semantics + admin routes | 🟡 MVP 2026-10-07 (local, uncommitted) — create + read only; see *C.4–C.7 MVP slice* |
-| C.5 | Run trigger: admission (three meters + headroom buffer), row insert, workflow start | 🟡 MVP 2026-10-07 (local, uncommitted) — no storage meter / buffer; see *MVP slice* |
-| C.6 | Workflow-worker DB activities: mirror, accounting, cancel-check | 🟡 MVP 2026-10-07 (local, uncommitted) — mirror only; see *MVP slice* |
-| C.7 | `PipelineWorkflow` body | 🟡 MVP 2026-10-07 (local, uncommitted) — scrape + llm_extract; see *MVP slice* |
+| C.4 | Pipelines CRUD API + versioning + delete semantics + admin routes | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); see *C.4–C.7 production refactor* |
+| C.5 | Run trigger: admission (three meters + headroom buffer), row insert, workflow start | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); see *production refactor* |
+| C.6 | Workflow-worker DB activities: mirror, accounting, cancel-check | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); `on_storage_wall` folded into `record_storage`; see *production refactor* |
+| C.7 | `PipelineWorkflow` body | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); scrape + llm_extract only until C.8/C.9; see *production refactor* |
 | C.8 | Clean + Validate activities | ⬜ |
 | C.9 | Webhook activity: wire contract, SSRF, four-timeout ladder, `waiting` | ⬜ |
 | C.10 | Cancellation: API cancel + workflow cancel + boundary re-check | ⬜ |
@@ -1195,7 +1195,8 @@ a review rule, add it to the PR checklist):
      `RestrictedWorkflowAccessError` → no `failed` mirror, the workflow times out. Both mutations
      (net removed; pass-through removed) caught by their own test. 395 API tests. Parts 1–3 still
      owed — the `block["id"]` / `block.get("input")` reads in `run()` sit outside the net until
-     part 2 makes them attributes.
+     part 2 makes them attributes. *(Parts 1–2 built later the same day — see the production
+     refactor note.)*
   Tests: an unreadable stored definition → no run row, named error; a `KeyError` in `_execute`
   → run `failed`, not stuck.
 - Tests (time-skipping env, activities mocked): R6 recipe happy path; block failure → skipped
@@ -1206,7 +1207,7 @@ a review rule, add it to the PR checklist):
 
 **Owner's call 2026-10-05:** build a thin working slice end to end first, refactor to the full task
 specs after ("MVP mode; once I'm comfortable we'll refactor"). C.4–C.7 stay 🟡 until their full
-specs above are met; this note is what exists. **Next session: the production refactor of C.4–C.7.**
+specs above are met; this note is what exists. *(Superseded by the production refactor note below.)*
 
 - **C.4** — `POST /pipelines`, `GET /pipelines`, `GET /pipelines/{id}` (latest version)
   (`api/app/routers/pipelines.py`, `api/app/schemas/pipelines.py`). Missing block IDs get 8 hex
@@ -1244,6 +1245,77 @@ specs above are met; this note is what exists. **Next session: the production re
   the `MAXIMUM_ATTEMPTS_REACHED` text, cancellation, Clean/Validate/Webhook, result = last
   *content* block.
 - Prod: nothing — needs a release (api image; the workflow worker registers the new workflow).
+
+#### C.4–C.7 — production refactor *(built 2026-10-07, committed 2026-10-11; local, unreleased)*
+
+**Owner, 2026-10-07:** "build everything at once; prod refactoring of c4-c7 … do not commit". Built
+while the owner was away, so **every call below is mine and reversible**. **2026-10-11, owner:**
+"skip this review for now; whenever possible i'll read the code and ask … finish up to c7 and close
+this session" — committed **without the owner's code review**; questions come as the owner reads.
+Supersedes the MVP note above wherever they differ.
+
+- **C.7 parts 1–2 — typed definitions.** New `api/app/pipelines/definition.py` (pure):
+  `StoredDefinition`/`StoredBlock` = the stored JSON; `parse_definition()` → `ParsedDefinition` of
+  typed run blocks (`ScrapeBlock`, `LLMExtractBlock`, … discriminated on `type`, config through
+  `CATALOG[type].config_versions[v]`) + stored secrets by block id. **Parse, not re-validate.** A
+  config version with no run-block model fails the parse with a named error — that is part 3's hook,
+  still undecided. The trigger parses before any row is written: unreadable → **422**
+  `this version cannot be run: …` per block, logged `pipeline_version_unreadable`, no run.
+  `PipelineRunInput.blocks` is typed; the workflow reads attributes.
+- **C.4.** `PATCH` (name and/or definition → next version; **an unchanged definition saves no
+  version**; concurrent saves → 409 from `UNIQUE (pipeline_id, version)`), `DELETE` (no runs → hard;
+  runs → soft, name held; the FK refusal on a run that lands between check and delete → soft),
+  `GET /{id}/versions`, `GET /admin/pipelines[?user_id&include_deleted]` +
+  `GET /admin/pipelines/{id}` (`routers/admin_pipelines.py`; admin sees soft-deleted with
+  `deleted_at`). `max_pipelines_per_user` → **429** `quota_type: "pipelines"` (non-deleted count;
+  check-then-insert, so two racing creates can pass the limit by one). Save-time SSRF on literal
+  Scrape/Webhook URLs and owned keys' `base_url` (the trigger still re-checks). Missing block IDs
+  never collide with sent ones.
+- **Secrets (C.3's ⚠️ for C.4) — my design.** Stored per block as `"secrets": {field: Fernet
+  ciphertext}` under `credentials_encryption_key` (the workers' key; cookies JSON-encoded, as jobs),
+  with the config field stored `null`. **GET omits secret fields from `config`** and returns
+  `"secrets": ["cookies", "proxy_url"]` (names only). **On `PATCH`, a kept block (same id) that leaves
+  a secret field out keeps its ciphertext; sending it sets it; `null`/empty clears it** — so GET's
+  definition round-trips unchanged. The trigger turns them into `ScrapeInput.credentials`, with the
+  platform `default_proxy_url` fallback jobs use. No new table, no migration.
+- **C.5.** Optional `version` on the trigger (unknown → 404). Storage admitted with the headroom
+  buffer: new setting **`storage_headroom_bytes` = 50 MiB** (my number; `check_user_quota(…,
+  headroom_bytes=)` — default 0, so v1 callers are unchanged). The run ceiling is resolved at the
+  trigger (`time_budget_seconds` or the blocks' need) and passed in. A start failure now also marks
+  the blocks `skipped`.
+- **C.6.** All four DB activities lock the run row (`FOR UPDATE`) and `pg_notify('pipeline_status',
+  {run_id, pipeline_id, status, block_id, block_status})` in the same transaction — no error text.
+  **Precedence:** the run mirror writes only a `running` run and returns the status the run holds;
+  the block mirror refuses `running` on a run that is not running or has `cancel_requested_at` and
+  returns `cancelled`; a block's `completed`/`failed` is still recorded on a cancelled run (its object
+  exists and is charged). `record_storage` reads the owner from the run, records every object
+  (screenshots included) idempotently, returns `{used, limit}`. **`on_storage_wall` is folded into
+  that return** — the workflow names the wall, so no fourth DB call per block. `check_cancelled`
+  built and registered; **its consumer is C.9's backoff** — at block boundaries the running-mirror
+  already is the check. DB activities: 10 s attempt, 20 s total; three per block fit
+  `BLOCK_OVERHEAD_SECONDS` (asserted at import).
+- **C.7.** Timeouts and retry policy per block from the catalog `Timing`; `schedule_to_close` =
+  `min(block budget, what is left of the run's)`, and a spent run budget fails the block before it
+  starts — no workflow `execution_timeout`, which would end the run without a mirror. The
+  `(gave up after N attempts)` suffix on `MAXIMUM_ATTEMPTS_REACHED`. Result = the last *content*
+  block's object (effect blocks pass their input ref on — **untested until C.8/C.9 make one
+  runnable**). **Storage wall:** the run completes and its `error` reads `storage_wall: block 'x'
+  took storage to U of L bytes; …`. **Cancellation:** every await goes through `_finish()`
+  (`asyncio.shield` + re-await), so a Temporal cancel never aborts the running block (R3); it is
+  honoured at the next block boundary → run `cancelled`, tail `skipped`, workflow ends Cancelled. A
+  cancel during the **last** block completes the run — nothing was left to stop. ⚠️ **For C.9:**
+  shielding also defers a cancel during a Webhook block's retry backoff to the block's end — 15d wants
+  that wait interruptible; revisit when Webhook lands.
+- **Verified:** 52 tests in `test_pipelines.py` + `test_workflows_pipeline.py`; 15 mutations, each
+  caught by its own test; **423 API tests**, 51 contract tests. Live on compose through Temporal and
+  the Go worker: create, PATCH → v2, version-pinned run, failure mirror + skipped tail, soft delete
+  all behaved. The storage half was blocked on 2026-10-07 by a full host disk (MinIO refused
+  writes); **re-run 2026-10-11 after the owner freed space — all green:** scrape-only `completed`;
+  scrape → LLM (fake key) `failed` at `extract` with the 401, `fetch` `completed`; v1 re-run pinned
+  and `completed`; three objects in the ledger with `pipeline_run_block_id`, counter = sum (1,731 B,
+  the failed run's scrape object included — charged, C.1); `release_user_objects` freed all three.
+- **Still open:** part 3 (historical config shapes); BUG-009 / the `pipeline_status` listener (C.11);
+  the cancel endpoint (C.10); `jsonschema` meta-validation (C.3's ⚠️).
 
 #### C.8 — Clean + Validate activities
 

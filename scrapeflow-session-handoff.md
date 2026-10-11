@@ -141,7 +141,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-07 *(clock)*
+## Current state — as of 2026-10-11 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +149,40 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔷 **C.4–C.7 — PRODUCTION REFACTOR BUILT AND COMMITTED (2026-10-07 → 10-11, one session).** Local,
+`develop`: `e60658b` (MVP code) + `1700e69` (MVP docs) + `4b230a3` (safety net) + **`7f3b1d5`
+(refactor)** + this closeout. **Not pushed, not released.** Detail and every design call: backlog
+*C.4–C.7 — production refactor* note (after the MVP note).
+
+- **Owner calls:** safety net — unexpected exceptions labelled `internal error: <Type>: …`, and
+  `NondeterminismError` left to the workflow task (test proves it). Then "build everything at once …
+  do not commit" while AFK, so **the refactor's design calls are mine and reversible**. 2026-10-11:
+  **"skip this review for now; whenever possible i'll read the code and ask … finish up to c7 and
+  close this session"** → committed without the owner's code review. Expect questions as the owner reads.
+- **Calls to know when the questions come:** block secrets stored per block as Fernet ciphertext
+  (`"secrets"` map, config field `null`; GET lists names only; a kept block that omits a field keeps
+  it); `on_storage_wall` folded into `record_storage`'s `{used, limit}` return; a Temporal cancel
+  never aborts the running block (`_finish()` = `asyncio.shield` + re-await) — **revisit at C.9**, 15d
+  wants a Webhook's backoff interruptible; `storage_headroom_bytes` = 50 MiB; pipeline limit → 429;
+  unreadable stored definition → 422, no run; an unchanged definition on PATCH saves no version.
+- **Concepts walked through:** why Temporal retries a failed workflow *task* forever (deterministic
+  code + same history = same error; it waits for a deploy) and why no Temporal knob
+  (`retry_policy`, `execution_timeout`, `failure_exception_types`) can replace an in-body net — each
+  ends the workflow without running the mirror, so `pipeline_runs` stays `running`.
+- ⚠️ **Test traps found:** a failing workflow task retries in **real** time (time-skipping cannot
+  skip it) — bound such tests with a short `execution_timeout`; and the workflow's
+  `execution_timeout` **caps every activity timeout**, so a short default hides the catalog values.
+  Patching `socket.getaddrinfo` for SSRF breaks the DB driver — patch `app.core.security.socket`.
+- **Verified:** 52 pipeline tests, 15 mutations each caught, **423 API tests**, 51 contract tests.
+  Live on compose (2026-10-11, after the owner freed disk — on 10-07 the host disk was full and MinIO
+  refused writes): scrape-only `completed`; scrape → LLM (fake key) `failed` at `extract` with 401;
+  version-pinned re-run; ledger rows charged, counter = sum; cleanup released all three.
+- **Local stack:** brought back up selectively (`api`, `workflow-worker`, `http-worker-temporal`,
+  `llm-worker-temporal` + deps) — **not** a bare `up -d`, which would start the NATS workers on the
+  ~1.69 M-message dev stream. `playwright-worker-temporal` needed `--force-recreate` (B.8's stale X lock).
+- **Next: C.8** — Clean + Validate activities (LLM worker image, `content` queue). C.7 part 3 (old
+  config shapes) waits for the first `V2` config.
 
 🔷 **C.4–C.7 — MVP SLICE BUILT END TO END (2026-10-05 → 10-07, one session).** Local, `develop`,
 **uncommitted** (owner: "do not commit yet" — read first). Not pushed, not released. Owner chose
@@ -1060,7 +1094,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.3 in `phase4-implementation-backlog.md`** (block catalog + per-type config schemas + save-time validator). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.8 in `phase4-implementation-backlog.md`** (Clean + Validate activities). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1106,6 +1140,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-11 close:** `develop` = `7f3b1d5` (C.4–C.7 refactor) + this closeout, **not pushed** — `origin/develop` stops at `071f6f2` (C.3 closeout); everything from `e60658b` on is local. `main` = `origin/main` = `6675f17`, unchanged — Group C is unreleased; it ships with C.14. Infra repo untouched.
 - **2026-10-01, second session close:** `develop` = `b5d0f94` (C.2) + this closeout, **pushed to `origin/develop`** (owner: "close out and push to origin"). `main` = `origin/main` = `6675f17`, unchanged — C.1 and C.2 are unreleased; they ship with C.14. Infra repo untouched.
 - *Historical:* **2026-10-01 close (verified after fetch):** `develop` = `origin/develop` = `9bdb3a5` (C.1) before this closeout commit, which is pushed after it. `main` = `origin/main` = `6675f17`, unchanged — **C.1 is unreleased**; it ships with Group C's release (C.14). Infra repo untouched.
 - *Historical:* **2026-09-30, fourth session close (verified after fetch):** `develop` = `origin/develop` = `main` = `origin/main` = `6675f17` (PyJWT release) — this closeout commit sits on `develop` after it. **Infra:** `origin/main` = `17a842b` (Flux api bump) after `9ebb305` (playwright-worker-temporal), 0 ahead.
