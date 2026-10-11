@@ -71,7 +71,7 @@
 | C.10 | Cancellation: API cancel + workflow cancel + boundary re-check | ✅ Built 2026-10-11 (local, `66abdeb`, unreleased) |
 | C.11 | Run/result read API + `pipeline_status` notify channel + WS route | ✅ Built 2026-10-11 (local, `88e8024`, unreleased); **BUG-009 pulled in and fixed** (open item 7) |
 | C.12 | Frontend: Pipelines pages + WS reconnect (11b, both lanes) | ✅ Built 2026-10-11 (local, `c2590af`, unreleased); BUG-018 not ridden — click-through after release |
-| C.13 | Worker Versioning: decide + enable server-side (⚠️ Architect) | ⬜ |
+| C.13 | Workflow-code versioning: decide + build (⚠️ Architect) | ✅ Built 2026-10-12 — owner chose **`patched()` + a replay test that gates the build** (ADR-012, Draft); Worker Versioning not taken |
 | C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | ⬜ |
 | **D** | **Job cutover** | |
 | D.1 | Lane marker on `job_runs` (mechanism 4) + v1 dispatcher filters | ⬜ |
@@ -1556,6 +1556,25 @@ default; `patched()` is the alternative. Needs **server-side enablement** (A.2's
 stamp in `worker_main.py` and the three activity workers, and a written deploy rule in the handoff.
 **Depends on:** A.2, C.7 — **must be in place before C.14's release** or the first mid-run deploy
 breaks a parked run.
+
+**Decided and built 2026-10-12.** The owner asked what the decision was, then what `patched()` means and
+whether it covers worker code (it does not need to — activities are not replayed; their *shapes* do matter),
+then: **"go with patched and the replay test"**. ~~Worker Versioning, dynamicconfig entry, deployment-version
+stamp on four workers~~ — **none of that is built**; record: [ADR-012](../adr/ADR-012-workflow-code-versioning.md)
+(Draft, decision the owner's).
+- **Replay corpus** `api/tests/replay/histories/` — 9 histories: 4 real compose runs (clean → validate → LLM
+  failed, json validate completed, Playwright completed, webhook cancelled mid-backoff) + 5 from the
+  mocked harness (webhook delivered after retries, webhook `RunCancelled`, clean/validate/LLM completed, LLM
+  retries exhausted, storage wall). Scanned before commit: no credentials; the only ciphertext is a
+  one-letter test secret under the dev key. Tools: `tests/replay/export_history.py` (compose; refuses to
+  overwrite), `tests/replay/record_harness.py` (writes only missing files); `Harness.run` keeps `history`.
+- **Test** `tests/test_workflow_replay.py` — `Replayer` + pydantic converter per history. **Gate:** new
+  `replay` job in `build-push.yml`, `build-api` needs it; runs with `--noconftest` and throwaway Fernet keys
+  (no services). Verified offline (`--network none`) and in a clean `uv` container as the job runs it.
+- **Proven:** an unwrapped new activity call → 9/9 fail; a swapped call order → 9/9 fail; the same call in
+  `if workflow.patched(…)` → pass; a required field added to `ScrapeOutput` → fail. Moving an activity to
+  another queue → pass (replay-safe — Temporal compares types, not queues).
+- **Deploy rule** written into the handoff and `CLAUDE.md` (Key decisions row).
 
 #### C.14 — 🚀 Pipeline-lane release + R6 gate
 
