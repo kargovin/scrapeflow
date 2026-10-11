@@ -1,6 +1,7 @@
 """C.6 + C.7 — PipelineWorkflow and the workflow-worker DB activities."""
 
 import asyncio
+import itertools
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -20,7 +21,14 @@ from app.core.db import AsyncSessionLocal
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.storage_object import StorageObject
 from app.models.user_quota import UserQuota
-from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, CLEAN, LLM_EXTRACT, SCRAPE, VALIDATE
+from app.pipelines.catalog import (
+    BLOCK_OVERHEAD_SECONDS,
+    CLEAN,
+    LLM_EXTRACT,
+    SCRAPE,
+    VALIDATE,
+    WEBHOOK,
+)
 from app.pipelines.definition import parse_definition
 from app.settings import settings
 from app.workflows.activities.contracts import (
@@ -50,6 +58,8 @@ from app.workflows.pipeline import (
     MIRROR_BLOCK_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
     RECORD_STORAGE_ACTIVITY,
+    RUN_CANCELLED_ERROR,
+    WEBHOOK_ACTIVITY,
     LLMKey,
     MirrorBlockInput,
     MirrorRunInput,
@@ -58,6 +68,7 @@ from app.workflows.pipeline import (
     RecordStorageInput,
     RunRef,
     StorageUsage,
+    WebhookInput,
 )
 from app.workflows.queues import CONTENT_QUEUE, LLM_QUEUE, SCRAPE_HTTP_QUEUE, WORKFLOW_QUEUE
 
@@ -102,6 +113,7 @@ PARSED, _ = parse_definition(DEFINITION)
 
 RUN_INPUT = PipelineRunInput(
     run_id="r1",
+    pipeline_id="p1",
     blocks=PARSED.blocks,
     time_budget_seconds=PARSED.run_budget_seconds,
     inputs={"url": "https://example.com"},
@@ -137,11 +149,21 @@ async def _validate_ok(input: ValidateInput) -> None:
     return None
 
 
+async def _webhook_ok(input: WebhookInput) -> None:
+    return None
+
+
 class Harness:
     """Mocked activities on their real queues; records every DB-activity call in order."""
 
     def __init__(
-        self, scrape=_scrape_ok, llm=_llm_ok, clean=_clean_ok, validate=_validate_ok, usage=None
+        self,
+        scrape=_scrape_ok,
+        llm=_llm_ok,
+        clean=_clean_ok,
+        validate=_validate_ok,
+        webhook=_webhook_ok,
+        usage=None,
     ):
         self.calls: list = []
         self.scraped: list[ScrapeInput] = []
@@ -150,12 +172,15 @@ class Harness:
         self.cleaned: list[CleanInput] = []
         self.validated: list[ValidateInput] = []
         self.content_info: list = []
+        self.delivered: list[WebhookInput] = []
+        self.webhook_info: list = []
         self.usage = usage or StorageUsage(used=0, limit=100)
         self.running_reply: dict[str, str] = {}
         self._scrape = scrape
         self._llm = llm
         self._clean = clean
         self._validate = validate
+        self._webhook = webhook
 
     def activities(self):
         @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
@@ -198,7 +223,13 @@ class Harness:
             self.content_info.append(activity.info())
             return await self._validate(input)
 
-        return [mirror_block, mirror_run, record], scrape, llm, [clean, validate]
+        @activity.defn(name=WEBHOOK_ACTIVITY)
+        async def webhook(input: WebhookInput) -> None:
+            self.delivered.append(input)
+            self.webhook_info.append(activity.info())
+            return await self._webhook(input)
+
+        return [mirror_block, mirror_run, record, webhook], scrape, llm, [clean, validate]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
         db_activities, scrape, llm, content = self.activities()
@@ -790,3 +821,190 @@ async def test_db_activities_on_a_missing_row_fail_without_retry(db_user):
         await record_storage(RecordStorageInput(run_id=str(run.id), block_id="nope", objects=[]))
     with pytest.raises(ApplicationError):
         await check_cancelled(RunRef(run_id=str(uuid.uuid4())))
+
+
+# ---------------------------------------------------------------------------
+# The Webhook block (C.9) — the R6 recipe, scrape -> llm -> webhook
+# ---------------------------------------------------------------------------
+
+HOOK_URL = "https://hooks.example.com/in"
+
+
+def _with_webhook(secret: str | None = "secret-ciphertext") -> PipelineRunInput:
+    stored = json.loads(json.dumps(DEFINITION))
+    stored["blocks"].append(
+        {
+            "id": "notify",
+            "type": "webhook",
+            "input": "extract",
+            "config_schema_version": 1,
+            "config": {"url": HOOK_URL, "secret": None},
+            "secrets": {},
+        }
+    )
+    parsed, _ = parse_definition(stored)
+    return RUN_INPUT.model_copy(
+        update={
+            "blocks": parsed.blocks,
+            "time_budget_seconds": parsed.run_budget_seconds,
+            "artifact_ids": {b.id: f"a-{b.id}" for b in parsed.blocks},
+            "webhook_secrets": {"notify": secret} if secret else {},
+        }
+    )
+
+
+R6 = _with_webhook()
+
+
+async def test_webhook_delivers_the_last_content_blocks_object_and_passes_it_on():
+    h = Harness()
+    result = await h.run(R6)
+
+    # An effect block: the run's result stays on the extraction.
+    assert result == LLM_PATH
+    [delivered] = h.delivered
+    assert delivered.model_dump(exclude={"timestamp"}) == {
+        "run_id": "r1",
+        "pipeline_id": "p1",
+        "block_id": "notify",
+        "url": HOOK_URL,
+        "result_path": LLM_PATH,
+        "encrypted_secret": "secret-ciphertext",
+        "maximum_attempts": 5,
+    }
+    assert h.calls[-3:] == [
+        MirrorBlockInput(run_id="r1", block_id="notify", status="running", input_ref=LLM_PATH),
+        MirrorBlockInput(run_id="r1", block_id="notify", status="completed", output_ref=LLM_PATH),
+        MirrorRunInput(run_id="r1", status="completed", result_path=LLM_PATH),
+    ]
+
+
+async def test_webhook_timeouts_are_the_four_step_ladder():
+    h = Harness()
+    await h.run(R6)
+
+    [info] = h.webhook_info
+    timing = WEBHOOK.timing(R6.blocks[2].config)
+    assert info.task_queue == WORKFLOW_QUEUE
+    assert info.start_to_close_timeout == timedelta(seconds=20)
+    # schedule_to_close = the horizon: >= 2.6 h, and inside the run budget.
+    assert info.schedule_to_close_timeout == timedelta(seconds=timing.budget)
+    assert timing.budget >= 2.6 * 3600
+    assert R6.time_budget_seconds > timing.budget
+
+
+async def test_webhook_retries_five_times_on_the_15b_schedule():
+    async def down(input):
+        raise ApplicationError("HTTP 503", type="WebhookFailed")
+
+    h = Harness(webhook=down)
+    result = await h.run(R6)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert [d.maximum_attempts for d in h.delivered] == [5] * 5
+    started = [i.started_time for i in h.webhook_info]
+    waits = [round((b - a).total_seconds()) for a, b in itertools.pairwise(started)]
+    # 30 s x10, capped at 7200 s (ADR-009 15b: attempts 4-5 drift from today's list).
+    assert waits == [30, 300, 3000, 7200]
+    assert h.calls[-1].error == "notify: WebhookFailed: HTTP 503 (gave up after 5 attempts)"
+
+
+async def test_every_webhook_attempt_signs_the_same_payload():
+    async def flaky(input):
+        if activity.info().attempt < 3:
+            raise ApplicationError("HTTP 503", type="WebhookFailed")
+
+    h = Harness(webhook=flaky)
+    result = await h.run(R6)
+
+    assert result == LLM_PATH
+    assert len(h.delivered) == 3
+    assert len({d.timestamp for d in h.delivered}) == 1
+
+
+async def test_an_ssrf_refusal_fails_the_run_on_the_first_attempt():
+    async def blocked(input):
+        raise ApplicationError(
+            "ssrf_blocked: URL resolves to a private address: 10.0.0.5",
+            type="WebhookBlocked",
+            non_retryable=True,
+        )
+
+    h = Harness(webhook=blocked)
+    result = await h.run(R6)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert len(h.delivered) == 1
+    assert h.calls[-1] == MirrorRunInput(
+        run_id="r1",
+        status="failed",
+        error="notify: WebhookBlocked: ssrf_blocked: URL resolves to a private address: 10.0.0.5",
+    )
+
+
+async def test_a_cancelled_run_found_by_a_retry_ends_cancelled_not_failed():
+    async def cancelled(input):
+        raise ApplicationError(
+            "the run was cancelled", type=RUN_CANCELLED_ERROR, non_retryable=True
+        )
+
+    h = Harness(webhook=cancelled)
+    result = await h.run(R6)
+
+    assert result is None
+    assert h.calls[-2:] == [
+        MirrorBlockInput(
+            run_id="r1", block_id="notify", status="failed", error="cancelled before it finished"
+        ),
+        MirrorRunInput(run_id="r1", status="cancelled"),
+    ]
+
+
+async def test_a_workflow_cancel_interrupts_the_wait_between_webhook_attempts():
+    failed_once = asyncio.Event()
+
+    async def down(input):
+        failed_once.set()
+        raise ApplicationError("HTTP 503", type="WebhookFailed")
+
+    async def cancel_during_backoff(handle):
+        await failed_once.wait()
+        await asyncio.sleep(0.5)  # inside the 30 s backoff; nothing skips time here
+        await handle.cancel()
+
+    h = Harness(webhook=down)
+    result = await h.run(R6, during=cancel_during_backoff)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert isinstance(result.cause, CancelledError)
+    assert len(h.delivered) == 1
+    assert h.calls[-2:] == [
+        MirrorBlockInput(
+            run_id="r1", block_id="notify", status="failed", error="cancelled before it finished"
+        ),
+        MirrorRunInput(run_id="r1", status="cancelled"),
+    ]
+
+
+async def test_a_workflow_cancel_lets_a_running_webhook_attempt_finish():
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(input):
+        started.set()
+        await release.wait()
+
+    async def cancel_mid_post(handle):
+        await started.wait()
+        await handle.cancel()
+        await asyncio.sleep(0.5)
+        release.set()
+
+    h = Harness(webhook=slow)
+    result = await h.run(R6, during=cancel_mid_post)
+
+    # R3: the POST was not abandoned; it was the last block, so the run completed.
+    assert result == LLM_PATH
+    assert h.calls[-2:] == [
+        MirrorBlockInput(run_id="r1", block_id="notify", status="completed", output_ref=LLM_PATH),
+        MirrorRunInput(run_id="r1", status="completed", result_path=LLM_PATH),
+    ]

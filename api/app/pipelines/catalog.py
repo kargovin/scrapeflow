@@ -240,6 +240,8 @@ class ValidateConfigV1(_Config):
 
 class WebhookConfigV1(_Config):
     url: AnyHttpUrl
+    # HMAC-SHA256 key for X-ScrapeFlow-Signature; none signs with b"" (the header is always sent).
+    secret: str | None = Field(default=None, max_length=500)
 
     @field_serializer("url")
     def _url(self, v: AnyHttpUrl) -> str:
@@ -347,6 +349,7 @@ WEBHOOK = BlockType(
     config_versions={1: WebhookConfigV1},
     consumes=ALL_REFS,
     produces=_pass_through,
+    secret_fields=frozenset({"secret"}),
     # ADR-009 §15b/§15c: 10 s POST inside a ~20 s attempt; 30 s x10 capped at 7200 s, 5 attempts.
     timing=lambda _config: Timing(
         start_to_close=20,

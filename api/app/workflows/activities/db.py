@@ -9,7 +9,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -78,7 +78,16 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
 
         now = datetime.now(UTC)
         if input.status == "running":
-            values = {"status": input.status, "input_ref": input.input_ref, "started_at": now}
+            # A retry after `waiting` keeps the first start; the last attempt's error clears.
+            values = {
+                "status": input.status,
+                "input_ref": input.input_ref,
+                "started_at": func.coalesce(PipelineRunBlock.started_at, now),
+                "error": None,
+            }
+        elif input.status == "waiting":
+            # Between attempts: holds no slot (ADR-009 15a); error is the attempt that failed.
+            values = {"status": input.status, "error": input.error}
         else:
             # A block's outcome is a fact even on a cancelled run: its object exists and is charged.
             values = {

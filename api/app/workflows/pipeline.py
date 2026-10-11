@@ -6,7 +6,8 @@ from typing import Any, Literal
 from pydantic import BaseModel
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError, RetryState
+from temporalio.exceptions import ActivityError, ApplicationError, CancelledError, RetryState
+from temporalio.workflow import ActivityCancellationType
 
 with workflow.unsafe.imports_passed_through():
     from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, CATALOG, InputBinding, Timing
@@ -16,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
         RunBlock,
         ScrapeBlock,
         ValidateBlock,
+        WebhookBlock,
     )
     from app.schemas.jobs import Engine
     from app.workflows.activities.contracts import (
@@ -46,9 +48,13 @@ MIRROR_BLOCK_ACTIVITY = "mirror_block_status"
 MIRROR_RUN_ACTIVITY = "mirror_run_status"
 RECORD_STORAGE_ACTIVITY = "record_storage"
 CHECK_CANCELLED_ACTIVITY = "check_cancelled"
+WEBHOOK_ACTIVITY = "deliver_webhook"
 
-# The block types PipelineWorkflow can execute; the trigger refuses the rest (C.9 adds webhook).
-SUPPORTED_BLOCK_TYPES = frozenset({"scrape", "clean", "llm_extract", "validate"})
+# The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
+WEBHOOK_EVENT = "pipeline.result"
+
+# Raised non-retryable by an activity that finds its run cancelled (ADR-009 15d's fallback).
+RUN_CANCELLED_ERROR = "RunCancelled"
 
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
 
@@ -62,6 +68,7 @@ class LLMKey(BaseModel):
 
 class PipelineRunInput(BaseModel):
     run_id: str
+    pipeline_id: str
     blocks: list[RunBlock]
     # The run ceiling, resolved at the trigger: declared, or what the blocks need.
     time_budget_seconds: int
@@ -71,12 +78,14 @@ class PipelineRunInput(BaseModel):
     llm_keys: dict[str, LLMKey] = {}
     # Scrape blocks' stored secrets, by block id.
     credentials: dict[str, Credentials] = {}
+    # Webhook blocks' signing secrets as Fernet ciphertext (credentials key), by block id.
+    webhook_secrets: dict[str, str] = {}
 
 
 class MirrorBlockInput(BaseModel):
     run_id: str
     block_id: str
-    status: Literal["running", "completed", "failed"]
+    status: Literal["running", "waiting", "completed", "failed"]
     input_ref: str | None = None
     output_ref: str | None = None
     error: str | None = None
@@ -104,6 +113,20 @@ class RunRef(BaseModel):
     run_id: str
 
 
+class WebhookInput(BaseModel):
+    run_id: str
+    pipeline_id: str
+    block_id: str
+    url: str
+    # The block's input reference: what is delivered.
+    result_path: str
+    encrypted_secret: str | None = None
+    # Fixed by the workflow so every attempt signs the same bytes.
+    timestamp: str
+    # The retry policy's; the last attempt mirrors no `waiting`.
+    maximum_attempts: int
+
+
 # Three per block — running, record_storage, completed — must fit BLOCK_OVERHEAD_SECONDS.
 DB_ACTIVITY_SECONDS = 20
 assert 3 * DB_ACTIVITY_SECONDS <= BLOCK_OVERHEAD_SECONDS
@@ -127,6 +150,8 @@ def _block_options(timing: Timing, remaining_s: float) -> dict[str, Any]:
         "start_to_close_timeout": timedelta(seconds=timing.start_to_close),
         # The block's budget, cut to what is left of the run's.
         "schedule_to_close_timeout": timedelta(seconds=min(timing.budget, remaining_s)),
+        # Only reached for an interruptible block: its wait ends, a running attempt finishes.
+        "cancellation_type": ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
         "retry_policy": RetryPolicy(
             initial_interval=timedelta(seconds=timing.initial_interval),
             backoff_coefficient=timing.backoff_coefficient,
@@ -137,6 +162,14 @@ def _block_options(timing: Timing, remaining_s: float) -> dict[str, Any]:
     if timing.heartbeat is not None:
         options["heartbeat_timeout"] = timedelta(seconds=timing.heartbeat)
     return options
+
+
+def _is_cancellation(exc: BaseException) -> bool:
+    """A block stopped by a cancel: Temporal's (a wait interrupted) or the row's (15d fallback)."""
+    cause = exc.cause if isinstance(exc, ActivityError) else exc
+    if isinstance(cause, CancelledError | asyncio.CancelledError):
+        return True
+    return isinstance(cause, ApplicationError) and cause.type == RUN_CANCELLED_ERROR
 
 
 def _failure_message(exc: Exception, maximum_attempts: int) -> str:
@@ -182,7 +215,12 @@ class PipelineWorkflow:
 
             timing = block_type.timing(block.config)
             try:
-                objects = await self._finish(self._execute(block, input, input_ref, deadline))
+                # ADR-009 15a/15d: an effect block may wait between attempts, and a cancel
+                # interrupts that wait; a running attempt still finishes (R3).
+                objects = await self._finish(
+                    self._execute(block, input, input_ref, deadline),
+                    interruptible=block_type.kind == "effect",
+                )
                 usage = None
                 if objects:
                     usage = await self._finish(
@@ -197,7 +235,14 @@ class PipelineWorkflow:
             except workflow.NondeterminismError:
                 # Code no longer matches history: the task retries until a deploy fixes it.
                 raise
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
+                if _is_cancellation(exc):
+                    await self._mirror_block(
+                        input.run_id, block.id, "failed", error="cancelled before it finished"
+                    )
+                    return await self._cancel(input.run_id)
+                if not isinstance(exc, Exception):
+                    raise
                 message = _failure_message(exc, timing.maximum_attempts)
                 await self._mirror_block(input.run_id, block.id, "failed", error=message)
                 await self._mirror_run(input.run_id, "failed", error=f"{block.id}: {message}")
@@ -221,8 +266,12 @@ class PipelineWorkflow:
         await self._mirror_run(input.run_id, "completed", result_path=result_path, error=wall)
         return result_path
 
-    async def _finish(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        """Await to completion even if the workflow is cancelled meanwhile (R3: never mid-block)."""
+    async def _finish(self, coro: Coroutine[Any, Any, Any], interruptible: bool = False) -> Any:
+        """Await to completion even if the workflow is cancelled meanwhile (R3: never mid-block).
+
+        ``interruptible`` passes the cancel on to the activity: its retry wait ends at once, a
+        running attempt still completes (``WAIT_CANCELLATION_COMPLETED``).
+        """
         task = asyncio.ensure_future(coro)
         while not task.done():
             try:
@@ -230,6 +279,8 @@ class PipelineWorkflow:
             except asyncio.CancelledError:
                 if task.done():
                     raise
+                if interruptible and not self._cancel_requested:
+                    task.cancel()
                 self._cancel_requested = True
         return task.result()
 
@@ -237,7 +288,7 @@ class PipelineWorkflow:
         self,
         run_id: str,
         block_id: str,
-        status: Literal["running", "completed", "failed"],
+        status: Literal["running", "waiting", "completed", "failed"],
         **fields: str | None,
     ) -> RunStatus:
         return await self._finish(
@@ -353,6 +404,28 @@ class PipelineWorkflow:
                     rules=[r.model_dump(mode="json", by_alias=True) for r in block.config.rules],
                 ),
                 task_queue=CONTENT_QUEUE,
+                **options,
+            )
+            return []
+
+        if isinstance(block, WebhookBlock):
+            if input_ref is None:
+                raise ApplicationError("webhook has no input", non_retryable=True)
+            # The retry policy is the delivery loop (ADR-009 §15); the activity mirrors
+            # running/waiting per attempt itself, since the workflow is blocked across retries.
+            await workflow.execute_activity(
+                WEBHOOK_ACTIVITY,
+                WebhookInput(
+                    run_id=input.run_id,
+                    pipeline_id=input.pipeline_id,
+                    block_id=block.id,
+                    url=str(block.config.url),
+                    result_path=input_ref,
+                    encrypted_secret=input.webhook_secrets.get(block.id),
+                    timestamp=workflow.now().isoformat(),
+                    maximum_attempts=options["retry_policy"].maximum_attempts,
+                ),
+                task_queue=WORKFLOW_QUEUE,
                 **options,
             )
             return []

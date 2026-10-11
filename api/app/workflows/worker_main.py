@@ -20,6 +20,7 @@ from app.workflows.activities.db import (
     mirror_run_status,
     record_storage,
 )
+from app.workflows.activities.webhook import deliver_webhook
 from app.workflows.client import connect
 from app.workflows.hello import HelloWorkflow, say_hello
 from app.workflows.pipeline import PipelineWorkflow
@@ -47,6 +48,7 @@ async def main() -> None:
             mirror_run_status,
             record_storage,
             check_cancelled,
+            deliver_webhook,
         ],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )

@@ -34,6 +34,7 @@ from app.pipelines.definition import (
     DefinitionUnreadable,
     LLMExtractBlock,
     ScrapeBlock,
+    WebhookBlock,
     parse_definition,
 )
 from app.pipelines.validator import (
@@ -55,7 +56,6 @@ from app.settings import settings
 from app.workflows.activities.contracts import Credentials
 from app.workflows.client import get_temporal
 from app.workflows.pipeline import (
-    SUPPORTED_BLOCK_TYPES,
     LLMKey,
     PipelineRunInput,
     PipelineWorkflow,
@@ -501,22 +501,20 @@ async def create_run(
             [Problem(b, f"this version cannot be run: {m}") for b, m in exc.problems]
         ) from None
 
-    problems = [
-        Problem(b.id, f"block type {b.type!r} cannot run yet")
-        for b in parsed.blocks
-        if b.type not in SUPPORTED_BLOCK_TYPES
-    ]
     declared, given = set(parsed.inputs), set(body.inputs)
-    problems += [Problem(None, f"missing run input {n!r}") for n in sorted(declared - given)]
+    problems = [Problem(None, f"missing run input {n!r}") for n in sorted(declared - given)]
     problems += [Problem(None, f"unexpected run input {n!r}") for n in sorted(given - declared)]
     if problems:
         raise _unprocessable(problems)
 
     # The scrape workers do not check SSRF; this is the only check before the fetch.
+    # The Webhook activity checks again on every attempt; this one fails the run up front.
     for block in parsed.blocks:
         if isinstance(block, ScrapeBlock):
             url = block.config.url
             await _ssrf_check(body.inputs[url.input] if isinstance(url, InputBinding) else str(url))
+        elif isinstance(block, WebhookBlock):
+            await _ssrf_check(str(block.config.url))
 
     llm_blocks = [b for b in parsed.blocks if isinstance(b, LLMExtractBlock)]
     keys = await _owned_keys(db, user.id, {b.config.llm_key_id for b in llm_blocks})
@@ -571,6 +569,7 @@ async def create_run(
             PipelineWorkflow.run,
             PipelineRunInput(
                 run_id=str(run_id),
+                pipeline_id=str(pipeline.id),
                 blocks=parsed.blocks,
                 time_budget_seconds=parsed.run_budget_seconds,
                 inputs=body.inputs,
@@ -584,6 +583,12 @@ async def create_run(
                     for key_id, k in keys.items()
                 },
                 credentials=credentials,
+                webhook_secrets={
+                    b.id: secret
+                    for b in parsed.blocks
+                    if isinstance(b, WebhookBlock)
+                    and (secret := stored_secrets.get(b.id, {}).get("secret")) is not None
+                },
             ),
             id=run.workflow_id,
             task_queue=WORKFLOW_QUEUE,

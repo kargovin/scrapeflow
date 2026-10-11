@@ -314,13 +314,41 @@ async def test_start_failure_marks_the_run_failed(
     assert statuses == ["skipped", "skipped"]
 
 
-async def test_unsupported_block_type_refused(client, headers, key, db_user, temporal, resolves_to):
-    pipeline = await _create(client, headers, recipe(key.id))
+async def test_the_r6_recipe_runs_with_its_webhook_secret_and_pipeline_id(
+    client, headers, key, db_user, temporal, resolves_to
+):
+    definition = recipe(key.id)
+    definition["blocks"][2]["config"]["secret"] = "whsec"
+    pipeline = await _create(client, headers, definition)
+    assert pipeline["definition"]["blocks"][2]["secrets"] == ["secret"]
+    [version] = await _stored(pipeline["id"])
+    stored = version.definition["blocks"][2]
+    assert stored["config"]["secret"] is None
+    assert _decrypt(stored["secrets"]["secret"]) == "whsec"
+
     resp = await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)
-    assert resp.status_code == 422
-    assert resp.json()["detail"] == [
-        {"block_id": "notify", "message": "block type 'webhook' cannot run yet"}
-    ]
+    assert resp.status_code == 202, resp.text
+    workflow_input = temporal.start_workflow.await_args.args[1]
+    assert workflow_input.pipeline_id == pipeline["id"]
+    assert workflow_input.webhook_secrets == {"notify": stored["secrets"]["secret"]}
+    assert workflow_input.blocks[2].config.secret is None
+
+
+async def test_a_webhook_url_now_private_is_refused_at_the_trigger(
+    client, headers, key, db_user, temporal, resolves_to
+):
+    definition = recipe(key.id)
+    definition["blocks"][2]["config"]["url"] = "https://hooks.example.net/in"
+    pipeline = await _create(client, headers, definition)
+
+    def resolve(host, *_):
+        ip = "10.0.0.5" if host == "hooks.example.net" else "93.184.216.34"
+        return [(None, None, None, None, (ip, 0))]
+
+    with patch("app.core.security.socket.getaddrinfo", side_effect=resolve):
+        resp = await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)
+    assert resp.status_code == 400
+    assert "10.0.0.5" in resp.json()["detail"]
     assert await _runs(db_user.id) == []
     temporal.start_workflow.assert_not_awaited()
 
