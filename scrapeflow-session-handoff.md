@@ -169,6 +169,19 @@ condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *
   (--webhook-site | --webhook-url …)` — paste the output; verdict → PRD-016 R6 + here. And the **C.12
   click-through** of the Pipelines pages. Until R6 passes, no block outside R2's catalog is designed.
 - GitHub reported Dependabot alerts on the push (not triaged this session).
+- ⚠️ **R6 gate attempted 2026-10-12 — NO VERDICT yet.** Two runs of `r6_gate.py` both hit a **new bug, to file as
+  BUG-022**: (1) the OpenAI-compatible LLM call sets **no `max_tokens`** (`llm-worker/worker/llm.py`, Anthropic has
+  4096), so the 4B Qwen model under JSON-schema decoding sometimes loops and generates for minutes; (2) the
+  **180 s read timeout did not fire** against Modal (one call ran ~7 min until the owner cancelled it on Modal) —
+  cause not verified. Both lanes share the code; the job lane hung until cancelled, the pipeline lane retried
+  (Temporal's 400 s attempt limit holds). First gate's run 1 completed in 8 s; second gate's job completed in 6 s
+  and its pipeline run 1 completed on attempt 3. **Everything stopped at the owner's request:** the last running
+  workflow `pipeline-run-8efa14c6-d074-4028-b2f6-42e1a9016467` was **terminated** (not cancelled — a cancel lets the
+  shielded LLM step keep calling Modal) and the `llm-worker-temporal` pod restarted to drop its open request.
+  **Leftover:** that run's row is still `running` with `extract` `running` (a terminate runs no mirror) — it holds
+  one of the owner's concurrency slots; fix with SQL (`status='cancelled'`, `finished_at=now()`, block `failed`,
+  tail `skipped`) or leave it. **Next:** fix BUG-022, release, rerun the gate. ⚠️ The owner's prod API key was
+  typed into this transcript in a `!` command — **revoke it** and make a new one.
 
 🔷 **C.9 → C.12 — BUILT AND COMMITTED (2026-10-11, third session).** Local, `develop`: **`5b14291`** (C.9),
 **`66abdeb`** (C.10), **`88e8024`** (C.11 + BUG-009), **`c2590af`** (C.12) + the docs closeout. **Not pushed, not
