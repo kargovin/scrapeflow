@@ -72,7 +72,7 @@
 | C.11 | Run/result read API + `pipeline_status` notify channel + WS route | ✅ Built 2026-10-11 (local, `88e8024`, unreleased); **BUG-009 pulled in and fixed** (open item 7) |
 | C.12 | Frontend: Pipelines pages + WS reconnect (11b, both lanes) | ✅ Built 2026-10-11 (local, `c2590af`, unreleased); BUG-018 not ridden — click-through after release |
 | C.13 | Workflow-code versioning: decide + build (⚠️ Architect) | ✅ Built 2026-10-12 — owner chose **`patched()` + a replay test that gates the build** (ADR-012, Draft); Worker Versioning not taken |
-| C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | ⬜ |
+| C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | 🟡 **RELEASED 2026-10-12** (`6675f17..1793c60`, api + llm-worker; no infra change) — **R6 gate not yet run** (owner: needs prod API key + a real LLM key) |
 | **D** | **Job cutover** | |
 | D.1 | Lane marker on `job_runs` (mechanism 4) + v1 dispatcher filters | ⬜ |
 | D.2 | `ChangeDetection` activity: content-hash dedup + `diff.py` port (**R5 obligation**) | ⬜ |
@@ -1587,6 +1587,22 @@ the repeat-run cost delta (one LLM call + one stored artifact — R6). **Record 
 PRD-016 and the handoff.** No block outside R2's catalog is designed until this passes.
 **Rollback:** there is none — switch the feature off (16d). Say so in the release notes.
 **Depends on:** C.1–C.13
+
+**Released 2026-10-12 — `main` `6675f17..1793c60`** (owner ran the ff; the classifier refuses it as a
+production deploy). Before it: **`PIPELINES_ENABLED`** (`626192b`) — 16d's switch: off refuses create, edit
+and run with 503, reads and cancel stay on (`PIPELINES_ENABLED=false` on the api Deployment, then restart);
+the R6 script `api/scripts/r6_gate.py` (`1793c60`, stdlib only, run by the owner against prod).
+- **CI:** the new `replay` job ran first (10 passed), then `build-api` and `build-llm-worker`; the other three
+  skipped. **No infra change** — the workflow worker already had both Fernet keys and the DB; the LLM Temporal
+  worker polls `content` from its new image. No NATS contract changed → no drain.
+- **Rollout:** Flux bumped all four Deployments to `1793c60` within ~2 min; `rollout status` green on api,
+  workflow-worker, llm-worker-temporal, llm-worker; 0 restarts. API startup ran
+  `9a1ebad3fca2 → cff9ec8fedbe → 9db1dcda44f7` and the notifier listens on `job_status`, `batch_status`,
+  `pipeline_status`. Pollers (admin-tools pod): workflow + workflow-queue activities on `workflow`, Clean/Validate
+  on `content`, LLM on `llm`, all from the new pods. `GET /pipelines` unauthenticated → 401, `/health` 200,
+  `/app/` serves the new bundle.
+- **Still owed:** the **R6 gate** (owner runs `r6_gate.py`; verdict goes to PRD-016 and the handoff) and the
+  **C.12 click-through**.
 
 ---
 

@@ -150,6 +150,26 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🚀 **C.13 BUILT + C.14 — PIPELINE LANE RELEASED (2026-10-12, same session).** `main` `6675f17..1793c60`
+(owner ran the ff — the classifier refuses it). **Deployed code is `1793c60`.** Detail: backlog C.13 and C.14 notes.
+
+- **C.13 — owner's decision after three questions** (what is C.13 · what does `patched` mean · does it cover
+  worker code): **"go with patched and the replay test"**. ADR-012 (Draft). 9 recorded histories
+  (`api/tests/replay/histories/`), `test_workflow_replay.py`, a `replay` job that `build-api` needs. Proven:
+  unwrapped change / swapped order / non-additive contract each fail; the same change in `patched()` passes.
+- **The deploy rule (ADR-012, `CLAUDE.md` Key decisions):** wrap any workflow-body change that alters its
+  activity calls/timers/branches in `workflow.patched("<id>")`; `deprecate_patch` after ≈3 h, then remove;
+  **activity contracts additive only**; **never regenerate a history** — add one per new behaviour; restart
+  the compose workflow worker after `app/` changes. A deploy keeping the workflow worker down > 60 s: switch
+  the lane off first (`PIPELINES_ENABLED=false`) — every block has a 60 s `schedule_to_start` per attempt.
+- **C.14:** `PIPELINES_ENABLED` kill switch (16d — the lane's only rollback); CI replay 10 passed; four
+  Deployments on `1793c60`, 0 restarts; migrations 4.4 + 4.5 applied; pollers on `workflow` / `content` /
+  `llm` from the new pods; `/pipelines` 401 unauthenticated.
+- **Open — owner-run:** the **R6 gate**: `SCRAPEFLOW_API_KEY=… python3 api/scripts/r6_gate.py --llm-key-id … --model …
+  (--webhook-site | --webhook-url …)` — paste the output; verdict → PRD-016 R6 + here. And the **C.12
+  click-through** of the Pipelines pages. Until R6 passes, no block outside R2's catalog is designed.
+- GitHub reported Dependabot alerts on the push (not triaged this session).
+
 🔷 **C.9 → C.12 — BUILT AND COMMITTED (2026-10-11, third session).** Local, `develop`: **`5b14291`** (C.9),
 **`66abdeb`** (C.10), **`88e8024`** (C.11 + BUG-009), **`c2590af`** (C.12) + the docs closeout. **Not pushed, not
 released.** Detail and every call: the backlog's four *Built* notes.
@@ -1151,7 +1171,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.13 in `phase4-implementation-backlog.md`** (Worker Versioning — ⚠️ an Architect/owner decision first; must land before C.14's release). ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Owner runs the R6 gate** (`api/scripts/r6_gate.py`) and clicks through the Pipelines pages; record the verdict in PRD-016 R6. Then **Group D — job cutover** (D.1). ~~C.14~~ 🚀 released 2026-10-12 (`1793c60`). ~~C.13~~ ✅ 2026-10-12 (ADR-012 Draft, `c86a9d9`). ~~Pick up C.13 in `phase4-implementation-backlog.md`~~. ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1197,7 +1217,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-10-11, third session close (verified after fetch):** `develop` = `c2590af` (C.12) + this docs closeout, **not pushed** — 12 ahead of `origin/develop` (`071f6f2`) before the closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
+- **2026-10-12 (C.14 release, verified after fetch):** `develop` = `main` = `origin/main` = `origin/develop` = `1793c60` before this docs closeout. **Deployed code is `1793c60`.** Infra repo untouched (Flux's own tag bumps only).
+- *Historical:* **2026-10-11, third session close (verified after fetch):** `develop` = `c2590af` (C.12) + this docs closeout, **not pushed** — 12 ahead of `origin/develop` (`071f6f2`) before the closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
 - *Historical:* **2026-10-11, second session close (verified after fetch):** `develop` = `6cfef04` (C.8 code `d75c7b2` + backlog note) + this closeout, **not pushed** — 7 ahead of `origin/develop` (`071f6f2`) before this closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
 - *Historical:* **2026-10-11 close:** `develop` = `7f3b1d5` (C.4–C.7 refactor) + this closeout, **not pushed** — `origin/develop` stops at `071f6f2` (C.3 closeout); everything from `e60658b` on is local. `main` = `origin/main` = `6675f17`, unchanged — Group C is unreleased; it ships with C.14. Infra repo untouched.
 - **2026-10-01, second session close:** `develop` = `b5d0f94` (C.2) + this closeout, **pushed to `origin/develop`** (owner: "close out and push to origin"). `main` = `origin/main` = `6675f17`, unchanged — C.1 and C.2 are unreleased; they ship with C.14. Infra repo untouched.
