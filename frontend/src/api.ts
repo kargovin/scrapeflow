@@ -11,9 +11,26 @@ async function apiFetch(path: string, token: string, options?: RequestInit): Pro
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    throw new Error(`HTTP ${res.status}: ${body}`)
+    throw new ApiError(res.status, body)
   }
   return res
+}
+
+// Keeps the status and the parsed `detail`, so a page can tell a 409 or a 422's block problems
+// apart. The message format is the one every page already shows.
+export class ApiError extends Error {
+  status: number
+  detail: unknown
+
+  constructor(status: number, body: string) {
+    super(`HTTP ${status}: ${body}`)
+    this.status = status
+    try {
+      this.detail = (JSON.parse(body) as { detail?: unknown }).detail
+    } catch {
+      this.detail = body
+    }
+  }
 }
 
 export async function apiGet<T>(path: string, token: string): Promise<T> {
@@ -108,4 +125,92 @@ export interface AdminStats {
     minio_storage_bytes: number
     webhook_delivery_success_rate_7d: number
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pipelines (PRD-016 layer A)
+// ---------------------------------------------------------------------------
+
+export interface PipelineBlock {
+  id: string
+  type: string
+  input: string | null
+  config_schema_version: number
+  config: Record<string, unknown>
+  // Names of the secret fields that are set; their values are never returned.
+  secrets: string[]
+}
+
+export interface PipelineDefinition {
+  inputs: Record<string, Record<string, unknown>>
+  time_budget_seconds: number | null
+  blocks: PipelineBlock[]
+}
+
+export interface Pipeline {
+  id: string
+  name: string
+  version: number
+  definition: PipelineDefinition
+  created_at: string
+  updated_at: string
+  // Admin routes only.
+  user_id?: string
+  user_email?: string | null
+  deleted_at?: string | null
+}
+
+export interface PipelineRunSummary {
+  id: string
+  pipeline_id: string
+  pipeline_version_id: string
+  version: number
+  status: string
+  cancel_requested_at: string | null
+  inputs: Record<string, string>
+  result_path: string | null
+  error: string | null
+  created_at: string
+  finished_at: string | null
+  user_id?: string
+}
+
+export type OutputState = 'none' | 'passed_through' | 'stored' | 'collected'
+
+export interface PipelineRunBlock {
+  block_id: string
+  position: number
+  type: string
+  status: string
+  input_ref: string | null
+  output_ref: string | null
+  output_state: OutputState
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+  collected_at: string | null
+}
+
+export interface PipelineRun extends PipelineRunSummary {
+  blocks: PipelineRunBlock[]
+}
+
+export interface PipelineRunResult {
+  content: string
+  result_path: string
+  block_id: string
+}
+
+export interface PipelineRunCancel {
+  run: PipelineRun
+  still_running: string[]
+  upper_bound_seconds: number
+  llm_billed: boolean
+  workflow_notified: boolean
+}
+
+// A 422 from save or run: every problem, each naming its block.
+export interface BlockProblem {
+  block_id: string | null
+  message: string
 }

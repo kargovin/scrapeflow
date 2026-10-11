@@ -1,8 +1,10 @@
-import { useState, useEffect, lazy, Suspense } from 'react'
+import { useState, lazy, Suspense } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { apiGet, apiDelete, API_BASE, type Job } from '../api'
+import { apiGet, apiDelete, type Job } from '../api'
+import { useLiveSocket } from '../lib/useLiveSocket'
+import LiveBadge from '../components/LiveBadge'
 
 // Lazy — pulls Monaco + react-markdown into a separate chunk so the rest of the
 // admin panel (Users, Jobs list, Stats) doesn't download the editor.
@@ -26,7 +28,6 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [liveStatus, setLiveStatus] = useState<string | null>(null)
-  const [wsLive, setWsLive] = useState(false)
 
   const isAdmin = mode === 'admin'
   const apiBase = isAdmin ? '/admin/jobs' : '/jobs'
@@ -62,30 +63,17 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
     },
   })
 
-  useEffect(() => {
-    if (!token || !job || TERMINAL.has(job.status)) return
-
-    const base = API_BASE || window.location.origin
-    const wsBase = base.replace(/^https/, 'wss').replace(/^http/, 'ws')
-    const ws = new WebSocket(`${wsBase}/jobs/${jobId}/watch?token=${encodeURIComponent(token)}`)
-
-    ws.onopen = () => setWsLive(true)
-    ws.onmessage = (evt) => {
-      const msg = JSON.parse(evt.data) as { status: string }
+  // Reconnects until a terminal message (11b); the first message after each connect is the
+  // run's current state, so nothing missed while disconnected stays stale.
+  const socket = useLiveSocket<{ type?: string; status: string }>({
+    path: job && !TERMINAL.has(job.status) ? `/jobs/${jobId}/watch` : null,
+    onMessage: (msg) => {
+      if (msg.type === 'timeout') return
       setLiveStatus(msg.status)
-      if (TERMINAL.has(msg.status)) {
-        qc.invalidateQueries({ queryKey: ['job', mode, jobId] })
-        setWsLive(false)
-      }
-    }
-    ws.onclose = () => setWsLive(false)
-    ws.onerror = () => ws.close()
-
-    return () => {
-      ws.close()
-      setWsLive(false)
-    }
-  }, [token, jobId, job?.status, qc, mode])
+      if (TERMINAL.has(msg.status)) qc.invalidateQueries({ queryKey: ['job', mode, jobId] })
+    },
+    isTerminal: (msg) => TERMINAL.has(msg.status),
+  })
 
   if (!jobId) return null
 
@@ -116,12 +104,7 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
         <span className={`inline-flex px-2 py-0.5 text-xs rounded-full ${STATUS_COLOURS[status] ?? 'bg-gray-100 text-gray-600'}`}>
           {status}
         </span>
-        {wsLive && (
-          <span className="flex items-center gap-1 text-xs text-green-600">
-            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-            live
-          </span>
-        )}
+        <LiveBadge state={socket} />
       </span>
     )],
     ['Result path', job.result_path ?? '—'],
