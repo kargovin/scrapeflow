@@ -1130,3 +1130,30 @@ async def test_admin_reads_any_users_runs_and_results(
     result = (await client.get(f"{base}/{run_id}/result", headers=headers)).json()
     assert result["block_id"] == "extract"
     assert (await client.get(f"{base}/{uuid.uuid4()}", headers=headers)).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# C.14 — the kill switch (ADR-009 16d)
+# ---------------------------------------------------------------------------
+
+
+async def test_switched_off_refuses_new_work_but_keeps_reads_and_cancel(
+    client, headers, key, temporal, engine, monkeypatch
+):
+    url, _ = await _started_run(client, headers, key, temporal)
+    pipeline_url = url.split("/runs/")[0]
+    monkeypatch.setattr(settings, "pipelines_enabled", False)
+
+    off = {"detail": "Pipelines are switched off"}
+    created = await client.post(
+        "/pipelines", json={"name": "x", "definition": runnable(key.id)}, headers=headers
+    )
+    assert (created.status_code, created.json()) == (503, off)
+    patched = await client.patch(pipeline_url, json={"name": "y"}, headers=headers)
+    assert (patched.status_code, patched.json()) == (503, off)
+    run = await client.post(f"{pipeline_url}/runs", json={}, headers=headers)
+    assert (run.status_code, run.json()) == (503, off)
+
+    assert (await client.get(pipeline_url, headers=headers)).status_code == 200
+    assert (await client.get(url, headers=headers)).status_code == 200
+    assert (await client.post(f"{url}/cancel", headers=headers)).status_code == 202

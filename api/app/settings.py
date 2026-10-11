@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     default_quota_concurrent_jobs: int = 5
     default_quota_storage_bytes: int = 5368709120  # 5 GB
 
+    # ADR-009 16d: the pipeline lane has no v1 to fall back to — off refuses new pipelines, edits and
+    # runs (503); reads and cancel stay on so in-flight runs can be watched and stopped.
+    pipelines_enabled: bool = True
     # Pipelines (PRD-016 R1, R4) — read by app/pipelines/validator.py; per-user count is C.4's
     max_blocks_per_pipeline: int = 20
     max_pipelines_per_user: int = 50

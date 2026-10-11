@@ -76,6 +76,13 @@ router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 logger = structlog.get_logger()
 
 
+def require_pipelines_enabled() -> None:
+    if not settings.pipelines_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Pipelines are switched off"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Definitions: what is stored, what is returned
 # ---------------------------------------------------------------------------
@@ -270,6 +277,7 @@ async def create_pipeline(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
+    __: None = Depends(require_pipelines_enabled),
 ) -> PipelineResponse:
     held = await db.scalar(
         select(func.count())
@@ -334,6 +342,7 @@ async def update_pipeline(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
+    __: None = Depends(require_pipelines_enabled),
 ) -> PipelineResponse:
     pipeline, version = await _owned_pipeline(db, user.id, pipeline_id)
     changed = False
@@ -516,6 +525,7 @@ async def create_run(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
+    __: None = Depends(require_pipelines_enabled),
     temporal: Client = Depends(get_temporal),
 ) -> PipelineRunResponse:
     # The ownership check is the only tenant boundary (ADR-009 §12).
