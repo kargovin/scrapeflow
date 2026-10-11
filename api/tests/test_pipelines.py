@@ -325,6 +325,26 @@ async def test_unsupported_block_type_refused(client, headers, key, db_user, tem
     temporal.start_workflow.assert_not_awaited()
 
 
+async def test_clean_and_validate_blocks_run(client, headers, db_user, temporal, resolves_to):
+    definition = {
+        "blocks": [
+            {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com"}},
+            {"id": "clean", "type": "clean", "input": "fetch"},
+            {
+                "id": "guard",
+                "type": "validate",
+                "input": "clean",
+                "config": {"rules": [{"kind": "min_length", "chars": 100}]},
+            },
+        ]
+    }
+    pipeline = await _create(client, headers, definition)
+    resp = await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)
+    assert resp.status_code == 202, resp.text
+    workflow_input = temporal.start_workflow.await_args.args[1]
+    assert [b.type for b in workflow_input.blocks] == ["scrape", "clean", "validate"]
+
+
 async def test_run_inputs_must_match_and_bound_url_is_ssrf_checked(
     client, headers, db_user, temporal, resolves_to
 ):

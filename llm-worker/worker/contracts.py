@@ -29,3 +29,67 @@ class StoredObject(BaseModel):
 
 class LLMOutput(BaseModel):
     result: StoredObject
+
+
+# Must equal the API's CLEAN_ACTIVITY, VALIDATE_ACTIVITY and CONTENT_QUEUE.
+CLEAN_ACTIVITY = "Clean"
+VALIDATE_ACTIVITY = "Validate"
+CONTENT_QUEUE = "content"
+
+
+class CleanInput(BaseModel):
+    artifact_id: NonEmptyStr
+    input_path: NonEmptyStr
+
+
+class CleanOutput(BaseModel):
+    result: StoredObject
+
+
+class JsonSchemaRule(BaseModel):
+    kind: Literal["json_schema"]
+    schema_: dict[str, Any] = Field(alias="schema")
+
+
+class PresentRule(BaseModel):
+    kind: Literal["present"]
+    path: str
+
+
+class TypeRule(BaseModel):
+    kind: Literal["type"]
+    path: str
+    type: Literal["string", "number", "integer", "boolean", "object", "array", "null"]
+
+
+class CompareRule(BaseModel):
+    kind: Literal["compare"]
+    path: str
+    op: Literal["eq", "ne", "lt", "le", "gt", "ge"]
+    value: str | int | float | bool | None
+
+
+class ContainsRule(BaseModel):
+    kind: Literal["contains"]
+    text: str
+
+
+class MinLengthRule(BaseModel):
+    kind: Literal["min_length"]
+    chars: int
+
+
+Rule = Annotated[
+    JsonSchemaRule
+    | PresentRule
+    | TypeRule
+    | CompareRule
+    | ContainsRule
+    | MinLengthRule,
+    Field(discriminator="kind"),
+]
+
+
+class ValidateInput(BaseModel):
+    input_path: NonEmptyStr
+    rules: list[Rule] = Field(min_length=1)

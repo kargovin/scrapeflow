@@ -20,18 +20,23 @@ from app.core.db import AsyncSessionLocal
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.storage_object import StorageObject
 from app.models.user_quota import UserQuota
-from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, LLM_EXTRACT, SCRAPE
+from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, CLEAN, LLM_EXTRACT, SCRAPE, VALIDATE
 from app.pipelines.definition import parse_definition
 from app.settings import settings
 from app.workflows.activities.contracts import (
+    CLEAN_ACTIVITY,
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
+    VALIDATE_ACTIVITY,
+    CleanInput,
+    CleanOutput,
     Credentials,
     LLMInput,
     LLMOutput,
     ScrapeInput,
     ScrapeOutput,
     StoredObject,
+    ValidateInput,
 )
 from app.workflows.activities.db import (
     PIPELINE_STATUS_CHANNEL,
@@ -54,11 +59,12 @@ from app.workflows.pipeline import (
     RunRef,
     StorageUsage,
 )
-from app.workflows.queues import LLM_QUEUE, SCRAPE_HTTP_QUEUE, WORKFLOW_QUEUE
+from app.workflows.queues import CONTENT_QUEUE, LLM_QUEUE, SCRAPE_HTTP_QUEUE, WORKFLOW_QUEUE
 
 SCRAPE_PATH = "scrapeflow-results/history/a-fetch/scrape.html"
 SHOT_PATH = "scrapeflow-results/screenshots/a-fetch/0.png"
 LLM_PATH = "scrapeflow-results/history/a-extract/llm.json"
+CLEAN_PATH = "scrapeflow-results/history/a-clean/clean.md"
 KEY_ID = "6b1f2c1e-0000-4000-8000-000000000001"
 
 DEFINITION = {
@@ -123,18 +129,33 @@ async def _llm_ok(input: LLMInput) -> LLMOutput:
     return LLMOutput.model_validate({"result": {"path": LLM_PATH, "size": 3}})
 
 
+async def _clean_ok(input: CleanInput) -> CleanOutput:
+    return CleanOutput.model_validate({"result": {"path": CLEAN_PATH, "size": 7}})
+
+
+async def _validate_ok(input: ValidateInput) -> None:
+    return None
+
+
 class Harness:
     """Mocked activities on their real queues; records every DB-activity call in order."""
 
-    def __init__(self, scrape=_scrape_ok, llm=_llm_ok, usage=None):
+    def __init__(
+        self, scrape=_scrape_ok, llm=_llm_ok, clean=_clean_ok, validate=_validate_ok, usage=None
+    ):
         self.calls: list = []
         self.scraped: list[ScrapeInput] = []
         self.scrape_info: list = []
         self.extracted: list[LLMInput] = []
+        self.cleaned: list[CleanInput] = []
+        self.validated: list[ValidateInput] = []
+        self.content_info: list = []
         self.usage = usage or StorageUsage(used=0, limit=100)
         self.running_reply: dict[str, str] = {}
         self._scrape = scrape
         self._llm = llm
+        self._clean = clean
+        self._validate = validate
 
     def activities(self):
         @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
@@ -165,10 +186,22 @@ class Harness:
             self.extracted.append(input)
             return await self._llm(input)
 
-        return [mirror_block, mirror_run, record], scrape, llm
+        @activity.defn(name=CLEAN_ACTIVITY)
+        async def clean(input: CleanInput) -> CleanOutput:
+            self.cleaned.append(input)
+            self.content_info.append(activity.info())
+            return await self._clean(input)
+
+        @activity.defn(name=VALIDATE_ACTIVITY)
+        async def validate(input: ValidateInput) -> None:
+            self.validated.append(input)
+            self.content_info.append(activity.info())
+            return await self._validate(input)
+
+        return [mirror_block, mirror_run, record], scrape, llm, [clean, validate]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
-        db_activities, scrape, llm = self.activities()
+        db_activities, scrape, llm, content = self.activities()
         async with await WorkflowEnvironment.start_time_skipping(
             data_converter=pydantic_data_converter
         ) as env:
@@ -182,6 +215,7 @@ class Harness:
                 ),
                 Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
                 Worker(env.client, task_queue=LLM_QUEUE, activities=[llm]),
+                Worker(env.client, task_queue=CONTENT_QUEUE, activities=content),
             ):
                 handle = await env.client.start_workflow(
                     PipelineWorkflow.run,
@@ -392,6 +426,145 @@ async def test_crossing_the_storage_wall_completes_the_run_with_a_named_error():
     final = h.calls[-1]
     assert (final.status, final.result_path) == ("completed", LLM_PATH)
     assert final.error.startswith("storage_wall: block 'fetch' took storage to 150 of 100 bytes")
+
+
+# --- Clean + Validate (C.8) --------------------------------------------------------------
+
+RULES = [
+    {"kind": "min_length", "chars": 100},
+    {"kind": "contains", "text": "Add to cart"},
+]
+
+
+def _with_content_blocks(*blocks):
+    """fetch -> <blocks> -> extract, each block consuming the one before it."""
+    stored = json.loads(json.dumps(DEFINITION))
+    fetch, extract = stored["blocks"]
+    previous, middle = "fetch", []
+    for block_id, block_type, config in blocks:
+        middle.append(
+            {
+                "id": block_id,
+                "type": block_type,
+                "input": previous,
+                "config_schema_version": 1,
+                "config": config,
+                "secrets": {},
+            }
+        )
+        previous = block_id
+    extract["input"] = previous
+    stored["blocks"] = [fetch, *middle, extract]
+    parsed, _ = parse_definition(stored)
+    return RUN_INPUT.model_copy(
+        update={
+            "blocks": parsed.blocks,
+            "time_budget_seconds": parsed.run_budget_seconds,
+            "artifact_ids": {b.id: f"a-{b.id}" for b in parsed.blocks},
+        }
+    )
+
+
+CLEAN_GUARD = _with_content_blocks(("clean", "clean", {}), ("guard", "validate", {"rules": RULES}))
+
+
+async def test_clean_and_validate_run_on_the_content_queue_between_scrape_and_llm():
+    h = Harness()
+    result = await h.run(CLEAN_GUARD)
+
+    assert result == LLM_PATH
+    assert h.cleaned == [CleanInput(artifact_id="a-clean", input_path=SCRAPE_PATH)]
+    assert h.validated == [ValidateInput(input_path=CLEAN_PATH, rules=RULES)]
+    # Validate is an effect block: it stores nothing and passes Clean's object on to the LLM.
+    [llm] = h.extracted
+    assert llm.raw_minio_path == CLEAN_PATH
+    assert h.calls[3:] == [
+        MirrorBlockInput(run_id="r1", block_id="clean", status="running", input_ref=SCRAPE_PATH),
+        RecordStorageInput(
+            run_id="r1", block_id="clean", objects=[StoredObject(path=CLEAN_PATH, size=7)]
+        ),
+        MirrorBlockInput(run_id="r1", block_id="clean", status="completed", output_ref=CLEAN_PATH),
+        MirrorBlockInput(run_id="r1", block_id="guard", status="running", input_ref=CLEAN_PATH),
+        MirrorBlockInput(run_id="r1", block_id="guard", status="completed", output_ref=CLEAN_PATH),
+        MirrorBlockInput(run_id="r1", block_id="extract", status="running", input_ref=CLEAN_PATH),
+        RecordStorageInput(
+            run_id="r1", block_id="extract", objects=[StoredObject(path=LLM_PATH, size=3)]
+        ),
+        MirrorBlockInput(run_id="r1", block_id="extract", status="completed", output_ref=LLM_PATH),
+        MirrorRunInput(run_id="r1", status="completed", result_path=LLM_PATH),
+    ]
+
+
+async def test_validate_block_sends_the_rules_by_alias():
+    # The worker's twin parses the catalog's dump; json_schema's field is "schema" on the wire.
+    schema_rule = {"kind": "json_schema", "schema": {"type": "object"}}
+    h = Harness()
+    await h.run(_with_content_blocks(("guard", "validate", {"rules": [schema_rule]})))
+
+    [validated] = h.validated
+    assert validated.rules == [schema_rule]
+
+
+async def test_a_trailing_validate_leaves_the_result_on_the_last_content_block():
+    stored = json.loads(json.dumps(DEFINITION))
+    stored["blocks"][1] = {
+        "id": "guard",
+        "type": "validate",
+        "input": "fetch",
+        "config_schema_version": 1,
+        "config": {"rules": RULES},
+        "secrets": {},
+    }
+    parsed, _ = parse_definition(stored)
+    h = Harness()
+    result = await h.run(
+        RUN_INPUT.model_copy(
+            update={
+                "blocks": parsed.blocks,
+                "time_budget_seconds": parsed.run_budget_seconds,
+                "artifact_ids": {"fetch": "a-fetch", "guard": "a-guard"},
+            }
+        )
+    )
+
+    assert result == SCRAPE_PATH
+    assert h.calls[-1] == MirrorRunInput(run_id="r1", status="completed", result_path=SCRAPE_PATH)
+
+
+async def test_a_failed_rule_stops_the_run_before_the_llm_is_billed():
+    async def validate(input):
+        raise ApplicationError(
+            "rules[1] (contains): 'Add to cart' not found",
+            type="ValidationFailed",
+            non_retryable=True,
+        )
+
+    h = Harness(validate=validate)
+    result = await h.run(CLEAN_GUARD)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert h.extracted == []
+    assert len(h.validated) == 1  # non-retryable: one attempt
+    message = "ValidationFailed: rules[1] (contains): 'Add to cart' not found"
+    assert h.calls[-2:] == [
+        MirrorBlockInput(run_id="r1", block_id="guard", status="failed", error=message),
+        MirrorRunInput(run_id="r1", status="failed", error=f"guard: {message}"),
+    ]
+
+
+async def test_content_block_timeouts_come_from_the_catalog():
+    h = Harness()
+    await h.run(CLEAN_GUARD)
+
+    clean_info, validate_info = h.content_info
+    for info, block_type, block in (
+        (clean_info, CLEAN, CLEAN_GUARD.blocks[1]),
+        (validate_info, VALIDATE, CLEAN_GUARD.blocks[2]),
+    ):
+        timing = block_type.timing(block.config)
+        assert info.task_queue == CONTENT_QUEUE
+        assert info.start_to_close_timeout == timedelta(seconds=timing.start_to_close)
+        assert info.schedule_to_close_timeout == timedelta(seconds=timing.budget)
 
 
 # ---------------------------------------------------------------------------

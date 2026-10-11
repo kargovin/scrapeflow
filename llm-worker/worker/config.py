@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     llm_request_timeout_seconds: int = 60
     llm_max_content_chars: int = 50_000
     llm_max_workers: int = 3
+    # Temporal mode: concurrent Clean/Validate activities on the content queue.
+    content_max_workers: int = 4
     # Provider-SDK retry count. Both the anthropic and openai clients default to
     # max_retries=2, so one call_llm() could make three billable attempts — invisible
     # in our logs and multiplying the wall-clock ceiling to ~3x. Pinned to 0 so retry

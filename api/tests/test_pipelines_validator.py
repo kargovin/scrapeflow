@@ -213,6 +213,27 @@ def test_declarative_validate_rules_accepted():
     assert stored["blocks"][2]["config"]["rules"][0]["schema"] == SCHEMA
 
 
+def test_malformed_json_schema_rule_rejected():
+    rules = [{"kind": "present", "path": "/x"}, {"kind": "json_schema", "schema": {"type": 5}}]
+    found = one_problem(pipeline(scrape(), llm(), check(input="extract", rules=rules)))
+    assert found.startswith("block 'check': config.rules[1].schema is not a valid JSON Schema: ")
+
+
+def test_malformed_llm_output_schema_rejected():
+    block = llm()
+    block["config"]["output_schema"] = {"type": "object", "required": "title"}
+    found = one_problem(pipeline(scrape(), block))
+    assert found.startswith("block 'extract': config.output_schema is not a valid JSON Schema: ")
+
+
+def test_malformed_schema_does_not_hide_later_checks():
+    # The block still parses, so the budget and type walk run in the same save.
+    block = llm()
+    block["config"]["output_schema"] = {"type": "object", "required": "title"}
+    found = problems(pipeline(scrape(), block, webhook(), webhook(id="again", input="notify")))
+    assert len(found) == 2
+
+
 # --- exactly one starting block, and it is a Scrape (ADR-009 §8) ---------------------------
 
 

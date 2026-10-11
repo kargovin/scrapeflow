@@ -108,6 +108,28 @@ LLM_INPUTS = {
 }
 
 
+CLEAN_INPUT = api.CleanInput(
+    artifact_id=ARTIFACT_ID,
+    input_path=f"scrapeflow-results/history/{ARTIFACT_ID}/scrape.html",
+)
+
+# One rule of each kind, as the workflow dumps the catalog's models (by alias) — the API test
+# test_validate_block_sends_the_rules_by_alias pins that shape on the producer side.
+VALIDATE_RULES = [
+    {"kind": "json_schema", "schema": {"type": "object", "required": ["price"]}},
+    {"kind": "present", "path": "/price"},
+    {"kind": "type", "path": "/price", "type": "number"},
+    {"kind": "compare", "path": "/price", "op": "gt", "value": 0},
+    {"kind": "compare", "path": "/in_stock", "op": "eq", "value": True},
+    {"kind": "compare", "path": "/currency", "op": "ne", "value": None},
+    {"kind": "contains", "text": "Add to cart"},
+    {"kind": "min_length", "chars": 500},
+]
+VALIDATE_INPUT = api.ValidateInput(
+    input_path=f"scrapeflow-results/history/{ARTIFACT_ID}/llm.json", rules=VALIDATE_RULES
+)
+
+
 @pytest.mark.parametrize("name", sorted(SCRAPE_INPUTS))
 def test_playwright_worker_parses_every_scrape_input(name):
     sent = SCRAPE_INPUTS[name]
@@ -140,6 +162,29 @@ def test_llm_stage_writes_beside_the_scrape_it_reads():
     received = _decode(_encode(LLM_INPUTS["anthropic"]), llm.LLMInput)
 
     assert f"history/{received.artifact_id}/" in received.raw_minio_path
+
+
+def test_llm_worker_parses_the_clean_input():
+    received = _decode(_encode(CLEAN_INPUT), llm.CleanInput)
+
+    assert received.model_dump() == CLEAN_INPUT.model_dump()
+
+
+def test_llm_worker_parses_every_validate_rule_kind():
+    received = _decode(_encode(VALIDATE_INPUT), llm.ValidateInput)
+
+    assert received.input_path == VALIDATE_INPUT.input_path
+    assert [r.model_dump(by_alias=True) for r in received.rules] == VALIDATE_RULES
+    # A bool stays a bool through the union: `eq true` must not become `eq 1`.
+    assert received.rules[4].value is True
+
+
+def test_llm_worker_refuses_an_unknown_rule_kind():
+    with pytest.raises(ValidationError):
+        _decode(
+            _encode(api.ValidateInput(input_path="b/k", rules=[{"kind": "regex", "re": "x"}])),
+            llm.ValidateInput,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +229,17 @@ def test_api_parses_the_llm_worker_output():
     assert received.model_dump() == sent.model_dump()
 
 
+def test_api_parses_the_clean_output():
+    sent = llm.CleanOutput(
+        result=llm.StoredObject(
+            path=f"scrapeflow-results/history/{ARTIFACT_ID}/clean.md", size=2048
+        )
+    )
+    received = _decode(_encode(sent), api.CleanOutput)
+
+    assert received.model_dump() == sent.model_dump()
+
+
 def test_api_parses_the_go_worker_output():
     # Written by http-worker/internal/activity/contract_test.go from a marshalled ScrapeOutput.
     received = _decode((FIXTURES / "go_scrape_output.json").read_bytes(), api.ScrapeOutput)
@@ -213,6 +269,8 @@ def test_api_rejects_a_null_list_from_go():
     [
         (api.ScrapeInput, playwright.ScrapeInput),
         (api.LLMInput, llm.LLMInput),
+        (api.CleanInput, llm.CleanInput),
+        (api.ValidateInput, llm.ValidateInput),
     ],
 )
 def test_workers_accept_every_input_field_the_api_sends(producer, consumer):
@@ -226,6 +284,7 @@ def test_workers_accept_every_input_field_the_api_sends(producer, consumer):
         (playwright.StoredObject, api.StoredObject),
         (llm.LLMOutput, api.LLMOutput),
         (llm.StoredObject, api.StoredObject),
+        (llm.CleanOutput, api.CleanOutput),
     ],
 )
 def test_api_accepts_every_output_field_the_workers_send(producer, consumer):
@@ -243,6 +302,14 @@ def test_llm_worker_registers_the_name_and_queue_the_api_calls():
     # A mismatch raises nothing: the task waits on an unpolled queue until it times out.
     assert llm.LLM_EXTRACT_ACTIVITY == api.LLM_EXTRACT_ACTIVITY
     assert llm.LLM_QUEUE == api_queues.LLM_QUEUE
+
+
+def test_content_activities_register_the_names_and_queue_the_api_calls():
+    assert llm.CLEAN_ACTIVITY == api.CLEAN_ACTIVITY
+    assert llm.VALIDATE_ACTIVITY == api.VALIDATE_ACTIVITY
+    assert llm.CONTENT_QUEUE == api_queues.CONTENT_QUEUE
+    # A separate queue, so a Clean never waits behind a slow LLM call.
+    assert api_queues.CONTENT_QUEUE != api_queues.LLM_QUEUE
 
 
 # ---------------------------------------------------------------------------

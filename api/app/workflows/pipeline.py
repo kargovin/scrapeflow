@@ -10,11 +10,21 @@ from temporalio.exceptions import ActivityError, ApplicationError, RetryState
 
 with workflow.unsafe.imports_passed_through():
     from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, CATALOG, InputBinding, Timing
-    from app.pipelines.definition import LLMExtractBlock, RunBlock, ScrapeBlock
+    from app.pipelines.definition import (
+        CleanBlock,
+        LLMExtractBlock,
+        RunBlock,
+        ScrapeBlock,
+        ValidateBlock,
+    )
     from app.schemas.jobs import Engine
     from app.workflows.activities.contracts import (
+        CLEAN_ACTIVITY,
         LLM_EXTRACT_ACTIVITY,
         SCRAPE_ACTIVITY,
+        VALIDATE_ACTIVITY,
+        CleanInput,
+        CleanOutput,
         Credentials,
         LLMInput,
         LLMOutput,
@@ -22,8 +32,10 @@ with workflow.unsafe.imports_passed_through():
         ScrapeOptions,
         ScrapeOutput,
         StoredObject,
+        ValidateInput,
     )
     from app.workflows.queues import (
+        CONTENT_QUEUE,
         LLM_QUEUE,
         SCRAPE_HTTP_QUEUE,
         SCRAPE_PLAYWRIGHT_QUEUE,
@@ -35,8 +47,8 @@ MIRROR_RUN_ACTIVITY = "mirror_run_status"
 RECORD_STORAGE_ACTIVITY = "record_storage"
 CHECK_CANCELLED_ACTIVITY = "check_cancelled"
 
-# The block types PipelineWorkflow can execute; the trigger refuses the rest (C.8, C.9 add theirs).
-SUPPORTED_BLOCK_TYPES = frozenset({"scrape", "llm_extract"})
+# The block types PipelineWorkflow can execute; the trigger refuses the rest (C.9 adds webhook).
+SUPPORTED_BLOCK_TYPES = frozenset({"scrape", "clean", "llm_extract", "validate"})
 
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
 
@@ -318,5 +330,31 @@ class PipelineWorkflow:
                 **options,
             )
             return [extracted.result]
+
+        if isinstance(block, CleanBlock):
+            if input_ref is None:
+                raise ApplicationError("clean has no input", non_retryable=True)
+            cleaned = await workflow.execute_activity(
+                CLEAN_ACTIVITY,
+                CleanInput(artifact_id=artifact_id, input_path=input_ref),
+                task_queue=CONTENT_QUEUE,
+                result_type=CleanOutput,
+                **options,
+            )
+            return [cleaned.result]
+
+        if isinstance(block, ValidateBlock):
+            if input_ref is None:
+                raise ApplicationError("validate has no input", non_retryable=True)
+            await workflow.execute_activity(
+                VALIDATE_ACTIVITY,
+                ValidateInput(
+                    input_path=input_ref,
+                    rules=[r.model_dump(mode="json", by_alias=True) for r in block.config.rules],
+                ),
+                task_queue=CONTENT_QUEUE,
+                **options,
+            )
+            return []
 
         raise ApplicationError(f"block type {block.type!r} cannot run yet", non_retryable=True)

@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
+from jsonschema import exceptions as jsonschema_exceptions
+from jsonschema import validators as jsonschema_validators
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.pipelines.catalog import (
@@ -16,7 +18,10 @@ from app.pipelines.catalog import (
     SCRAPE,
     WEBHOOK,
     BlockType,
+    JsonSchemaRule,
+    LLMExtractConfigV1,
     Timing,
+    ValidateConfigV1,
     is_binding,
     run_need_seconds,
 )
@@ -167,7 +172,28 @@ def _parse_block(
         config = model.model_validate(block.config)
     except ValidationError as exc:
         return None, _pydantic_problems(exc, block.id, "config")
-    return ValidatedBlock(block.id, block_type, config, block_type.timing(config)), []
+    validated = ValidatedBlock(block.id, block_type, config, block_type.timing(config))
+    return validated, _json_schema_problems(block.id, config)
+
+
+def _json_schema_problems(block_id: str, config: BaseModel) -> list[Problem]:
+    """Save time only: the catalog models also parse pinned versions, which keep their day's rules."""
+    schemas: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(config, LLMExtractConfigV1):
+        schemas.append(("config.output_schema", config.output_schema))
+    elif isinstance(config, ValidateConfigV1):
+        schemas += [
+            (f"config.rules[{i}].schema", rule.schema_)
+            for i, rule in enumerate(config.rules)
+            if isinstance(rule, JsonSchemaRule)
+        ]
+    problems = []
+    for where, schema in schemas:
+        try:
+            jsonschema_validators.validator_for(schema).check_schema(schema)
+        except jsonschema_exceptions.SchemaError as exc:
+            problems.append(Problem(block_id, f"{where} is not a valid JSON Schema: {exc.message}"))
+    return problems
 
 
 def _starting_block_problems(blocks: list[BlockDefinition]) -> list[Problem]:

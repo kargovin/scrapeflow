@@ -14,6 +14,10 @@ SCRAPE_ACTIVITY = "Scrape"
 # Registered by the LLM worker under this name (worker/contracts.py); must match exactly.
 LLM_EXTRACT_ACTIVITY = "LLMExtract"
 
+# Registered by the LLM worker on the content queue (worker/contracts.py); must match exactly.
+CLEAN_ACTIVITY = "Clean"
+VALIDATE_ACTIVITY = "Validate"
+
 
 class Credentials(BaseModel):
     """Per-job secrets as Fernet ciphertext — workflow history stores inputs in plain JSON."""
@@ -68,3 +72,20 @@ class LLMInput(BaseModel):
 
 class LLMOutput(BaseModel):
     result: StoredObject
+
+
+class CleanInput(BaseModel):
+    artifact_id: ArtifactId
+    input_path: Annotated[str, StringConstraints(min_length=1)]
+
+
+class CleanOutput(BaseModel):
+    result: StoredObject
+
+
+class ValidateInput(BaseModel):
+    """A failing rule is raised, not returned."""
+
+    input_path: Annotated[str, StringConstraints(min_length=1)]
+    # The Validate block's rules as the catalog dumps them (by alias: "schema").
+    rules: list[dict[str, Any]] = Field(min_length=1)

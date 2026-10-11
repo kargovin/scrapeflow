@@ -24,6 +24,10 @@ dependencies = [
     "openai>=3.8.0,<4",
     "structlog>=24.0.0",
     "temporalio>=1.33.0",
+    # Clean and Validate (worker/content.py).
+    "markdownify>=0.12.0",
+    "beautifulsoup4>=4.12.0",
+    "jsonschema>=4.23.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]

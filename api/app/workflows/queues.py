@@ -15,3 +15,6 @@ SCRAPE_PLAYWRIGHT_QUEUE = "scrape-playwright"
 
 # Polled by the LLM worker in WORKER_MODE=temporal.
 LLM_QUEUE = "llm"
+
+# Polled by the LLM worker in WORKER_MODE=temporal, beside LLM_QUEUE: Clean and Validate.
+CONTENT_QUEUE = "content"

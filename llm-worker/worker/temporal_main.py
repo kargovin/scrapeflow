@@ -4,7 +4,8 @@ LLM worker — Temporal entry point (WORKER_MODE=temporal).
   1. Load config from env vars (requires LLM_KEY_ENCRYPTION_KEY)
   2. Connect to Temporal
   3. Connect to MinIO, verify bucket exists
-  4. Poll the `llm` task queue for LLMExtract activity tasks (no workflows)
+  4. Poll the `llm` task queue for LLMExtract and the `content` queue for Clean and
+     Validate (no workflows)
   5. On SIGTERM, wait up to llm_graceful_shutdown_seconds for in-flight calls
 """
 
@@ -20,7 +21,8 @@ from temporalio.worker import Worker
 
 from .activity import LLMActivities
 from .config import settings
-from .contracts import LLM_QUEUE
+from .content import ContentActivities
+from .contracts import CONTENT_QUEUE, LLM_QUEUE
 
 log = structlog.get_logger()
 
@@ -61,13 +63,25 @@ async def run() -> None:
         ),
     )
 
-    async with worker:
+    content = ContentActivities(minio)
+    content_worker = Worker(
+        client,
+        task_queue=CONTENT_QUEUE,
+        activities=[content.clean, content.validate],
+        max_concurrent_activities=settings.content_max_workers,
+        graceful_shutdown_timeout=timedelta(
+            seconds=settings.llm_graceful_shutdown_seconds
+        ),
+    )
+
+    async with worker, content_worker:
         log.info(
             "temporal_worker_started",
             address=settings.temporal_address,
             namespace=settings.temporal_namespace,
-            task_queue=LLM_QUEUE,
+            task_queues=[LLM_QUEUE, CONTENT_QUEUE],
             max_workers=settings.llm_max_workers,
+            content_max_workers=settings.content_max_workers,
             graceful_shutdown_s=settings.llm_graceful_shutdown_seconds,
             warmup=settings.llm_warmup_enabled,
         )
