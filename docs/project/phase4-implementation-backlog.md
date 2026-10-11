@@ -66,7 +66,7 @@
 | C.5 | Run trigger: admission (three meters + headroom buffer), row insert, workflow start | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); see *production refactor* |
 | C.6 | Workflow-worker DB activities: mirror, accounting, cancel-check | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); `on_storage_wall` folded into `record_storage`; see *production refactor* |
 | C.7 | `PipelineWorkflow` body | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); scrape + llm_extract only until C.8/C.9; see *production refactor* |
-| C.8 | Clean + Validate activities | ⬜ |
+| C.8 | Clean + Validate activities | ✅ Built 2026-10-11 (local, uncommitted, unreleased); LLM worker's `content` queue; see C.8 *Built* |
 | C.9 | Webhook activity: wire contract, SSRF, four-timeout ladder, `waiting` | ⬜ |
 | C.10 | Cancellation: API cancel + workflow cancel + boundary re-check | ⬜ |
 | C.11 | Run/result read API + `pipeline_status` notify channel + WS route | ⬜ |
@@ -1059,9 +1059,10 @@ its block). Settings `max_blocks_per_pipeline` (20), `max_pipelines_per_user` (5
   (the activity contract already carries Fernet ciphertext). (2) DB/network checks are C.4's: LLM key
   ownership, SSRF on a literal Scrape/Webhook URL and the key's `base_url`, the per-user count.
   (3) Block IDs are required here — C.4 assigns missing ones before calling `validate()`.
-- ⚠️ **Not done — `jsonschema` is not an API dependency.** The `json_schema` rule's schema and the LLM
+- ~~⚠️ **Not done — `jsonschema` is not an API dependency.** The `json_schema` rule's schema and the LLM
   `output_schema` are checked for shape only, not meta-validated. Owner's call whether to add it to the
-  API lock; C.8 needs it in the LLM image either way to evaluate the rule.
+  API lock; C.8 needs it in the LLM image either way to evaluate the rule.~~ ✅ **C.8** (owner: worker
+  + API) — both are meta-validated at save.
 - ⚠️ **For C.7:** do not call `validate()` in the workflow body — it reads settings, so an operator
   limit change could fail a replay. Use the catalog (`config_versions[v].model_validate`, `.timing`).
 - **Verified:** 60 tests (one per rule, positive + negative; R6 recipe validates; a stored definition
@@ -1299,7 +1300,7 @@ Supersedes the MVP note above wherever they differ.
   starts — no workflow `execution_timeout`, which would end the run without a mirror. The
   `(gave up after N attempts)` suffix on `MAXIMUM_ATTEMPTS_REACHED`. Result = the last *content*
   block's object (effect blocks pass their input ref on — **untested until C.8/C.9 make one
-  runnable**). **Storage wall:** the run completes and its `error` reads `storage_wall: block 'x'
+  runnable**; ✅ tested at C.8 with Validate). **Storage wall:** the run completes and its `error` reads `storage_wall: block 'x'
   took storage to U of L bytes; …`. **Cancellation:** every await goes through `_finish()`
   (`asyncio.shield` + re-await), so a Temporal cancel never aborts the running block (R3); it is
   honoured at the next block boundary → run `cancelled`, tail `skipped`, workflow ends Cancelled. A
@@ -1333,6 +1334,53 @@ scraper pods stay hostile-page renderers. Reversible — activities move by re-r
   failing rule ⇒ `ApplicationError(non_retryable=True)` naming the rule; passes its input ref through.
 - Tests: rule matrix; Clean on a fixture page; both idempotent on retry (deterministic keys — §5).
 **Depends on:** B.6 (image + queue plumbing), C.7
+
+**Built 2026-10-11 (local, uncommitted) — not released.** Owner: "do c8". Three calls asked before
+building, all answered with the recommendation: (a) **Clean = denylist MVP**, the scored ladder
+(`competitor-research.md` §B1) stays a later refactor; (b) **object path `history/{artifact_id}/clean.md`**
+— ADR-011's convention, as Scrape and LLM already use in C.7 (the `pipelines/{run}/{block}.md` above
+predates it); (c) **`jsonschema` in the worker *and* the API** — closes C.3's ⚠️.
+- **Worker** (`llm-worker/`): `worker/content.py` — `ContentActivities.clean` / `.validate`, registered
+  as `Clean` / `Validate` on a **second `Worker` in the same process** polling `content` (`temporal_main.py`;
+  `content_max_workers` = 4) — so a Clean never queues behind a slow LLM call and prod needs **no new
+  Deployment and no infra change**: the existing `llm-worker-temporal` polls both queues on its next
+  image. `worker/cleaner.py` — drops `head`, script/style/noscript/template/iframe/object/embed/svg/canvas,
+  nav/aside/form/button/dialog, `role=` navigation/banner/contentinfo/complementary/search/dialog/alertdialog,
+  `[hidden]`/`[aria-hidden=true]`, data-URI images, and `header`/`footer` **outside** `article`/`main`/`section`
+  (an article's own title stays) → `markdownify` (ATX headings) → blank runs collapsed. `worker/rules.py` —
+  RFC 6901 pointers; JSON types (`39.0` is an integer; `true` ≠ `1` for `eq`); every failing rule reported
+  by index, one message (`rules[1] (contains): 'Add to cart' not found`). Contracts twin in
+  `worker/contracts.py` (typed rules); `storage.py` gained `fetch_bytes` / `put`.
+- **Errors:** a failing rule → `ValidationFailed`, non-retryable. Unreadable input (`NoSuchKey`), a bad
+  schema on an old saved version, a conversion crash → `ContentFailed`, non-retryable. MinIO unreachable/5xx
+  → `StorageTransient`, retried by the catalog's 5 s ×2 / 3-attempt policy (the LLM worker's classifier).
+  Pages decode with `errors="replace"` — a latin-1 page is cleaned, not failed. CPU work runs in
+  `asyncio.to_thread`: the LLM activities sharing the event loop must keep heartbeating.
+- **API:** `CONTENT_QUEUE`, `CLEAN_ACTIVITY`/`VALIDATE_ACTIVITY`, `CleanInput`/`CleanOutput`/`ValidateInput`
+  (rules travel as the catalog's **by-alias** dump — `"schema"`, not `schema_`; the worker twin parses
+  them typed); two `_execute` branches; `SUPPORTED_BLOCK_TYPES` += `clean`, `validate`. Validate returns
+  no objects, so the workflow's effect path passes its input ref on and charges nothing.
+- **Save-time meta-validation** in `validator.py` (`_json_schema_problems`), **not** in the catalog models —
+  those also parse pinned versions at the trigger, so a check there would strand old versions. The block
+  still parses, so the type walk and budget run in the same save. A pre-C.8 version with a bad schema fails
+  at its Validate block (`invalid schema: …`) instead.
+- **Timing:** Clean/Validate keep C.3's 60 s attempt — a 577 B page takes milliseconds; nothing measured
+  near the limit. Revisit only if a large page times out.
+- **Verified:** **192 LLM-worker tests** (+72 in `tests/test_content.py`), **432 API tests** (+9), **59 contract
+  tests** (+8: Clean in/out, every rule kind incl. bool-stays-bool, unknown kind refused, names/queues,
+  twins). **15 mutations, each caught by its own test** (header/footer scope, data-URI, JSON equality,
+  leading-zero index, pointer unescape, integer-as-float, worker schema check, non-retryable failure,
+  stage-named key, lenient decode, by-alias dump, content queue, Validate stores nothing, supported types,
+  save-time schema check). ⚠️ **Mutation-testing trap:** a same-length edit restored within the same second
+  leaves a valid stale `.pyc` — run mutation passes with `PYTHONDONTWRITEBYTECODE=1`, or every later
+  "catch" is the stale bytecode. **Live on compose** through Temporal, the Go worker and the rebuilt
+  `llm-worker-temporal`: scrape → clean → validate `completed`, `result_path` = `clean.md` (last content
+  block); scrape → clean → validate("Add to cart") → llm `failed` at `guard`, `extract` `skipped` — **no LLM
+  call**; scrape(json) → validate(json_schema + type + compare) `completed`; a malformed schema → 422 at
+  save. Ledger: five objects, `clean.md` charged with its block, counter = sum; all released after.
+- ⚠️ **Known simplification — Clean drops `<title>`** with the rest of `<head>`. On today's `example.com`
+  (no `<h1>`) the page's name survives nowhere in `clean.md`. Candidate for the refactor: emit the title as
+  `# …` when the content has no `h1`.
 
 #### C.9 — Webhook activity
 
