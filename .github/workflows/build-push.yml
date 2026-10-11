@@ -33,9 +33,32 @@ jobs:
             coordinator:
               - 'coordinator/**'
 
+  # ── Workflow replay (ADR-012) ──────────────────────────────────────────────
+  # The workflow worker ships in the api image: recorded histories must replay on this code, or a
+  # deploy strands runs already in flight. Pure Python — no services.
+  replay:
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Replay recorded workflow histories
+        run: |
+          uv sync --frozen --extra dev --no-install-project
+          key() { uv run --no-sync python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"; }
+          export LLM_KEY_ENCRYPTION_KEY="$(key)" CREDENTIALS_ENCRYPTION_KEY="$(key)"
+          uv run --no-sync pytest --noconftest tests/test_workflow_replay.py -q -p no:cacheprovider
+
   # ── API ────────────────────────────────────────────────────────────────────
   build-api:
-    needs: changes
+    needs: [changes, replay]
     if: needs.changes.outputs.api == 'true'
     runs-on: ubuntu-latest
 

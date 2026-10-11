@@ -263,6 +263,9 @@ class Harness:
                     return await handle.result()
                 except WorkflowFailureError as exc:
                     return exc
+                finally:
+                    # The replay corpus records from here (tests/replay/record_harness.py).
+                    self.history = await handle.fetch_history()
 
 
 def _block_calls(calls):
