@@ -176,9 +176,12 @@ def patched_ws_app():
 class MockJobNotifier:
     """Pre-fills queues with the supplied update dicts so WS handlers terminate."""
 
-    def __init__(self, job_updates=None, batch_updates=None, raise_limit=False):
+    def __init__(
+        self, job_updates=None, batch_updates=None, raise_limit=False, pipeline_updates=None
+    ):
         self._job_updates = list(job_updates or [])
         self._batch_updates = list(batch_updates or [])
+        self._pipeline_updates = list(pipeline_updates or [])
         self._raise_limit = raise_limit
 
     @asynccontextmanager
@@ -200,5 +203,16 @@ class MockJobNotifier:
             raise WebSocketConnectionLimitExceeded()
         queue: asyncio.Queue = asyncio.Queue()
         for item in self._batch_updates:
+            await queue.put(item)
+        yield queue
+
+    @asynccontextmanager
+    async def subscribe_pipeline_run(self, run_id: str, user_id: str):
+        if self._raise_limit:
+            from app.core.job_notifier import WebSocketConnectionLimitExceeded
+
+            raise WebSocketConnectionLimitExceeded()
+        queue: asyncio.Queue = asyncio.Queue()
+        for item in self._pipeline_updates:
             await queue.put(item)
         yield queue

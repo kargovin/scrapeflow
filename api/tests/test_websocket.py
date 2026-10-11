@@ -474,3 +474,119 @@ async def test_batch_watch_connection_limit_exceeded():
         app.state.job_notifier = None
 
     assert messages == [4029]
+
+
+# ---------------------------------------------------------------------------
+# /pipelines/{id}/runs/{run_id}/watch (C.11)
+# ---------------------------------------------------------------------------
+
+
+def _pipeline_db(run):
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=run)
+    db.refresh = AsyncMock()
+    db.close = AsyncMock()
+    return db
+
+
+def _pipeline_run(status: str, cancel_requested=False):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        status=status,
+        cancel_requested_at=MagicMock() if cancel_requested else None,
+    )
+
+
+def _watch_pipeline(user, run, notifier, db, receive: int):
+    app.state.job_notifier = notifier
+    app.dependency_overrides[get_db] = _override_db(db)
+    pipeline_id = uuid.uuid4()
+    messages: list = []
+    codes: list = []
+
+    def _do():
+        with patched_ws_app(), TestClient(app, raise_server_exceptions=False) as client:
+            with patch("app.routers.pipelines.auth_from_token", new=AsyncMock(return_value=user)):
+                try:
+                    url = f"/pipelines/{pipeline_id}/runs/{run.id if run else uuid.uuid4()}/watch"
+                    with client.websocket_connect(f"{url}?token=sf_any") as ws:
+                        for _ in range(receive):
+                            messages.append(ws.receive_json())
+                        ws.receive_text()
+                except WebSocketDisconnect as e:
+                    codes.append(e.code)
+
+    async def go():
+        try:
+            await asyncio.to_thread(_do)
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+            app.state.job_notifier = None
+        return pipeline_id, messages, codes
+
+    return go()
+
+
+async def test_pipeline_watch_bad_token():
+    _, messages, codes = await _watch_pipeline(
+        None, _pipeline_run("running"), MockJobNotifier(), _pipeline_db(None), 0
+    )
+    assert (messages, codes) == ([], [4001])
+
+
+async def test_pipeline_watch_other_users_run_is_not_found():
+    _, messages, codes = await _watch_pipeline(
+        _user(), _pipeline_run("running"), MockJobNotifier(), _pipeline_db(None), 0
+    )
+    assert (messages, codes) == ([], [4004])
+
+
+async def test_pipeline_watch_already_terminal():
+    run = _pipeline_run("completed")
+    pipeline_id, messages, _ = await _watch_pipeline(
+        _user(), run, MockJobNotifier(), _pipeline_db(run), 1
+    )
+    assert messages == [
+        {
+            "type": "completed",
+            "run_id": str(run.id),
+            "status": "completed",
+            "cancel_requested": False,
+            "block_id": None,
+            "block_status": None,
+            "result_url": f"/pipelines/{pipeline_id}/runs/{run.id}/result",
+        }
+    ]
+
+
+async def test_pipeline_watch_streams_blocks_until_terminal_without_holding_the_db():
+    run = _pipeline_run("running")
+    rid = str(run.id)
+    base = {"run_id": rid, "pipeline_id": "p"}
+    notifier = MockJobNotifier(
+        pipeline_updates=[
+            {**base, "status": "running", "block_id": "fetch", "block_status": "completed"},
+            {**base, "status": "running", "cancel_requested": True},
+            {**base, "status": "cancelled"},
+        ]
+    )
+    db = _pipeline_db(run)
+    _, messages, _ = await _watch_pipeline(_user(), run, notifier, db, 4)
+
+    assert [(m["type"], m["block_id"], m["cancel_requested"]) for m in messages] == [
+        ("status_update", None, False),
+        ("status_update", "fetch", False),
+        ("status_update", None, True),
+        ("cancelled", None, False),
+    ]
+    # Subscribed, re-read, then released the connection before streaming.
+    db.refresh.assert_awaited_once_with(run)
+    db.close.assert_awaited()
+
+
+async def test_pipeline_watch_connection_limit():
+    run = _pipeline_run("running")
+    _, _, codes = await _watch_pipeline(
+        _user(), run, MockJobNotifier(raise_limit=True), _pipeline_db(run), 0
+    )
+    assert codes == [4029]

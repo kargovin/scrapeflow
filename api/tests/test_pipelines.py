@@ -11,10 +11,12 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
+from miniopy_async.error import S3Error
 from sqlalchemy import delete, func, select, update
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.core.db import AsyncSessionLocal
+from app.core.minio import get_minio
 from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
 from app.main import app
 from app.models.llm_keys import UserLLMKey
@@ -926,3 +928,205 @@ async def test_cancel_notifies_with_the_request_flag(client, headers, key, tempo
         "running",
         True,
     )
+
+
+# ---------------------------------------------------------------------------
+# C.11 — run reads and results
+# ---------------------------------------------------------------------------
+
+
+class FakeMinio:
+    def __init__(self, objects: dict[str, bytes]):
+        self.objects = objects
+        self.reads: list[str] = []
+
+    async def get_object(self, bucket, key):
+        path = f"{bucket}/{key}"
+        self.reads.append(path)
+        if path not in self.objects:
+            raise S3Error("NoSuchKey", "missing", path, "req", "host", MagicMock())
+        response = MagicMock()
+        response.read = AsyncMock(return_value=self.objects[path])
+        response.release = AsyncMock()
+        return response
+
+
+@pytest.fixture
+def minio():
+    fake = FakeMinio({})
+    app.dependency_overrides[get_minio] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_minio, None)
+
+
+SCRAPED = "scrapeflow-results/history/b-fetch/scrape.html"
+EXTRACTED = "scrapeflow-results/history/b-extract/llm.json"
+
+
+async def _finished_run(client, headers, key, temporal, collected=False):
+    """A completed R6 run: fetch stored (or collected), extract stored = result, notify passed."""
+    pipeline = await _create(client, headers, recipe(key.id))
+    run = (await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)).json()
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as db:
+        rows = PipelineRunBlock.pipeline_run_id == uuid.UUID(run["id"])
+        for block_id, output_ref in (
+            ("fetch", SCRAPED),
+            ("extract", EXTRACTED),
+            ("notify", EXTRACTED),
+        ):
+            values = {"status": "completed", "output_ref": output_ref, "finished_at": now}
+            if collected and block_id == "fetch":
+                values["collected_at"] = now
+            await db.execute(
+                update(PipelineRunBlock)
+                .where(rows, PipelineRunBlock.block_id == block_id)
+                .values(**values)
+            )
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == uuid.UUID(run["id"]))
+            .values(status="completed", result_path=EXTRACTED, finished_at=now)
+        )
+        await db.commit()
+    return pipeline["id"], run["id"]
+
+
+async def test_runs_are_listed_newest_first_with_their_version(client, headers, key, temporal):
+    pipeline = await _create(client, headers, runnable(key.id))
+    runs_url = f"/pipelines/{pipeline['id']}/runs"
+    first = (await client.post(runs_url, json={}, headers=headers)).json()
+    await client.patch(
+        f"/pipelines/{pipeline['id']}", json={"definition": recipe(key.id)}, headers=headers
+    )
+    second = (await client.post(runs_url, json={}, headers=headers)).json()
+
+    listed = (await client.get(runs_url, headers=headers)).json()
+
+    assert [(r["id"], r["version"]) for r in listed] == [(second["id"], 2), (first["id"], 1)]
+    assert "blocks" not in listed[0]
+    assert (await client.get(f"{runs_url}?status=completed", headers=headers)).json() == []
+
+
+async def test_another_users_runs_are_not_listed(client, headers, key, temporal, other_user):
+    pipeline = await _create(client, headers, runnable(key.id))
+    runs_url = f"/pipelines/{pipeline['id']}/runs"
+    run = (await client.post(runs_url, json={}, headers=headers)).json()
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == uuid.UUID(run["id"]))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+    assert (await client.get(runs_url, headers=headers)).json() == []
+
+
+async def test_each_block_says_what_became_of_its_output(client, headers, key, temporal):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal, collected=True)
+
+    run = (await client.get(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)).json()
+
+    assert run["version"] == 1
+    assert [(b["block_id"], b["output_state"]) for b in run["blocks"]] == [
+        ("fetch", "collected"),
+        ("extract", "stored"),
+        ("notify", "passed_through"),
+    ]
+    assert run["blocks"][0]["collected_at"] is not None
+
+
+async def test_the_result_is_the_last_content_blocks_object(client, headers, key, temporal, minio):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
+    minio.objects[EXTRACTED] = b'{"title": "x"}'
+
+    resp = await client.get(f"/pipelines/{pipeline_id}/runs/{run_id}/result", headers=headers)
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "content": '{"title": "x"}',
+        "result_path": EXTRACTED,
+        "block_id": "extract",
+    }
+
+
+async def test_one_steps_output_by_block(client, headers, key, temporal, minio):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
+    minio.objects[SCRAPED] = b"<html>page</html>"
+    url = f"/pipelines/{pipeline_id}/runs/{run_id}/result"
+
+    resp = await client.get(f"{url}?block=fetch", headers=headers)
+    assert (resp.status_code, resp.json()["content"]) == (200, "<html>page</html>")
+
+    resp = await client.get(f"{url}?block=notify", headers=headers)
+    assert (resp.status_code, resp.json()["detail"]) == (
+        404,
+        "This block stores nothing; it passed its input on",
+    )
+    assert (await client.get(f"{url}?block=nope", headers=headers)).status_code == 404
+
+
+async def test_a_collected_output_is_gone_not_missing(client, headers, key, temporal, minio):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal, collected=True)
+
+    resp = await client.get(
+        f"/pipelines/{pipeline_id}/runs/{run_id}/result?block=fetch", headers=headers
+    )
+
+    assert resp.status_code == 410
+    assert resp.json()["detail"].startswith("This block's output was collected at ")
+    assert minio.reads == []
+
+
+async def test_a_run_without_a_result_is_404(client, headers, key, temporal, minio):
+    pipeline = await _create(client, headers, runnable(key.id))
+    run = (await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)).json()
+    resp = await client.get(f"/pipelines/{pipeline['id']}/runs/{run['id']}/result", headers=headers)
+    assert (resp.status_code, resp.json()["detail"]) == (404, "The run has no result")
+
+
+async def test_another_users_result_is_404_before_storage_is_read(
+    client, headers, key, temporal, minio, other_user
+):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
+    minio.objects[EXTRACTED] = b"secret"
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == uuid.UUID(run_id))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+
+    resp = await client.get(f"/pipelines/{pipeline_id}/runs/{run_id}/result", headers=headers)
+
+    assert resp.status_code == 404
+    assert minio.reads == []
+
+
+async def test_a_missing_object_is_404_not_500(client, headers, key, temporal, minio):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
+    resp = await client.get(f"/pipelines/{pipeline_id}/runs/{run_id}/result", headers=headers)
+    assert (resp.status_code, resp.json()["detail"]) == (404, "The stored output is missing")
+
+
+async def test_admin_reads_any_users_runs_and_results(
+    client, headers, key, temporal, minio, db_user
+):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
+    minio.objects[EXTRACTED] = b"{}"
+    base = f"/admin/pipelines/{pipeline_id}/runs"
+    assert (await client.get(base, headers=headers)).status_code == 403
+
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, db_user.id)
+        user.is_admin = True
+        await db.commit()
+
+    listed = (await client.get(base, headers=headers)).json()
+    assert [(r["id"], r["user_id"]) for r in listed] == [(run_id, str(db_user.id))]
+    run = (await client.get(f"{base}/{run_id}", headers=headers)).json()
+    assert [b["output_state"] for b in run["blocks"]] == ["stored", "stored", "passed_through"]
+    result = (await client.get(f"{base}/{run_id}/result", headers=headers)).json()
+    assert result["block_id"] == "extract"
+    assert (await client.get(f"{base}/{uuid.uuid4()}", headers=headers)).status_code == 404

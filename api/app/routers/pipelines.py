@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import uuid
@@ -7,7 +8,9 @@ from typing import Any
 
 import structlog
 from cryptography.fernet import Fernet
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, status
+from miniopy_async import Minio
+from miniopy_async.error import S3Error
 from sqlalchemy import Select, delete, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,8 +18,10 @@ from sqlalchemy.orm import aliased
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import auth_from_token, get_current_user
 from app.core.db import get_db
+from app.core.job_notifier import WebSocketConnectionLimitExceeded
+from app.core.minio import get_minio
 from app.core.pipeline_status import notify_run
 from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit
@@ -45,12 +50,15 @@ from app.pipelines.validator import (
     validate,
 )
 from app.schemas.pipelines import (
+    OutputState,
     PipelineCreate,
     PipelineResponse,
     PipelineRunBlockResponse,
     PipelineRunCancelResponse,
     PipelineRunCreate,
     PipelineRunResponse,
+    PipelineRunResultResponse,
+    PipelineRunSummary,
     PipelineUpdate,
     PipelineVersionResponse,
 )
@@ -412,17 +420,36 @@ async def delete_pipeline(
 # ---------------------------------------------------------------------------
 
 
-def _run_response(run: PipelineRun, blocks: list[PipelineRunBlock]) -> PipelineRunResponse:
-    return PipelineRunResponse(
+def output_state(block: PipelineRunBlock) -> OutputState:
+    if block.collected_at is not None:
+        return "collected"
+    if block.output_ref is None:
+        return "none"
+    block_type = CATALOG.get(block.type)
+    return "passed_through" if block_type and block_type.kind == "effect" else "stored"
+
+
+def run_summary(run: PipelineRun, version: int) -> PipelineRunSummary:
+    return PipelineRunSummary(
         id=run.id,
         pipeline_id=run.pipeline_id,
         pipeline_version_id=run.pipeline_version_id,
+        version=version,
         status=run.status,
+        cancel_requested_at=run.cancel_requested_at,
         inputs=run.inputs,
         result_path=run.result_path,
         error=run.error,
         created_at=run.created_at,
         finished_at=run.finished_at,
+    )
+
+
+def run_response(
+    run: PipelineRun, version: int, blocks: list[PipelineRunBlock]
+) -> PipelineRunResponse:
+    return PipelineRunResponse(
+        **run_summary(run, version).model_dump(),
         blocks=[
             PipelineRunBlockResponse(
                 block_id=b.block_id,
@@ -431,9 +458,11 @@ def _run_response(run: PipelineRun, blocks: list[PipelineRunBlock]) -> PipelineR
                 status=b.status,
                 input_ref=b.input_ref,
                 output_ref=b.output_ref,
+                output_state=output_state(b),
                 error=b.error,
                 started_at=b.started_at,
                 finished_at=b.finished_at,
+                collected_at=b.collected_at,
             )
             for b in blocks
         ],
@@ -616,7 +645,7 @@ async def create_run(
         pipeline_id=str(pipeline.id),
         version=version.version,
     )
-    return _run_response(run, run_blocks)
+    return run_response(run, version.version, run_blocks)
 
 
 def _owned_run(pipeline_id: uuid.UUID, run_id: uuid.UUID, user_id: uuid.UUID) -> Select:
@@ -627,7 +656,15 @@ def _owned_run(pipeline_id: uuid.UUID, run_id: uuid.UUID, user_id: uuid.UUID) ->
     )
 
 
-async def _run_blocks(db: AsyncSession, run_id: uuid.UUID) -> list[PipelineRunBlock]:
+async def version_number(db: AsyncSession, run: PipelineRun) -> int:
+    version = await db.scalar(
+        select(PipelineVersion.version).where(PipelineVersion.id == run.pipeline_version_id)
+    )
+    assert version is not None  # FK
+    return version
+
+
+async def run_blocks(db: AsyncSession, run_id: uuid.UUID) -> list[PipelineRunBlock]:
     blocks = await db.scalars(
         select(PipelineRunBlock)
         .where(PipelineRunBlock.pipeline_run_id == run_id)
@@ -646,7 +683,7 @@ async def get_run(
     run = await db.scalar(_owned_run(pipeline_id, run_id, user.id))
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    return _run_response(run, await _run_blocks(db, run.id))
+    return run_response(run, await version_number(db, run), await run_blocks(db, run.id))
 
 
 async def _budget_left(
@@ -716,13 +753,188 @@ async def cancel_run(
         except Exception as exc:
             logger.warning("pipeline_run_cancel_not_sent", run_id=str(run.id), error=str(exc))
 
-    blocks = await _run_blocks(db, run.id)
+    blocks = await run_blocks(db, run.id)
     active = [b for b in blocks if b.status in ("running", "waiting")]
     logger.info("pipeline_run_cancel_requested", run_id=str(run.id), notified=workflow_notified)
     return PipelineRunCancelResponse(
-        run=_run_response(run, blocks),
+        run=run_response(run, await version_number(db, run), blocks),
         still_running=[b.block_id for b in active],
         upper_bound_seconds=await _budget_left(db, run, active, now, workflow_notified),
         llm_billed=any(b.type == "llm_extract" and b.started_at for b in blocks),
         workflow_notified=workflow_notified,
     )
+
+
+# ---------------------------------------------------------------------------
+# Run reads: list, result, live status (C.11)
+# ---------------------------------------------------------------------------
+
+
+def runs_select() -> Select:
+    """Runs with their version number, newest first. Callers add the tenant filter."""
+    return (
+        select(PipelineRun, PipelineVersion.version)
+        .join(PipelineVersion, PipelineVersion.id == PipelineRun.pipeline_version_id)
+        .order_by(PipelineRun.created_at.desc())
+    )
+
+
+@router.get("/{pipeline_id}/runs", response_model=list[PipelineRunSummary])
+async def list_runs(
+    pipeline_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    run_status: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[PipelineRunSummary]:
+    stmt = runs_select().where(
+        PipelineRun.pipeline_id == pipeline_id, PipelineRun.user_id == user.id
+    )
+    if run_status is not None:
+        stmt = stmt.where(PipelineRun.status == run_status)
+    rows = (await db.execute(stmt.limit(limit).offset(offset))).all()
+    return [run_summary(run, version) for run, version in rows]
+
+
+async def load_run_result(
+    db: AsyncSession, minio: Minio, run: PipelineRun, block_id: str | None
+) -> PipelineRunResultResponse:
+    """The run's result, or one block's stored output. The caller has authorized ``run``:
+    a result path is bare, so nothing may resolve one before the ownership check (§12)."""
+    blocks = await run_blocks(db, run.id)
+    if block_id is None:
+        if run.result_path is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="The run has no result"
+            )
+        path = run.result_path
+        # Effect blocks after it pass the same reference on; the first holder produced it.
+        block_id = next(b.block_id for b in blocks if b.output_ref == path)
+    else:
+        block = next((b for b in blocks if b.block_id == block_id), None)
+        if block is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block not found")
+        state = output_state(block)
+        if state == "collected":
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail=f"This block's output was collected at {block.collected_at.isoformat()}",
+            )
+        if state == "passed_through":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="This block stores nothing; it passed its input on",
+            )
+        if state == "none":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="This block produced no output"
+            )
+        path = block.output_ref
+
+    bucket, _, key = path.partition("/")
+    try:
+        response = await minio.get_object(bucket, key)
+        content = await response.read()
+        response.close()
+        await response.release()
+    except S3Error as exc:
+        if exc.code != "NoSuchKey":
+            raise
+        logger.error("pipeline_result_missing", run_id=str(run.id), path=path)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="The stored output is missing"
+        ) from None
+    return PipelineRunResultResponse(
+        content=content.decode("utf-8", errors="replace"), result_path=path, block_id=block_id
+    )
+
+
+@router.get("/{pipeline_id}/runs/{run_id}/result", response_model=PipelineRunResultResponse)
+async def get_run_result(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    block: str | None = Query(default=None, description="A block id: that step's stored output"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+) -> PipelineRunResultResponse:
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id))
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return await load_run_result(db, minio, run, block)
+
+
+_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+WATCH_TIMEOUT_SECONDS = 300
+
+
+def _watch_message(pipeline_id: str, update: dict) -> dict:
+    run_status = update["status"]
+    message = {
+        "type": run_status if run_status in _TERMINAL else "status_update",
+        "run_id": update["run_id"],
+        "status": run_status,
+        "cancel_requested": update.get("cancel_requested", False),
+        "block_id": update.get("block_id"),
+        "block_status": update.get("block_status"),
+    }
+    if run_status == "completed":
+        message["result_url"] = f"/pipelines/{pipeline_id}/runs/{update['run_id']}/result"
+    return message
+
+
+@router.websocket("/{pipeline_id}/runs/{run_id}/watch")
+async def run_status_stream(
+    websocket: WebSocket,
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Live status for one run until it is terminal, as ``/jobs/{id}/watch`` does for a job.
+
+    Auth: ?token= (API key or Clerk JWT). Close codes: 4001 unauthorized, 4004 not found,
+    4029 connection limit. A ``timeout`` message after 300 s idle; the client reconnects (11b).
+    """
+    await websocket.accept()
+    user = await auth_from_token(token, db)
+    if user is None:
+        await websocket.close(code=4001, reason="unauthorized")
+        return
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id))
+    if run is None:
+        await websocket.close(code=4004, reason="not found")
+        return
+
+    notifier = websocket.app.state.job_notifier
+    pid = str(pipeline_id)
+    try:
+        async with notifier.subscribe_pipeline_run(str(run.id), str(user.id)) as queue:
+            # Re-read after subscribing: an update in between is queued, not lost.
+            await db.refresh(run)
+            snapshot = {
+                "run_id": str(run.id),
+                "status": run.status,
+                "cancel_requested": run.cancel_requested_at is not None,
+            }
+            # Hours-long watches must not hold a pooled connection.
+            await db.close()
+            await websocket.send_json(_watch_message(pid, snapshot))
+            if run.status in _TERMINAL:
+                await websocket.close()
+                return
+            while True:
+                try:
+                    update = await asyncio.wait_for(queue.get(), timeout=WATCH_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    await websocket.send_json({"type": "timeout"})
+                    break
+                message = _watch_message(pid, update)
+                await websocket.send_json(message)
+                if message["status"] in _TERMINAL:
+                    break
+    except WebSocketConnectionLimitExceeded:
+        await websocket.close(code=4029, reason="connection limit exceeded")
+        return
+    await websocket.close()

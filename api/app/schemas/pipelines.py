@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -55,6 +55,11 @@ class PipelineRunCreate(BaseModel):
     version: int | None = Field(default=None, ge=1)
 
 
+# ADR-009 §8c: never produced, passed through (an effect block), stored, or collected
+# (retention elapsed) — a collected output must not read as missing.
+OutputState = Literal["none", "passed_through", "stored", "collected"]
+
+
 class PipelineRunBlockResponse(BaseModel):
     block_id: str
     position: int
@@ -62,22 +67,45 @@ class PipelineRunBlockResponse(BaseModel):
     status: str
     input_ref: str | None
     output_ref: str | None
+    output_state: OutputState
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    collected_at: datetime | None
 
 
-class PipelineRunResponse(BaseModel):
+class PipelineRunSummary(BaseModel):
     id: uuid.UUID
     pipeline_id: uuid.UUID
     pipeline_version_id: uuid.UUID
+    version: int
     status: str
+    # Set once a cancel is requested; status turns cancelled when the run has stopped (R3).
+    cancel_requested_at: datetime | None
     inputs: dict[str, str]
     result_path: str | None
     error: str | None
     created_at: datetime
     finished_at: datetime | None
+
+
+class PipelineRunResponse(PipelineRunSummary):
     blocks: list[PipelineRunBlockResponse]
+
+
+class AdminPipelineRunSummary(PipelineRunSummary):
+    user_id: uuid.UUID
+
+
+class AdminPipelineRunResponse(PipelineRunResponse):
+    user_id: uuid.UUID
+
+
+class PipelineRunResultResponse(BaseModel):
+    content: str
+    result_path: str
+    # Which block's output this is: the run's result, or ?block= for one step's.
+    block_id: str
 
 
 class PipelineRunCancelResponse(BaseModel):
