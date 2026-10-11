@@ -150,6 +150,34 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **C.8 — CLEAN + VALIDATE BUILT AND COMMITTED (2026-10-11, second session).** Local, `develop`
+**`d75c7b2`** (code) + `6cfef04` (backlog note) + this closeout. **Not pushed, not released.** Detail and
+every design call: backlog C.8 *Built* note.
+
+- **Owner calls (asked before building, all took the recommendation):** Clean = **denylist MVP** (scored
+  ladder later); object **`history/{artifact_id}/clean.md`** (ADR-011, not the backlog's older
+  `pipelines/{run}/{block}.md`); **`jsonschema` in the worker and the API** — closes C.3's ⚠️.
+- **Shape:** `Clean`/`Validate` on a **second `Worker` in the `llm-worker-temporal` process**, queue
+  `content` — no new Deployment, no infra change; the next LLM image carries it. Validate is an effect
+  block: stores nothing, passes its input ref on; a failing rule is non-retryable and names every failing
+  rule by index. Save-time schema meta-validation lives in `validator.py`, **not** the catalog models (they
+  also parse pinned versions at the trigger).
+- **Verified:** 192 LLM-worker / 432 API / 59 contract tests; 15 mutations each caught by its own test.
+  Live on compose: clean+validate `completed` (result = `clean.md`); a failing guard stops the run before the
+  LLM block (`extract` `skipped`, no call); JSON rules on a json scrape `completed`; bad schema → 422 at save.
+- ⚠️ **Traps found:** (1) mutation passes need `PYTHONDONTWRITEBYTECODE=1` — a same-length edit restored
+  within the second leaves a valid stale `.pyc`, and 8 of my first results were false catches; (2) the API
+  image does **not** sync deps at `uv run` — a new API dependency needs `docker compose build api
+  workflow-worker` + `up -d --no-deps --force-recreate`; (3) my live script deleted its test user before
+  releasing its objects (the user cascade drops ledger rows) — 5 dev objects orphaned, removed by hand.
+  Release **before** deleting the user.
+- **Known simplification:** Clean drops `<title>`; today's `example.com` has no `<h1>`, so its name is in no
+  part of `clean.md`. Refactor candidate (backlog note).
+- **Local stack:** `api`, `workflow-worker`, `llm-worker-temporal` rebuilt and recreated `--no-deps`; the NATS
+  workers stay down.
+- **Next: C.9** — Webhook activity (wire contract, SSRF per attempt, four-timeout ladder, `waiting`). Revisit
+  `_finish()`'s shield there: 15d wants a Webhook's backoff interruptible.
+
 🔷 **C.4–C.7 — PRODUCTION REFACTOR BUILT AND COMMITTED (2026-10-07 → 10-11, one session).** Local,
 `develop`: `e60658b` (MVP code) + `1700e69` (MVP docs) + `4b230a3` (safety net) + **`7f3b1d5`
 (refactor)** + this closeout. **Not pushed, not released.** Detail and every design call: backlog
@@ -1094,7 +1122,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.8 in `phase4-implementation-backlog.md`** (Clean + Validate activities). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.9 in `phase4-implementation-backlog.md`** (Webhook activity). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1140,7 +1168,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-10-11 close:** `develop` = `7f3b1d5` (C.4–C.7 refactor) + this closeout, **not pushed** — `origin/develop` stops at `071f6f2` (C.3 closeout); everything from `e60658b` on is local. `main` = `origin/main` = `6675f17`, unchanged — Group C is unreleased; it ships with C.14. Infra repo untouched.
+- **2026-10-11, second session close (verified after fetch):** `develop` = `6cfef04` (C.8 code `d75c7b2` + backlog note) + this closeout, **not pushed** — 7 ahead of `origin/develop` (`071f6f2`) before this closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
+- *Historical:* **2026-10-11 close:** `develop` = `7f3b1d5` (C.4–C.7 refactor) + this closeout, **not pushed** — `origin/develop` stops at `071f6f2` (C.3 closeout); everything from `e60658b` on is local. `main` = `origin/main` = `6675f17`, unchanged — Group C is unreleased; it ships with C.14. Infra repo untouched.
 - **2026-10-01, second session close:** `develop` = `b5d0f94` (C.2) + this closeout, **pushed to `origin/develop`** (owner: "close out and push to origin"). `main` = `origin/main` = `6675f17`, unchanged — C.1 and C.2 are unreleased; they ship with C.14. Infra repo untouched.
 - *Historical:* **2026-10-01 close (verified after fetch):** `develop` = `origin/develop` = `9bdb3a5` (C.1) before this closeout commit, which is pushed after it. `main` = `origin/main` = `6675f17`, unchanged — **C.1 is unreleased**; it ships with Group C's release (C.14). Infra repo untouched.
 - *Historical:* **2026-09-30, fourth session close (verified after fetch):** `develop` = `origin/develop` = `main` = `origin/main` = `6675f17` (PyJWT release) — this closeout commit sits on `develop` after it. **Infra:** `origin/main` = `17a842b` (Flux api bump) after `9ebb305` (playwright-worker-temporal), 0 ahead.
@@ -1287,6 +1316,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-11 *(clock, second session)* | **🔷 C.8 built (local).** Read-in; owner: "do c8". Illustrated scrape → clean → validate → LLM walkthrough; three calls asked before building (denylist MVP, `history/{artifact_id}/clean.md`, `jsonschema` in worker + API) — all took the recommendation. Built worker activities on a `content` queue in the LLM worker process, API contracts + workflow branches, save-time schema meta-validation, contract arms, tests; 15 mutations (stale-`.pyc` false catches found and re-run); live on compose, three pipelines + a 422. Owner: "commit it as two", then "close this session". *(Rows for the C.3 → C.7 sessions were never added; their record is the Current-state blocks.)* | `d75c7b2`, `6cfef04` + this closeout |
 | 2026-10-01 *(clock, second session)* | **🔷 C.2 built (local).** Read-in. Two open questions asked before building: own revision (4.5) and the slot rule (run `running` AND a `running` block) — both took the recommendation. Built models, migration 4.5 (views + CHECK hand-written), ledger kwarg + release helper, 8 tests; round trip with `pg_get_viewdef` diffs, five schema mutations each failing its own test, 311 tests. Owner: "close out c2 and commit". | `b5d0f94` + this closeout |
 | 2026-10-01 *(clock)* | **🔷 C.1 built (local) — Group C opens.** Read-in. Concepts at the owner's request: what a pipeline is (recipe of blocks, `PipelineWorkflow` as interpreter, Group C = the API→Temporal→Postgres bridge, D reuses it); the four C.1 tables; failed-run artifacts and the four retry layers. Owner calls: run-level `error`, `result_path` only on `completed`, indexes delegated. My RESTRICT-vs-NO ACTION "trap" tested on dev Postgres and withdrawn; FK explanation redone from scratch after the owner said it mixed everything. Built models + migration 4.4 (round trip, `alembic check`, constraint behaviour in a rolled-back transaction, 303 tests); owner: "commit and push dev". | `9bdb3a5` + this closeout |
 | 2026-09-30 *(clock, fourth session)* | **🔷 B.9 — PLAYWRIGHT PORT RELEASED; Group B complete. BUG-020 closed. PyJWT released.** Read-in; owner's prod `pip freeze` matched the lock (`patchright` 1.63.0; Chrome binary unlocked — noted). Owner delegated the graceful-shutdown call → 630 s / grace 660 s. BUG-020 closed on the owner's prod probe (401). B.9: probe `--engine`, infra manifest, release `a11cce6` + infra `9ebb305`, both Playwright Deployments green, poller listed, Chrome 154.0.8037.92; gate passed (`18f1a13f59dcc2ad` both; a first v1 try sent as `http` by mistake is ignored). PyJWT 2.13.0 → 2.15.1 (10 alerts), verified through Clerk's real `verify_token`, released `6675f17`, alerts fixed. | `cdbb8c2`, `43be066`, `a11cce6`, `5da9460`, `33bb2db`, `e57f163`, `6675f17`, this closeout; infra `9ebb305` |
