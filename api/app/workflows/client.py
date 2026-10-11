@@ -33,3 +33,11 @@ async def get_temporal(request: Request) -> Client:
                         detail="Workflow engine unavailable",
                     ) from exc
     return state.temporal
+
+
+async def get_temporal_or_none(request: Request) -> Client | None:
+    """For a caller with a fallback when the engine is down (the pipeline cancel)."""
+    try:
+        return await get_temporal(request)
+    except HTTPException:
+        return None

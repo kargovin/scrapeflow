@@ -17,6 +17,7 @@ from temporalio.common import WorkflowIDReusePolicy
 
 from app.auth.dependencies import get_current_user
 from app.core.db import get_db
+from app.core.pipeline_status import notify_run
 from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
@@ -47,6 +48,7 @@ from app.schemas.pipelines import (
     PipelineCreate,
     PipelineResponse,
     PipelineRunBlockResponse,
+    PipelineRunCancelResponse,
     PipelineRunCreate,
     PipelineRunResponse,
     PipelineUpdate,
@@ -54,7 +56,7 @@ from app.schemas.pipelines import (
 )
 from app.settings import settings
 from app.workflows.activities.contracts import Credentials
-from app.workflows.client import get_temporal
+from app.workflows.client import get_temporal, get_temporal_or_none
 from app.workflows.pipeline import (
     LLMKey,
     PipelineRunInput,
@@ -617,6 +619,23 @@ async def create_run(
     return _run_response(run, run_blocks)
 
 
+def _owned_run(pipeline_id: uuid.UUID, run_id: uuid.UUID, user_id: uuid.UUID) -> Select:
+    return select(PipelineRun).where(
+        PipelineRun.id == run_id,
+        PipelineRun.pipeline_id == pipeline_id,
+        PipelineRun.user_id == user_id,
+    )
+
+
+async def _run_blocks(db: AsyncSession, run_id: uuid.UUID) -> list[PipelineRunBlock]:
+    blocks = await db.scalars(
+        select(PipelineRunBlock)
+        .where(PipelineRunBlock.pipeline_run_id == run_id)
+        .order_by(PipelineRunBlock.position)
+    )
+    return list(blocks)
+
+
 @router.get("/{pipeline_id}/runs/{run_id}", response_model=PipelineRunResponse)
 async def get_run(
     pipeline_id: uuid.UUID,
@@ -624,20 +643,86 @@ async def get_run(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PipelineRunResponse:
-    run = await db.scalar(
-        select(PipelineRun).where(
-            PipelineRun.id == run_id,
-            PipelineRun.pipeline_id == pipeline_id,
-            PipelineRun.user_id == user.id,
-        )
-    )
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id))
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    blocks = (
-        await db.scalars(
-            select(PipelineRunBlock)
-            .where(PipelineRunBlock.pipeline_run_id == run.id)
-            .order_by(PipelineRunBlock.position)
+    return _run_response(run, await _run_blocks(db, run.id))
+
+
+async def _budget_left(
+    db: AsyncSession,
+    run: PipelineRun,
+    active: list[PipelineRunBlock],
+    now: datetime,
+    workflow_notified: bool,
+) -> int:
+    version = await db.get(PipelineVersion, run.pipeline_version_id)
+    try:
+        parsed, _ = parse_definition(version.definition if version else None)
+    except DefinitionUnreadable:
+        return 0
+    by_id = {b.id: b for b in parsed.blocks}
+    left = 0
+    for row in active:
+        block = by_id.get(row.block_id)
+        if block is None:
+            continue
+        block_type = CATALOG[block.type]
+        timing = block_type.timing(block.config)
+        if workflow_notified and block_type.kind == "effect":
+            # The engine ends its retry wait; at most the attempt in flight finishes.
+            left = max(left, timing.start_to_close)
+            continue
+        elapsed = (now - row.started_at).total_seconds() if row.started_at else 0
+        left = max(left, int(timing.budget - elapsed))
+    return max(left, 0)
+
+
+@router.post(
+    "/{pipeline_id}/runs/{run_id}/cancel",
+    response_model=PipelineRunCancelResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def cancel_run(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    temporal: Client | None = Depends(get_temporal_or_none),
+) -> PipelineRunCancelResponse:
+    """Requests the cancel; the row turns ``cancelled`` only once the run has stopped (R3).
+
+    Row first (instant UI, works with the engine down), then a best-effort workflow cancel that
+    interrupts a retry wait (ADR-009 15d); the mirror's boundary check is the fallback.
+    """
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id).with_for_update())
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status != "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=f"The run is already {run.status}"
         )
-    ).all()
-    return _run_response(run, list(blocks))
+    now = datetime.now(UTC)
+    if run.cancel_requested_at is None:
+        run.cancel_requested_at = now
+        await notify_run(db, run)
+    await db.commit()
+
+    workflow_notified = False
+    if temporal is not None:
+        try:
+            await temporal.get_workflow_handle(run.workflow_id).cancel()
+            workflow_notified = True
+        except Exception as exc:
+            logger.warning("pipeline_run_cancel_not_sent", run_id=str(run.id), error=str(exc))
+
+    blocks = await _run_blocks(db, run.id)
+    active = [b for b in blocks if b.status in ("running", "waiting")]
+    logger.info("pipeline_run_cancel_requested", run_id=str(run.id), notified=workflow_notified)
+    return PipelineRunCancelResponse(
+        run=_run_response(run, blocks),
+        still_running=[b.block_id for b in active],
+        upper_bound_seconds=await _budget_left(db, run, active, now, workflow_notified),
+        llm_billed=any(b.type == "llm_extract" and b.started_at for b in blocks),
+        workflow_notified=workflow_notified,
+    )

@@ -78,3 +78,17 @@ class PipelineRunResponse(BaseModel):
     created_at: datetime
     finished_at: datetime | None
     blocks: list[PipelineRunBlockResponse]
+
+
+class PipelineRunCancelResponse(BaseModel):
+    """A cancel is requested, not done: the run turns ``cancelled`` at its next block boundary (R3)."""
+
+    run: PipelineRunResponse
+    # Blocks that may still be executing; none is aborted mid-execution.
+    still_running: list[str]
+    # Worst case until the run stops: what is left of those blocks' declared budgets.
+    upper_bound_seconds: int
+    # An LLM block was called, so the user's key may already have been billed.
+    llm_billed: bool
+    # False = the engine was unreachable; the run still stops, at its next block boundary.
+    workflow_notified: bool

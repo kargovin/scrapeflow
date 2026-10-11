@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -18,6 +18,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 from temporalio.worker.workflow_sandbox import RestrictedWorkflowAccessError
 
 from app.core.db import AsyncSessionLocal
+from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.storage_object import StorageObject
 from app.models.user_quota import UserQuota
@@ -47,7 +48,6 @@ from app.workflows.activities.contracts import (
     ValidateInput,
 )
 from app.workflows.activities.db import (
-    PIPELINE_STATUS_CHANNEL,
     check_cancelled,
     mirror_block_status,
     mirror_run_status,
@@ -778,7 +778,7 @@ async def test_every_mirror_write_notifies_identifiers_and_status_only(db_user):
         payloads = [json.loads(await asyncio.wait_for(received.get(), 5)) for _ in range(2)]
     finally:
         await conn.close()
-    base = {"run_id": str(run.id), "pipeline_id": str(run.pipeline_id)}
+    base = {"run_id": str(run.id), "pipeline_id": str(run.pipeline_id), "cancel_requested": False}
     assert payloads == [
         {**base, "status": "running", "block_id": "fetch", "block_status": "failed"},
         {**base, "status": "failed", "block_id": None, "block_status": None},
@@ -1008,3 +1008,63 @@ async def test_a_workflow_cancel_lets_a_running_webhook_attempt_finish():
         MirrorBlockInput(run_id="r1", block_id="notify", status="completed", output_ref=LLM_PATH),
         MirrorRunInput(run_id="r1", status="completed", result_path=LLM_PATH),
     ]
+
+
+async def test_a_row_cancel_mid_block_ends_the_run_at_the_next_boundary(db_user):
+    """C.10 end to end on the real mirrors: the engine is never told, the row is enough."""
+    run = await _run_rows(
+        db_user.id, (("fetch", "scrape", "pending"), ("extract", "llm_extract", "pending"))
+    )
+    key = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+    started, release = asyncio.Event(), asyncio.Event()
+
+    @activity.defn(name=SCRAPE_ACTIVITY)
+    async def scrape(input: ScrapeInput) -> ScrapeOutput:
+        started.set()
+        await release.wait()
+        return ScrapeOutput.model_validate(
+            {"result": {"path": key, "size": 10}, "content_hash": "00c0ffee12345678"}
+        )
+
+    @activity.defn(name=LLM_EXTRACT_ACTIVITY)
+    async def llm(input: LLMInput) -> LLMOutput:
+        raise AssertionError("a cancelled run must not start its next block")
+
+    async with await WorkflowEnvironment.start_time_skipping(
+        data_converter=pydantic_data_converter
+    ) as env:
+        async with (
+            Worker(
+                env.client,
+                task_queue=WORKFLOW_QUEUE,
+                workflows=[PipelineWorkflow],
+                activities=[
+                    mirror_block_status,
+                    mirror_run_status,
+                    record_storage,
+                    check_cancelled,
+                ],
+            ),
+            Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
+            Worker(env.client, task_queue=LLM_QUEUE, activities=[llm]),
+        ):
+            handle = await env.client.start_workflow(
+                PipelineWorkflow.run,
+                RUN_INPUT.model_copy(update={"run_id": str(run.id)}),
+                id=run.workflow_id,
+                task_queue=WORKFLOW_QUEUE,
+            )
+            await started.wait()
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    update(PipelineRun)
+                    .where(PipelineRun.id == run.id)
+                    .values(cancel_requested_at=datetime.now(UTC))
+                )
+                await db.commit()
+            # Mid-block the row says running: never cancelled before it stopped (R3).
+            assert (await _statuses(run.id))[0] == "running"
+            release.set()
+            assert await handle.result() is None
+
+    assert await _statuses(run.id) == ("cancelled", {"fetch": "completed", "extract": "skipped"})

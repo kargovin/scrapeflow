@@ -5,17 +5,17 @@ mirror never moves a run out of a terminal state it did not set, and never start
 run whose cancel was requested. Every write notifies ``pipeline_status`` in its own transaction.
 """
 
-import json
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.core.db import AsyncSessionLocal
 from app.core.ledger import record_object
+from app.core.pipeline_status import notify_run
 from app.core.quota import storage_usage
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.workflows.pipeline import (
@@ -30,8 +30,6 @@ from app.workflows.pipeline import (
     StorageUsage,
 )
 
-PIPELINE_STATUS_CHANNEL = "pipeline_status"
-
 
 async def _lock_run(db: AsyncSession, run_id: str) -> PipelineRun:
     run = await db.scalar(
@@ -40,26 +38,6 @@ async def _lock_run(db: AsyncSession, run_id: str) -> PipelineRun:
     if run is None:
         raise ApplicationError(f"no run {run_id}", non_retryable=True)
     return run
-
-
-async def _notify(
-    db: AsyncSession,
-    run: PipelineRun,
-    block_id: str | None = None,
-    block_status: str | None = None,
-) -> None:
-    # Identifiers and absolute state only — never error text (11d: 8000-byte cap, at-least-once).
-    payload = {
-        "run_id": str(run.id),
-        "pipeline_id": str(run.pipeline_id),
-        "status": run.status,
-        "block_id": block_id,
-        "block_status": block_status,
-    }
-    await db.execute(
-        text("SELECT pg_notify(:channel, :payload)"),
-        {"channel": PIPELINE_STATUS_CHANNEL, "payload": json.dumps(payload)},
-    )
 
 
 def _cancel_requested(run: PipelineRun) -> bool:
@@ -72,7 +50,7 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
     async with AsyncSessionLocal() as db:
         run = await _lock_run(db, input.run_id)
         if input.status == "running" and (run.status != "running" or _cancel_requested(run)):
-            await _notify(db, run)
+            await notify_run(db, run)
             await db.commit()
             return "cancelled" if _cancel_requested(run) else run.status
 
@@ -108,7 +86,7 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
             raise ApplicationError(
                 f"no block {input.block_id!r} in run {input.run_id}", non_retryable=True
             )
-        await _notify(db, run, input.block_id, input.status)
+        await notify_run(db, run, input.block_id, input.status)
         await db.commit()
         return run.status
 
@@ -134,7 +112,7 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
                 )
                 .values(status="skipped")
             )
-        await _notify(db, run)
+        await notify_run(db, run)
         await db.commit()
         return run.status
 

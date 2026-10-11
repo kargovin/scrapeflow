@@ -1,25 +1,30 @@
 """C.4 + C.5 — pipelines CRUD, versions, delete, admin reads, and the run trigger."""
 
+import asyncio
 import json
 import socket
 import uuid
-from unittest.mock import AsyncMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.core.db import AsyncSessionLocal
+from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
 from app.main import app
 from app.models.llm_keys import UserLLMKey
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.user import User
 from app.models.user_quota import UserQuota
+from app.pipelines.catalog import LLM_EXTRACT, WEBHOOK
 from app.pipelines.definition import parse_definition
 from app.settings import settings
-from app.workflows.client import get_temporal
+from app.workflows.client import get_temporal, get_temporal_or_none
 from app.workflows.pipeline import PipelineRunInput, PipelineWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 
@@ -742,3 +747,182 @@ async def test_an_unreadable_stored_definition_creates_no_run(
     assert problem["message"].startswith("this version cannot be run: config: url")
     assert await _runs(db_user.id) == []
     temporal.start_workflow.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# C.10 — cancel
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def engine():
+    """The client the cancel route sees; ``None`` stands for the engine being unreachable."""
+    handle = MagicMock()
+    handle.cancel = AsyncMock()
+    client = MagicMock()
+    client.get_workflow_handle.return_value = handle
+    holder = {"client": client}
+    app.dependency_overrides[get_temporal_or_none] = lambda: holder["client"]
+    yield holder
+    app.dependency_overrides.pop(get_temporal_or_none, None)
+
+
+async def _started_run(client, headers, key, temporal):
+    """A run of the R6 recipe whose fetch is done and whose LLM block has run for 100 s."""
+    pipeline = await _create(client, headers, recipe(key.id))
+    resp = await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)
+    assert resp.status_code == 202, resp.text
+    run = resp.json()
+    async with AsyncSessionLocal() as db:
+        rows = PipelineRunBlock.pipeline_run_id == uuid.UUID(run["id"])
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(rows, PipelineRunBlock.block_id == "fetch")
+            .values(status="completed")
+        )
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(rows, PipelineRunBlock.block_id == "extract")
+            .values(status="running", started_at=datetime.now(UTC) - timedelta(seconds=100))
+        )
+        await db.commit()
+    return f"/pipelines/{pipeline['id']}/runs/{run['id']}", run["id"]
+
+
+async def test_cancel_is_requested_not_reported_done(client, headers, key, temporal, engine):
+    url, run_id = await _started_run(client, headers, key, temporal)
+
+    resp = await client.post(f"{url}/cancel", headers=headers)
+
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    # R3: never report cancelled before it stopped.
+    assert body["run"]["status"] == "running"
+    assert body["still_running"] == ["extract"]
+    budget = LLM_EXTRACT.timing(None).budget
+    assert budget - 110 <= body["upper_bound_seconds"] <= budget - 100
+    assert (body["llm_billed"], body["workflow_notified"]) == (True, True)
+    engine["client"].get_workflow_handle.assert_called_once_with(f"pipeline-run-{run_id}")
+    engine["client"].get_workflow_handle.return_value.cancel.assert_awaited_once()
+    async with AsyncSessionLocal() as db:
+        run = await db.get(PipelineRun, uuid.UUID(run_id))
+    assert (run.status, run.cancel_requested_at is not None) == ("running", True)
+
+
+async def test_cancel_with_the_engine_down_still_lands_on_the_row(
+    client, headers, key, temporal, engine
+):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    engine["client"] = None
+
+    resp = await client.post(f"{url}/cancel", headers=headers)
+
+    assert resp.status_code == 202
+    assert resp.json()["workflow_notified"] is False
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(PipelineRun, uuid.UUID(run_id))).cancel_requested_at is not None
+
+
+async def test_a_waiting_webhook_bound_is_one_attempt_once_the_engine_is_told(
+    client, headers, key, temporal, engine
+):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    async with AsyncSessionLocal() as db:
+        rows = PipelineRunBlock.pipeline_run_id == uuid.UUID(run_id)
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(rows, PipelineRunBlock.block_id == "extract")
+            .values(status="completed")
+        )
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(rows, PipelineRunBlock.block_id == "notify")
+            .values(status="waiting", started_at=datetime.now(UTC))
+        )
+        await db.commit()
+
+    told = (await client.post(f"{url}/cancel", headers=headers)).json()
+    engine["client"] = None
+    untold = (await client.post(f"{url}/cancel", headers=headers)).json()
+
+    assert told["still_running"] == ["notify"]
+    assert told["upper_bound_seconds"] == WEBHOOK.timing(None).start_to_close
+    # Unreachable engine: the fallback waits out the backoff, up to the whole horizon.
+    assert untold["upper_bound_seconds"] > 2.6 * 3600
+
+
+async def test_a_failed_workflow_cancel_is_reported_not_raised(
+    client, headers, key, temporal, engine
+):
+    url, _ = await _started_run(client, headers, key, temporal)
+    engine["client"].get_workflow_handle.return_value.cancel.side_effect = RuntimeError("gone")
+
+    resp = await client.post(f"{url}/cancel", headers=headers)
+
+    assert resp.status_code == 202
+    assert resp.json()["workflow_notified"] is False
+
+
+async def test_a_second_cancel_keeps_the_first_request_time(client, headers, key, temporal, engine):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    await client.post(f"{url}/cancel", headers=headers)
+    async with AsyncSessionLocal() as db:
+        first = (await db.get(PipelineRun, uuid.UUID(run_id))).cancel_requested_at
+
+    resp = await client.post(f"{url}/cancel", headers=headers)
+
+    assert resp.status_code == 202
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(PipelineRun, uuid.UUID(run_id))).cancel_requested_at == first
+
+
+async def test_a_finished_run_cannot_be_cancelled(client, headers, key, temporal, engine):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == uuid.UUID(run_id))
+            .values(status="completed")
+        )
+        await db.commit()
+
+    resp = await client.post(f"{url}/cancel", headers=headers)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "The run is already completed"
+    engine["client"].get_workflow_handle.assert_not_called()
+
+
+async def test_another_users_run_cannot_be_cancelled(
+    client, headers, key, temporal, engine, other_user
+):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == uuid.UUID(run_id))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+
+    resp = await client.post(f"{url}/cancel", headers=headers)
+
+    assert resp.status_code == 404
+    engine["client"].get_workflow_handle.assert_not_called()
+
+
+async def test_cancel_notifies_with_the_request_flag(client, headers, key, temporal, engine):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
+    received: asyncio.Queue = asyncio.Queue()
+    await conn.add_listener(PIPELINE_STATUS_CHANNEL, lambda *a: received.put_nowait(a[3]))
+    try:
+        await client.post(f"{url}/cancel", headers=headers)
+        payload = json.loads(await asyncio.wait_for(received.get(), 5))
+    finally:
+        await conn.close()
+    assert (payload["run_id"], payload["status"], payload["cancel_requested"]) == (
+        run_id,
+        "running",
+        True,
+    )
