@@ -18,6 +18,7 @@ from app.pipelines.catalog import (
     BlockType,
     Timing,
     is_binding,
+    run_need_seconds,
 )
 from app.settings import settings
 
@@ -263,7 +264,7 @@ def _budget_problems(
     declared: int | None, parsed: list[ValidatedBlock]
 ) -> tuple[int, list[Problem]]:
     """PRD-016 R4: budgets compose. The run ceiling must cover every block's own budget."""
-    needed = sum(b.timing.budget + BLOCK_OVERHEAD_SECONDS for b in parsed)
+    needed = run_need_seconds(b.timing for b in parsed)
     breakdown = " + ".join(f"{b.id} {b.timing.budget + BLOCK_OVERHEAD_SECONDS}" for b in parsed)
     ceiling = settings.pipeline_max_run_seconds
     problems = []

@@ -1,45 +1,69 @@
-"""C.6 + C.7 (MVP) — PipelineWorkflow and the two mirror activities."""
+"""C.6 + C.7 — PipelineWorkflow and the workflow-worker DB activities."""
 
+import asyncio
+import json
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
+import asyncpg
 import pytest
 from sqlalchemy import select
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 from temporalio.worker.workflow_sandbox import RestrictedWorkflowAccessError
 
 from app.core.db import AsyncSessionLocal
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
+from app.models.storage_object import StorageObject
+from app.models.user_quota import UserQuota
+from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, LLM_EXTRACT, SCRAPE
+from app.pipelines.definition import parse_definition
+from app.settings import settings
 from app.workflows.activities.contracts import (
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
+    Credentials,
     LLMInput,
     LLMOutput,
     ScrapeInput,
     ScrapeOutput,
+    StoredObject,
 )
-from app.workflows.activities.db import mirror_block_status, mirror_run_status
+from app.workflows.activities.db import (
+    PIPELINE_STATUS_CHANNEL,
+    check_cancelled,
+    mirror_block_status,
+    mirror_run_status,
+    record_storage,
+)
 from app.workflows.pipeline import (
+    DB_ACTIVITY_SECONDS,
     MIRROR_BLOCK_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
+    RECORD_STORAGE_ACTIVITY,
     LLMKey,
     MirrorBlockInput,
     MirrorRunInput,
     PipelineRunInput,
     PipelineWorkflow,
+    RecordStorageInput,
+    RunRef,
+    StorageUsage,
 )
 from app.workflows.queues import LLM_QUEUE, SCRAPE_HTTP_QUEUE, WORKFLOW_QUEUE
 
 SCRAPE_PATH = "scrapeflow-results/history/a-fetch/scrape.html"
+SHOT_PATH = "scrapeflow-results/screenshots/a-fetch/0.png"
 LLM_PATH = "scrapeflow-results/history/a-extract/llm.json"
+KEY_ID = "6b1f2c1e-0000-4000-8000-000000000001"
 
 DEFINITION = {
     "inputs": {"url": {"type": "url"}},
+    "time_budget_seconds": None,
     "blocks": [
         {
             "id": "fetch",
@@ -56,111 +80,213 @@ DEFINITION = {
                 "cookies": None,
                 "actions": None,
             },
+            "secrets": {},
         },
         {
             "id": "extract",
             "type": "llm_extract",
             "input": "fetch",
             "config_schema_version": 1,
-            "config": {"llm_key_id": "k1", "model": "m", "output_schema": {"type": "object"}},
+            "config": {"llm_key_id": KEY_ID, "model": "m", "output_schema": {"type": "object"}},
+            "secrets": {},
         },
     ],
 }
+PARSED, _ = parse_definition(DEFINITION)
 
 RUN_INPUT = PipelineRunInput(
     run_id="r1",
-    definition=DEFINITION,
+    blocks=PARSED.blocks,
+    time_budget_seconds=PARSED.run_budget_seconds,
     inputs={"url": "https://example.com"},
     artifact_ids={"fetch": "a-fetch", "extract": "a-extract"},
-    llm_keys={"k1": LLMKey(provider="anthropic", encrypted_api_key="ciphertext")},
+    llm_keys={KEY_ID: LLMKey(provider="anthropic", encrypted_api_key="ciphertext")},
+    credentials={"fetch": Credentials(encrypted_proxy_url="proxy-ciphertext")},
 )
 
 
-async def _run(llm_extract, run_input=RUN_INPUT, timeout=timedelta(seconds=30), **worker_kwargs):
-    mirrored: list = []
-    scraped: list[ScrapeInput] = []
+def _scrape_output(screenshots=()):
+    return ScrapeOutput.model_validate(
+        {
+            "result": {"path": SCRAPE_PATH, "size": 10},
+            "content_hash": "00c0ffee12345678",
+            "screenshots": [{"path": p, "size": 5} for p in screenshots],
+        }
+    )
 
-    @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
-    async def mirror_block(input: MirrorBlockInput) -> None:
-        mirrored.append(input)
 
-    @activity.defn(name=MIRROR_RUN_ACTIVITY)
-    async def mirror_run(input: MirrorRunInput) -> None:
-        mirrored.append(input)
+async def _scrape_ok(input: ScrapeInput) -> ScrapeOutput:
+    return _scrape_output()
 
-    @activity.defn(name=SCRAPE_ACTIVITY)
-    async def scrape(input: ScrapeInput) -> ScrapeOutput:
-        scraped.append(input)
-        return ScrapeOutput.model_validate(
-            {"result": {"path": SCRAPE_PATH, "size": 1}, "content_hash": "00c0ffee12345678"}
-        )
 
-    async with await WorkflowEnvironment.start_time_skipping(
-        data_converter=pydantic_data_converter
-    ) as env:
-        async with (
-            Worker(
-                env.client,
-                task_queue=WORKFLOW_QUEUE,
-                workflows=[PipelineWorkflow],
-                activities=[mirror_block, mirror_run],
-                **worker_kwargs,
-            ),
-            Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
-            Worker(env.client, task_queue=LLM_QUEUE, activities=[llm_extract]),
-        ):
-            try:
-                result = await env.client.execute_workflow(
+async def _llm_ok(input: LLMInput) -> LLMOutput:
+    return LLMOutput.model_validate({"result": {"path": LLM_PATH, "size": 3}})
+
+
+class Harness:
+    """Mocked activities on their real queues; records every DB-activity call in order."""
+
+    def __init__(self, scrape=_scrape_ok, llm=_llm_ok, usage=None):
+        self.calls: list = []
+        self.scraped: list[ScrapeInput] = []
+        self.scrape_info: list = []
+        self.extracted: list[LLMInput] = []
+        self.usage = usage or StorageUsage(used=0, limit=100)
+        self.running_reply: dict[str, str] = {}
+        self._scrape = scrape
+        self._llm = llm
+
+    def activities(self):
+        @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
+        async def mirror_block(input: MirrorBlockInput) -> str:
+            self.calls.append(input)
+            if input.status == "running":
+                return self.running_reply.get(input.block_id, "running")
+            return "running"
+
+        @activity.defn(name=MIRROR_RUN_ACTIVITY)
+        async def mirror_run(input: MirrorRunInput) -> str:
+            self.calls.append(input)
+            return input.status
+
+        @activity.defn(name=RECORD_STORAGE_ACTIVITY)
+        async def record(input: RecordStorageInput) -> StorageUsage:
+            self.calls.append(input)
+            return self.usage
+
+        @activity.defn(name=SCRAPE_ACTIVITY)
+        async def scrape(input: ScrapeInput) -> ScrapeOutput:
+            self.scraped.append(input)
+            self.scrape_info.append(activity.info())
+            return await self._scrape(input)
+
+        @activity.defn(name=LLM_EXTRACT_ACTIVITY)
+        async def llm(input: LLMInput) -> LLMOutput:
+            self.extracted.append(input)
+            return await self._llm(input)
+
+        return [mirror_block, mirror_run, record], scrape, llm
+
+    async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
+        db_activities, scrape, llm = self.activities()
+        async with await WorkflowEnvironment.start_time_skipping(
+            data_converter=pydantic_data_converter
+        ) as env:
+            async with (
+                Worker(
+                    env.client,
+                    task_queue=WORKFLOW_QUEUE,
+                    workflows=[PipelineWorkflow],
+                    activities=db_activities,
+                    **kw,
+                ),
+                Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
+                Worker(env.client, task_queue=LLM_QUEUE, activities=[llm]),
+            ):
+                handle = await env.client.start_workflow(
                     PipelineWorkflow.run,
                     run_input,
                     id=f"pipeline-run-{uuid.uuid4()}",
                     task_queue=WORKFLOW_QUEUE,
-                    # A failing workflow task retries forever, in real time: no time skipping.
+                    # Caps every activity timeout too. A failing workflow task retries forever
+                    # in real time (no time skipping), so stuck-task tests pass a short one.
                     execution_timeout=timeout,
                 )
-            except WorkflowFailureError as exc:
-                result = exc
-    return result, mirrored, scraped
+                if during:
+                    await during(handle)
+                try:
+                    return await handle.result()
+                except WorkflowFailureError as exc:
+                    return exc
 
 
-async def test_blocks_run_in_order_and_every_step_is_mirrored():
-    received: list[LLMInput] = []
+def _block_calls(calls):
+    return [(c.block_id, c.status) for c in calls if isinstance(c, MirrorBlockInput)]
 
-    @activity.defn(name=LLM_EXTRACT_ACTIVITY)
-    async def llm_extract(input: LLMInput) -> LLMOutput:
-        received.append(input)
-        return LLMOutput.model_validate({"result": {"path": LLM_PATH, "size": 1}})
 
-    result, mirrored, scraped = await _run(llm_extract)
+# ---------------------------------------------------------------------------
+# PipelineWorkflow (time-skipping env, activities mocked)
+# ---------------------------------------------------------------------------
+
+
+async def test_blocks_run_in_order_and_every_step_is_mirrored_and_charged():
+    async def scrape(input):
+        return _scrape_output([SHOT_PATH])
+
+    h = Harness(scrape=scrape)
+    result = await h.run()
 
     assert result == LLM_PATH
-    assert [(s.artifact_id, s.url, s.output_format) for s in scraped] == [
-        ("a-fetch", "https://example.com", "html")
-    ]
-    [llm] = received
+    [scraped] = h.scraped
+    assert (scraped.artifact_id, scraped.url, scraped.output_format) == (
+        "a-fetch",
+        "https://example.com",
+        "html",
+    )
+    assert scraped.credentials == Credentials(encrypted_proxy_url="proxy-ciphertext")
+    [llm] = h.extracted
     assert (llm.artifact_id, llm.raw_minio_path, llm.encrypted_api_key) == (
         "a-extract",
         SCRAPE_PATH,
         "ciphertext",
     )
-    assert mirrored == [
+    assert h.calls == [
         MirrorBlockInput(run_id="r1", block_id="fetch", status="running"),
+        RecordStorageInput(
+            run_id="r1",
+            block_id="fetch",
+            objects=[
+                StoredObject(path=SCRAPE_PATH, size=10),
+                StoredObject(path=SHOT_PATH, size=5),
+            ],
+        ),
         MirrorBlockInput(run_id="r1", block_id="fetch", status="completed", output_ref=SCRAPE_PATH),
         MirrorBlockInput(run_id="r1", block_id="extract", status="running", input_ref=SCRAPE_PATH),
+        RecordStorageInput(
+            run_id="r1", block_id="extract", objects=[StoredObject(path=LLM_PATH, size=3)]
+        ),
         MirrorBlockInput(run_id="r1", block_id="extract", status="completed", output_ref=LLM_PATH),
         MirrorRunInput(run_id="r1", status="completed", result_path=LLM_PATH),
     ]
 
 
+async def test_block_activity_timeouts_come_from_the_catalog():
+    h = Harness()
+    await h.run()
+    [info] = h.scrape_info
+    timing = SCRAPE.timing(PARSED.blocks[0].config)
+    assert info.start_to_close_timeout == timedelta(seconds=timing.start_to_close)
+    assert info.schedule_to_close_timeout == timedelta(seconds=timing.budget)
+    # The three DB activities around a block fit the allowance the validator budgets for it.
+    assert 3 * DB_ACTIVITY_SECONDS <= BLOCK_OVERHEAD_SECONDS
+
+
+async def test_a_short_run_budget_cuts_the_block_budget():
+    h = Harness()
+    await h.run(RUN_INPUT.model_copy(update={"time_budget_seconds": 50}))
+    [info] = h.scrape_info
+    assert info.schedule_to_close_timeout <= timedelta(seconds=50)
+
+
+async def test_a_spent_run_budget_fails_the_block_before_it_starts():
+    h = Harness()
+    result = await h.run(RUN_INPUT.model_copy(update={"time_budget_seconds": 0}))
+    assert isinstance(result, WorkflowFailureError)
+    assert h.scraped == []
+    assert h.calls[-1] == MirrorRunInput(
+        run_id="r1", status="failed", error="fetch: the run's time budget is spent"
+    )
+
+
 async def test_a_failed_block_fails_the_block_the_run_and_the_workflow():
-    @activity.defn(name=LLM_EXTRACT_ACTIVITY)
-    async def llm_extract(input: LLMInput) -> LLMOutput:
+    async def llm(input):
         raise ApplicationError("401 invalid key", type="LLMFailed", non_retryable=True)
 
-    result, mirrored, _ = await _run(llm_extract)
+    h = Harness(llm=llm)
+    result = await h.run()
 
     assert isinstance(result, WorkflowFailureError)
-    assert mirrored[-2:] == [
+    assert h.calls[-2:] == [
         MirrorBlockInput(
             run_id="r1", block_id="extract", status="failed", error="LLMFailed: 401 invalid key"
         ),
@@ -168,24 +294,33 @@ async def test_a_failed_block_fails_the_block_the_run_and_the_workflow():
     ]
 
 
-@activity.defn(name=LLM_EXTRACT_ACTIVITY)
-async def _unreached_llm_extract(input: LLMInput) -> LLMOutput:
-    raise AssertionError("LLMExtract must not run")
+async def test_exhausted_retries_say_how_many_attempts_were_made():
+    async def llm(input):
+        raise ApplicationError("503 overloaded", type="LLMTransient")
+
+    h = Harness(llm=llm)
+    result = await h.run()
+
+    assert isinstance(result, WorkflowFailureError)
+    attempts = LLM_EXTRACT.timing(PARSED.blocks[1].config).maximum_attempts
+    assert len(h.extracted) == attempts
+    assert h.calls[-1].error.endswith(f"503 overloaded (gave up after {attempts} attempts)")
 
 
 async def test_an_unexpected_exception_fails_the_run_instead_of_hanging():
-    blocks = [dict(DEFINITION["blocks"][0]), DEFINITION["blocks"][1]]
-    blocks[0]["config"] = {k: v for k, v in blocks[0]["config"].items() if k != "output_format"}
-    run_input = RUN_INPUT.model_copy(update={"definition": {**DEFINITION, "blocks": blocks}})
-
-    result, mirrored, scraped = await _run(_unreached_llm_extract, run_input)
+    # artifact_ids is missing a block: a KeyError inside _execute.
+    h = Harness()
+    result = await h.run(
+        RUN_INPUT.model_copy(update={"artifact_ids": {"extract": "a-extract"}}),
+        timeout=timedelta(seconds=30),
+    )
 
     assert isinstance(result, WorkflowFailureError)
     assert isinstance(result.cause, ApplicationError)
     assert result.cause.non_retryable
-    assert scraped == []
-    error = "internal error: KeyError: 'output_format'"
-    assert mirrored == [
+    assert h.scraped == []
+    error = "internal error: KeyError: 'fetch'"
+    assert h.calls == [
         MirrorBlockInput(run_id="r1", block_id="fetch", status="running"),
         MirrorBlockInput(run_id="r1", block_id="fetch", status="failed", error=error),
         MirrorRunInput(run_id="r1", status="failed", error=f"fetch: {error}"),
@@ -199,23 +334,72 @@ async def test_a_nondeterminism_error_is_left_to_the_workflow_task(monkeypatch):
     # Unsandboxed, so the patched method is the one the worker runs.
     monkeypatch.setattr(PipelineWorkflow, "_execute", restricted)
 
-    result, mirrored, _ = await _run(
-        _unreached_llm_extract,
-        timeout=timedelta(seconds=3),
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    )
+    h = Harness()
+    result = await h.run(timeout=timedelta(seconds=3), workflow_runner=UnsandboxedWorkflowRunner())
 
     assert isinstance(result, WorkflowFailureError)
     assert not isinstance(result.cause, ApplicationError)
-    assert mirrored == [MirrorBlockInput(run_id="r1", block_id="fetch", status="running")]
+    assert h.calls == [MirrorBlockInput(run_id="r1", block_id="fetch", status="running")]
+
+
+async def test_a_cancel_seen_by_the_mirror_stops_at_the_next_block():
+    h = Harness()
+    h.running_reply["extract"] = "cancelled"
+    result = await h.run()
+
+    assert result is None
+    assert h.extracted == []
+    assert _block_calls(h.calls) == [
+        ("fetch", "running"),
+        ("fetch", "completed"),
+        ("extract", "running"),
+    ]
+    assert h.calls[-1] == MirrorRunInput(run_id="r1", status="cancelled")
+
+
+async def test_a_workflow_cancel_lets_the_running_block_finish_then_stops():
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def scrape(input):
+        started.set()
+        await release.wait()
+        return _scrape_output()
+
+    async def cancel_mid_block(handle):
+        await started.wait()
+        await handle.cancel()
+        await asyncio.sleep(0.5)
+        release.set()
+
+    h = Harness(scrape=scrape)
+    result = await h.run(during=cancel_mid_block)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert isinstance(result.cause, CancelledError)
+    # R3: the block was never aborted; its output stays and is charged.
+    assert _block_calls(h.calls) == [("fetch", "running"), ("fetch", "completed")]
+    assert any(isinstance(c, RecordStorageInput) for c in h.calls)
+    assert h.extracted == []
+    assert h.calls[-1] == MirrorRunInput(run_id="r1", status="cancelled")
+
+
+async def test_crossing_the_storage_wall_completes_the_run_with_a_named_error():
+    h = Harness(usage=StorageUsage(used=150, limit=100))
+    result = await h.run()
+
+    assert result == LLM_PATH
+    assert len(h.extracted) == 1  # the run finishes: later blocks still run
+    final = h.calls[-1]
+    assert (final.status, final.result_path) == ("completed", LLM_PATH)
+    assert final.error.startswith("storage_wall: block 'fetch' took storage to 150 of 100 bytes")
 
 
 # ---------------------------------------------------------------------------
-# The mirror activities, against the dev DB
+# The DB activities, against the dev DB
 # ---------------------------------------------------------------------------
 
 
-async def _run_rows(user_id, blocks=(("fetch", "scrape", "pending"),)) -> PipelineRun:
+async def _run_rows(user_id, blocks=(("fetch", "scrape", "pending"),), **run_fields) -> PipelineRun:
     async with AsyncSessionLocal() as db:
         pipeline = Pipeline(user_id=user_id, name=f"p-{uuid.uuid4().hex[:6]}")
         db.add(pipeline)
@@ -229,8 +413,9 @@ async def _run_rows(user_id, blocks=(("fetch", "scrape", "pending"),)) -> Pipeli
             pipeline_id=pipeline.id,
             pipeline_version_id=version.id,
             user_id=user_id,
-            status="running",
+            status=run_fields.pop("status", "running"),
             workflow_id=f"pipeline-run-{run_id}",
+            **run_fields,
         )
         db.add(run)
         db.add_all(
@@ -243,17 +428,27 @@ async def _run_rows(user_id, blocks=(("fetch", "scrape", "pending"),)) -> Pipeli
     return run
 
 
-async def _block(run_id) -> PipelineRunBlock:
+async def _statuses(run_id) -> tuple[str, dict[str, str]]:
     async with AsyncSessionLocal() as db:
-        return await db.get(
-            PipelineRunBlock,
+        run = await db.get(PipelineRun, run_id)
+        blocks = dict(
             (
-                await db.scalar(
-                    PipelineRunBlock.__table__.select()
-                    .with_only_columns(PipelineRunBlock.id)
-                    .where(PipelineRunBlock.pipeline_run_id == run_id)
+                await db.execute(
+                    select(PipelineRunBlock.block_id, PipelineRunBlock.status).where(
+                        PipelineRunBlock.pipeline_run_id == run_id
+                    )
                 )
-            ),
+            ).all()
+        )
+    return run.status, blocks
+
+
+async def _block(run_id, block_id="fetch") -> PipelineRunBlock:
+    async with AsyncSessionLocal() as db:
+        return await db.scalar(
+            select(PipelineRunBlock).where(
+                PipelineRunBlock.pipeline_run_id == run_id, PipelineRunBlock.block_id == block_id
+            )
         )
 
 
@@ -261,7 +456,10 @@ async def test_mirror_block_status_writes_the_row(db_user):
     run = await _run_rows(db_user.id)
     rid = str(run.id)
 
-    await mirror_block_status(MirrorBlockInput(run_id=rid, block_id="fetch", status="running"))
+    status = await mirror_block_status(
+        MirrorBlockInput(run_id=rid, block_id="fetch", status="running")
+    )
+    assert status == "running"
     block = await _block(run.id)
     assert (block.status, block.started_at is not None, block.finished_at) == (
         "running",
@@ -282,14 +480,16 @@ async def test_mirror_block_status_writes_the_row(db_user):
 
 async def test_mirror_run_status_writes_the_row(db_user):
     run = await _run_rows(db_user.id)
-    await mirror_run_status(
+    status = await mirror_run_status(
         MirrorRunInput(run_id=str(run.id), status="completed", result_path=LLM_PATH)
     )
+    assert status == "completed"
     async with AsyncSessionLocal() as db:
         row = await db.get(PipelineRun, run.id)
-    assert (row.status, row.result_path, row.finished_at is not None) == (
+    assert (row.status, row.result_path, row.error, row.finished_at is not None) == (
         "completed",
         LLM_PATH,
+        None,
         True,
     )
 
@@ -304,25 +504,116 @@ async def test_a_failed_run_skips_the_blocks_that_never_started(db_user):
         ),
     )
     await mirror_run_status(MirrorRunInput(run_id=str(run.id), status="failed", error="x"))
+    assert await _statuses(run.id) == (
+        "failed",
+        {"fetch": "completed", "extract": "failed", "notify": "skipped"},
+    )
+
+
+async def test_a_mirror_never_moves_a_cancelled_run(db_user):
+    run = await _run_rows(
+        db_user.id,
+        (("fetch", "scrape", "completed"), ("extract", "llm_extract", "pending")),
+        status="cancelled",
+    )
+    status = await mirror_run_status(
+        MirrorRunInput(run_id=str(run.id), status="completed", result_path=LLM_PATH)
+    )
+    assert status == "cancelled"
     async with AsyncSessionLocal() as db:
-        statuses = dict(
-            (
-                await db.execute(
-                    select(PipelineRunBlock.block_id, PipelineRunBlock.status).where(
-                        PipelineRunBlock.pipeline_run_id == run.id
-                    )
-                )
-            ).all()
+        row = await db.get(PipelineRun, run.id)
+    assert (row.status, row.result_path) == ("cancelled", None)
+    assert await _statuses(run.id) == ("cancelled", {"fetch": "completed", "extract": "skipped"})
+
+
+async def test_a_cancel_request_stops_the_next_block_from_starting(db_user):
+    run = await _run_rows(
+        db_user.id,
+        (("fetch", "scrape", "completed"), ("extract", "llm_extract", "pending")),
+        cancel_requested_at=datetime.now(UTC),
+    )
+    status = await mirror_block_status(
+        MirrorBlockInput(run_id=str(run.id), block_id="extract", status="running")
+    )
+    assert status == "cancelled"
+    assert (await _block(run.id, "extract")).status == "pending"
+    assert await check_cancelled(RunRef(run_id=str(run.id))) is True
+
+    # The workflow's cancel lands next; the row the API only flagged becomes cancelled.
+    status = await mirror_run_status(MirrorRunInput(run_id=str(run.id), status="cancelled"))
+    assert status == "cancelled"
+    assert await _statuses(run.id) == ("cancelled", {"fetch": "completed", "extract": "skipped"})
+
+
+async def test_a_block_outcome_is_still_recorded_on_a_cancelled_run(db_user):
+    run = await _run_rows(db_user.id, (("fetch", "scrape", "running"),), status="cancelled")
+    await mirror_block_status(
+        MirrorBlockInput(run_id=str(run.id), block_id="fetch", status="completed", output_ref="o")
+    )
+    assert (await _block(run.id)).status == "completed"
+
+
+async def test_check_cancelled_is_false_for_a_running_run(db_user):
+    run = await _run_rows(db_user.id)
+    assert await check_cancelled(RunRef(run_id=str(run.id))) is False
+
+
+async def test_every_mirror_write_notifies_identifiers_and_status_only(db_user):
+    run = await _run_rows(db_user.id)
+    conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
+    received: asyncio.Queue = asyncio.Queue()
+    await conn.add_listener(PIPELINE_STATUS_CHANNEL, lambda *a: received.put_nowait(a[3]))
+    try:
+        # An error far past pg_notify's 8000-byte cap: it must not reach the payload.
+        await mirror_block_status(
+            MirrorBlockInput(
+                run_id=str(run.id), block_id="fetch", status="failed", error="x" * 9000
+            )
         )
-    assert statuses == {"fetch": "completed", "extract": "failed", "notify": "skipped"}
+        await mirror_run_status(MirrorRunInput(run_id=str(run.id), status="failed", error="y"))
+        payloads = [json.loads(await asyncio.wait_for(received.get(), 5)) for _ in range(2)]
+    finally:
+        await conn.close()
+    base = {"run_id": str(run.id), "pipeline_id": str(run.pipeline_id)}
+    assert payloads == [
+        {**base, "status": "running", "block_id": "fetch", "block_status": "failed"},
+        {**base, "status": "failed", "block_id": None, "block_status": None},
+    ]
 
 
-async def test_mirror_of_a_missing_row_fails_without_retry(db_user):
+async def test_record_storage_charges_once_and_reports_usage(db_user):
+    run = await _run_rows(db_user.id)
+    key = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+    arg = RecordStorageInput(
+        run_id=str(run.id), block_id="fetch", objects=[StoredObject(path=key, size=1234)]
+    )
+
+    first = await record_storage(arg)
+    again = await record_storage(arg)  # a retried activity
+
+    assert first == again == StorageUsage(used=1234, limit=settings.default_quota_storage_bytes)
+    block = await _block(run.id)
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.scalars(select(StorageObject).where(StorageObject.object_key == key))
+        ).all()
+        quota = await db.get(UserQuota, db_user.id)
+    assert [(r.pipeline_run_block_id, r.bytes, r.user_id) for r in rows] == [
+        (block.id, 1234, db_user.id)
+    ]
+    assert quota.storage_bytes_used == 1234
+
+
+async def test_db_activities_on_a_missing_row_fail_without_retry(db_user):
     run = await _run_rows(db_user.id)
     with pytest.raises(ApplicationError) as exc_info:
         await mirror_block_status(
-            MirrorBlockInput(run_id=str(run.id), block_id="nope", status="running")
+            MirrorBlockInput(run_id=str(run.id), block_id="nope", status="completed")
         )
     assert exc_info.value.non_retryable
     with pytest.raises(ApplicationError):
         await mirror_run_status(MirrorRunInput(run_id=str(uuid.uuid4()), status="completed"))
+    with pytest.raises(ApplicationError):
+        await record_storage(RecordStorageInput(run_id=str(run.id), block_id="nope", objects=[]))
+    with pytest.raises(ApplicationError):
+        await check_cancelled(RunRef(run_id=str(uuid.uuid4())))

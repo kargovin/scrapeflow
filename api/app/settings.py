@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     max_pipelines_per_user: int = 50
     # Upper bound on any run's time budget, declared or computed.
     pipeline_max_run_seconds: int = 86400
+    # ADR-009 §8d: refuse to start a pipeline run this close to the storage limit (operator dial).
+    storage_headroom_bytes: int = 52428800  # 50 MiB
 
     @field_validator("llm_key_encryption_key")
     def validate_fernet_key(cls, v):

@@ -84,6 +84,7 @@ async def _quota_check(
     db: AsyncSession,
     quota_type: str,
     batch_count: int = 1,
+    headroom_bytes: int = 0,
 ) -> tuple[bool, dict]:
     """Returns (exceeded, detail_dict). detail_dict is empty when not exceeded."""
     quota_row = await db.get(UserQuota, user_id)
@@ -125,18 +126,15 @@ async def _quota_check(
             }
 
     elif quota_type == "storage_bytes":
-        used = quota_row.storage_bytes_used if quota_row else 0
-        limit = (
-            quota_row.storage_bytes_limit
-            if quota_row and quota_row.storage_bytes_limit is not None
-            else settings.default_quota_storage_bytes
-        )
-        if used >= limit:
+        used, limit = _storage_usage(quota_row)
+        if used + headroom_bytes >= limit:
+            near = f", within the {headroom_bytes}-byte headroom" if headroom_bytes else ""
             return True, {
                 "error": "quota_exceeded",
                 "quota_type": "storage_bytes",
                 "message": (
-                    f"Storage limit reached ({used}/{limit} bytes). Delete old results to continue."
+                    f"Storage limit reached ({used}/{limit} bytes{near}). "
+                    "Delete old results to continue."
                 ),
                 "resets_at": None,
             }
@@ -149,13 +147,17 @@ async def check_user_quota(
     db: AsyncSession,
     quota_type: str,
     batch_count: int = 1,
+    headroom_bytes: int = 0,
 ) -> None:
     """Raises HTTP 429 if the user has exceeded the given quota dimension.
 
     batch_count lets callers (e.g. POST /batch) check whether adding N items
-    would push the user over their monthly_runs limit.
+    would push the user over their monthly_runs limit. headroom_bytes refuses
+    storage that near the limit (ADR-009 §8d — the pipeline trigger's buffer).
     """
-    exceeded, detail = await _quota_check(user_id, db, quota_type, batch_count=batch_count)
+    exceeded, detail = await _quota_check(
+        user_id, db, quota_type, batch_count=batch_count, headroom_bytes=headroom_bytes
+    )
     if exceeded:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
 
@@ -169,15 +171,24 @@ async def is_quota_exceeded(user_id: uuid.UUID, db: AsyncSession, quota_type: st
     return exceeded
 
 
-async def check_storage_quota(user_id: uuid.UUID, db: AsyncSession, additional_bytes: int) -> bool:
-    """Returns True if the user can store additional_bytes more. False if over limit."""
-    quota_row = await db.get(UserQuota, user_id)
+def _storage_usage(quota_row: UserQuota | None) -> tuple[int, int]:
     used = quota_row.storage_bytes_used if quota_row else 0
     limit = (
         quota_row.storage_bytes_limit
         if quota_row and quota_row.storage_bytes_limit is not None
         else settings.default_quota_storage_bytes
     )
+    return used, limit
+
+
+async def storage_usage(user_id: uuid.UUID, db: AsyncSession) -> tuple[int, int]:
+    """(bytes used, limit) for the user."""
+    return _storage_usage(await db.get(UserQuota, user_id))
+
+
+async def check_storage_quota(user_id: uuid.UUID, db: AsyncSession, additional_bytes: int) -> bool:
+    """Returns True if the user can store additional_bytes more. False if over limit."""
+    used, limit = await storage_usage(user_id, db)
     return (used + additional_bytes) <= limit
 
 

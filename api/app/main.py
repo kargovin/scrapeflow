@@ -19,7 +19,7 @@ from app.core.result_consumer import start_result_consumer
 from app.core.scheduler import scheduler_loop
 from app.core.webhook_loop import webhook_delivery_loop
 from app.middleware.correlation import CorrelationIdMiddleware
-from app.routers import admin, batch, crawls, health, jobs, pipelines, users
+from app.routers import admin, admin_pipelines, batch, crawls, health, jobs, pipelines, users
 from app.settings import settings
 
 logger = structlog.get_logger()  # structured JSON logger — see settings.py for log level config
@@ -147,6 +147,7 @@ app.include_router(batch.router)
 app.include_router(crawls.router)
 app.include_router(pipelines.router)
 app.include_router(admin.router)
+app.include_router(admin_pipelines.router)
 
 # SPA — served at /app/* so it doesn't overlap with any API route prefix.
 # /admin/*, /users/*, /jobs/* etc. are all API routes; /app/* is SPA-only.

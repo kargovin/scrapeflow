@@ -14,7 +14,12 @@ import structlog
 from temporalio.worker import Worker
 
 from app.settings import settings
-from app.workflows.activities.db import mirror_block_status, mirror_run_status
+from app.workflows.activities.db import (
+    check_cancelled,
+    mirror_block_status,
+    mirror_run_status,
+    record_storage,
+)
 from app.workflows.client import connect
 from app.workflows.hello import HelloWorkflow, say_hello
 from app.workflows.pipeline import PipelineWorkflow
@@ -36,7 +41,13 @@ async def main() -> None:
         client,
         task_queue=WORKFLOW_QUEUE,
         workflows=[HelloWorkflow, ScrapeProbeWorkflow, LLMProbeWorkflow, PipelineWorkflow],
-        activities=[say_hello, mirror_block_status, mirror_run_status],
+        activities=[
+            say_hello,
+            mirror_block_status,
+            mirror_run_status,
+            record_storage,
+            check_cancelled,
+        ],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )
 

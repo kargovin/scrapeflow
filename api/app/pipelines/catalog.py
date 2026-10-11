@@ -12,7 +12,7 @@ it, so a definition saved today must still validate and run after this file chan
 
 import math
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
@@ -360,3 +360,8 @@ WEBHOOK = BlockType(
 CATALOG: Mapping[str, BlockType] = {
     t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK)
 }
+
+
+def run_need_seconds(timings: Iterable[Timing]) -> int:
+    """What a run needs when it declares no ceiling: every block's budget plus its allowance."""
+    return sum(t.budget + BLOCK_OVERHEAD_SECONDS for t in timings)
