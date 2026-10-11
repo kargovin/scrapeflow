@@ -66,11 +66,11 @@
 | C.5 | Run trigger: admission (three meters + headroom buffer), row insert, workflow start | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); see *production refactor* |
 | C.6 | Workflow-worker DB activities: mirror, accounting, cancel-check | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); `on_storage_wall` folded into `record_storage`; see *production refactor* |
 | C.7 | `PipelineWorkflow` body | ✅ Built 2026-10-07, committed 2026-10-11 (local, unreleased; owner's code review deferred); scrape + llm_extract only until C.8/C.9; see *production refactor* |
-| C.8 | Clean + Validate activities | ✅ Built 2026-10-11 (local, uncommitted, unreleased); LLM worker's `content` queue; see C.8 *Built* |
-| C.9 | Webhook activity: wire contract, SSRF, four-timeout ladder, `waiting` | ⬜ |
-| C.10 | Cancellation: API cancel + workflow cancel + boundary re-check | ⬜ |
-| C.11 | Run/result read API + `pipeline_status` notify channel + WS route | ⬜ |
-| C.12 | Frontend: Pipelines pages + WS reconnect (11b, both lanes) | ⬜ |
+| C.8 | Clean + Validate activities | ✅ Built 2026-10-11 (local, `d75c7b2`, unreleased); LLM worker's `content` queue; see C.8 *Built* |
+| C.9 | Webhook activity: wire contract, SSRF, four-timeout ladder, `waiting` | ✅ Built 2026-10-11 (local, `5b14291`, unreleased); open item 2 built on the TL reading — see *Built* |
+| C.10 | Cancellation: API cancel + workflow cancel + boundary re-check | ✅ Built 2026-10-11 (local, `66abdeb`, unreleased) |
+| C.11 | Run/result read API + `pipeline_status` notify channel + WS route | ✅ Built 2026-10-11 (local, `88e8024`, unreleased); **BUG-009 pulled in and fixed** (open item 7) |
+| C.12 | Frontend: Pipelines pages + WS reconnect (11b, both lanes) | ✅ Built 2026-10-11 (local, `c2590af`, unreleased); BUG-018 not ridden — click-through after release |
 | C.13 | Worker Versioning: decide + enable server-side (⚠️ Architect) | ⬜ |
 | C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | ⬜ |
 | **D** | **Job cutover** | |
@@ -1335,7 +1335,7 @@ scraper pods stay hostile-page renderers. Reversible — activities move by re-r
 - Tests: rule matrix; Clean on a fixture page; both idempotent on retry (deterministic keys — §5).
 **Depends on:** B.6 (image + queue plumbing), C.7
 
-**Built 2026-10-11 (local, uncommitted) — not released.** Owner: "do c8". Three calls asked before
+**Built 2026-10-11 (local) — `d75c7b2`. Not released.** Owner: "do c8". Three calls asked before
 building, all answered with the recommendation: (a) **Clean = denylist MVP**, the scored ladder
 (`competitor-research.md` §B1) stays a later refactor; (b) **object path `history/{artifact_id}/clean.md`**
 — ADR-011's convention, as Scrape and LLM already use in C.7 (the `pipelines/{run}/{block}.md` above
@@ -1406,6 +1406,54 @@ and wire contract live in `api/app/core/` already — port, do not rewrite):
 - Tests: header/threshold; SSRF → non-retryable, no attempt; state flips per attempt.
 **Depends on:** C.6, C.7
 
+**Built 2026-10-11 (local) — `5b14291`. Not released.** Owner: "i'll let you do everything until c13; no
+need for any walkthrough" — **every call below is mine and reversible**; none was asked.
+- **Activity** `api/app/workflows/activities/webhook.py` → `deliver_webhook` on the `workflow` queue (it
+  writes the block's status, so it needs the DB). Wire contract copied from `webhook_loop.py`, byte for byte:
+  HMAC-SHA256 over the raw body, `X-ScrapeFlow-Signature: sha256=<hex>` always sent (`b""` with no secret),
+  success = `< 300`, 10 s POST, no redirects followed; every failed POST is retried, a 4xx included, as on
+  the job lane. The repo's first fixture receiver (`tests/test_workflows_webhook.py`, a bare asyncio HTTP
+  server) asserts header name, hex, content type and the 299/300 threshold.
+- **Payload — the two R6 exceptions, recorded in PRD-016 R6:** `job_id` **omitted**; `pipeline_id` and
+  `pipeline_run_id` **added**; `run_id` **kept**, carrying the pipeline run's id, so a receiver keyed on
+  `run_id` keeps working (it equals `pipeline_run_id`). `event` = `pipeline.result` — not
+  `pipeline.completed`, because a Webhook block need not be the last step. `diff_detected: false`,
+  `diff_summary: null` constants. `timestamp` is fixed by the workflow (`workflow.now()`), so every
+  attempt signs the same bytes.
+- **Secret:** `WebhookConfigV1.secret` — optional, user-supplied, a C.4 secret field (Fernet, credentials
+  key; GET lists its name only). Jobs generate theirs server-side and return it once; a pipeline version
+  is an immutable stored definition, so a server-generated secret would need a rotate route C.4 does not
+  have. New optional field with a default, so `config_schema_version` stays 1 (catalog rule).
+- **SSRF** in the activity on every attempt → `WebhookBlocked`, non-retryable, nothing POSTed. The trigger
+  also checks the webhook URL now (fails the run up front). An undecryptable secret → `WebhookSecret`,
+  non-retryable.
+- **Open item 2 — built on the TL reading, not separately confirmed:** the activity mirrors the block
+  itself. Attempt > 1 first writes `running` through `mirror_block_status` — which refuses on a cancelled
+  or cancel-requested run (15d's boundary re-check) → `RunCancelled`, non-retryable; a retryable failure
+  writes `waiting` (`error = "attempt N: HTTP 503"`) then raises — except on the last attempt, where
+  nothing follows. No sleeps, no second counter; `activity.info().attempt` is the counter and
+  `maximum_attempts` rides in `WebhookInput` (the test server leaves `info().retry_policy` empty). The
+  running mirror keeps the first `started_at` (`coalesce`) and clears the last attempt's error.
+- **Cancel during the backoff (C.7's ⚠️ revisited):** `_finish(…, interruptible=…)` — for **effect**
+  blocks (ADR-009 15a's category rule, not a type check) a workflow cancel is passed on to the activity,
+  with `ActivityCancellationType.WAIT_CANCELLATION_COMPLETED`: a retry wait ends at once, an attempt in
+  flight still completes (R3). Content blocks stay shielded. A cancelled block mirrors
+  `failed` / `cancelled before it finished`, the run `cancelled`.
+- **Timing:** the catalog's ladder, unchanged — POST 10 s · `start_to_close` 20 s · `schedule_to_close`
+  10 930 s (5 × (60 + 20) + 30 + 300 + 3000 + 7200) · run budget via `run_need_seconds`. ⚠️ The catalog's
+  default `schedule_to_start` = 60 s still applies per attempt, though 15c leaves it unset: a workflow
+  worker down > 60 s exactly when an attempt is scheduled fails the block. Left as is (same as every
+  block); revisit with C.13's deploy rule.
+- `SUPPORTED_BLOCK_TYPES` and the trigger's "cannot run yet" check removed — every catalog type runs.
+- **Verified:** 455 API tests, 59 contract tests; 15 mutations each caught by its own test (header name,
+  threshold, HMAC over the sent bytes, per-attempt timestamp, SSRF retryable, no cancel re-check, `waiting`
+  on the last attempt, `started_at` reset, error not cleared, not interruptible, `TRY_CANCEL`, `RunCancelled`
+  as failure, trigger SSRF, secret not passed, secret not a secret field) — two first missed because my
+  test selection was wrong, fixed and re-run. Retry spacing measured on the test server: 30 / 300 / 3000 /
+  7200 s (15b). **Live on compose:** POST to `example.com` (405) → `waiting` "attempt 1: HTTP 405" at t+2 s,
+  attempt 2 at t+32 s, cancel row written → attempt 3 at t+332 s refused → run `cancelled`. The success
+  path was not sent to a third-party receiver live; the fixture receiver covers it.
+
 #### C.10 — Cancellation end to end
 
 **What:** `POST /pipelines/{id}/runs/{run_id}/cancel`:
@@ -1420,6 +1468,22 @@ and wire contract live in `api/app/core/` already — port, do not rewrite):
   `cancelled` + tail `skipped`; Temporal-unreachable path still cancels via fallback.
 **Depends on:** C.6, C.7, C.9
 
+**Built 2026-10-11 (local) — `66abdeb`. Not released.** Calls mine (delegated).
+- `POST /pipelines/{id}/runs/{run_id}/cancel` → 202 `PipelineRunCancelResponse`: the run (still `running`),
+  `still_running` (blocks `running`/`waiting`), `upper_bound_seconds`, `llm_billed` (an `llm_extract` block
+  has started — a started call may bill), `workflow_notified`. Row lock, `cancel_requested_at` (first
+  request kept) + notify, commit — **then** `handle.cancel()`, best-effort. A finished run → 409; another
+  user's → 404. The route depends on `get_temporal_or_none`: the engine down must not 503 the cancel.
+- **Upper bound:** the active block's declared budget minus its elapsed time; once the engine is told, an
+  **effect** block's bound is one attempt (`start_to_close`), since its wait ends at once — live, the first
+  version quoted 10 928 s for a webhook that stopped in 0.6 s.
+- `pipeline_status` notify moved to `api/app/core/pipeline_status.py` (`notify_run`, shared by the mirrors
+  and the API) and gained `cancel_requested` — the SPA shows *cancelling* from it (R3).
+- **Verified:** 464 API tests; 10 mutations each caught. End to end on the **real mirrors** in the
+  time-skipping env: a row cancel mid-block leaves the run `running`, the next block is refused, run
+  `cancelled`, tail `skipped` — the engine never told. **Live:** cancel during a webhook's 30 s wait →
+  `cancelled` 0.6 s later (engine cancel); a second cancel → 409.
+
 #### C.11 — Read API + notify channel + WS
 
 **What:** `GET /pipelines/{id}/runs`, `GET …/runs/{run_id}` (per-block status/timing/refs; a
@@ -1431,6 +1495,31 @@ load-bearing here** — a second channel and multi-hour runs. Backlog §4 defers
 owner pull it in at this task** (detect drop, re-register every channel on backoff, log loudly).
 **Depends on:** C.1, C.6
 
+**Built 2026-10-11 (local) — `88e8024`. Not released.** Calls mine (delegated); **BUG-009 pulled in** (open
+item 7's recommendation).
+- **Reads:** `GET /pipelines/{id}/runs` (newest first, `?status=`, summaries without blocks, `version`
+  number, `cancel_requested_at`); run detail gains `version`, `cancel_requested_at` and per block
+  `output_state` ∈ `none` / `passed_through` / `stored` / `collected` + `collected_at` (§8c — collected is
+  never a 404). `GET …/runs/{run_id}/result` = the run's result; **`?block=<id>`** = one step's stored output
+  (added — R3's "what did this step return"; 410 for collected, 404 naming why for passed-through / none).
+  Ownership is checked before any path resolves (§12). Admin twins under `/admin/pipelines/{id}/runs…`.
+- **WS** `/pipelines/{id}/runs/{run_id}/watch`: auth as the job route; **subscribes, then re-reads** the row
+  (an update in between is queued, not lost), then `db.close()` — an hours-long watch must not hold a pooled
+  connection (the job route still does). Messages carry `status`, `cancel_requested`, `block_id`,
+  `block_status`; terminal type = status, `result_url` on completed; 300 s `timeout`; 4001/4004/4029.
+- **`JobNotifier`:** third listener; the three subscribe methods share one `_subscribe` (one per-user limit
+  across all channels). **BUG-009:** termination listener → `job_notifier_connection_lost` (error) →
+  reconnect on 1/2/5/10/30 s, every channel re-registered, `job_notifier_reconnected` (warning); a 30 s
+  `SELECT 1` health check terminates a half-open connection. Updates sent while disconnected are lost —
+  the client reconnect (C.12) re-reads.
+- **Verified:** 484 API tests; 13 mutations, 12 caught on the first pass — the miss showed a redundant
+  guard in the termination handler (`stop()` clears the connection first), removed. Notifier tests run
+  against real Postgres (`pg_terminate_backend` on its own backend; a patched half-open `execute`).
+  **Live:** the API's LISTEN backend killed → reconnected in 1 s; then a WS stream through a run and its
+  cancel (block-by-block messages, `cancel_requested` flips, terminal `cancelled`); list/detail/result on
+  real MinIO. ⚠️ **Restart the workflow worker after changing `app/`** — it does not hot-reload; a stale one
+  sent `cancel_requested: false` here until restarted.
+
 #### C.12 — Frontend
 
 **What:** Pipelines list / editor (JSON-first is acceptable for layer A; Monaco exists) / run
@@ -1440,6 +1529,23 @@ backoff, honouring 4029. `tsc -b && vite build` is the only verification; click-
 release. ⚠️ BUG-018 (token caching, tabled) touches the same fetch path — owner's call whether it
 rides here.
 **Depends on:** C.11
+
+**Built 2026-10-11 (local) — `c2590af`. Not released.** Calls mine (delegated).
+- `src/lib/useLiveSocket.ts` — **11b on both lanes:** reconnect on any close not after a terminal message,
+  backoff 1/2/5/10/30 s, 4029 → 30 s with a visible "too many live views", 4004 stops; a **fresh token per
+  connect** (a Clerk JWT outlives no reconnect). `JobDetail.tsx` uses it (the old socket died on its first
+  close). `LiveBadge` shows live / reconnecting / limited.
+- Pages, one component set with `mode` (admin = read-only, polls instead of a socket — the WS is owner-only):
+  `Pipelines` (list; admin: include deleted), `PipelineEditor` (JSON in Monaco, R6-shaped template, every
+  422 problem listed by block; **lazy** — Monaco stays out of the main chunk), `PipelineDetail` (block chain,
+  run form from declared inputs + optional version, runs table, delete), `PipelineRunDetail` (per-step status
+  / time / output state, `view` a stored step's output, the result, cancel → *cancelling* with the response's
+  bound and billing note; after a reload, from `cancel_requested_at`).
+- **BUG-018 not ridden** (owner's earlier call stands), but nothing new copies it: new pages use `useApi()`,
+  a fresh `getToken()` per request — BUG-018's proposed fix, scoped to new code. `apiFetch` throws
+  `ApiError` (status + parsed `detail`); message format unchanged.
+- **Verified:** `tsc -b && vite build` in `node:22-slim` — clean; the editor and viewer are 3 kB / 1 kB lazy
+  chunks. **Not clicked through** (Clerk sign-in) — after the release, as the task says.
 
 #### C.13 — Worker Versioning (⚠️ Architect decision + infra task)
 
@@ -1776,13 +1882,15 @@ migration's stated payoff; record the before/after in the handoff.
 1. **D.2** — the job cutover must port dedup + diff or R5 breaks; ADR-009 §10 frames them as
    waiting for Monitors, which is the pipeline lane's answer only.
 2. **C.9** — `waiting` under a `RetryPolicy` can only be written by the activity itself; confirm
-   that reading of 15a/15b/15d.
+   that reading of 15a/15b/15d. **Built on that reading 2026-10-11 (`5b14291`)** under the owner's
+   delegation; not separately confirmed — the C.9 *Built* note says exactly what the activity writes.
 3. **C.13** — Worker Versioning vs `patched()`: due before C.14, not after.
 4. **E.0** — task-queue shape (per-host limiter, reserved lanes) vs the crw deferral.
 5. **F.4** — `webhook_deliveries` as a v1-only audit mirror or retired.
 6. **I.1** — Alembic-on-startup under two replicas; no ADR covers it.
-7. **C.11** — BUG-009 is deferred past Phase 4 in `phase4-backlog.md` §4 but is made load-bearing
-   by the pipeline lane; recommend pulling it in.
+7. ~~**C.11** — BUG-009 is deferred past Phase 4 in `phase4-backlog.md` §4 but is made load-bearing
+   by the pipeline lane; recommend pulling it in.~~ **Pulled in and fixed at C.11 (`88e8024`, 2026-10-11)**,
+   under the owner's delegation.
 8. ~~**A.8** — where the Temporal Postgres backup lives.~~ **Answered 2026-09-29: nowhere, for
    either Postgres — deferred past the migration by the owner** (data is junk today). `phase4-backlog.md` §4.
 9. ~~**C.5 / C.7** — where the LLM block's key comes from: the definition holds `llm_key_id` only, the

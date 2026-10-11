@@ -965,7 +965,14 @@ takes its bugs along; plumbing is replaced.
 that anything is wrong, and it gets worse under Phase 4's longer runs)
 **Discovered:** 2026-08-26 (reviewing ADR-009 §11, which preserves this mechanism and leans on it
 harder)
-**Status:** Open — pre-migration fix on live code. Not dissolved by Temporal: ADR-009 §11 keeps
+**Status:** ✅ **FIXED locally 2026-10-11 (`88e8024`, C.11) — not released**; ships with the pipeline lane
+(C.14). All three parts of the fix sketch: asyncpg's termination listener logs
+`job_notifier_connection_lost` at **error**, a reconnect loop (1/2/5/10/30 s) re-registers **every** channel
+(`job_status`, `batch_status`, `pipeline_status`) and logs `job_notifier_reconnected`, and a 30 s `SELECT 1`
+health check terminates a half-open connection so the same path fires. Updates sent during the gap are
+lost (no replay) — the client half is C.12's reconnect, which re-reads on every connect. Verified against
+real Postgres (`pg_terminate_backend` on the notifier's own backend) and live on compose (reconnected in
+1 s). *Original status:* Open — pre-migration fix on live code. Not dissolved by Temporal: ADR-009 §11 keeps
 this component and adds a second channel to it.
 
 ### What happens

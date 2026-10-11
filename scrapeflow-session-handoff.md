@@ -150,6 +150,35 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **C.9 → C.12 — BUILT AND COMMITTED (2026-10-11, third session).** Local, `develop`: **`5b14291`** (C.9),
+**`66abdeb`** (C.10), **`88e8024`** (C.11 + BUG-009), **`c2590af`** (C.12) + the docs closeout. **Not pushed, not
+released.** Detail and every call: the backlog's four *Built* notes.
+
+- **Owner's brief:** *"im slightly behind on the schedule; so i'll let you do everything until c13; no need
+  for any walkthrough"* — so **no question was posed and every design call is mine and reversible.** Expect
+  questions as the owner reads; the calls to know: webhook payload (`job_id` omitted; `pipeline_id` +
+  `pipeline_run_id` added; `run_id` kept = the pipeline run id; `event: pipeline.result`) — recorded in
+  PRD-016 R6; the webhook secret is **optional and user-set** (jobs generate theirs); open item 2 built on
+  the TL reading (the activity writes `running`/`waiting` per attempt); a cancel **interrupts an effect
+  block's retry wait** (`WAIT_CANCELLATION_COMPLETED` — an attempt in flight still finishes); cancel bound =
+  one attempt once the engine is told; `?block=` on the result route (added); **BUG-009 pulled in and
+  fixed** (open item 7's recommendation); BUG-018 **not** ridden, but new SPA code fetches a token per request.
+- **Owner asked what C.13 is** — answered: Worker Versioning vs `patched()`, the Architect decision that
+  must precede C.14 (a webhook parks a run ~2.6 h; a deploy inside that window would replay old history on
+  new code). **Not started.**
+- **Verified:** 484 API tests, 59 contract tests; 38 mutations across C.9–C.11 (15 + 10 + 13), every one
+  caught after fixing two test-selection misses and removing one redundant guard. Live on compose: webhook
+  405 → `waiting` → retries 30 s / 300 s apart → row cancel; endpoint cancel mid-backoff → `cancelled` in
+  0.6 s; LISTEN backend killed → reconnect in 1 s; WS stream through a cancel; result + `?block=` on real
+  MinIO. C.12: `tsc -b && vite build` only — **not clicked through** (Clerk).
+- ⚠️ **Found:** the **workflow worker does not hot-reload** — restart it after any `app/` change, or it runs
+  stale code (it sent `cancel_requested: false` until restarted). The catalog's 60 s `schedule_to_start`
+  applies to webhook attempts though ADR-009 15c leaves it unset — noted for C.13's deploy rule.
+- **Local stack:** unchanged set (`api`, `workflow-worker`, the three `-temporal` workers + deps); workflow
+  worker restarted on the final code.
+- **Next: C.13** — Worker Versioning: decide (Architect/owner), dynamicconfig entry, deployment-version stamp
+  on the four workers, deploy rule. Then C.14, the release + R6 gate.
+
 🔷 **C.8 — CLEAN + VALIDATE BUILT AND COMMITTED (2026-10-11, second session).** Local, `develop`
 **`d75c7b2`** (code) + `6cfef04` (backlog note) + this closeout. **Not pushed, not released.** Detail and
 every design call: backlog C.8 *Built* note.
@@ -1122,7 +1151,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Pick up C.9 in `phase4-implementation-backlog.md`** (Webhook activity). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Pick up C.13 in `phase4-implementation-backlog.md`** (Worker Versioning — ⚠️ an Architect/owner decision first; must land before C.14's release). ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1168,7 +1197,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-10-11, second session close (verified after fetch):** `develop` = `6cfef04` (C.8 code `d75c7b2` + backlog note) + this closeout, **not pushed** — 7 ahead of `origin/develop` (`071f6f2`) before this closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
+- **2026-10-11, third session close (verified after fetch):** `develop` = `c2590af` (C.12) + this docs closeout, **not pushed** — 12 ahead of `origin/develop` (`071f6f2`) before the closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
+- *Historical:* **2026-10-11, second session close (verified after fetch):** `develop` = `6cfef04` (C.8 code `d75c7b2` + backlog note) + this closeout, **not pushed** — 7 ahead of `origin/develop` (`071f6f2`) before this closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
 - *Historical:* **2026-10-11 close:** `develop` = `7f3b1d5` (C.4–C.7 refactor) + this closeout, **not pushed** — `origin/develop` stops at `071f6f2` (C.3 closeout); everything from `e60658b` on is local. `main` = `origin/main` = `6675f17`, unchanged — Group C is unreleased; it ships with C.14. Infra repo untouched.
 - **2026-10-01, second session close:** `develop` = `b5d0f94` (C.2) + this closeout, **pushed to `origin/develop`** (owner: "close out and push to origin"). `main` = `origin/main` = `6675f17`, unchanged — C.1 and C.2 are unreleased; they ship with C.14. Infra repo untouched.
 - *Historical:* **2026-10-01 close (verified after fetch):** `develop` = `origin/develop` = `9bdb3a5` (C.1) before this closeout commit, which is pushed after it. `main` = `origin/main` = `6675f17`, unchanged — **C.1 is unreleased**; it ships with Group C's release (C.14). Infra repo untouched.
@@ -1316,6 +1346,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-11 *(clock, third session)* | **🔷 C.9 → C.12 built (local).** Read-in; owner: "i'll let you do everything until c13; no need for any walkthrough"; asked what C.13's check is → answered (Worker Versioning, Architect call before C.14). Built one task at a time, each tested, mutation-checked, live-checked on compose and committed: C.9 Webhook activity, C.10 cancel endpoint, C.11 reads + WS + BUG-009, C.12 SPA pages + reconnecting socket. Docs: backlog (four rows, four *Built* notes, open items 2 and 7, stale C.8 row), PRD-016 R6 payload decision, `open-bugs.md` + `phase4-backlog.md` (BUG-009), `CLAUDE.md`, this file. | `5b14291`, `66abdeb`, `88e8024`, `c2590af` + this closeout |
 | 2026-10-11 *(clock, second session)* | **🔷 C.8 built (local).** Read-in; owner: "do c8". Illustrated scrape → clean → validate → LLM walkthrough; three calls asked before building (denylist MVP, `history/{artifact_id}/clean.md`, `jsonschema` in worker + API) — all took the recommendation. Built worker activities on a `content` queue in the LLM worker process, API contracts + workflow branches, save-time schema meta-validation, contract arms, tests; 15 mutations (stale-`.pyc` false catches found and re-run); live on compose, three pipelines + a 422. Owner: "commit it as two", then "close this session". *(Rows for the C.3 → C.7 sessions were never added; their record is the Current-state blocks.)* | `d75c7b2`, `6cfef04` + this closeout |
 | 2026-10-01 *(clock, second session)* | **🔷 C.2 built (local).** Read-in. Two open questions asked before building: own revision (4.5) and the slot rule (run `running` AND a `running` block) — both took the recommendation. Built models, migration 4.5 (views + CHECK hand-written), ledger kwarg + release helper, 8 tests; round trip with `pg_get_viewdef` diffs, five schema mutations each failing its own test, 311 tests. Owner: "close out c2 and commit". | `b5d0f94` + this closeout |
 | 2026-10-01 *(clock)* | **🔷 C.1 built (local) — Group C opens.** Read-in. Concepts at the owner's request: what a pipeline is (recipe of blocks, `PipelineWorkflow` as interpreter, Group C = the API→Temporal→Postgres bridge, D reuses it); the four C.1 tables; failed-run artifacts and the four retry layers. Owner calls: run-level `error`, `result_path` only on `completed`, indexes delegated. My RESTRICT-vs-NO ACTION "trap" tested on dev Postgres and withdrawn; FK explanation redone from scratch after the owner said it mixed everything. Built models + migration 4.4 (round trip, `alembic check`, constraint behaviour in a rolled-back transaction, 303 tests); owner: "commit and push dev". | `9bdb3a5` + this closeout |
