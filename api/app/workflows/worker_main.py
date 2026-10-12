@@ -20,9 +20,17 @@ from app.workflows.activities.db import (
     mirror_run_status,
     record_storage,
 )
+from app.workflows.activities.job_runs import (
+    finish_job_run,
+    job_run_processing,
+    job_run_started,
+    load_job_llm,
+    record_job_objects,
+)
 from app.workflows.activities.webhook import deliver_webhook
 from app.workflows.client import connect
 from app.workflows.hello import HelloWorkflow, say_hello
+from app.workflows.job import JobWorkflow
 from app.workflows.pipeline import PipelineWorkflow
 from app.workflows.probe import LLMProbeWorkflow, ScrapeProbeWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
@@ -41,7 +49,13 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=WORKFLOW_QUEUE,
-        workflows=[HelloWorkflow, ScrapeProbeWorkflow, LLMProbeWorkflow, PipelineWorkflow],
+        workflows=[
+            HelloWorkflow,
+            ScrapeProbeWorkflow,
+            LLMProbeWorkflow,
+            PipelineWorkflow,
+            JobWorkflow,
+        ],
         activities=[
             say_hello,
             mirror_block_status,
@@ -49,6 +63,11 @@ async def main() -> None:
             record_storage,
             check_cancelled,
             deliver_webhook,
+            job_run_started,
+            load_job_llm,
+            record_job_objects,
+            job_run_processing,
+            finish_job_run,
         ],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )

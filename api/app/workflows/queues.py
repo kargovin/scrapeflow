@@ -18,3 +18,8 @@ LLM_QUEUE = "llm"
 
 # Polled by the LLM worker in WORKER_MODE=temporal, beside LLM_QUEUE: Clean and Validate.
 CONTENT_QUEUE = "content"
+
+
+def scrape_queue(engine: str) -> str:
+    """The queue whose worker runs ``engine``; both register the same activity name."""
+    return SCRAPE_PLAYWRIGHT_QUEUE if engine == "playwright" else SCRAPE_HTTP_QUEUE

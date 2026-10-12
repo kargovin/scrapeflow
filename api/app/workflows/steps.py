@@ -1,6 +1,7 @@
 from datetime import timedelta
-from typing import Literal
+from typing import Any, Literal
 
+from pydantic import BaseModel
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
@@ -13,7 +14,7 @@ with workflow.unsafe.imports_passed_through():
         ScrapeInput,
         ScrapeOutput,
     )
-    from app.workflows.queues import LLM_QUEUE, SCRAPE_HTTP_QUEUE, SCRAPE_PLAYWRIGHT_QUEUE
+    from app.workflows.queues import LLM_QUEUE, WORKFLOW_QUEUE, scrape_queue
 
 # Not retried: a queue nobody polls fails here instead of waiting forever.
 SCHEDULE_TO_START = timedelta(seconds=60)
@@ -31,14 +32,12 @@ async def scrape(input: ScrapeInput, engine: Engine = "http") -> ScrapeOutput:
             # The activity heartbeats every 30 s.
             "heartbeat_timeout": timedelta(seconds=90),
         }
-        queue = SCRAPE_PLAYWRIGHT_QUEUE
     else:
         timeouts = {"start_to_close_timeout": timedelta(seconds=90)}
-        queue = SCRAPE_HTTP_QUEUE
     return await workflow.execute_activity(
         SCRAPE_ACTIVITY,
         input,
-        task_queue=queue,
+        task_queue=scrape_queue(engine),
         result_type=ScrapeOutput,
         schedule_to_start_timeout=SCHEDULE_TO_START,
         retry_policy=RetryPolicy(maximum_attempts=3),
@@ -62,4 +61,17 @@ async def llm_extract(input: LLMInput) -> LLMOutput:
             maximum_interval=timedelta(seconds=60),
             maximum_attempts=3,
         ),
+    )
+
+
+async def db(activity: str, arg: BaseModel, result_type: type) -> Any:
+    """An app-DB activity on the workflow worker: short, retried until its window closes."""
+    return await workflow.execute_activity(
+        activity,
+        arg,
+        task_queue=WORKFLOW_QUEUE,
+        result_type=result_type,
+        start_to_close_timeout=timedelta(seconds=10),
+        schedule_to_close_timeout=timedelta(seconds=20),
+        retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=5)),
     )

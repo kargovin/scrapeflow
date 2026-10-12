@@ -14,6 +14,7 @@ from app.messages import Credentials, MessageOptions, ScrapeMessage
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.workflows.activities import contracts
 
 
 def build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> ScrapeMessage:
@@ -32,6 +33,23 @@ def build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> Scr
         engine=job.engine,
         credentials=Credentials(**credentials) if credentials else None,
         options=MessageOptions(respect_robots=job.respect_robots, actions=job.playwright_actions),
+        playwright_options=job.playwright_options if job.engine == "playwright" else None,
+    )
+
+
+def build_scrape_input(job: Job, run: JobRun, credentials: dict | None) -> contracts.ScrapeInput:
+    """The v2 twin of ``build_scrape_message``: the same values, the activity's shape (B.1).
+
+    The engine is not in it — it picks the task queue (``queues.scrape_queue``).
+    """
+    return contracts.ScrapeInput(
+        artifact_id=str(run.id),
+        url=job.url,
+        output_format=job.output_format.value,
+        credentials=contracts.Credentials(**credentials) if credentials else None,
+        options=contracts.ScrapeOptions(
+            respect_robots=job.respect_robots, actions=job.playwright_actions
+        ),
         playwright_options=job.playwright_options if job.engine == "playwright" else None,
     )
 
