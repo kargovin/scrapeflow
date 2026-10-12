@@ -156,8 +156,15 @@ clean; http run `e2d6928c…` + playwright run `ee41a07f…` both `v2` `complete
 unmoved. Detail: backlog D.5 *Released*. After the build, the owner's review added: D.2's reasoning recorded; open
 item 10 (jobs as a front end over pipelines → decide with Monitors); `load_job_llm` → `read_llm_settings` (4 unreleased
 histories re-recorded, ADR-012 pre-release exception); the job cancel routes became a conditional UPDATE (`0b4ac9e`).
-⚠️ The SPA cannot create jobs — test jobs are `curl` + an API key, run in the owner's own terminal. **Next: E.0** (needs
-ADR-010 Accepted — X.2). Owner to delete the `d5-check` API key.
+⚠️ The SPA cannot create jobs — test jobs are `curl` + an API key, run in the owner's own terminal. **LLM path also
+verified in prod** (http + LLM run `fff0b755…`, playwright + LLM run `f3d28777…`, both `completed`, `llm.json` correct,
+NATS LLM counter unmoved). Not tried in prod: a cancel, a webhook job, a scheduled job (compose only).
+- **Session close (2026-10-12):** `develop` is **ahead of `origin/develop`** (docs on top of `0b4ac9e`; `main` holds all
+  the code) — push when convenient. `tmp/` untracked, pre-existing, not mine. **Local compose runs `JOB_LANE=v1`**
+  (the default; `.env` untouched) while **prod runs `v2`** — set it in compose to reproduce prod's job lane.
+  Owner to delete the `d5-check` API key.
+- **Next: E.0** — needs ADR-010 Accepted (X.2) and the task-queue shape decision (open item 4; the crw per-host
+  limiter / reserved lanes). Open item 10 (jobs as a front end over pipelines) waits for Monitors.
 
 🔷 **GROUP D — JOB CUTOVER BUILT (2026-10-12, later session).** `develop` `db774d0` (D.1) ·
 `5e61413` (D.3) · `de91a44` (D.4) · `9bd761e` (D.3 guard) + docs. **Not pushed.** Infra `9ef396a` (`JOB_LANE=v1` on
