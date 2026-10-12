@@ -2038,6 +2038,8 @@ code. Found by the R6 gate's first two attempts (2026-10-12): **two runaways in 
 vLLM endpoint (`Qwen/Qwen3-4B-Instruct-2507`, L4, `--max-model-len 32768`).
 **Status:** ✅ **FIXED (`4965e9d`), DEPLOYED 2026-10-12** — `main` `1793c60..03f72f8`, llm-worker image only; both LLM
 Deployments rolled out, the prod pod reads `llm_max_output_tokens=4096`, `llm_request_timeout_seconds=180`.
+**Prompt fix (`9173837`) DEPLOYED 2026-10-12** — `main` `03f72f8..cf9d2fb` (llm-worker + an api rebuild for the R6
+script); all four Deployments rolled out, both LLM pods return the new prompt.
 
 ### What happens — two faults that compound
 
@@ -2092,7 +2094,7 @@ guidance, so stopping after one sentence is a sampling coin-toss.
 | system: *"Return only the JSON object. Keep every string value short: one sentence at most."* | 0/10 (too strict for general schemas) |
 | system: *"Extract the requested data from the page and return only a JSON object matching the schema. Use only information present in the page. Keep each value as concise as the data allows; do not add commentary, explanations or repetition."* — **20 calls** | **0/20**, every answer the normal 44 tokens, ~2.5 s |
 
-**Fix — built 2026-10-12 (`9173837`, owner: "use your study to build a solution"), unreleased:** that general
+**Fix — built 2026-10-12 (`9173837`, owner: "use your study to build a solution"), deployed `cf9d2fb`:** that general
 instruction opens the **user** turn on both providers (`EXTRACTION_INSTRUCTION` + `Page:` + the page, in
 `llm-worker/worker/llm.py`), so job runs and the pipeline LLM block both get it. **Not a system message**, unlike the
 study: some self-hosted chat templates (Gemma-2, early Mistral) reject a system role with a 400, which the classifier
