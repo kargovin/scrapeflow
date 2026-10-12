@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import redis.asyncio as aioredis
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from miniopy_async.api import Minio
 from sqlalchemy import case, func, select, text, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -13,6 +13,7 @@ from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import get_current_admin_user
 from app.core.db import get_db
+from app.core.dispatch import cancel_workflows
 from app.core.ledger import release_run_objects, release_user_objects
 from app.core.minio import get_minio
 from app.core.redis import get_redis
@@ -36,6 +37,7 @@ from app.schemas.admin import (
 )
 from app.schemas.jobs import CancelJobResponse, JobResponse, JobResultResponse
 from app.settings import settings
+from app.workflows.client import lazy_client
 
 MINIO_STORAGE_CACHE_KEY = "scrapeflow:cache:minio_storage"
 MINIO_STORAGE_CACHE_TTL = 300  # seconds
@@ -304,6 +306,7 @@ async def admin_get_job_result(
 @router.delete("/jobs/{job_id}", response_model=CancelJobResponse)
 async def admin_delete_or_cancel_job(
     job_id: uuid.UUID,
+    request: Request,
     hard_delete: bool = Query(default=False),
     admin: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
@@ -315,6 +318,10 @@ async def admin_delete_or_cancel_job(
 
     if hard_delete:
         runs = (await db.execute(select(JobRun).where(JobRun.job_id == job_id))).scalars().all()
+        await cancel_workflows(
+            [r for r in runs if r.status in ("pending", "running", "processing")],
+            lambda: lazy_client(request.app.state),
+        )
         outcome = await release_run_objects(
             db, minio_client, runs, job.user_id, "job object on admin hard delete"
         )
@@ -354,6 +361,7 @@ async def admin_delete_or_cancel_job(
             {"p": f"{run.job_id}:{run.id}:cancelled"},
         )
     await db.commit()
+    await cancel_workflows(active_runs, lambda: lazy_client(request.app.state))
     logger.info("admin_job_cancelled", job_id=str(job_id), admin_id=str(admin.id))
     return CancelJobResponse(message="Job run cancelled")
 

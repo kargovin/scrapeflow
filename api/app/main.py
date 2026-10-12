@@ -21,6 +21,7 @@ from app.core.webhook_loop import webhook_delivery_loop
 from app.middleware.correlation import CorrelationIdMiddleware
 from app.routers import admin, admin_pipelines, batch, crawls, health, jobs, pipelines, users
 from app.settings import settings
+from app.workflows.client import lazy_client
 
 logger = structlog.get_logger()  # structured JSON logger — see settings.py for log level config
 
@@ -73,7 +74,9 @@ async def lifespan(app: FastAPI):
     fernet = Fernet(settings.llm_key_encryption_key)
 
     # Scheduler — dispatches due cron jobs every 60s
-    scheduler_task = asyncio.create_task(scheduler_loop(AsyncSessionLocal, app.state.nats_js))
+    scheduler_task = asyncio.create_task(
+        scheduler_loop(AsyncSessionLocal, app.state.nats_js, lambda: lazy_client(app.state))
+    )
     logger.info("Scheduler loop started")
 
     # Webhook delivery loop — retries pending deliveries every 15s

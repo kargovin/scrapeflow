@@ -8,13 +8,98 @@ makes that hold, rather than merely being true today.
 
 The wire models in ``app.messages`` stay ORM-free; this module is the bridge from rows
 to messages.
+
+``dispatch_run`` is the one switch between the engines for a job's run (ADR-009 16d): the run's
+``lane``, written when the row was inserted, picks NATS or ``JobWorkflow``.
 """
 
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+
+import structlog
+from nats.js import JetStreamContext
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client
+from temporalio.common import WorkflowIDReusePolicy
+
+from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
+from app.core.webhooks import create_webhook_delivery
 from app.messages import Credentials, MessageOptions, ScrapeMessage
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.workflows.activities import contracts
+from app.workflows.job import JobRunInput, JobWorkflow, workflow_id
+from app.workflows.queues import WORKFLOW_QUEUE
+
+logger = structlog.get_logger()
+
+TemporalClient = Callable[[], Awaitable[Client]]
+
+
+def nats_subject(engine: str) -> str:
+    return (
+        NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT if engine == "playwright" else NATS_JOBS_RUN_HTTP_SUBJECT
+    )
+
+
+async def dispatch_run(
+    job: Job,
+    run: JobRun,
+    credentials: dict | None,
+    js: JetStreamContext,
+    temporal: TemporalClient,
+) -> None:
+    """Sends a committed run to its lane's engine. Raises if the engine refused it.
+
+    v1: a failed publish leaves the run pending for stale-pending recovery. v2 has no recovery:
+    the caller fails the run (``fail_unstarted_run``).
+    """
+    if run.lane == "v1":
+        message = build_scrape_message(job, run, credentials)
+        await js.publish(nats_subject(job.engine), message.to_nats_bytes())
+        return
+    client = await temporal()
+    await client.start_workflow(
+        JobWorkflow.run,
+        JobRunInput(
+            run_id=str(run.id),
+            engine=job.engine,
+            scrape=build_scrape_input(job, run, credentials),
+        ),
+        id=workflow_id(run.id),
+        task_queue=WORKFLOW_QUEUE,
+        # The default is ALLOW_DUPLICATE.
+        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+    )
+
+
+async def fail_unstarted_run(db: AsyncSession, job: Job, run: JobRun, exc: Exception) -> None:
+    """A v2 run whose workflow never started: failed, as a worker failure would leave it."""
+    run.status = "failed"
+    run.error = f"could not start workflow: {exc}"
+    run.completed_at = datetime.now(UTC)
+    if job.webhook_url and (not job.webhook_events or "job.failed" in job.webhook_events):
+        await create_webhook_delivery(
+            db, job, run.id, event="job.failed", minio_path=None, error=run.error
+        )
+    await db.execute(text("SELECT pg_notify('job_status', :p)"), {"p": f"{job.id}:{run.id}:failed"})
+    await db.commit()
+
+
+async def cancel_workflows(runs: list[JobRun], temporal: TemporalClient) -> None:
+    """Best effort, after the rows are cancelled: the row is what stops a v2 run (its next mirror
+    refuses), so an engine that cannot be told only delays the stop."""
+    v2 = [run for run in runs if run.lane == "v2"]
+    if not v2:
+        return
+    try:
+        client = await temporal()
+        for run in v2:
+            await client.get_workflow_handle(workflow_id(run.id)).cancel()
+    except Exception as exc:
+        logger.warning("job_workflow_cancel_not_sent", error=str(exc))
 
 
 def build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> ScrapeMessage:

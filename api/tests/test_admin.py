@@ -511,6 +511,27 @@ async def test_admin_cancel_job(client, admin_headers, db_user):
     assert updated_run.status == "cancelled"
 
 
+async def test_admin_cancel_tells_the_engine_about_a_v2_run(client, admin_headers, db_user):
+    async with AsyncSessionLocal() as db:
+        job = Job(user_id=db_user.id, url="https://cancel.example.com")
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="running", lane="v2")
+        db.add(run)
+        await db.commit()
+    temporal = MagicMock()
+    temporal.get_workflow_handle.return_value.cancel = AsyncMock()
+    app.state.temporal = temporal
+    try:
+        resp = await client.delete(f"/admin/jobs/{job.id}", headers=admin_headers)
+    finally:
+        app.state.temporal = None
+
+    assert resp.status_code == 200
+    temporal.get_workflow_handle.assert_called_once_with(f"job-run-{run.id}")
+    temporal.get_workflow_handle.return_value.cancel.assert_awaited_once()
+
+
 async def test_admin_cancel_job_emits_pg_notify(client, admin_headers, db_user):
     """Admin soft-delete emits pg_notify on job_status so WebSocket subscribers close immediately."""
     import asyncpg

@@ -13,6 +13,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     Response,
     WebSocket,
     status,
@@ -25,10 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import auth_from_token, get_current_user
-from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.credentials import resolve_credentials
 from app.core.db import get_db
-from app.core.dispatch import build_scrape_message
+from app.core.dispatch import cancel_workflows, dispatch_run, fail_unstarted_run
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
@@ -51,8 +51,10 @@ from app.schemas.jobs import (
     RotateWebhookSecretResponse,
 )
 from app.settings import settings
+from app.workflows.client import lazy_client
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
 logger = structlog.get_logger()
 
 
@@ -132,6 +134,7 @@ def _jobs_with_latest_run_stmt(
 @router.post("", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
 async def create_job(
     body: JobCreate,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
@@ -250,15 +253,19 @@ async def create_job(
     # Resolve credentials: per-job secret > platform default > None (PRD-005)
     credentials = await resolve_credentials(job, db)
 
-    # Publish to NATS after successful DB insert (ADR-001)
-    # If NATS is unavailable, job stays as `pending` and can be retried later
-    message = build_scrape_message(job, job_run, credentials)
-    subject = (
-        NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-        if body.engine == Engine.playwright
-        else NATS_JOBS_RUN_HTTP_SUBJECT
-    )
-    await js.publish(subject, message.to_nats_bytes())
+    # Dispatch after the DB insert (ADR-001). v1: if NATS is down the run stays pending for
+    # stale-pending recovery. v2 has no recovery: a run whose workflow did not start is failed.
+    try:
+        await dispatch_run(job, job_run, credentials, js, lambda: lazy_client(request.app.state))
+    except Exception as exc:
+        if job_run.lane == "v1":
+            raise
+        logger.exception("job_run_start_failed", job_id=str(job.id), run_id=str(job_run.id))
+        await fail_unstarted_run(db, job, job_run, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"job_id": str(job.id), "run_id": str(job_run.id), "error": job_run.error},
+        ) from None
     logger.info("job_created", job_id=str(job.id), user_id=str(user.id), url=job.url)
 
     return JobResponse(
@@ -348,6 +355,7 @@ async def get_job(
 @router.delete("/{job_id}", response_model=CancelJobResponse)
 async def cancel_job(
     job_id: uuid.UUID,
+    request: Request,
     permanent: bool = Query(default=False),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -361,6 +369,11 @@ async def cancel_job(
         # Objects before the DB row (external-before-internal), enumerated from the
         # ledger rather than derived from result_path — an LLM run holds more than one.
         runs = (await db.execute(select(JobRun).where(JobRun.job_id == job_id))).scalars().all()
+        # A v2 run still in flight finds its row gone and drops what it writes after this.
+        await cancel_workflows(
+            [r for r in runs if r.status in ("pending", "running", "processing")],
+            lambda: lazy_client(request.app.state),
+        )
         outcome = await release_run_objects(
             db, minio_client, runs, user.id, "job object on permanent delete"
         )
@@ -405,6 +418,7 @@ async def cancel_job(
             {"p": f"{run.job_id}:{run.id}:cancelled"},
         )
     await db.commit()
+    await cancel_workflows(active_runs, lambda: lazy_client(request.app.state))
     logger.info("job_cancelled", job_id=str(job_id))
     return CancelJobResponse(message="Job run cancelled")
 

@@ -16,10 +16,17 @@ from croniter import croniter
 from nats.js import JetStreamContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from temporalio.client import Client
 
-from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.credentials import resolve_credentials
-from app.core.dispatch import build_batch_scrape_message, build_scrape_message
+from app.core.dispatch import (
+    TemporalClient,
+    build_batch_scrape_message,
+    build_scrape_message,
+    dispatch_run,
+    fail_unstarted_run,
+    nats_subject,
+)
 from app.core.quota import is_quota_exceeded
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
@@ -29,15 +36,20 @@ from app.settings import settings
 logger = structlog.get_logger()
 
 
+async def _no_temporal() -> Client:
+    raise RuntimeError("no Temporal client")
+
+
 async def scheduler_loop(
     db_factory: async_sessionmaker[AsyncSession],
     js: JetStreamContext,
+    temporal: TemporalClient,
 ) -> None:
     """Background task: dispatch due cron jobs and recover stale pending runs."""
     while True:
         await asyncio.sleep(60)  # sleep at top — no immediate trigger on startup
         try:
-            await _dispatch_due_jobs(db_factory, js)
+            await _dispatch_due_jobs(db_factory, js, temporal)
             await _recover_stale_pending(db_factory, js)
         except asyncio.CancelledError:
             raise
@@ -48,8 +60,9 @@ async def scheduler_loop(
 async def _dispatch_due_jobs(
     db_factory: async_sessionmaker[AsyncSession],
     js: JetStreamContext,
+    temporal: TemporalClient = _no_temporal,
 ) -> None:
-    """Create a JobRun and publish to NATS for every cron job that is now due."""
+    """Create a JobRun for every cron job that is now due and send it to its lane's engine."""
     async with db_factory() as db:
         stmt = (
             select(Job)
@@ -93,20 +106,22 @@ async def _dispatch_due_jobs(
             await db.commit()  # commit per job — releases row lock immediately
 
             credentials = await resolve_credentials(job, db)
-            message = build_scrape_message(job, run, credentials)
-            subject = (
-                NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-                if job.engine == "playwright"
-                else NATS_JOBS_RUN_HTTP_SUBJECT
-            )
             try:
-                await js.publish(subject, message.to_nats_bytes())
-            except Exception:
+                await dispatch_run(job, run, credentials, js, temporal)
+            except Exception as exc:
+                if run.lane == "v1":
+                    logger.exception(
+                        "scheduler: NATS publish failed after DB commit — stale-pending recovery will retry",
+                        job_id=str(job.id),
+                        run_id=str(run.id),
+                    )
+                    continue
                 logger.exception(
-                    "scheduler: NATS publish failed after DB commit — stale-pending recovery will retry",
+                    "scheduler: workflow start failed — run failed",
                     job_id=str(job.id),
                     run_id=str(run.id),
                 )
+                await fail_unstarted_run(db, job, run, exc)
                 continue
 
             logger.info(
@@ -114,6 +129,7 @@ async def _dispatch_due_jobs(
                 job_id=str(job.id),
                 run_id=str(run.id),
                 engine=job.engine,
+                lane=run.lane,
             )
 
 
@@ -193,13 +209,8 @@ async def _recover_stale_pending(
                 )
                 continue
 
-            subject = (
-                NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-                if engine == "playwright"
-                else NATS_JOBS_RUN_HTTP_SUBJECT
-            )
             try:
-                await js.publish(subject, message.to_nats_bytes())
+                await js.publish(nats_subject(engine), message.to_nats_bytes())
             except Exception:
                 logger.exception(
                     "scheduler: NATS publish failed for stale-pending recovery — will retry next cycle",
