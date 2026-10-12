@@ -25,6 +25,14 @@ class JobRun(Base):
         nullable=False,
         index=True,
     )
+    # Which engine owns the run (ADR-009 §7 mechanism 4); set in the insert transaction.
+    lane: Mapped[str] = mapped_column(
+        VARCHAR(2),
+        CheckConstraint("lane IN ('v1', 'v2')", name="chk_job_runs_lane"),
+        nullable=False,
+        server_default="v1",
+        default="v1",
+    )
     result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     diff_detected: Mapped[bool | None] = mapped_column(nullable=True)
     diff_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

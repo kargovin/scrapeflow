@@ -692,6 +692,12 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
             await msg.ack()
             return
 
+        if run.lane != "v1":
+            # Temporal owns this run; a NATS result for it is a stray (ADR-009 16b).
+            logger.warning("Received NATS result for a v2 run, discarding", run_id=run_id)
+            await msg.ack()
+            return
+
         # Read the job id from the row, not the wire (ADR-011 §2). The message used to
         # carry its own copy while the cancellation and pg_notify paths below already
         # read run.job_id — two sources for one fact, which could disagree. It is None

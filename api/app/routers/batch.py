@@ -101,7 +101,8 @@ async def create_batch(
     await db.flush()
 
     # One job_run per item — batch_item_id set, job_id null (ADR-006 §4).
-    runs = [JobRun(batch_item_id=item.id, status="pending") for item in items]
+    # The batch lane moves at the batch cutover, not with JOB_LANE.
+    runs = [JobRun(batch_item_id=item.id, status="pending", lane="v1") for item in items]
     db.add_all(runs)
     await db.commit()
 

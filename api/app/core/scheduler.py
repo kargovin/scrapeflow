@@ -78,7 +78,7 @@ async def _dispatch_due_jobs(
                 )
                 continue
 
-            run = JobRun(job_id=job.id, status="pending")
+            run = JobRun(job_id=job.id, status="pending", lane=settings.job_lane)
             db.add(run)
             await db.flush()  # populate run.id before publish
 
@@ -140,6 +140,8 @@ async def _recover_stale_pending(
             .where(
                 JobRun.status == "pending",
                 JobRun.created_at < stale_cutoff,
+                # A v2 run is Temporal's: re-publishing it to NATS would run it twice.
+                JobRun.lane == "v1",
             )
             .with_for_update(skip_locked=True)
         )

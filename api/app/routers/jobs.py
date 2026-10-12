@@ -203,7 +203,7 @@ async def create_job(
     )
     db.add(job)
     await db.flush()
-    job_run = JobRun(job_id=job.id, status="pending")
+    job_run = JobRun(job_id=job.id, status="pending", lane=settings.job_lane)
     db.add(job_run)
     await db.commit()
     await db.refresh(job)
