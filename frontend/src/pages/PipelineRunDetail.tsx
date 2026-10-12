@@ -14,7 +14,9 @@ import LiveBadge from '../components/LiveBadge'
 import StatusPill, { runStatus } from '../components/StatusPill'
 
 // Monaco in its own chunk, as on the job page.
-const OutputViewer = lazy(() => import('../components/OutputViewer'))
+const ContentViewer = lazy(() => import('../components/ContentViewer'))
+
+const FORMAT_BY_EXT: Record<string, string> = { json: 'json', md: 'markdown', html: 'html' }
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 
@@ -195,10 +197,17 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
           <div className="mb-6"><ErrorBox error={output.error} /></div>
         ) : output.data ? (
           <Suspense fallback={<p className="mb-6 text-sm text-gray-500">Loading viewer…</p>}>
-            <OutputViewer
+            <ContentViewer
+              key={output.data.result_path}
               title={viewing ? `Output of ${viewing}` : 'Result'}
-              path={output.data.result_path}
+              subtitle={
+                <span className="text-xs text-gray-400 truncate" title={output.data.result_path}>
+                  {output.data.result_path}
+                </span>
+              }
+              format={FORMAT_BY_EXT[output.data.result_path.split('.').pop() ?? ''] ?? 'text'}
               content={output.data.content}
+              filename={`${runId}-${viewing ?? 'result'}`}
             />
           </Suspense>
         ) : null

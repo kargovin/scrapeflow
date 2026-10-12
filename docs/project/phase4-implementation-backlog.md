@@ -1604,7 +1604,10 @@ the R6 script `api/scripts/r6_gate.py` (`1793c60`, stdlib only, run by the owner
 - **R6 — PASS 2026-10-12** (owner-run, on `03f72f8`): every structural check and both signatures pass; repeat run
   = 1 LLM call + 2 stored objects vs the job's 0 + 0. Verdict and detail: PRD-016 R6 → *Gate result*. The run
   carried BUG-022's loop (3 of 6 LLM attempts hit the cap). First found BUG-022 (`4965e9d`).
-- **Still owed:** the **C.12 click-through**.
+- **C.12 click-through — done by the owner 2026-10-12**: "at a glance everything looks good"; one gap — a pipeline
+  output had no Preview / Download (the job lane's Result card has both). Fixed: one shared `ContentViewer`
+  (Source/Preview for markdown and HTML, Copy, Download) on both lanes; `OutputViewer` removed. Build-only verified;
+  ships with the next api image.
 
 ---
 
