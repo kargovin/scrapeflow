@@ -2036,7 +2036,8 @@ worker was fixed on 2026-09-30 (`63e7fbe`, infra `1807870`); the API was left by
 code. Found by the R6 gate's first two attempts (2026-10-12): **two runaways in about six calls**.
 **Discovered:** 2026-10-12, running `api/scripts/r6_gate.py` against production with the owner's Modal
 vLLM endpoint (`Qwen/Qwen3-4B-Instruct-2507`, L4, `--max-model-len 32768`).
-**Status:** ✅ **FIXED locally 2026-10-12** — not released; ships with the next `main` fast-forward (llm-worker image).
+**Status:** ✅ **FIXED (`4965e9d`), DEPLOYED 2026-10-12** — `main` `1793c60..03f72f8`, llm-worker image only; both LLM
+Deployments rolled out, the prod pod reads `llm_max_output_tokens=4096`, `llm_request_timeout_seconds=180`.
 
 ### What happens — two faults that compound
 

@@ -180,8 +180,9 @@ condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *
   shielded LLM step keep calling Modal) and the `llm-worker-temporal` pod restarted to drop its open request.
   **Leftover:** that run's row is still `running` with `extract` `running` (a terminate runs no mirror) — it holds
   one of the owner's concurrency slots; fix with SQL (`status='cancelled'`, `finished_at=now()`, block `failed`,
-  tail `skipped`) or leave it. **BUG-022 filed and fixed locally the same day** (`open-bugs.md`) — **next: release
-  it (owner runs the `main` ff; llm-worker image only), then rerun the gate.** ⚠️ The owner's prod API key was
+  tail `skipped`) or leave it. **BUG-022 filed and fixed locally the same day** (`open-bugs.md`) — ✅ **released 2026-10-12
+  (`1793c60..03f72f8`, llm-worker image only; both LLM Deployments rolled out, prod pod reads cap 4096 / deadline 180 s).
+  Deployed code is `03f72f8`. Next: rerun the gate.** ⚠️ The owner's prod API key was
   typed into this transcript in a `!` command — **revoke it** and make a new one.
 
 🔷 **C.9 → C.12 — BUILT AND COMMITTED (2026-10-11, third session).** Local, `develop`: **`5b14291`** (C.9),
