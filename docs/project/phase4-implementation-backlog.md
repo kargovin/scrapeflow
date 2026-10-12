@@ -1635,6 +1635,8 @@ result for a `lane='v2'` row — cheap, recommended.
 > calls the LLM). Recorded as PRD-016 R5's second named exception; change detection is re-homed with
 > Monitors (PRD-018). The spec below stands for whenever it is picked up — `JobWorkflow` still writes
 > `content_hash`, so the baseline exists.
+> **Owner's reasoning (confirmed after an explanation, same day):** change detection comes with Monitors,
+> and two ways to do the same thing are not wanted; no jobs run in production today, so nothing is lost now.
 
 **Why:** ADR-009 §10 parks content-hash dedup + `diff.py` as "relocated, not re-homed, wait for
 Monitors" — **that is the pipeline lane's answer.** On the **job lane**, R5 forbids user-visible
@@ -2036,7 +2038,8 @@ migration's stated payoff; record the before/after in the handoff.
 1. ~~**D.2** — the job cutover must port dedup + diff or R5 breaks; ADR-009 §10 frames them as
    waiting for Monitors, which is the pipeline lane's answer only.~~ **Answered 2026-10-12 (owner):
    drop for now** — jobs on v2 have no dedup and no diff until change detection is re-homed;
-   recorded as PRD-016 R5's second named exception. D.2 not built.
+   recorded as PRD-016 R5's second named exception. D.2 not built. Why: one place for change
+   detection (Monitors), not two; no jobs run in production, so nothing is lost now.
 2. **C.9** — `waiting` under a `RetryPolicy` can only be written by the activity itself; confirm
    that reading of 15a/15b/15d. **Built on that reading 2026-10-11 (`5b14291`)** under the owner's
    delegation; not separately confirmed — the C.9 *Built* note says exactly what the activity writes.

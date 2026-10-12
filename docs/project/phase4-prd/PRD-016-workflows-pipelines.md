@@ -392,6 +392,8 @@ accident through a vague requirement.
   and no reporting diff (`diff_detected` / `diff_summary` are `null` in the webhook payload and on the
   run). Porting both was backlog task D.2; the owner chose to drop it for now and re-home change
   detection with Monitors (PRD-018). Jobs still on the NATS lane keep both until it is retired.
+  **Owner's reasoning:** change detection is being built with Monitors, and two ways to do the same
+  thing are not wanted; no jobs run in production today, so nothing is lost now.
 - **A unit of work executes on exactly one lane — never both.** Double execution means a
   double scrape of the target site and a double LLM bill. This is the top cutover risk on
   record and must be structurally prevented, not just avoided by convention.
