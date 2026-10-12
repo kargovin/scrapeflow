@@ -9,7 +9,7 @@
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
 > **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
-> **Last updated:** 2026-10-05 (C.3 ✅ — block catalog + save-time validator; C.2 ✅; C.1 ✅) · **Tracking:** the status table below is the tracker.
+> **Last updated:** 2026-10-12 (D.1, D.3, D.4 built; D.2 deferred by the owner; D.5 runbook ready) · **Tracking:** the status table below is the tracker.
 
 ---
 
@@ -74,11 +74,11 @@
 | C.13 | Workflow-code versioning: decide + build (⚠️ Architect) | ✅ Built 2026-10-12 — owner chose **`patched()` + a replay test that gates the build** (ADR-012, Draft); Worker Versioning not taken |
 | C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | ✅ **RELEASED 2026-10-12** (`6675f17..1793c60`, api + llm-worker; no infra change) — **R6 PASS 2026-10-12** (on `03f72f8`, BUG-022's fix) |
 | **D** | **Job cutover** | |
-| D.1 | Lane marker on `job_runs` (mechanism 4) + v1 dispatcher filters | ⬜ |
-| D.2 | `ChangeDetection` activity: content-hash dedup + `diff.py` port (**R5 obligation**) | ⬜ |
-| D.3 | `JobWorkflow` + job-lane webhook row activity | ⬜ |
-| D.4 | Single dispatch switch in `dispatch.py` (`create_job` + scheduler) + cancel path | ⬜ |
-| D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ⬜ |
+| D.1 | Lane marker on `job_runs` (mechanism 4) + v1 dispatcher filters | ✅ Built 2026-10-12 (local, `db774d0`, migration 4.6 `56ab6118641d`, unreleased) |
+| D.2 | `ChangeDetection` activity: content-hash dedup + `diff.py` port (**R5 obligation**) | ⏸ **Not built — owner, 2026-10-12: drop for now.** Jobs on v2 have no dedup and no diff (PRD-016 R5's second named exception) |
+| D.3 | `JobWorkflow` + job-lane webhook row activity | ✅ Built 2026-10-12 (local, `5e61413` + `9bd761e`, unreleased) |
+| D.4 | Single dispatch switch in `dispatch.py` (`create_job` + scheduler) + cancel path | ✅ Built 2026-10-12 (local, `de91a44`, unreleased); infra `JOB_LANE=v1` committed locally, **not pushed** (infra `9ef396a`) |
+| D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ⬜ **Owner-run.** Runbook written (D.5 below); code verified live on compose with `JOB_LANE=v2` |
 | **E** | **Batch and crawl cutover** | |
 | E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ⬜ |
 | E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ⬜ |
@@ -1630,6 +1630,12 @@ result for a `lane='v2'` row — cheap, recommended.
 
 #### D.2 — `ChangeDetection` activity (⚠️ TL finding — raise to Architect)
 
+> ⏸ **Not built — owner's answer 2026-10-12: drop for now.** Jobs on the v2 lane have no content-hash
+> dedup and no reporting diff (the webhook's `diff_detected`/`diff_summary` stay `null`; every run
+> calls the LLM). Recorded as PRD-016 R5's second named exception; change detection is re-homed with
+> Monitors (PRD-018). The spec below stands for whenever it is picked up — `JobWorkflow` still writes
+> `content_hash`, so the baseline exists.
+
 **Why:** ADR-009 §10 parks content-hash dedup + `diff.py` as "relocated, not re-homed, wait for
 Monitors" — **that is the pipeline lane's answer.** On the **job lane**, R5 forbids user-visible
 change, and today's job path does dedup (skip LLM, delete the new object, repoint `result_path`)
@@ -1684,15 +1690,123 @@ unchanged (it calls the API).
 **Tests:** switch → correct lane, marker set in the same transaction; cancel signals only v2.
 **Depends on:** D.3
 
+#### D.1–D.4 — Built *(2026-10-12, one session; local, unreleased)*
+
+> Built under the owner's delegation ("continue building the entire D … without needing my input"),
+> after four questions asked up front: **D.2 → drop for now**; **full spec**, not an MVP slice; a v2
+> run whose workflow cannot start → **failed + 503**; **commit to `develop`**, infra committed but
+> not pushed. Every other call below is mine and reversible.
+
+**What exists.** `develop` `db774d0` (D.1) · `5e61413` (D.3) · `de91a44` (D.4) · `9bd761e` (D.3 guard).
+
+- **D.1** — `job_runs.lane VARCHAR(2) NOT NULL DEFAULT 'v1'` + `chk_job_runs_lane` (migration 4.6
+  `56ab6118641d`; the CHECK is hand-written — autogenerate does not see CHECKs). Every `JobRun(...)`
+  sets it: `create_job` and `_dispatch_due_jobs` from **`settings.job_lane`** (`JOB_LANE`, default
+  `v1`), `create_batch` **always `v1`** (the batch lane moves at E.2, not with this switch).
+  `_recover_stale_pending` selects `lane='v1'` only; `result_consumer._handle_result` acks and
+  discards a NATS result for a `v2` row (the optional belt-and-braces — built).
+- **D.3** — `app/workflows/job.py` (`JobWorkflow`, models, activity names) +
+  `app/workflows/activities/job_runs.py` (five DB activities on the `workflow` queue). Flow:
+  `job_run_started` (pending → running) → Scrape (`steps.scrape`, engine → `queues.scrape_queue`)
+  → `load_job_llm` → `record_job_objects` → [`job_run_processing` → LLMExtract →
+  `record_job_objects`] → `finish_job_run` (row + webhook row in one transaction). Every write
+  notifies `job_status` with the positional `{job_id}:{run_id}:{status}` payload. Input = the run id,
+  the engine and a `ScrapeInput` from **`dispatch.build_scrape_input`** (beside
+  `build_scrape_message`; a test pins that the two carry the same values).
+- **D.4** — `dispatch.dispatch_run(job, run, credentials, js, temporal)` routes by **`run.lane`** (not
+  by the setting: the lane is fixed at insert, so a flip mid-request cannot split a run). `create_job`
+  and the scheduler both call it. `dispatch.cancel_workflows` — best effort, **after** the row write —
+  is called by the user cancel, user permanent delete, admin cancel and admin hard delete.
+  `workflows/client.lazy_client(state)` split out of `get_temporal` so the scheduler (no request)
+  can reach the engine, and so a `v1` request never connects to Temporal at all.
+
+**Calls made (reversible):**
+1. **The LLM step is read by an activity after the scrape** (`load_job_llm`), not resolved into
+   the workflow input at dispatch as pipelines do (open item 9). v1 reads `jobs.llm_config` and the
+   key when the scrape result arrives, so a key deleted meanwhile fails the run with v1's exact
+   error (`LLM key not found or deleted`) and the uncharged scrape is deleted. It also suits F.1: a
+   Temporal Schedule's arguments are fixed at creation, and key rotation must not break it. The
+   ciphertext lands in history either way (activity results are recorded).
+2. **Cancel = row first, engine second, steps never aborted.** The API writes `cancelled` exactly as
+   on v1; every mirror refuses to move a run out of a state it did not set (§11a); all steps are
+   shielded like the pipeline lane's content blocks, so a Temporal cancel only ends the workflow at
+   the next boundary (`CANCELED` in the UI). **Objects a stopped run wrote are deleted, uncharged** —
+   v1 left them orphaned for the reconcile sweep. "Delete" always means *unless a ledger row holds
+   it* (`_discard_unrecorded`), so a retried activity can never delete a charged object.
+3. **v1's job-lane rules kept** (R5): over the storage limit the objects are deleted and the run fails
+   `storage_quota_exceeded` (the quota check covers the LLM output too, as on v1), no webhook; an
+   accounting failure → `storage_accounting_failed` + objects deleted + `job.failed`; a failed LLM
+   leaves the charged scrape in place; `warnings` are stored only on a run with no LLM step (v1 drops
+   them on the LLM path — looks like a v1 oversight, kept for parity; a one-line change if wanted).
+   Error text is the worker's own message (`ApplicationError.message`), e.g. `blocked:akamai`.
+4. **`content_hash` is still written** (from `ScrapeOutput`, no re-read) though nothing reads it on
+   v2 — it keeps the baseline for when change detection returns.
+5. **A v2 run whose workflow cannot start** (owner's answer): `fail_unstarted_run` — `failed`,
+   `could not start workflow: …`, a `job.failed` webhook row, notify. `create_job` returns **503**
+   with `{job_id, run_id, error}`; the scheduler logs and continues.
+6. **Internal-error net** as on the pipeline lane: an unexpected exception in the body fails the run
+   (`internal error: <Type>: …`) instead of leaving a workflow task retrying forever;
+   `NondeterminismError` is left to the task.
+7. **An engine-only cancel** (Temporal UI, row still `running`) is honoured: the workflow writes
+   `cancelled` itself at the next boundary.
+
+**Verified.** 543 API tests (13 lane/switch + 30 workflow/activity, incl. end-to-end on the real
+mirrors), 59 contract tests, replay corpus 15 (**5 new JobWorkflow histories**, harness-recorded —
+`record_harness.py` `JOB_SCENARIOS`). **33 mutations, every one caught by its named test**
+(2 D.1 · 19 D.3 · 11 D.4 · 1 guard). **Live on compose with `JOB_LANE=v2`**
+(temporary override file, not `.env`): http markdown job `completed` (result readable, 1 ledger row,
+`job.completed` webhook row, workflow `COMPLETED`); playwright job `completed`; LLM job with a fake
+Anthropic key → `processing` → `failed` with the provider's 401 text, scrape still charged; cancel
+mid-render → row `cancelled`, workflow `CANCELED`, nothing charged, no object left; a due cron job
+picked up by the **real scheduler loop** → `v2`, `completed`. Cleanup through the delete paths; test
+user removed after its objects were released.
+
+⚠️ **Found:** a mutation run that disables a delete leaves objects in the dev bucket — three were
+removed by hand after checking no ledger row held them. Sweep recent objects after a mutation pass
+on MinIO-deleting code.
+
 #### D.5 — 🚀 Job cutover release
 
-**Runbook:** ff `main` with `JOB_LANE=v1` (code lands dormant) → verify rollouts → **drain gate**
-(job flow: no `pending`/`running` v1 job runs; `go-worker`, `python-playwright-worker`,
-`python-llm-worker`, `api-result-consumer` at zero/zero via `--json`) → flip `JOB_LANE=v2` in the
-infra repo (a ConfigMap change, not a rebuild) → submit one http and one playwright job → watch
-both in the UI and the SPA. **Rollback:** flip to `v1`; in-flight v2 runs finish on v2 (they are
-marked); no drain needed in that direction.
-**Depends on:** D.1–D.4
+**Ships:** api image (also the workflow worker's) — migration 4.6 applies on API startup; infra
+`9ef396a` (`JOB_LANE=v1` on the api Deployment, committed locally, **not pushed**). The scrape and
+LLM `-temporal` workers are unchanged (B.5/B.7/B.9) — no worker image in this release.
+
+**Runbook** (owner-run; ⚠️ the infra commit is behind any Flux image-automation commits that land
+meanwhile — `git pull --rebase` in the infra repo before pushing it):
+1. **Code lands dormant.** ff `main` to the D commits **and** push infra `9ef396a` (`JOB_LANE=v1` —
+   the default, so the order does not matter). Watch: api + workflow-worker rollouts green;
+   `alembic current` = `56ab6118641d`; `\d job_runs` shows `lane` with every row `v1`; the workflow
+   worker's startup log lists no error (it now registers `JobWorkflow` + five activities). The CI
+   `replay` job must pass (15 histories).
+2. **Drain gate** (16b) on the job flow. In prod: no job-lane run active —
+   `SELECT count(*) FROM job_runs WHERE job_id IS NOT NULL AND status IN ('pending','running','processing')`
+   = 0 — and, from the `nats-box` pod, `nats --server nats://scrapeflow-nats:4222 consumer info
+   SCRAPEFLOW <durable> --json` shows `num_pending` = 0 and `num_ack_pending` = 0 for **`go-worker`,
+   `python-playwright-worker`, `python-llm-worker`, `api-result-consumer`**. (Batch runs share those
+   consumers; a batch in flight blocks the gate — wait for it.)
+3. **Flip:** `JOB_LANE` → `"v2"` in `clusters/k3s-server/scrapeflow/app/api.yaml`, push. An env
+   change on the Deployment = an api rollout (no rebuild). Confirm the new pod reads it:
+   `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -c "from app.settings import settings; print(settings.job_lane)"`.
+4. **Verify:** from the SPA submit one **http** and one **playwright** job (`example.com`). Each run's
+   row says `lane = 'v2'`; the SPA shows `running` → `completed` live (WS); the result opens; the
+   Temporal UI (port-forward `scrapeflow-temporal-ui`) shows `job-run-<run_id>` **Completed**; NATS
+   `go-worker` / `python-playwright-worker` `delivered` counters **did not move**. Optional: a job with
+   an LLM step (proves `processing` + the `llm` queue), a cancel mid-render (row `cancelled`,
+   workflow `Canceled`), and a webhook job (a `job.completed` row in `webhook_deliveries`, delivered by
+   `webhook_loop`).
+5. **Scheduled jobs** follow the switch from the next tick: the scheduler creates `v2` runs and
+   starts a `JobWorkflow` per run (Temporal Schedules are F.1, not this).
+
+**Rollback:** set `JOB_LANE` back to `"v1"` and push. New runs go to NATS; v2 runs in flight finish on
+v2 (they are marked, and recovery never touches them); **no drain needed in this direction**. A v2 run
+stranded by a workflow-worker outage stays `pending`/`running` until the worker returns (it holds a
+concurrency slot meanwhile) — the same property as the pipeline lane.
+
+**Behaviour changes users can see on v2** (all recorded): no dedup and no diff (owner, PRD-016 R5);
+`running` means *scheduled*, not *picked up* — `started_at` is the scheduling time; a run whose
+workflow cannot start fails at once (503 on create) instead of waiting for stale-pending recovery.
+
+**Depends on:** D.1, D.3, D.4 (D.2 deferred)
 
 ---
 
@@ -1919,8 +2033,10 @@ migration's stated payoff; record the before/after in the handoff.
 
 ## Open items this backlog surfaced (for the Architect / owner)
 
-1. **D.2** — the job cutover must port dedup + diff or R5 breaks; ADR-009 §10 frames them as
-   waiting for Monitors, which is the pipeline lane's answer only.
+1. ~~**D.2** — the job cutover must port dedup + diff or R5 breaks; ADR-009 §10 frames them as
+   waiting for Monitors, which is the pipeline lane's answer only.~~ **Answered 2026-10-12 (owner):
+   drop for now** — jobs on v2 have no dedup and no diff until change detection is re-homed;
+   recorded as PRD-016 R5's second named exception. D.2 not built.
 2. **C.9** — `waiting` under a `RetryPolicy` can only be written by the activity itself; confirm
    that reading of 15a/15b/15d. **Built on that reading 2026-10-11 (`5b14291`)** under the owner's
    delegation; not separately confirmed — the C.9 *Built* note says exactly what the activity writes.

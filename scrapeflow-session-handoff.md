@@ -150,6 +150,29 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔷 **GROUP D — JOB CUTOVER BUILT (2026-10-12, later session; local, unreleased).** `develop` `db774d0` (D.1) ·
+`5e61413` (D.3) · `de91a44` (D.4) · `9bd761e` (D.3 guard) + docs. **Not pushed.** Infra `9ef396a` (`JOB_LANE=v1` on
+the api Deployment) **committed locally in the infra repo, not pushed**. Detail and every call: implementation
+backlog *D.1–D.4 — Built* and the D.5 runbook.
+
+- **Owner's brief:** away for the session — *"continue building the entire D … without needing my input; if you
+  need any input ask now"*. Four questions asked up front, answers: **D.2 (dedup + diff on v2) → drop for now**
+  (recorded as PRD-016 R5's second named exception; `phase4-backlog.md` PRD-018 row) · **full spec**, not MVP ·
+  a v2 run whose workflow cannot start → **failed + 503** · **commit to `develop`**, infra committed not pushed.
+- **Calls to know when the questions come** (all reversible): the LLM step is read **by an activity after the
+  scrape** (`load_job_llm`, v1's timing and error) rather than resolved at dispatch like pipelines; cancel is row
+  first, engine second, steps never aborted; a stopped run's objects are deleted **unless a ledger row holds
+  them**; v1's job-lane storage wall (fail + delete) kept; `warnings` stored only without an LLM step (v1 parity —
+  looks like a v1 oversight); `content_hash` still written on v2.
+- **Verified:** 543 API tests, 59 contract, replay corpus 15 (5 new JobWorkflow histories); 33 mutations all
+  caught. **Live on compose with `JOB_LANE=v2`** (temporary override file — `.env` untouched): http, playwright,
+  LLM-fails-401, cancel-mid-render and a real scheduler tick all behaved; cleaned up through the delete paths.
+- **Local stack:** api recreated back on the default `JOB_LANE=v1`; workflow worker restarted on the final code.
+  Three dev-bucket objects left by mutation runs were removed by hand (no ledger rows).
+- **Next — owner:** read the D code (expect questions), then **D.5** per the runbook: ff `main` + push infra
+  (`git pull --rebase` there first — Flux bumps land meanwhile) → drain gate → flip `JOB_LANE=v2` → one http + one
+  playwright job. Then **E.0** (needs ADR-010 Accepted — X.2).
+
 ✅ **R6 ACCEPTANCE GATE — PASS (2026-10-12).** Owner-run `r6_gate.py` against prod on `03f72f8`: job
 `87bdc314-…`, pipeline `1722555a-…`. Same blocks in order, all `completed`; same schema fields (`title`, `summary`);
 artifact retrievable on both lanes; payload shape equal but for the two recorded exceptions; both signatures valid.

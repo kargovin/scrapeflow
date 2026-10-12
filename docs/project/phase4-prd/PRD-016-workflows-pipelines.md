@@ -387,6 +387,11 @@ accident through a vague requirement.
   pre-existing gap (crawls consume zero of all three meters today) that ADR-009's run-counting view
   forces us to name, and it would be correct even if Phase 4 were cancelled. It is called out here
   so it is a recorded product decision rather than a contradiction found later.
+  **Second named exception (owner, 2026-10-12, at the job cutover):** jobs moved to the Temporal lane
+  lose **change detection** — no content-hash dedup (every run calls the LLM and stores its object)
+  and no reporting diff (`diff_detected` / `diff_summary` are `null` in the webhook payload and on the
+  run). Porting both was backlog task D.2; the owner chose to drop it for now and re-home change
+  detection with Monitors (PRD-018). Jobs still on the NATS lane keep both until it is retired.
 - **A unit of work executes on exactly one lane — never both.** Double execution means a
   double scrape of the target site and a double LLM bill. This is the top cutover risk on
   record and must be structurally prevented, not just avoided by convention.
