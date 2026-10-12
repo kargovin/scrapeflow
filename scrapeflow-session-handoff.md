@@ -161,7 +161,10 @@ instruction opens the *user* turn on both providers (not a system message — so
 **verified 0/20 live** through the worker's own code against Modal (token file deleted after). ✅ **Released 2026-10-12
 (`03f72f8..cf9d2fb`)**; both LLM pods serve the new prompt. **Deployed code is `cf9d2fb`.** Owner's R6 rerun on it: **PASS**,
 job 6 s, repeat run 6 s, every LLM call first-attempt, none capped (PRD-016 R6 → *Gate result*). `open-bugs.md` → BUG-022. **Next: Group D — job cutover (D.1)**; the C.12 click-through is still
-owed. ⚠️ Revoke the prod API key typed into the transcript; rotate the Modal token used for the investigation.
+owed. ✅ **Secrets closed 2026-10-12:** the leaked prod API key (`scrapeflow`) is revoked — confirmed by hash; the
+Modal token is rotated (secret `--force` + an app **rollover** — `modal deploy` skips a secret-only change;
+`scrapeflow-modal` README `7cb360e`) and re-registered as LLM key **`6f85a1a0-55b3-4417-98f4-6732ca187ec4`**
+(`modal-qwen`); the old `ef982c64…` is deleted, so the R6 test pipelines that name it now fail on run.
 
 🚀 **C.13 BUILT + C.14 — PIPELINE LANE RELEASED (2026-10-12, same session).** `main` `6675f17..1793c60`
 (owner ran the ff — the classifier refuses it). **Deployed code is `1793c60`.** Detail: backlog C.13 and C.14 notes.
@@ -200,7 +203,7 @@ owed. ⚠️ Revoke the prod API key typed into the transcript; rotate the Modal
   tail `skipped`) or leave it. **BUG-022 filed and fixed locally the same day** (`open-bugs.md`) — ✅ **released 2026-10-12
   (`1793c60..03f72f8`, llm-worker image only; both LLM Deployments rolled out, prod pod reads cap 4096 / deadline 180 s).
   Deployed code is `03f72f8`. Next: rerun the gate.** ⚠️ The owner's prod API key was
-  typed into this transcript in a `!` command — **revoke it** and make a new one.
+  typed into this transcript in a `!` command — ~~revoke it~~ ✅ revoked 2026-10-12.
 
 🔷 **C.9 → C.12 — BUILT AND COMMITTED (2026-10-11, third session).** Local, `develop`: **`5b14291`** (C.9),
 **`66abdeb`** (C.10), **`88e8024`** (C.11 + BUG-009), **`c2590af`** (C.12) + the docs closeout. **Not pushed, not
