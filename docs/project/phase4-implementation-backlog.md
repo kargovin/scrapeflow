@@ -1832,8 +1832,12 @@ workflow cannot start fails at once (503 on create) instead of waiting for stale
   playwright job → run `ee41a07f…` `v2` `completed` in 1.4 s, `scrape.html` 2,373 B charged. Both
   `job-run-…` workflows COMPLETED with `job_run_started → Scrape → read_llm_settings →
   record_job_objects → finish_job_run` on the right queues. NATS `delivered` on all four consumers
-  unchanged across the test (38 / 130 / 13 / 823). **Not exercised in prod:** the LLM path, a cancel,
-  a webhook job, a scheduled job (all verified on compose).
+  unchanged across the test (38 / 130 / 13 / 823).
+- **LLM path, same day (owner):** http + LLM → run `fff0b755…` `completed` in 7.1 s; playwright + LLM
+  → run `f3d28777…` in 4.3 s (Modal warm). Each holds `scrape.*` + `llm.json` (198 B) in the ledger;
+  workflows COMPLETED with `job_run_processing → LLMExtract` on the `llm` queue; extraction
+  `{"title": "Example Domain", "summary": …}`. NATS `python-llm-worker` still 13. **Not exercised in
+  prod:** a cancel, a webhook job, a scheduled job (all verified on compose).
 
 ---
 
