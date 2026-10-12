@@ -21,6 +21,7 @@ from structlog.testing import capture_logs
 from worker.config import settings
 from worker.errors import LLMOutputTruncated, LLMRequestTimeout
 from worker.llm import (
+    EXTRACTION_INSTRUCTION,
     _anthropic_client,
     _call_anthropic,
     _call_openai_compatible,
@@ -362,6 +363,28 @@ async def test_both_providers_cap_the_answer_length():
 
     assert openai_client.chat.completions.create.call_args.kwargs["max_tokens"] == 1234
     assert anthropic_client.messages.create.call_args.kwargs["max_tokens"] == 1234
+
+
+async def test_both_providers_send_the_extraction_instruction_in_one_user_turn():
+    openai_client, anthropic_client = _openai_mock(), _anthropic_mock()
+    with (
+        patch("worker.llm.AsyncOpenAI", return_value=openai_client),
+        patch("worker.llm.anthropic.AsyncAnthropic", return_value=anthropic_client),
+    ):
+        await _call_openai_compatible(
+            "sk-test", None, "m", "<p>page</p>", {"type": "object"}
+        )
+        await _call_anthropic("sk-ant-test", "m", "<p>page</p>", {"type": "object"})
+
+    for kwargs in (
+        openai_client.chat.completions.create.call_args.kwargs,
+        anthropic_client.messages.create.call_args.kwargs,
+    ):
+        assert "system" not in kwargs
+        [message] = kwargs["messages"]
+        assert message["role"] == "user"
+        assert message["content"].startswith(EXTRACTION_INSTRUCTION)
+        assert message["content"].endswith("<p>page</p>")
 
 
 async def test_an_answer_cut_off_by_the_cap_is_named_not_a_json_error():

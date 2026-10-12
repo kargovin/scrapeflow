@@ -21,6 +21,19 @@ log = structlog.get_logger()
 # strictly safer than trusting another pod's view of readiness.
 _warm_until: dict[str, float] = {}
 
+# BUG-022: without it a small model under schema decoding can keep extending a string value until
+# max_tokens. In the user turn, not a system message: some self-hosted chat templates reject a
+# system role.
+EXTRACTION_INSTRUCTION = (
+    "Extract the requested data from the page and return only a JSON object matching the schema. "
+    "Use only information present in the page. Keep each value as concise as the data allows; "
+    "do not add commentary, explanations or repetition."
+)
+
+
+def _prompt(content: str) -> str:
+    return f"{EXTRACTION_INSTRUCTION}\n\nPage:\n\n{content}"
+
 
 def _decrypt_key(encrypted_api_key: str) -> str:
     """Fernet-decrypt an LLM API key using the shared encryption key."""
@@ -135,7 +148,7 @@ async def _call_anthropic(
         max_tokens=settings.llm_max_output_tokens,
         tools=[{"name": "extract", "input_schema": output_schema}],
         tool_choice={"type": "tool", "name": "extract"},
-        messages=[{"role": "user", "content": f"Extract data from:\n\n{content}"}],
+        messages=[{"role": "user", "content": _prompt(content)}],
     )
     if response.stop_reason == "max_tokens":
         raise LLMOutputTruncated(
@@ -155,7 +168,7 @@ async def _call_openai_compatible(
     client = _openai_client(api_key, base_url)
     response = await client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": f"Extract data from:\n\n{content}"}],
+        messages=[{"role": "user", "content": _prompt(content)}],
         response_format={
             "type": "json_schema",
             "json_schema": {"name": "extraction", "schema": output_schema},
