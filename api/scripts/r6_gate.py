@@ -11,6 +11,9 @@ repeat cost). Judged on structure and mechanics, not byte equality (R6). ``--web
 webhook.site inbox — a third party that receives both payloads (ids and storage paths, no content) —
 and reads them back to compare shape and verify signatures; with ``--webhook-url`` check them yourself.
 Leaves the job and pipeline in place; their ids are printed.
+
+``--signature-only`` checks just the webhook wire contract on both lanes — scrape -> webhook, no LLM —
+so the signature check does not depend on an LLM call finishing.
 """
 
 import argparse
@@ -102,6 +105,60 @@ def header(request: dict, name: str) -> str | None:
     return value[0] if isinstance(value, list) else value
 
 
+def verify(request: dict, secret: str) -> bool:
+    body = (request.get("content") or "").encode()
+    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return header(request, "X-ScrapeFlow-Signature") == expected
+
+
+def signature_only(api: Api, args) -> None:
+    token, hook = webhook_site_inbox() if args.webhook_site else (None, args.webhook_url)
+    if not token:
+        sys.exit("--signature-only reads the payloads back: use --webhook-site")
+    print(f"signature check against {args.api} — webhook {hook}")
+    job = api("POST", "/jobs", {"url": args.url, "output_format": "html", "webhook_url": hook})
+    job_secret = job["webhook_secret"] or ""
+    pipeline = api(
+        "POST",
+        "/pipelines",
+        {
+            "name": f"r6-signature-{int(time.time())}",
+            "definition": {
+                "blocks": [
+                    {
+                        "id": "fetch",
+                        "type": "scrape",
+                        "config": {"url": args.url, "output_format": "html"},
+                    },
+                    {
+                        "id": "notify",
+                        "type": "webhook",
+                        "input": "fetch",
+                        "config": {"url": hook, "secret": PIPELINE_SECRET},
+                    },
+                ]
+            },
+        },
+    )
+    pid = pipeline["id"]
+    run = api("POST", f"/pipelines/{pid}/runs", {})
+    wait(lambda: api("GET", f"/jobs/{job['id']}"), "job")
+    wait(lambda: api("GET", f"/pipelines/{pid}/runs/{run['id']}"), "pipeline run")
+    time.sleep(20)  # the job lane's webhook loop polls every 15 s
+    parsed = [(r, json.loads(r.get("content") or "{}")) for r in webhook_site_requests(token)]
+    job_hooks = [r for r, p in parsed if p.get("job_id") == job["id"]]
+    run_hooks = [r for r, p in parsed if p.get("pipeline_run_id") == run["id"]]
+    results = {
+        "job payload signed with its secret": bool(job_hooks) and verify(job_hooks[0], job_secret),
+        "pipeline payload signed with its secret": bool(run_hooks)
+        and verify(run_hooks[0], PIPELINE_SECRET),
+    }
+    for name, ok in results.items():
+        print(f"  {'PASS' if ok else 'FAIL'}  {name}")
+    print(f"\nverdict: {'PASS' if all(results.values()) else 'FAIL'}")
+    print(json.dumps({"job_id": job["id"], "pipeline_id": pid, "run": run["id"]}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -110,8 +167,9 @@ def main() -> None:
         "--api", default=os.environ.get("SCRAPEFLOW_API", "https://scrapeflow.govindappa.com")
     )
     parser.add_argument("--url", default="https://example.com/")
-    parser.add_argument("--llm-key-id", required=True)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--llm-key-id")
+    parser.add_argument("--model")
+    parser.add_argument("--signature-only", action="store_true")
     parser.add_argument(
         "--schema", default=json.dumps(DEFAULT_SCHEMA), help="output schema as JSON"
     )
@@ -121,6 +179,11 @@ def main() -> None:
     args = parser.parse_args()
     key = os.environ.get("SCRAPEFLOW_API_KEY") or sys.exit("set SCRAPEFLOW_API_KEY")
     api = Api(args.api, key)
+    if args.signature_only:
+        signature_only(api, args)
+        return
+    if not (args.llm_key_id and args.model):
+        parser.error("--llm-key-id and --model are required unless --signature-only")
     schema = json.loads(args.schema)
 
     token, hook = webhook_site_inbox() if args.webhook_site else (None, args.webhook_url)
@@ -173,6 +236,8 @@ def main() -> None:
         },
     )
     pid = pipeline["id"]
+    # Only the create response carries the job's secret; GET /jobs/{id} does not.
+    job_secret = job["webhook_secret"] or ""
     print(f"  job {job['id']} · pipeline {pid}")
 
     runs = []
@@ -242,11 +307,7 @@ def main() -> None:
                     f"job-only {sorted(only_job)} · pipeline-only {sorted(only_run)}",
                 )
             )
-            sig_ok = []
-            for request, secret in ((jr, job["webhook_secret"] or ""), (rr, PIPELINE_SECRET)):
-                body = (request.get("content") or "").encode()
-                expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-                sig_ok.append(header(request, "X-ScrapeFlow-Signature") == expected)
+            sig_ok = [verify(jr, job_secret), verify(rr, PIPELINE_SECRET)]
             checks.append(
                 ("both payloads signed as the wire contract says", all(sig_ok), str(sig_ok))
             )
