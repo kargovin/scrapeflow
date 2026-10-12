@@ -2074,6 +2074,28 @@ Deployments rolled out, the prod pod reads `llm_max_output_tokens=4096`, `llm_re
   output (a `disable-any-whitespace` option of its structured-output backend; flag name depends on the vLLM
   version) — in `scrapeflow-modal/modal_llm.py`. It removes the usual trigger; the cap stays the bound.
 
+### Root cause of the loop — found 2026-10-12 (replay against Modal, owner's token, deleted after)
+
+The worker's exact request (same message, same schema `{title, summary}`, the real 577-byte `example.com` page)
+replayed with a 600-token cap: **4 of 10 looped**. The loop is **not whitespace** (≈16 % of characters — normal
+word gaps). It is an **endless string**: the model writes a good first sentence of `summary`, then never emits the
+closing quote — it keeps elaborating and paraphrasing the page (*"… This is not a service; avoid relying on it …
+It is intended solely for illustrative … It does not offer any real services …"*) until the cap. JSON-schema
+decoding fixes the *shape*, not a string's length, and the prompt (`Extract data from:\n\n{page}`) gives no
+guidance, so stopping after one sentence is a sampling coin-toss.
+
+| variant (10 calls each unless noted) | loops |
+|---|---|
+| as sent today | **4/10** |
+| `temperature: 0.2` | 1/10 |
+| `frequency_penalty: 0.5` | 0/10, two answers still 15–18 s |
+| system: *"Return only the JSON object. Keep every string value short: one sentence at most."* | 0/10 (too strict for general schemas) |
+| system: *"Extract the requested data from the page and return only a JSON object matching the schema. Use only information present in the page. Keep each value as concise as the data allows; do not add commentary, explanations or repetition."* — **20 calls** | **0/20**, every answer the normal 44 tokens, ~2.5 s |
+
+**Proposed fix (not built — owner's call, it changes the job lane's LLM output slightly):** send that general
+instruction as the system message on both providers (`system=` for Anthropic, a `system` message for
+OpenAI-compatible). The cap and the deadline stay as the bound. Provider-neutral, no vLLM flag, no schema edits.
+
 ### Interactions
 
 - **PRD-016 R6** — the gate's first two attempts produced no verdict because of this bug, not the pipeline
