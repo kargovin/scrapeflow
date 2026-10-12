@@ -198,9 +198,7 @@ Modal token is rotated (secret `--force` + an app **rollover** — `modal deploy
   and its pipeline run 1 completed on attempt 3. **Everything stopped at the owner's request:** the last running
   workflow `pipeline-run-8efa14c6-d074-4028-b2f6-42e1a9016467` was **terminated** (not cancelled — a cancel lets the
   shielded LLM step keep calling Modal) and the `llm-worker-temporal` pod restarted to drop its open request.
-  **Leftover:** that run's row is still `running` with `extract` `running` (a terminate runs no mirror) — it holds
-  one of the owner's concurrency slots; fix with SQL (`status='cancelled'`, `finished_at=now()`, block `failed`,
-  tail `skipped`) or leave it. **BUG-022 filed and fixed locally the same day** (`open-bugs.md`) — ✅ **released 2026-10-12
+  ~~**Leftover:** that run's row still `running`~~ ✅ **closed by hand 2026-10-12 at the owner's word** — run `cancelled`, `extract` `failed`, `notify` `skipped`, and its pipeline `r6-gate-1791746433` (`60c31b42…`) soft-deleted; no pipeline run is `running` now. **BUG-022 filed and fixed locally the same day** (`open-bugs.md`) — ✅ **released 2026-10-12
   (`1793c60..03f72f8`, llm-worker image only; both LLM Deployments rolled out, prod pod reads cap 4096 / deadline 180 s).
   Deployed code is `03f72f8`. Next: rerun the gate.** ⚠️ The owner's prod API key was
   typed into this transcript in a `!` command — ~~revoke it~~ ✅ revoked 2026-10-12.
