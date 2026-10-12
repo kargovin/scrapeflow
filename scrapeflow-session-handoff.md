@@ -159,7 +159,8 @@ passed on its 3rd and last attempt). The loop investigation (same day, owner's M
 a general instruction stops it — **0/20 loops vs 4/10**. ✅ **Built at the owner's word (`9173837`)**: the
 instruction opens the *user* turn on both providers (not a system message — some self-hosted templates 400 on one);
 **verified 0/20 live** through the worker's own code against Modal (token file deleted after). ✅ **Released 2026-10-12
-(`03f72f8..cf9d2fb`)**; both LLM pods serve the new prompt. **Deployed code is `cf9d2fb`.** `open-bugs.md` → BUG-022. **Next: Group D — job cutover (D.1)**; the C.12 click-through is still
+(`03f72f8..cf9d2fb`)**; both LLM pods serve the new prompt. **Deployed code is `cf9d2fb`.** Owner's R6 rerun on it: **PASS**,
+job 6 s, repeat run 6 s, every LLM call first-attempt, none capped (PRD-016 R6 → *Gate result*). `open-bugs.md` → BUG-022. **Next: Group D — job cutover (D.1)**; the C.12 click-through is still
 owed. ⚠️ Revoke the prod API key typed into the transcript; rotate the Modal token used for the investigation.
 
 🚀 **C.13 BUILT + C.14 — PIPELINE LANE RELEASED (2026-10-12, same session).** `main` `6675f17..1793c60`

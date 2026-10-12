@@ -2039,7 +2039,8 @@ vLLM endpoint (`Qwen/Qwen3-4B-Instruct-2507`, L4, `--max-model-len 32768`).
 **Status:** ✅ **FIXED (`4965e9d`), DEPLOYED 2026-10-12** — `main` `1793c60..03f72f8`, llm-worker image only; both LLM
 Deployments rolled out, the prod pod reads `llm_max_output_tokens=4096`, `llm_request_timeout_seconds=180`.
 **Prompt fix (`9173837`) DEPLOYED 2026-10-12** — `main` `03f72f8..cf9d2fb` (llm-worker + an api rebuild for the R6
-script); all four Deployments rolled out, both LLM pods return the new prompt.
+script); all four Deployments rolled out, both LLM pods return the new prompt. **Confirmed in prod** by the owner's R6
+rerun the same day: 5 LLM calls across both lanes, all first-attempt, 2–4 s, none capped (before: 3 of 6 capped).
 
 ### What happens — two faults that compound
 

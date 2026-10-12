@@ -519,6 +519,10 @@ a webhook.site receiver. Job `87bdc314-2268-4d0c-8a65-4326123b9523`, pipeline
   the pipeline model; the proposed mitigation is in `open-bugs.md` → BUG-022. Earlier attempts the same day: two
   with no verdict (BUG-022 before its fix), one structural PASS with a signature check failing on a script bug
   (`7e1cfaf`), one `--signature-only` PASS.
+- **Rerun after BUG-022's prompt fix (2026-10-12, `cf9d2fb`) — PASS again, every check**: job
+  `a15629bc-279c-4f09-aaf7-771e5aa74511`, pipeline `68263095-25da-4469-b557-47d1cf09ed32`. Job completed in 6 s,
+  repeat run in 6 s; every LLM call in the window succeeded on its first attempt (2–4 s), none hit the cap. Repeat-run
+  cost unchanged: 1 LLM call + 2 stored objects vs the job's 0 + 0.
 
 ---
 
