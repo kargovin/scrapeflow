@@ -150,7 +150,16 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
-🔷 **GROUP D — JOB CUTOVER BUILT (2026-10-12, later session; local, unreleased).** `develop` `db774d0` (D.1) ·
+🚀 **GROUP D RELEASED + FLIPPED (2026-10-12, same session).** Owner ran `main` `28c881b..0b4ac9e` and infra `9ef396a`
+(v1) then `99ed5c8` (**`JOB_LANE=v2`**). **Deployed code is `0b4ac9e`; new job runs run on Temporal in prod.** Drain gate
+clean; http run `e2d6928c…` + playwright run `ee41a07f…` both `v2` `completed`, workflows COMPLETED, NATS counters
+unmoved. Detail: backlog D.5 *Released*. After the build, the owner's review added: D.2's reasoning recorded; open
+item 10 (jobs as a front end over pipelines → decide with Monitors); `load_job_llm` → `read_llm_settings` (4 unreleased
+histories re-recorded, ADR-012 pre-release exception); the job cancel routes became a conditional UPDATE (`0b4ac9e`).
+⚠️ The SPA cannot create jobs — test jobs are `curl` + an API key, run in the owner's own terminal. **Next: E.0** (needs
+ADR-010 Accepted — X.2). Owner to delete the `d5-check` API key.
+
+🔷 **GROUP D — JOB CUTOVER BUILT (2026-10-12, later session).** `develop` `db774d0` (D.1) ·
 `5e61413` (D.3) · `de91a44` (D.4) · `9bd761e` (D.3 guard) + docs. **Not pushed.** Infra `9ef396a` (`JOB_LANE=v1` on
 the api Deployment) **committed locally in the infra repo, not pushed**. Detail and every call: implementation
 backlog *D.1–D.4 — Built* and the D.5 runbook.

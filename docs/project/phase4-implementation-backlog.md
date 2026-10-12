@@ -78,7 +78,7 @@
 | D.2 | `ChangeDetection` activity: content-hash dedup + `diff.py` port (**R5 obligation**) | ⏸ **Not built — owner, 2026-10-12: drop for now.** Jobs on v2 have no dedup and no diff (PRD-016 R5's second named exception) |
 | D.3 | `JobWorkflow` + job-lane webhook row activity | ✅ Built 2026-10-12 (local, `5e61413` + `9bd761e`, unreleased) |
 | D.4 | Single dispatch switch in `dispatch.py` (`create_job` + scheduler) + cancel path | ✅ Built 2026-10-12 (local, `de91a44`, unreleased); infra `JOB_LANE=v1` committed locally, **not pushed** (infra `9ef396a`) |
-| D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ⬜ **Owner-run.** Runbook written (D.5 below); code verified live on compose with `JOB_LANE=v2` |
+| D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ✅ **RELEASED + FLIPPED 2026-10-12** (`main` `28c881b..0b4ac9e`; infra `9ef396a` v1, `99ed5c8` **v2**) — **new job runs run on Temporal in prod**; http + playwright verified |
 | **E** | **Batch and crawl cutover** | |
 | E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ⬜ |
 | E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ⬜ |
@@ -1796,7 +1796,9 @@ meanwhile — `git pull --rebase` in the infra repo before pushing it):
 3. **Flip:** `JOB_LANE` → `"v2"` in `clusters/k3s-server/scrapeflow/app/api.yaml`, push. An env
    change on the Deployment = an api rollout (no rebuild). Confirm the new pod reads it:
    `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -c "from app.settings import settings; print(settings.job_lane)"`.
-4. **Verify:** from the SPA submit one **http** and one **playwright** job (`example.com`). Each run's
+4. **Verify:** submit one **http** and one **playwright** job (`example.com`) **with `curl` and an API key**
+   — ⚠️ the SPA cannot create jobs (it lists, views and cancels them; corrected 2026-10-12 during the
+   release) — run the `curl` in your own terminal so the key stays out of any transcript. Each run's
    row says `lane = 'v2'`; the SPA shows `running` → `completed` live (WS); the result opens; the
    Temporal UI (port-forward `scrapeflow-temporal-ui`) shows `job-run-<run_id>` **Completed**; NATS
    `go-worker` / `python-playwright-worker` `delivered` counters **did not move**. Optional: a job with
@@ -1816,6 +1818,22 @@ concurrency slot meanwhile) — the same property as the pipeline lane.
 workflow cannot start fails at once (503 on create) instead of waiting for stale-pending recovery.
 
 **Depends on:** D.1, D.3, D.4 (D.2 deferred)
+
+**Released 2026-10-12** (owner ran the ff and both infra pushes; checks run from here, read-only):
+- **Step 1:** CI `replay` + `build-api` green (others skipped); api and workflow worker on
+  `0b4ac9e`, migration `56ab6118641d` head, all 85 existing `job_runs` rows `v1`, workflow worker
+  started clean.
+- **Step 2 (drain gate):** 0 active `job_runs` (any lane); `go-worker`, `python-playwright-worker`,
+  `python-llm-worker`, `api-result-consumer` all `num_pending` 0 / `num_ack_pending` 0.
+- **Step 3:** infra `99ed5c8` — `JOB_LANE: 'v2'` (the owner's YAML linter reformatted the file; parsed,
+  it is identical but for that value, and the Flux `$imagepolicy` marker survived). New api pod
+  reads `job_lane v2`.
+- **Step 4:** http job → run `e2d6928c…` `v2` `completed` in 0.9 s, `scrape.md` 172 B charged;
+  playwright job → run `ee41a07f…` `v2` `completed` in 1.4 s, `scrape.html` 2,373 B charged. Both
+  `job-run-…` workflows COMPLETED with `job_run_started → Scrape → read_llm_settings →
+  record_job_objects → finish_job_run` on the right queues. NATS `delivered` on all four consumers
+  unchanged across the test (38 / 130 / 13 / 823). **Not exercised in prod:** the LLM path, a cancel,
+  a webhook job, a scheduled job (all verified on compose).
 
 ---
 
