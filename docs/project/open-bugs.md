@@ -2029,6 +2029,57 @@ worker was fixed on 2026-09-30 (`63e7fbe`, infra `1807870`); the API was left by
 
 ---
 
+## BUG-022 — An LLM call against a self-hosted endpoint can run for many minutes: no output cap, and a timeout that redirects reset
+
+**Severity:** Medium. A job hangs until someone cancels it on the provider; a pipeline's LLM step burns its
+400 s attempt limit, sometimes three times; GPU time on Modal is spent the whole while. Both lanes share the
+code. Found by the R6 gate's first two attempts (2026-10-12): **two runaways in about six calls**.
+**Discovered:** 2026-10-12, running `api/scripts/r6_gate.py` against production with the owner's Modal
+vLLM endpoint (`Qwen/Qwen3-4B-Instruct-2507`, L4, `--max-model-len 32768`).
+**Status:** ✅ **FIXED locally 2026-10-12** — not released; ships with the next `main` fast-forward (llm-worker image).
+
+### What happens — two faults that compound
+
+1. **No output cap on the OpenAI-compatible path.** `_call_openai_compatible` sent no `max_tokens`
+   (`_call_anthropic` hardcoded 4096). vLLM then lets the answer grow until the context window is spent —
+   up to ~32k tokens here, ~20 min at the observed 26 tokens/s. Under JSON-schema decoding a small model
+   can fall into output that is valid-so-far and never closes (typically endless whitespace, which JSON
+   allows). The owner's vLLM log showed it: `Running: 1 reqs`, generation going, prompt throughput 0.
+   Sampling is random, so the same request succeeds in ~5 s most of the time — both lanes' retries did.
+2. **The 180 s read timeout did not bound the call.** Production sets `LLM_REQUEST_TIMEOUT_SECONDS=180`;
+   the job's first attempt ran **~7 min** (19:20:33 → 19:27:30) until the owner cancelled it on Modal.
+   httpx's `read` timeout is the longest gap *between bytes*, per request — and the OpenAI SDK's client
+   **follows redirects** (`follow_redirects=True`, verified in `openai` 3.22.1). Modal answers a web request
+   still running at 150 s with a `303` to poll for the result (Modal's documented behaviour, **not verified
+   live here**), so each hop restarts the read timer and httpx gives up only after 20 redirects
+   (≈ 50 min at 150 s a hop). The `CLAUDE.md` *LLM cold starts* row's budget (warm-up + request ≈ 360 s,
+   which the pipeline activity's 400 s `start_to_close` is sized against) assumed a bound that did not exist.
+
+### Fix (built 2026-10-12)
+
+- **`LLM_MAX_OUTPUT_TOKENS`** (default 4096) sent as `max_tokens` to **both** providers. A capped answer
+  (`finish_reason == "length"` / `stop_reason == "max_tokens"`) raises **`LLMOutputTruncated`** instead of a
+  confusing `JSONDecodeError`.
+- **A wall-clock deadline:** the provider call runs under `asyncio.wait_for(LLM_REQUEST_TIMEOUT_SECONDS)` →
+  **`LLMRequestTimeout`**; cancelling closes the connection, so vLLM drops the request. The warm-up probe
+  keeps its own budget, so the 400 s activity limit still composes (180 + 180).
+- **Both new errors are transient** (retried, ≤ 3 attempts on both lanes). Deliberate, against the
+  classifier's fail-closed default: both observed runaways were sampling accidents whose retry finished in
+  seconds, and the cap bounds each attempt's cost, so a retry can no longer be the unbounded spend Q6 was.
+- Tests: the cap on both providers, truncation named on both, both errors transient, and a **real
+  `AsyncOpenAI` client against a local endpoint that answers every request with a `303`** — stopped by the
+  deadline at 2 s; without the fix it runs until httpx's redirect limit. 6 mutations, each caught.
+- **Optional, server-side (not done):** vLLM can be told not to allow unlimited whitespace in structured
+  output (a `disable-any-whitespace` option of its structured-output backend; flag name depends on the vLLM
+  version) — in `scrapeflow-modal/modal_llm.py`. It removes the usual trigger; the cap stays the bound.
+
+### Interactions
+
+- **PRD-016 R6** — the gate's first two attempts produced no verdict because of this bug, not the pipeline
+  model. Rerun after the release.
+- **`CLAUDE.md` → *LLM cold starts*** — the "request timeout" is now a wall clock, as that row assumed.
+- **Q6 / *LLM transient vs terminal*** — the two new transient classes are bounded per attempt by the cap.
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised

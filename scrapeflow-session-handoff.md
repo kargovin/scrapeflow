@@ -29,7 +29,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-021) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-022) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -180,7 +180,8 @@ condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *
   shielded LLM step keep calling Modal) and the `llm-worker-temporal` pod restarted to drop its open request.
   **Leftover:** that run's row is still `running` with `extract` `running` (a terminate runs no mirror) — it holds
   one of the owner's concurrency slots; fix with SQL (`status='cancelled'`, `finished_at=now()`, block `failed`,
-  tail `skipped`) or leave it. **Next:** fix BUG-022, release, rerun the gate. ⚠️ The owner's prod API key was
+  tail `skipped`) or leave it. **BUG-022 filed and fixed locally the same day** (`open-bugs.md`) — **next: release
+  it (owner runs the `main` ff; llm-worker image only), then rerun the gate.** ⚠️ The owner's prod API key was
   typed into this transcript in a `!` command — **revoke it** and make a new one.
 
 🔷 **C.9 → C.12 — BUILT AND COMMITTED (2026-10-11, third session).** Local, `develop`: **`5b14291`** (C.9),
