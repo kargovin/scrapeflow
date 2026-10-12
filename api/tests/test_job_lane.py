@@ -1,5 +1,6 @@
 """D.1 + D.4 — the job lane marker (ADR-009 §7 mechanism 4) and the dispatch switch."""
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -334,6 +335,34 @@ async def test_a_cancel_still_lands_when_the_engine_is_down(client, auth_headers
         assert response.status_code == 200
         async with AsyncSessionLocal() as db:
             assert (await db.get(JobRun, run.id)).status == "cancelled"
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(Job).where(Job.id == job.id))
+            await db.commit()
+
+
+async def test_a_cancel_that_waits_on_a_finishing_run_leaves_it_finished(client, auth_headers):
+    """A v2 activity holds the row lock while it completes the run; the cancel lands right after."""
+    await client.get("/users/me", headers=auth_headers)
+    async with AsyncSessionLocal() as db:
+        from app.models.user import User
+
+        user = await db.scalar(select(User).where(User.clerk_id == "user_test_123"))
+    job, run = await _job_with_run(user.id, "v2")
+    try:
+        async with AsyncSessionLocal() as activity:
+            row = await activity.scalar(select(JobRun).where(JobRun.id == run.id).with_for_update())
+            row.status = "completed"
+            await activity.flush()
+            cancel = asyncio.create_task(client.delete(f"/jobs/{job.id}", headers=auth_headers))
+            await asyncio.sleep(0.5)
+            assert not cancel.done()  # waiting on the row lock
+            await activity.commit()
+        response = await cancel
+
+        assert response.json()["message"] == "Job has no active run to cancel"
+        async with AsyncSessionLocal() as db:
+            assert (await db.get(JobRun, run.id)).status == "completed"
     finally:
         async with AsyncSessionLocal() as db:
             await db.execute(delete(Job).where(Job.id == job.id))

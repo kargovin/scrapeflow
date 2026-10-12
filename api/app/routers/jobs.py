@@ -20,7 +20,7 @@ from fastapi import (
 )
 from miniopy_async import Minio
 from nats.js import JetStreamContext
-from sqlalchemy import delete, func, select, text, true
+from sqlalchemy import delete, func, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -28,7 +28,12 @@ from sqlalchemy.orm import aliased
 from app.auth.dependencies import auth_from_token, get_current_user
 from app.core.credentials import resolve_credentials
 from app.core.db import get_db
-from app.core.dispatch import cancel_workflows, dispatch_run, fail_unstarted_run
+from app.core.dispatch import (
+    cancel_active_runs,
+    cancel_workflows,
+    dispatch_run,
+    fail_unstarted_run,
+)
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
@@ -402,22 +407,9 @@ async def cancel_job(
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     # Soft cancel (default behaviour — existing semantics unchanged)
-    active_statuses = ("pending", "running", "processing")
-    result = await db.execute(
-        select(JobRun).where(JobRun.job_id == job_id).where(JobRun.status.in_(active_statuses))
-    )
-    active_runs = result.scalars().all()
-
+    active_runs = await cancel_active_runs(db, job_id)
     if not active_runs:
         return CancelJobResponse(message="Job has no active run to cancel")
-
-    for run in active_runs:
-        run.status = "cancelled"
-        await db.execute(
-            text("SELECT pg_notify('job_status', :p)"),
-            {"p": f"{run.job_id}:{run.id}:cancelled"},
-        )
-    await db.commit()
     await cancel_workflows(active_runs, lambda: lazy_client(request.app.state))
     logger.info("job_cancelled", job_id=str(job_id))
     return CancelJobResponse(message="Job run cancelled")

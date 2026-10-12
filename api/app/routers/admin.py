@@ -6,14 +6,14 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from miniopy_async.api import Minio
-from sqlalchemy import case, func, select, text, true
+from sqlalchemy import case, func, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import get_current_admin_user
 from app.core.db import get_db
-from app.core.dispatch import cancel_workflows
+from app.core.dispatch import cancel_active_runs, cancel_workflows
 from app.core.ledger import release_run_objects, release_user_objects
 from app.core.minio import get_minio
 from app.core.redis import get_redis
@@ -345,22 +345,9 @@ async def admin_delete_or_cancel_job(
         )
         return CancelJobResponse(message="Job deleted")
 
-    active_statuses = ("pending", "running", "processing")
-    result = await db.execute(
-        select(JobRun).where(JobRun.job_id == job_id).where(JobRun.status.in_(active_statuses))
-    )
-    active_runs = result.scalars().all()
-
+    active_runs = await cancel_active_runs(db, job_id)
     if not active_runs:
         return CancelJobResponse(message="Job has no active run to cancel")
-
-    for run in active_runs:
-        run.status = "cancelled"
-        await db.execute(
-            text("SELECT pg_notify('job_status', :p)"),
-            {"p": f"{run.job_id}:{run.id}:cancelled"},
-        )
-    await db.commit()
     await cancel_workflows(active_runs, lambda: lazy_client(request.app.state))
     logger.info("admin_job_cancelled", job_id=str(job_id), admin_id=str(admin.id))
     return CancelJobResponse(message="Job run cancelled")

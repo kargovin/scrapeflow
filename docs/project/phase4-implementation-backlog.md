@@ -1751,6 +1751,13 @@ unchanged (it calls the API).
    `NondeterminismError` is left to the task.
 7. **An engine-only cancel** (Temporal UI, row still `running`) is honoured: the workflow writes
    `cancelled` itself at the next boundary.
+8. **The job cancel routes are a conditional UPDATE** (owner, 2026-10-12, reading D.3):
+   `dispatch.cancel_active_runs` — `UPDATE job_runs SET status='cancelled' WHERE job_id=… AND status IN
+   (active) RETURNING …`, used by the user and admin cancel. Before, both read the active runs and then
+   wrote by primary key, so a cancel that waited on a v2 activity's row lock relabelled a run that had
+   just completed (webhook row already written) as `cancelled`. Now it leaves it `completed` and says
+   "no active run". A test holds the lock to reproduce it; it fails on the old route. Both lanes
+   benefit; v1's other race (the result consumer writes without a lock) is left to die with it at G.
 
 **Verified.** 543 API tests (13 lane/switch + 30 workflow/activity, incl. end-to-end on the real
 mirrors), 59 contract tests, replay corpus 15 (**5 new JobWorkflow histories**, harness-recorded —

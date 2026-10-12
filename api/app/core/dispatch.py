@@ -13,12 +13,13 @@ to messages.
 ``lane``, written when the row was inserted, picks NATS or ``JobWorkflow``.
 """
 
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import structlog
 from nats.js import JetStreamContext
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
@@ -86,6 +87,31 @@ async def fail_unstarted_run(db: AsyncSession, job: Job, run: JobRun, exc: Excep
         )
     await db.execute(text("SELECT pg_notify('job_status', :p)"), {"p": f"{job.id}:{run.id}:failed"})
     await db.commit()
+
+
+async def cancel_active_runs(db: AsyncSession, job_id: uuid.UUID) -> list[JobRun]:
+    """Cancels the job's active runs, notifies each, commits; returns the runs it cancelled."""
+    # The status test is in the UPDATE itself: a run that finished while this waited on its row
+    # lock (a v2 activity holds it) stays finished instead of being relabelled cancelled.
+    runs = list(
+        (
+            await db.scalars(
+                update(JobRun)
+                .where(
+                    JobRun.job_id == job_id,
+                    JobRun.status.in_(("pending", "running", "processing")),
+                )
+                .values(status="cancelled")
+                .returning(JobRun)
+            )
+        ).all()
+    )
+    for run in runs:
+        await db.execute(
+            text("SELECT pg_notify('job_status', :p)"), {"p": f"{run.job_id}:{run.id}:cancelled"}
+        )
+    await db.commit()
+    return runs
 
 
 async def cancel_workflows(runs: list[JobRun], temporal: TemporalClient) -> None:
