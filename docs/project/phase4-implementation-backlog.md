@@ -1837,7 +1837,11 @@ workflow cannot start fails at once (503 on create) instead of waiting for stale
   → run `f3d28777…` in 4.3 s (Modal warm). Each holds `scrape.*` + `llm.json` (198 B) in the ledger;
   workflows COMPLETED with `job_run_processing → LLMExtract` on the `llm` queue; extraction
   `{"title": "Example Domain", "summary": …}`. NATS `python-llm-worker` still 13. **Not exercised in
-  prod:** a cancel, a webhook job, a scheduled job (all verified on compose).
+  prod:** a cancel, a scheduled job (both verified on compose).
+- **Webhook path, same day (owner):** job + LLM + `webhook_url` → run `859b3923…` `v2` `completed`;
+  `finish_job_run` wrote the `job.completed` row in the completing transaction (2 ms apart) and
+  `webhook_loop` delivered it on attempt 1, 14 s later (its poll interval); received at webhook.site.
+  Payload as v1 but `diff_detected` / `diff_summary` `null` (D.2).
 
 ---
 
