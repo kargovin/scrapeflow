@@ -114,6 +114,9 @@ class JobWorkflow:
 
     async def _run(self, input: JobRunInput) -> str | None:
         run_id = input.run_id
+        if self._cancel_requested:
+            # Cancelled from the engine while the row still said running (an operator).
+            return await self._cancel(run_id)
         try:
             scraped: ScrapeOutput = await self._finish(steps.scrape(input.scrape, input.engine))
         except ActivityError as exc:

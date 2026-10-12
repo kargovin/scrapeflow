@@ -339,6 +339,36 @@ async def test_a_run_cancelled_before_it_started_is_never_scraped():
     assert h.calls == [("started", "r1")]
 
 
+async def test_an_engine_cancel_during_the_start_mirror_never_scrapes():
+    release = asyncio.Event()
+
+    class Slow(Harness):
+        def activities(self):
+            db, scrape, llm = super().activities()
+
+            @activity.defn(name=JOB_RUN_STARTED_ACTIVITY)
+            async def started(input: JobRunRef) -> str:
+                self.calls.append(("started", input.run_id))
+                await release.wait()
+                return "running"
+
+            return [started, *db[1:]], scrape, llm
+
+    async def cancel_during_start(handle):
+        await asyncio.sleep(0.5)
+        await handle.cancel()
+        await asyncio.sleep(0.5)
+        release.set()
+
+    h = Slow()
+    result = await h.run(during=cancel_during_start)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert isinstance(result.cause, CancelledError)
+    assert h.scraped == []
+    assert h.calls == [("started", "r1"), FinishJobRunInput(run_id="r1", status="cancelled")]
+
+
 async def test_a_row_cancel_during_the_scrape_stops_at_the_record_mirror():
     h = Harness(job_llm=KEY, replies={RECORD_JOB_OBJECTS_ACTIVITY: "cancelled"})
     assert await h.run() is None
