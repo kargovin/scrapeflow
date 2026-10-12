@@ -1607,7 +1607,7 @@ the R6 script `api/scripts/r6_gate.py` (`1793c60`, stdlib only, run by the owner
 - **C.12 click-through — done by the owner 2026-10-12**: "at a glance everything looks good"; one gap — a pipeline
   output had no Preview / Download (the job lane's Result card has both). Fixed: one shared `ContentViewer`
   (Source/Preview for markdown and HTML, Copy, Download) on both lanes; `OutputViewer` removed. Build-only verified;
-  ships with the next api image.
+  **released 2026-10-12 (`cf9d2fb..28c881b`, owner; rollout not watched, not yet seen in the browser).**
 
 ---
 
