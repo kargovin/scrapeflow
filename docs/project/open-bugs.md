@@ -2092,16 +2092,21 @@ guidance, so stopping after one sentence is a sampling coin-toss.
 | system: *"Return only the JSON object. Keep every string value short: one sentence at most."* | 0/10 (too strict for general schemas) |
 | system: *"Extract the requested data from the page and return only a JSON object matching the schema. Use only information present in the page. Keep each value as concise as the data allows; do not add commentary, explanations or repetition."* — **20 calls** | **0/20**, every answer the normal 44 tokens, ~2.5 s |
 
-**Proposed fix (not built — owner's call, it changes the job lane's LLM output slightly):** send that general
-instruction as the system message on both providers (`system=` for Anthropic, a `system` message for
-OpenAI-compatible). The cap and the deadline stay as the bound. Provider-neutral, no vLLM flag, no schema edits.
+**Fix — built 2026-10-12 (`9173837`, owner: "use your study to build a solution"), unreleased:** that general
+instruction opens the **user** turn on both providers (`EXTRACTION_INSTRUCTION` + `Page:` + the page, in
+`llm-worker/worker/llm.py`), so job runs and the pipeline LLM block both get it. **Not a system message**, unlike the
+study: some self-hosted chat templates (Gemma-2, early Mistral) reject a system role with a 400, which the classifier
+makes terminal — every job for those users would fail. **Verified in that form**: 20 calls through the worker's own
+`_call_openai_compatible` against the owner's Modal endpoint (after a 137 s cold start) — **0/20 loops**, every answer
+2.4–5.0 s. The cap and the deadline stay as the bound. Job-lane answers become somewhat more concise; the fields are
+unchanged.
 
 ### Interactions
 
 - **PRD-016 R6** — the gate's first two attempts produced no verdict because of this bug, not the pipeline
   model. The rerun on `03f72f8` **passed** (2026-10-12), but 3 of its 6 LLM attempts still hit the cap — the job
-  lane passed on its last attempt. With the fix deployed the loop is bounded, not gone; the mitigation above is
-  what removes it.
+  lane passed on its last attempt. With the fix deployed the loop is bounded, not gone; the prompt fix above
+  (`9173837`) is what removes it.
 - **`CLAUDE.md` → *LLM cold starts*** — the "request timeout" is now a wall clock, as that row assumed.
 - **Q6 / *LLM transient vs terminal*** — the two new transient classes are bounded per attempt by the cap.
 
