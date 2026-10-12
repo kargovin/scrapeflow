@@ -2,7 +2,7 @@
   "events": [
     {
       "eventId": "1",
-      "eventTime": "2026-10-12T13:35:52.653Z",
+      "eventTime": "2026-10-12T18:07:32.236Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
       "workflowExecutionStartedEventAttributes": {
         "workflowType": {
@@ -24,9 +24,9 @@
         "workflowExecutionTimeout": "86400s",
         "workflowRunTimeout": "86400s",
         "workflowTaskTimeout": "10s",
-        "originalExecutionRunId": "86fca5ad-86a5-4389-871e-8cf657b1bacd",
-        "identity": "32544@d1f3c96a8288",
-        "firstExecutionRunId": "86fca5ad-86a5-4389-871e-8cf657b1bacd",
+        "originalExecutionRunId": "621065aa-5b4d-4e94-8869-d608921f44e6",
+        "identity": "3864@c70a00404ac4",
+        "firstExecutionRunId": "621065aa-5b4d-4e94-8869-d608921f44e6",
         "attempt": 1,
         "firstWorkflowTaskBackoff": "0s",
         "priority": {}
@@ -34,7 +34,7 @@
     },
     {
       "eventId": "2",
-      "eventTime": "2026-10-12T13:35:52.653Z",
+      "eventTime": "2026-10-12T18:07:32.236Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
@@ -46,26 +46,26 @@
     },
     {
       "eventId": "3",
-      "eventTime": "2026-10-12T13:35:52.654Z",
+      "eventTime": "2026-10-12T18:07:32.236Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "2",
-        "identity": "32544@d1f3c96a8288",
-        "historySizeBytes": "413"
+        "identity": "3864@c70a00404ac4",
+        "historySizeBytes": "410"
       }
     },
     {
       "eventId": "4",
-      "eventTime": "2026-10-12T13:35:52.692Z",
+      "eventTime": "2026-10-12T18:07:32.280Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "2",
-        "identity": "32544@d1f3c96a8288",
-        "binaryChecksum": "c8b25638246c6673227c79aeed9ad051",
+        "identity": "3864@c70a00404ac4",
+        "binaryChecksum": "ef3b13728e301bdb7b2c4d74ded51267",
         "sdkMetadata": {
           "coreUsedFlags": [
-            2,
             1,
+            2,
             3
           ],
           "sdkName": "temporal-python",
@@ -76,7 +76,7 @@
     },
     {
       "eventId": "5",
-      "eventTime": "2026-10-12T13:35:52.692Z",
+      "eventTime": "2026-10-12T18:07:32.280Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
       "activityTaskScheduledEventAttributes": {
         "activityId": "1",
@@ -113,17 +113,17 @@
     },
     {
       "eventId": "6",
-      "eventTime": "2026-10-12T13:35:52.692Z",
+      "eventTime": "2026-10-12T18:07:32.280Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
       "activityTaskStartedEventAttributes": {
         "scheduledEventId": "5",
-        "identity": "32544@d1f3c96a8288",
+        "identity": "3864@c70a00404ac4",
         "attempt": 1
       }
     },
     {
       "eventId": "7",
-      "eventTime": "2026-10-12T13:35:52.695Z",
+      "eventTime": "2026-10-12T18:07:32.283Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
       "activityTaskCompletedEventAttributes": {
         "result": {
@@ -138,12 +138,12 @@
         },
         "scheduledEventId": "5",
         "startedEventId": "6",
-        "identity": "32544@d1f3c96a8288"
+        "identity": "3864@c70a00404ac4"
       }
     },
     {
       "eventId": "8",
-      "eventTime": "2026-10-12T13:35:52.695Z",
+      "eventTime": "2026-10-12T18:07:32.283Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
@@ -155,29 +155,29 @@
     },
     {
       "eventId": "9",
-      "eventTime": "2026-10-12T13:35:52.695Z",
+      "eventTime": "2026-10-12T18:07:32.283Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "8",
-        "identity": "32544@d1f3c96a8288",
-        "historySizeBytes": "875"
+        "identity": "3864@c70a00404ac4",
+        "historySizeBytes": "867"
       }
     },
     {
       "eventId": "10",
-      "eventTime": "2026-10-12T13:35:52.700Z",
+      "eventTime": "2026-10-12T18:07:32.288Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "8",
-        "identity": "32544@d1f3c96a8288",
-        "binaryChecksum": "c8b25638246c6673227c79aeed9ad051",
+        "identity": "3864@c70a00404ac4",
+        "binaryChecksum": "ef3b13728e301bdb7b2c4d74ded51267",
         "sdkMetadata": {},
         "meteringMetadata": {}
       }
     },
     {
       "eventId": "11",
-      "eventTime": "2026-10-12T13:35:52.700Z",
+      "eventTime": "2026-10-12T18:07:32.288Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
       "activityTaskScheduledEventAttributes": {
         "activityId": "2",
@@ -215,17 +215,17 @@
     },
     {
       "eventId": "12",
-      "eventTime": "2026-10-12T13:35:52.700Z",
+      "eventTime": "2026-10-12T18:07:32.288Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
       "activityTaskStartedEventAttributes": {
         "scheduledEventId": "11",
-        "identity": "32544@d1f3c96a8288",
+        "identity": "3864@c70a00404ac4",
         "attempt": 1
       }
     },
     {
       "eventId": "13",
-      "eventTime": "2026-10-12T13:35:52.703Z",
+      "eventTime": "2026-10-12T18:07:32.291Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
       "activityTaskCompletedEventAttributes": {
         "result": {
@@ -240,12 +240,12 @@
         },
         "scheduledEventId": "11",
         "startedEventId": "12",
-        "identity": "32544@d1f3c96a8288"
+        "identity": "3864@c70a00404ac4"
       }
     },
     {
       "eventId": "14",
-      "eventTime": "2026-10-12T13:35:52.703Z",
+      "eventTime": "2026-10-12T18:07:32.291Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
@@ -257,34 +257,34 @@
     },
     {
       "eventId": "15",
-      "eventTime": "2026-10-12T13:35:52.703Z",
+      "eventTime": "2026-10-12T18:07:32.291Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "14",
-        "identity": "32544@d1f3c96a8288",
-        "historySizeBytes": "1558"
+        "identity": "3864@c70a00404ac4",
+        "historySizeBytes": "1546"
       }
     },
     {
       "eventId": "16",
-      "eventTime": "2026-10-12T13:35:52.707Z",
+      "eventTime": "2026-10-12T18:07:32.296Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "14",
-        "identity": "32544@d1f3c96a8288",
-        "binaryChecksum": "c8b25638246c6673227c79aeed9ad051",
+        "identity": "3864@c70a00404ac4",
+        "binaryChecksum": "ef3b13728e301bdb7b2c4d74ded51267",
         "sdkMetadata": {},
         "meteringMetadata": {}
       }
     },
     {
       "eventId": "17",
-      "eventTime": "2026-10-12T13:35:52.707Z",
+      "eventTime": "2026-10-12T18:07:32.296Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
       "activityTaskScheduledEventAttributes": {
         "activityId": "3",
         "activityType": {
-          "name": "load_job_llm"
+          "name": "read_llm_settings"
         },
         "taskQueue": {
           "name": "workflow",
@@ -316,17 +316,17 @@
     },
     {
       "eventId": "18",
-      "eventTime": "2026-10-12T13:35:52.707Z",
+      "eventTime": "2026-10-12T18:07:32.296Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
       "activityTaskStartedEventAttributes": {
         "scheduledEventId": "17",
-        "identity": "32544@d1f3c96a8288",
+        "identity": "3864@c70a00404ac4",
         "attempt": 1
       }
     },
     {
       "eventId": "19",
-      "eventTime": "2026-10-12T13:35:52.708Z",
+      "eventTime": "2026-10-12T18:07:32.297Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
       "activityTaskCompletedEventAttributes": {
         "result": {
@@ -341,12 +341,12 @@
         },
         "scheduledEventId": "17",
         "startedEventId": "18",
-        "identity": "32544@d1f3c96a8288"
+        "identity": "3864@c70a00404ac4"
       }
     },
     {
       "eventId": "20",
-      "eventTime": "2026-10-12T13:35:52.708Z",
+      "eventTime": "2026-10-12T18:07:32.297Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
@@ -358,29 +358,29 @@
     },
     {
       "eventId": "21",
-      "eventTime": "2026-10-12T13:35:52.708Z",
+      "eventTime": "2026-10-12T18:07:32.297Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "20",
-        "identity": "32544@d1f3c96a8288",
-        "historySizeBytes": "2113"
+        "identity": "3864@c70a00404ac4",
+        "historySizeBytes": "2102"
       }
     },
     {
       "eventId": "22",
-      "eventTime": "2026-10-12T13:35:52.711Z",
+      "eventTime": "2026-10-12T18:07:32.301Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "20",
-        "identity": "32544@d1f3c96a8288",
-        "binaryChecksum": "c8b25638246c6673227c79aeed9ad051",
+        "identity": "3864@c70a00404ac4",
+        "binaryChecksum": "ef3b13728e301bdb7b2c4d74ded51267",
         "sdkMetadata": {},
         "meteringMetadata": {}
       }
     },
     {
       "eventId": "23",
-      "eventTime": "2026-10-12T13:35:52.711Z",
+      "eventTime": "2026-10-12T18:07:32.301Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
       "activityTaskScheduledEventAttributes": {
         "activityId": "4",
@@ -417,17 +417,17 @@
     },
     {
       "eventId": "24",
-      "eventTime": "2026-10-12T13:35:52.711Z",
+      "eventTime": "2026-10-12T18:07:32.301Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
       "activityTaskStartedEventAttributes": {
         "scheduledEventId": "23",
-        "identity": "32544@d1f3c96a8288",
+        "identity": "3864@c70a00404ac4",
         "attempt": 1
       }
     },
     {
       "eventId": "25",
-      "eventTime": "2026-10-12T13:35:52.713Z",
+      "eventTime": "2026-10-12T18:07:32.303Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
       "activityTaskCompletedEventAttributes": {
         "result": {
@@ -442,12 +442,12 @@
         },
         "scheduledEventId": "23",
         "startedEventId": "24",
-        "identity": "32544@d1f3c96a8288"
+        "identity": "3864@c70a00404ac4"
       }
     },
     {
       "eventId": "26",
-      "eventTime": "2026-10-12T13:35:52.713Z",
+      "eventTime": "2026-10-12T18:07:32.303Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
@@ -459,34 +459,34 @@
     },
     {
       "eventId": "27",
-      "eventTime": "2026-10-12T13:35:52.713Z",
+      "eventTime": "2026-10-12T18:07:32.303Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "26",
-        "identity": "32544@d1f3c96a8288",
-        "historySizeBytes": "2695"
+        "identity": "3864@c70a00404ac4",
+        "historySizeBytes": "2680"
       }
     },
     {
       "eventId": "28",
-      "eventTime": "2026-10-12T13:35:52.716Z",
+      "eventTime": "2026-10-12T18:07:32.317Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "26",
-        "identity": "32544@d1f3c96a8288",
-        "binaryChecksum": "c8b25638246c6673227c79aeed9ad051",
+        "identity": "3864@c70a00404ac4",
+        "binaryChecksum": "ef3b13728e301bdb7b2c4d74ded51267",
         "sdkMetadata": {},
         "meteringMetadata": {}
       }
     },
     {
       "eventId": "29",
-      "eventTime": "2026-10-12T13:35:52.716Z",
+      "eventTime": "2026-10-12T18:07:32.317Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED",
       "workflowExecutionFailedEventAttributes": {
         "failure": {
           "message": "LLM key not found or deleted",
-          "stackTrace": "  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 2750, in _run_top_level_workflow_function\n    await coro\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 1153, in run_workflow\n    result = await self._inbound.execute_workflow(input)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/testing/_workflow.py\", line 584, in execute_workflow\n    return await super().execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_interceptor.py\", line 401, in execute_workflow\n    return await self.next.execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 3144, in execute_workflow\n    return await input.run_fn(*args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/job.py\", line 103, in run\n    return await self._run(input)\n           ^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/job.py\", line 129, in _run\n    return await self._fail(run_id, llm.error, discard=paths)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/job.py\", line 200, in _fail\n    raise ApplicationError(error, non_retryable=True)\n",
+          "stackTrace": "  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 2750, in _run_top_level_workflow_function\n    await coro\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 1153, in run_workflow\n    result = await self._inbound.execute_workflow(input)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/testing/_workflow.py\", line 584, in execute_workflow\n    return await super().execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_interceptor.py\", line 401, in execute_workflow\n    return await self.next.execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 3144, in execute_workflow\n    return await input.run_fn(*args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/job.py\", line 103, in run\n    return await self._run(input)\n           ^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/job.py\", line 132, in _run\n    return await self._fail(run_id, llm.error, discard=paths)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/job.py\", line 203, in _fail\n    raise ApplicationError(error, non_retryable=True)\n",
           "applicationFailureInfo": {
             "nonRetryable": true
           }

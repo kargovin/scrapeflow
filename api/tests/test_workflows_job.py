@@ -39,7 +39,7 @@ from app.workflows.activities.job_runs import (
     finish_job_run,
     job_run_processing,
     job_run_started,
-    load_job_llm,
+    read_llm_settings,
     record_job_objects,
 )
 from app.workflows.job import (
@@ -47,7 +47,7 @@ from app.workflows.job import (
     FINISH_JOB_RUN_ACTIVITY,
     JOB_RUN_PROCESSING_ACTIVITY,
     JOB_RUN_STARTED_ACTIVITY,
-    LOAD_JOB_LLM_ACTIVITY,
+    READ_LLM_SETTINGS_ACTIVITY,
     RECORD_JOB_OBJECTS_ACTIVITY,
     FinishJobRunInput,
     JobLLM,
@@ -127,9 +127,9 @@ class Harness:
             self.calls.append(("started", input.run_id))
             return reply(JOB_RUN_STARTED_ACTIVITY, "running")
 
-        @activity.defn(name=LOAD_JOB_LLM_ACTIVITY)
+        @activity.defn(name=READ_LLM_SETTINGS_ACTIVITY)
         async def load(input: JobRunRef) -> JobLLM:
-            self.calls.append(("load_llm", input.run_id))
+            self.calls.append(("read_llm_settings", input.run_id))
             return self.job_llm
 
         @activity.defn(name=RECORD_JOB_OBJECTS_ACTIVITY)
@@ -219,7 +219,7 @@ async def test_a_job_without_llm_is_scraped_charged_and_completed():
     assert h.extracted == []
     assert h.calls == [
         ("started", "r1"),
-        ("load_llm", "r1"),
+        ("read_llm_settings", "r1"),
         _record(
             [StoredObject(path=SCRAPE_PATH, size=10), StoredObject(path=SHOT_PATH, size=5)], HASH
         ),
@@ -258,7 +258,7 @@ async def test_a_job_with_llm_goes_processing_and_completes_on_the_extraction():
     )
     assert h.calls == [
         ("started", "r1"),
-        ("load_llm", "r1"),
+        ("read_llm_settings", "r1"),
         _record(SCRAPED, HASH),
         ("processing", "r1"),
         _record([StoredObject(path=LLM_PATH, size=3)]),
@@ -680,7 +680,7 @@ async def test_discard_spares_an_object_the_ledger_holds(db_user):
     await _remove(charged)
 
 
-async def test_load_job_llm_reads_the_job_and_its_key_now(db_user):
+async def test_read_llm_settings_reads_the_job_and_its_key_now(db_user):
     async with AsyncSessionLocal() as db:
         key = UserLLMKey(
             user_id=db_user.id,
@@ -697,15 +697,15 @@ async def test_load_job_llm_reads_the_job_and_its_key_now(db_user):
     without = await _job_run(db_user.id)
     missing = await _job_run(db_user.id, llm_config={**config, "llm_key_id": str(uuid.uuid4())})
 
-    assert await load_job_llm(JobRunRef(run_id=str(with_llm.id))) == JobLLM(
+    assert await read_llm_settings(JobRunRef(run_id=str(with_llm.id))) == JobLLM(
         provider="openai_compatible",
         encrypted_api_key="ciphertext",
         base_url="https://llm.example.com/v1",
         model="m",
         output_schema={"type": "object"},
     )
-    assert await load_job_llm(JobRunRef(run_id=str(without.id))) == JobLLM()
-    assert await load_job_llm(JobRunRef(run_id=str(missing.id))) == JobLLM(
+    assert await read_llm_settings(JobRunRef(run_id=str(without.id))) == JobLLM()
+    assert await read_llm_settings(JobRunRef(run_id=str(missing.id))) == JobLLM(
         error="LLM key not found or deleted"
     )
 
@@ -734,7 +734,7 @@ async def _run_real(run: JobRun, scrape, during=None):
                 workflows=[JobWorkflow],
                 activities=[
                     job_run_started,
-                    load_job_llm,
+                    read_llm_settings,
                     record_job_objects,
                     job_run_processing,
                     finish_job_run,

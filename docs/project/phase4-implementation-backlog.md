@@ -1710,7 +1710,7 @@ unchanged (it calls the API).
 - **D.3** — `app/workflows/job.py` (`JobWorkflow`, models, activity names) +
   `app/workflows/activities/job_runs.py` (five DB activities on the `workflow` queue). Flow:
   `job_run_started` (pending → running) → Scrape (`steps.scrape`, engine → `queues.scrape_queue`)
-  → `load_job_llm` → `record_job_objects` → [`job_run_processing` → LLMExtract →
+  → `read_llm_settings` → `record_job_objects` → [`job_run_processing` → LLMExtract →
   `record_job_objects`] → `finish_job_run` (row + webhook row in one transaction). Every write
   notifies `job_status` with the positional `{job_id}:{run_id}:{status}` payload. Input = the run id,
   the engine and a `ScrapeInput` from **`dispatch.build_scrape_input`** (beside
@@ -1723,7 +1723,7 @@ unchanged (it calls the API).
   can reach the engine, and so a `v1` request never connects to Temporal at all.
 
 **Calls made (reversible):**
-1. **The LLM step is read by an activity after the scrape** (`load_job_llm`), not resolved into
+1. **The LLM step is read by an activity after the scrape** (`read_llm_settings`), not resolved into
    the workflow input at dispatch as pipelines do (open item 9). v1 reads `jobs.llm_config` and the
    key when the scrape result arrives, so a key deleted meanwhile fails the run with v1's exact
    error (`LLM key not found or deleted`) and the uncharged scrape is deleted. It also suits F.1: a

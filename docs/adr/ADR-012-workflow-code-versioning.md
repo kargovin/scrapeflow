@@ -27,12 +27,16 @@ except its **input/output shapes**, which are recorded in the history too.
    ≈3 h with a Webhook block), the wrapper becomes `workflow.deprecate_patch("<id>")` and the old branch goes;
    once no run carrying the marker remains, the line goes.
 2. **A replay test gates the api image build.** `api/tests/test_workflow_replay.py` replays every history in
-   `api/tests/replay/histories/` against the current `PipelineWorkflow`; `.github/workflows/build-push.yml`
+   `api/tests/replay/histories/` against the current `PipelineWorkflow` and `JobWorkflow`; `.github/workflows/build-push.yml`
    runs it (no services, `--noconftest`) and `build-api` depends on it. The workflow worker ships in the api
    image, so a failure blocks exactly the image that would strand runs.
 3. **The corpus only grows.** Histories are recorded from real compose runs (`tests/replay/export_history.py`)
    or the mocked-activity harness (`tests/replay/record_harness.py`); **a history is never regenerated or
    edited to make the test pass.** Add one for each new behaviour of the workflow body.
+   *One exception, before release only:* a workflow that has never been deployed has started no run
+   anywhere, so its histories protect nothing yet and may be replaced. Used once — `JobWorkflow`'s
+   `load_job_llm` → `read_llm_settings` rename, 2026-10-12, owner's call, four histories re-recorded.
+   From a workflow's first release on, the rule above is absolute.
 4. **Activity contracts change additively only.** A new field is optional with a default on both sides; a
    removal or rename is add-new → release → drain → remove-old. Neither mechanism protects against a
    non-additive change: the recorded result no longer decodes (the replay test catches that), and the

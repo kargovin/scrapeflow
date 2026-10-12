@@ -17,7 +17,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 JOB_RUN_STARTED_ACTIVITY = "job_run_started"
-LOAD_JOB_LLM_ACTIVITY = "load_job_llm"
+READ_LLM_SETTINGS_ACTIVITY = "read_llm_settings"
 RECORD_JOB_OBJECTS_ACTIVITY = "record_job_objects"
 JOB_RUN_PROCESSING_ACTIVITY = "job_run_processing"
 FINISH_JOB_RUN_ACTIVITY = "finish_job_run"
@@ -127,7 +127,7 @@ class JobWorkflow:
             return await self._cancel(run_id, discard=paths)
 
         # Read after the scrape, as v1 did: a key deleted meanwhile fails the run.
-        llm: JobLLM = await self._db(LOAD_JOB_LLM_ACTIVITY, JobRunRef(run_id=run_id), JobLLM)
+        llm: JobLLM = await self._db(READ_LLM_SETTINGS_ACTIVITY, JobRunRef(run_id=run_id), JobLLM)
         if llm.error is not None:
             return await self._fail(run_id, llm.error, discard=paths)
 

@@ -24,7 +24,7 @@ from app.workflows.activities.job_runs import (
     finish_job_run,
     job_run_processing,
     job_run_started,
-    load_job_llm,
+    read_llm_settings,
     record_job_objects,
 )
 from app.workflows.activities.webhook import deliver_webhook
@@ -64,7 +64,7 @@ async def main() -> None:
             check_cancelled,
             deliver_webhook,
             job_run_started,
-            load_job_llm,
+            read_llm_settings,
             record_job_objects,
             job_run_processing,
             finish_job_run,

@@ -28,7 +28,7 @@ from app.workflows.job import (
     FINISH_JOB_RUN_ACTIVITY,
     JOB_RUN_PROCESSING_ACTIVITY,
     JOB_RUN_STARTED_ACTIVITY,
-    LOAD_JOB_LLM_ACTIVITY,
+    READ_LLM_SETTINGS_ACTIVITY,
     RECORD_JOB_OBJECTS_ACTIVITY,
     FinishJobRunInput,
     JobLLM,
@@ -107,8 +107,8 @@ async def job_run_processing(input: JobRunRef) -> str:
         return await _move(db, run, "running", "processing")
 
 
-@activity.defn(name=LOAD_JOB_LLM_ACTIVITY)
-async def load_job_llm(input: JobRunRef) -> JobLLM:
+@activity.defn(name=READ_LLM_SETTINGS_ACTIVITY)
+async def read_llm_settings(input: JobRunRef) -> JobLLM:
     """The job's LLM step as it is now — v1 also read it when the scrape result arrived."""
     async with AsyncSessionLocal() as db:
         run = await db.get(JobRun, uuid.UUID(input.run_id))

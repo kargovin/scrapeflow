@@ -160,7 +160,7 @@ backlog *D.1–D.4 — Built* and the D.5 runbook.
   (recorded as PRD-016 R5's second named exception; `phase4-backlog.md` PRD-018 row) · **full spec**, not MVP ·
   a v2 run whose workflow cannot start → **failed + 503** · **commit to `develop`**, infra committed not pushed.
 - **Calls to know when the questions come** (all reversible): the LLM step is read **by an activity after the
-  scrape** (`load_job_llm`, v1's timing and error) rather than resolved at dispatch like pipelines; cancel is row
+  scrape** (`read_llm_settings`, v1's timing and error) rather than resolved at dispatch like pipelines; cancel is row
   first, engine second, steps never aborted; a stopped run's objects are deleted **unless a ledger row holds
   them**; v1's job-lane storage wall (fail + delete) kept; `warnings` stored only without an LLM step (v1 parity —
   looks like a v1 oversight); `content_hash` still written on v2.
