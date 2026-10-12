@@ -2099,7 +2099,9 @@ OpenAI-compatible). The cap and the deadline stay as the bound. Provider-neutral
 ### Interactions
 
 - **PRD-016 R6** — the gate's first two attempts produced no verdict because of this bug, not the pipeline
-  model. Rerun after the release.
+  model. The rerun on `03f72f8` **passed** (2026-10-12), but 3 of its 6 LLM attempts still hit the cap — the job
+  lane passed on its last attempt. With the fix deployed the loop is bounded, not gone; the mitigation above is
+  what removes it.
 - **`CLAUDE.md` → *LLM cold starts*** — the "request timeout" is now a wall clock, as that row assumed.
 - **Q6 / *LLM transient vs terminal*** — the two new transient classes are bounded per attempt by the cap.
 

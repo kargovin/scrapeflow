@@ -141,7 +141,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-11 *(clock)*
+## Current state — as of 2026-10-12 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +149,16 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+✅ **R6 ACCEPTANCE GATE — PASS (2026-10-12).** Owner-run `r6_gate.py` against prod on `03f72f8`: job
+`87bdc314-…`, pipeline `1722555a-…`. Same blocks in order, all `completed`; same schema fields (`title`, `summary`);
+artifact retrievable on both lanes; payload shape equal but for the two recorded exceptions; both signatures valid.
+Repeat-run cost: 1 LLM call + 2 stored objects (job lane 0 + 0). Recorded in PRD-016 R6 → *Gate result* and backlog
+C.14 (now ✅). ⚠️ The run carried **BUG-022's loop**: 3 of 6 LLM attempts hit the 4096 cap (prod logs; the job lane
+passed on its 3rd and last attempt). The loop investigation (same day, owner's Modal token, file deleted after) found
+a general system instruction stops it — **0/20 loops vs 4/10** — `open-bugs.md` → BUG-022; **not built, owner's
+call** (it changes job-lane output slightly). **Next: Group D — job cutover (D.1)**; the C.12 click-through is still
+owed. ⚠️ Revoke the prod API key typed into the transcript; rotate the Modal token used for the investigation.
 
 🚀 **C.13 BUILT + C.14 — PIPELINE LANE RELEASED (2026-10-12, same session).** `main` `6675f17..1793c60`
 (owner ran the ff — the classifier refuses it). **Deployed code is `1793c60`.** Detail: backlog C.13 and C.14 notes.
@@ -165,16 +175,15 @@ condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *
 - **C.14:** `PIPELINES_ENABLED` kill switch (16d — the lane's only rollback); CI replay 10 passed; four
   Deployments on `1793c60`, 0 restarts; migrations 4.4 + 4.5 applied; pollers on `workflow` / `content` /
   `llm` from the new pods; `/pipelines` 401 unauthenticated.
-- **Open — owner-run:** the **R6 gate**: `SCRAPEFLOW_API_KEY=… python3 api/scripts/r6_gate.py --llm-key-id … --model …
-  (--webhook-site | --webhook-url …)` — paste the output; verdict → PRD-016 R6 + here. And the **C.12
-  click-through** of the Pipelines pages. Until R6 passes, no block outside R2's catalog is designed.
+- ~~**Open — owner-run:** the **R6 gate**~~ ✅ **PASS 2026-10-12** (above). Still open: the **C.12
+  click-through** of the Pipelines pages.
 - GitHub reported Dependabot alerts on the push (not triaged this session) — **10 open on `main`** (4 high, 4 moderate, 2 low) as of the BUG-022 release.
 - **Follow-up — LLM warm-up margin (owner, 2026-10-12):** cold starts on the Modal endpoint now take **~140–150 s**
   (Qwen3-4B on an L4), against `llm_warmup_max_wait_seconds=180` — 30–40 s spare; `CLAUDE.md` still says 90–110 s.
   Past 180 s the call raises `WarmupTimeout` (transient → one retry, so no failure). Widening it is **coupled**: the
   pipeline LLM block's `start_to_close` (400 s, `catalog.py` `LLM_EXTRACT`) must stay ≥ warm-up + request (180 s), so a
   240 s warm-up needs ≥ 420 s there (and the budget/validator follow it). Not urgent.
-- ⚠️ **R6 gate attempted 2026-10-12 — NO VERDICT yet.** Two runs of `r6_gate.py` both hit a **new bug, to file as
+- ⚠️ **R6 gate attempted 2026-10-12 — first attempts, no verdict** (superseded: PASS on the rerun, above). Two runs of `r6_gate.py` both hit a **new bug, to file as
   BUG-022**: (1) the OpenAI-compatible LLM call sets **no `max_tokens`** (`llm-worker/worker/llm.py`, Anthropic has
   4096), so the 4B Qwen model under JSON-schema decoding sometimes loops and generates for minutes; (2) the
   **180 s read timeout did not fire** against Modal (one call ran ~7 min until the owner cancelled it on Modal) —
@@ -1191,7 +1200,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Owner runs the R6 gate** (`api/scripts/r6_gate.py`) and clicks through the Pipelines pages; record the verdict in PRD-016 R6. Then **Group D — job cutover** (D.1). ~~C.14~~ 🚀 released 2026-10-12 (`1793c60`). ~~C.13~~ ✅ 2026-10-12 (ADR-012 Draft, `c86a9d9`). ~~Pick up C.13 in `phase4-implementation-backlog.md`~~. ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Group D — job cutover (D.1).** Owner still owes the C.12 click-through; decide BUG-022's system-instruction mitigation. ~~Owner runs the R6 gate~~ ✅ **PASS 2026-10-12** (PRD-016 R6 → *Gate result*). ~~C.14~~ 🚀 released 2026-10-12 (`1793c60`). ~~C.13~~ ✅ 2026-10-12 (ADR-012 Draft, `c86a9d9`). ~~Pick up C.13 in `phase4-implementation-backlog.md`~~. ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1387,6 +1396,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-12 *(clock)* | **🚀 C.13 built, C.14 released, BUG-022 filed/fixed/released, R6 PASS.** Owner: "go with patched and the replay test; build c13 and do c14". ADR-012 (Draft), replay corpus + CI gate, `PIPELINES_ENABLED`; owner ran the `main` ff (`6675f17..1793c60`). R6's first runs found BUG-022 → fixed, released (`03f72f8`). R6 script fixes (`7e1cfaf`). Loop investigation against the owner's Modal endpoint (token file deleted after): system instruction 0/20 vs 4/10, not built. Owner's full rerun: **R6 PASS**, recorded in PRD-016, backlog C.14, `CLAUDE.md`, `open-bugs.md`, this file. | `c86a9d9`, `3325534`, `626192b`, `1793c60`, `4965e9d`, `03f72f8`, `c62f5a4`, `7e1cfaf`, `3dae1fd`, `def7156` + this closeout |
 | 2026-10-11 *(clock, third session)* | **🔷 C.9 → C.12 built (local).** Read-in; owner: "i'll let you do everything until c13; no need for any walkthrough"; asked what C.13's check is → answered (Worker Versioning, Architect call before C.14). Built one task at a time, each tested, mutation-checked, live-checked on compose and committed: C.9 Webhook activity, C.10 cancel endpoint, C.11 reads + WS + BUG-009, C.12 SPA pages + reconnecting socket. Docs: backlog (four rows, four *Built* notes, open items 2 and 7, stale C.8 row), PRD-016 R6 payload decision, `open-bugs.md` + `phase4-backlog.md` (BUG-009), `CLAUDE.md`, this file. | `5b14291`, `66abdeb`, `88e8024`, `c2590af` + this closeout |
 | 2026-10-11 *(clock, second session)* | **🔷 C.8 built (local).** Read-in; owner: "do c8". Illustrated scrape → clean → validate → LLM walkthrough; three calls asked before building (denylist MVP, `history/{artifact_id}/clean.md`, `jsonschema` in worker + API) — all took the recommendation. Built worker activities on a `content` queue in the LLM worker process, API contracts + workflow branches, save-time schema meta-validation, contract arms, tests; 15 mutations (stale-`.pyc` false catches found and re-run); live on compose, three pipelines + a 422. Owner: "commit it as two", then "close this session". *(Rows for the C.3 → C.7 sessions were never added; their record is the Current-state blocks.)* | `d75c7b2`, `6cfef04` + this closeout |
 | 2026-10-01 *(clock, second session)* | **🔷 C.2 built (local).** Read-in. Two open questions asked before building: own revision (4.5) and the slot rule (run `running` AND a `running` block) — both took the recommendation. Built models, migration 4.5 (views + CHECK hand-written), ledger kwarg + release helper, 8 tests; round trip with `pg_get_viewdef` diffs, five schema mutations each failing its own test, 311 tests. Owner: "close out c2 and commit". | `b5d0f94` + this closeout |

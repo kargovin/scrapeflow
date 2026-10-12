@@ -72,7 +72,7 @@
 | C.11 | Run/result read API + `pipeline_status` notify channel + WS route | ✅ Built 2026-10-11 (local, `88e8024`, unreleased); **BUG-009 pulled in and fixed** (open item 7) |
 | C.12 | Frontend: Pipelines pages + WS reconnect (11b, both lanes) | ✅ Built 2026-10-11 (local, `c2590af`, unreleased); BUG-018 not ridden — click-through after release |
 | C.13 | Workflow-code versioning: decide + build (⚠️ Architect) | ✅ Built 2026-10-12 — owner chose **`patched()` + a replay test that gates the build** (ADR-012, Draft); Worker Versioning not taken |
-| C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | 🟡 **RELEASED 2026-10-12** (`6675f17..1793c60`, api + llm-worker; no infra change) — **R6 gate not yet run** (owner: needs prod API key + a real LLM key) |
+| C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | ✅ **RELEASED 2026-10-12** (`6675f17..1793c60`, api + llm-worker; no infra change) — **R6 PASS 2026-10-12** (on `03f72f8`, BUG-022's fix) |
 | **D** | **Job cutover** | |
 | D.1 | Lane marker on `job_runs` (mechanism 4) + v1 dispatcher filters | ⬜ |
 | D.2 | `ChangeDetection` activity: content-hash dedup + `diff.py` port (**R5 obligation**) | ⬜ |
@@ -1601,8 +1601,10 @@ the R6 script `api/scripts/r6_gate.py` (`1793c60`, stdlib only, run by the owner
   `pipeline_status`. Pollers (admin-tools pod): workflow + workflow-queue activities on `workflow`, Clean/Validate
   on `content`, LLM on `llm`, all from the new pods. `GET /pipelines` unauthenticated → 401, `/health` 200,
   `/app/` serves the new bundle.
-- **Still owed:** the **R6 gate** (owner runs `r6_gate.py`; verdict goes to PRD-016 and the handoff) and the
-  **C.12 click-through**.
+- **R6 — PASS 2026-10-12** (owner-run, on `03f72f8`): every structural check and both signatures pass; repeat run
+  = 1 LLM call + 2 stored objects vs the job's 0 + 0. Verdict and detail: PRD-016 R6 → *Gate result*. The run
+  carried BUG-022's loop (3 of 6 LLM attempts hit the cap). First found BUG-022 (`4965e9d`).
+- **Still owed:** the **C.12 click-through**.
 
 ---
 

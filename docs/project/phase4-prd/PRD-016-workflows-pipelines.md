@@ -497,6 +497,29 @@ so R2's one-Webhook-block cap does not narrow the gate. It is noted only because
 reproducing "today's recipe" for a job with several consumers will reach for a second Webhook
 block and must be sent to layer C rather than around the cap.
 
+**Gate result — PASS (2026-10-12, production, `03f72f8`).** Run by the owner with `api/scripts/r6_gate.py`:
+`https://example.com/`, schema `{title, summary}`, `Qwen/Qwen3-4B-Instruct-2507` on the owner's Modal endpoint,
+a webhook.site receiver. Job `87bdc314-2268-4d0c-8a65-4326123b9523`, pipeline
+`1722555a-23b9-4fd8-99bf-22240c35e7c5` (runs `5cb0145e-…`, `2b44591e-…`).
+
+| criterion | result |
+|---|---|
+| same blocks, in order, expected outcomes | PASS — `fetch`, `extract`, `notify`, all `completed` |
+| same schema, same fields populated | PASS — `summary`, `title` on both lanes |
+| artifact stored and retrievable the same way | PASS — `history/{artifact_id}/llm.json` on both |
+| webhook payload same shape, but for the two recorded exceptions | PASS — job-only `job_id`; pipeline-only `pipeline_id`, `pipeline_run_id` |
+| both payloads signed per the wire contract | PASS |
+
+- **Repeat-run cost (unchanged page):** the pipeline's second run cost **1 successful LLM call and 2 newly stored
+  objects** (the fetched page and `llm.json`); the job lane's content-hash gate costs 0 and 0 — as this section
+  predicted. Bytes added to `storage_bytes_used` were not measured.
+- **The four divergences were read as known exclusions**, not judged.
+- ⚠️ **The pass carried BUG-022's loop**: 3 of 6 LLM attempts in this run hit the 4096-token cap (the job lane
+  passed on its third and last attempt; pipeline run 2 on its second) — each a billed call. That is the model, not
+  the pipeline model; the proposed mitigation is in `open-bugs.md` → BUG-022. Earlier attempts the same day: two
+  with no verdict (BUG-022 before its fix), one structural PASS with a signature check failing on a script bug
+  (`7e1cfaf`), one `--signature-only` PASS.
+
 ---
 
 ## Success criteria
@@ -513,11 +536,11 @@ block and must be sent to layer C rather than around the cap.
       user** are enforced and operator-configurable; hitting the concurrency ceiling produces a
       clear response rather than a silent stall.
 - [ ] All five R2 block types execute, and each exposes the options listed for it.
-- [ ] A `scrape → LLM → webhook` pipeline is equivalent to the same job on the existing path,
+- [x] A `scrape → LLM → webhook` pipeline is equivalent to the same job on the existing path,
       on the same URL with the same schema **(R6 gate)** — judged on **structure and mechanics**
       (blocks run and their outcomes, schema satisfied with the same fields populated, artifact
       stored and retrievable the same way, webhook payload of the same shape), **not** on
-      byte-equality of nondeterministic LLM output.
+      byte-equality of nondeterministic LLM output. ✅ **PASS 2026-10-12** (R6 → *Gate result*).
 - [ ] One saved pipeline runs against different URLs by supplying the URL as a run input, and
       changing its extraction schema is **one** edit rather than one per URL.
 - [ ] The cost of an R6 pipeline run is measured against the equivalent job **on both axes**:
@@ -525,7 +548,8 @@ block and must be sent to layer C rather than around the cap.
       (b) **bytes added to `storage_bytes_used`**. Today's content-hash gate makes the job's
       second run cost zero on both; a pipeline without that gate costs one call and one artifact
       every run. The measured delta is **recorded before shipping** — not discovered on a user's
-      invoice or at a storage wall.
+      invoice or at a storage wall. *(2026-10-12: repeat run = 1 LLM call + 2 stored objects vs the job's 0 + 0;
+      bytes not measured — R6 → Gate result.)*
 - [ ] **Metering parity (hard):** for the *same* work, the R6 gate pipeline consumes no more
       quota (`monthly_runs_limit`, `concurrent_jobs_limit`, `storage_bytes_used`) than the job it
       reproduces **for having been expressed as a pipeline** — a 3-block pipeline doing one
