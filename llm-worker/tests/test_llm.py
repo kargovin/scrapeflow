@@ -9,7 +9,9 @@ Fernet key/ciphertext pairs are generated inline per test so each test is
 fully self-contained and independent of the conftest-bootstrapped settings key.
 """
 
+import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +19,7 @@ from cryptography.fernet import Fernet
 from structlog.testing import capture_logs
 
 from worker.config import settings
+from worker.errors import LLMOutputTruncated, LLMRequestTimeout
 from worker.llm import (
     _anthropic_client,
     _call_anthropic,
@@ -324,3 +327,106 @@ def test_real_openai_client_accepts_our_timeout_and_retry_pin(base_url):
     assert client.timeout.read == float(settings.llm_request_timeout_seconds)
     assert client.timeout.connect == 10.0
     assert client.max_retries == settings.llm_max_retries
+
+
+# ---------------------------------------------------------------------------
+# BUG-022 — an output cap on both providers, and a wall-clock deadline per call
+# ---------------------------------------------------------------------------
+
+
+def _openai_mock(content='{"ok": true}', finish_reason="stop"):
+    client = AsyncMock()
+    choice = MagicMock(message=MagicMock(content=content), finish_reason=finish_reason)
+    client.chat.completions.create = AsyncMock(return_value=MagicMock(choices=[choice]))
+    return client
+
+
+def _anthropic_mock(stop_reason="tool_use"):
+    client = AsyncMock()
+    response = MagicMock(
+        content=[MagicMock(input={"ok": True})], stop_reason=stop_reason
+    )
+    client.messages.create = AsyncMock(return_value=response)
+    return client
+
+
+async def test_both_providers_cap_the_answer_length():
+    openai_client, anthropic_client = _openai_mock(), _anthropic_mock()
+    with (
+        patch.object(settings, "llm_max_output_tokens", 1234),
+        patch("worker.llm.AsyncOpenAI", return_value=openai_client),
+        patch("worker.llm.anthropic.AsyncAnthropic", return_value=anthropic_client),
+    ):
+        await _call_openai_compatible("sk-test", None, "m", "page", {"type": "object"})
+        await _call_anthropic("sk-ant-test", "m", "page", {"type": "object"})
+
+    assert openai_client.chat.completions.create.call_args.kwargs["max_tokens"] == 1234
+    assert anthropic_client.messages.create.call_args.kwargs["max_tokens"] == 1234
+
+
+async def test_an_answer_cut_off_by_the_cap_is_named_not_a_json_error():
+    # The runaway's shape: whitespace until the cap, so the JSON never closes.
+    client = _openai_mock(content='{"title": "x"' + " " * 50, finish_reason="length")
+    with patch("worker.llm.AsyncOpenAI", return_value=client):
+        with pytest.raises(LLMOutputTruncated, match="max_tokens"):
+            await _call_openai_compatible(
+                "sk-test", None, "m", "page", {"type": "object"}
+            )
+
+    with patch(
+        "worker.llm.anthropic.AsyncAnthropic",
+        return_value=_anthropic_mock("max_tokens"),
+    ):
+        with pytest.raises(LLMOutputTruncated):
+            await _call_anthropic("sk-ant-test", "m", "page", {"type": "object"})
+
+
+class RedirectLoop:
+    """An OpenAI-compatible endpoint that never answers: every request gets a 303 after a pause
+    shorter than the client's read timeout — how a long request on Modal looks to the SDK."""
+
+    def __init__(self, pause: float):
+        self.pause, self.requests = pause, 0
+
+    async def _handle(self, reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        self.requests += 1
+        await asyncio.sleep(self.pause)
+        writer.write(
+            b"HTTP/1.1 303 See Other\r\nLocation: /v1/poll\r\nContent-Length: 0\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        await writer.drain()
+        writer.close()
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.base_url = f"http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}/v1"
+        return self
+
+    async def __aexit__(self, *exc):
+        self.server.close()
+        await self.server.wait_closed()
+
+
+async def test_the_deadline_stops_a_call_that_keeps_being_redirected():
+    key = Fernet(settings.llm_key_encryption_key).encrypt(b"sk-test").decode()
+    async with RedirectLoop(pause=0.3) as endpoint:
+        with (
+            patch.object(settings, "llm_request_timeout_seconds", 2),
+            patch.object(settings, "llm_warmup_enabled", False),
+        ):
+            started = time.monotonic()
+            with pytest.raises(LLMRequestTimeout, match="within 2s"):
+                # The outer bound only keeps a regression from hanging the suite.
+                await asyncio.wait_for(
+                    call_llm(
+                        key, "openai_compatible", endpoint.base_url, "m", "page", {}
+                    ),
+                    15,
+                )
+            elapsed = time.monotonic() - started
+
+    # Every hop was well inside the 2 s read timeout, so only the wall clock could stop it.
+    assert endpoint.requests > 3
+    assert elapsed < 4

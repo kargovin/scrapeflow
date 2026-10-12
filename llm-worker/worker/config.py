@@ -29,7 +29,12 @@ class Settings(BaseSettings):
     minio_bucket: str = "scrapeflow-results"
     minio_secure: bool = False
     llm_key_encryption_key: str = ""
+    # Wall clock for one provider call, end to end (BUG-022: a per-read timeout is reset by
+    # every redirect the SDK follows). The warm-up probe has its own budget.
     llm_request_timeout_seconds: int = 60
+    # BUG-022: without a cap a small model under JSON-schema decoding can loop until the context
+    # window is spent. Sent to both providers.
+    llm_max_output_tokens: int = 4096
     llm_max_content_chars: int = 50_000
     llm_max_workers: int = 3
     # Temporal mode: concurrent Clean/Validate activities on the content queue.

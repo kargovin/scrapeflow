@@ -11,7 +11,7 @@ from cryptography.fernet import Fernet
 from openai import AsyncOpenAI
 
 from worker.config import settings
-from worker.errors import WarmupTimeout
+from worker.errors import LLMOutputTruncated, LLMRequestTimeout, WarmupTimeout
 
 log = structlog.get_logger()
 
@@ -132,11 +132,15 @@ async def _call_anthropic(
     client = _anthropic_client(api_key)
     response = await client.messages.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=settings.llm_max_output_tokens,
         tools=[{"name": "extract", "input_schema": output_schema}],
         tool_choice={"type": "tool", "name": "extract"},
         messages=[{"role": "user", "content": f"Extract data from:\n\n{content}"}],
     )
+    if response.stop_reason == "max_tokens":
+        raise LLMOutputTruncated(
+            f"the answer reached max_tokens ({settings.llm_max_output_tokens}) before it closed"
+        )
     # tool_choice forces a ToolUseBlock at content[0]; .input is already a dict
     return response.content[0].input  # type: ignore[return-value]
 
@@ -156,8 +160,24 @@ async def _call_openai_compatible(
             "type": "json_schema",
             "json_schema": {"name": "extraction", "schema": output_schema},
         },
+        max_tokens=settings.llm_max_output_tokens,
     )
-    return json.loads(response.choices[0].message.content)
+    choice = response.choices[0]
+    if choice.finish_reason == "length":
+        raise LLMOutputTruncated(
+            f"the answer reached max_tokens ({settings.llm_max_output_tokens}) before it closed"
+        )
+    return json.loads(choice.message.content)
+
+
+async def _within_deadline(call: Any) -> dict[str, Any]:
+    # The SDK's read timeout restarts on every redirect it follows (Modal answers a long request
+    # with 303s), so it is no upper bound on its own (BUG-022). Cancelling closes the connection.
+    limit = settings.llm_request_timeout_seconds
+    try:
+        return await asyncio.wait_for(call, timeout=limit)
+    except TimeoutError:
+        raise LLMRequestTimeout(f"no complete answer within {limit}s") from None
 
 
 async def call_llm(
@@ -185,13 +205,15 @@ async def call_llm(
         content = content[: settings.llm_max_content_chars]
 
     if provider == "anthropic":
-        return await _call_anthropic(api_key, model, content, output_schema)
+        return await _within_deadline(
+            _call_anthropic(api_key, model, content, output_schema)
+        )
 
     # Self-hosted openai-compatible endpoints may be scaled to zero. Wait for the
     # endpoint to wake before spending the real request's timeout budget on it.
     if settings.llm_warmup_enabled and base_url:
         await ensure_ready(base_url, api_key)
 
-    return await _call_openai_compatible(
-        api_key, base_url, model, content, output_schema
+    return await _within_deadline(
+        _call_openai_compatible(api_key, base_url, model, content, output_schema)
     )

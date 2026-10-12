@@ -77,6 +77,15 @@ _TRANSIENT_S3_CODES = frozenset(
 )
 
 
+class LLMRequestTimeout(Exception):
+    """No complete answer within llm_request_timeout_seconds, wall clock (BUG-022). Transient."""
+
+
+class LLMOutputTruncated(Exception):
+    """The answer hit llm_max_output_tokens before it closed (BUG-022). Transient: a fresh sample
+    usually finishes; each attempt is capped, so retries stay bounded."""
+
+
 class WarmupTimeout(Exception):
     """The warm-up probe never saw the endpoint become ready (llm.ensure_ready).
 
@@ -95,7 +104,7 @@ def classify(exc: BaseException) -> str:
     if isinstance(exc, _TERMINAL_TYPES):
         return TERMINAL
 
-    if isinstance(exc, WarmupTimeout):
+    if isinstance(exc, WarmupTimeout | LLMRequestTimeout | LLMOutputTruncated):
         return TRANSIENT
 
     if isinstance(exc, _TRANSIENT_TYPES):

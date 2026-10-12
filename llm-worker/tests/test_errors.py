@@ -22,6 +22,8 @@ import anthropic
 from worker.errors import (
     TERMINAL,
     TRANSIENT,
+    LLMOutputTruncated,
+    LLMRequestTimeout,
     WarmupTimeout,
     classify,
     describe,
@@ -48,6 +50,8 @@ def _resp(status: int) -> httpx.Response:
         httpx.ConnectError("connection refused"),
         httpx.RemoteProtocolError("server disconnected"),
         WarmupTimeout("endpoint never woke"),
+        LLMRequestTimeout("no complete answer within 180s"),
+        LLMOutputTruncated("the answer reached max_tokens (4096) before it closed"),
     ],
 )
 def test_network_and_warmup_errors_are_transient(exc):
