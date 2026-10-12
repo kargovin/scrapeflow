@@ -2059,3 +2059,16 @@ migration's stated payoff; record the before/after in the handoff.
    `{provider, encrypted_api_key, base_url}` per `llm_key_id` in `PipelineRunInput.llm_keys`, as
    `LLMProbeWorkflow` does. Accepted cost: a key deleted or rotated mid-run is not seen by that run.
    Built in the *C.4–C.7 MVP slice*.
+10. **Should `/jobs` become a front end over pipelines?** *(raised by the owner 2026-10-12, reading D;
+    deferred — decide with Monitors / PRD-018, not before D.5.)* A job is a pipeline of
+    `scrape → (llm_extract) → (webhook)` — R6 proved the equivalence — and both workflows already call
+    the same `Scrape` / `LLMExtract` activities; what `JobWorkflow` duplicates is the orchestration and
+    its five DB activities (~250 lines). ADR-009 and `temporal-full-migration.md` assumed a separate
+    `JobWorkflow` and never weighed the alternative. It is not a drop-in swap: the lanes differ where
+    users can see it — storage wall (job fails vs pipeline completes and is charged), webhook (side
+    delivery via `webhook_loop` that never fails a job vs a block that can fail the run), payload
+    (`job.completed` + `job_id` + diff fields vs `pipeline.result` + `pipeline_id`), webhook secret
+    (generated vs optional), and separate tables, routes, SPA pages and MCP tools. Folding jobs in means
+    either accepting those changes (a named R5 exception) or a job mode inside `PipelineWorkflow`, plus
+    deciding the fate of `jobs` / `job_runs`. Same principle as D.2's answer: one way to do a thing.
+    Monitors overlap scheduled jobs too, which is why that is the moment to settle what a job is.
