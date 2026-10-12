@@ -168,7 +168,12 @@ condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *
 - **Open — owner-run:** the **R6 gate**: `SCRAPEFLOW_API_KEY=… python3 api/scripts/r6_gate.py --llm-key-id … --model …
   (--webhook-site | --webhook-url …)` — paste the output; verdict → PRD-016 R6 + here. And the **C.12
   click-through** of the Pipelines pages. Until R6 passes, no block outside R2's catalog is designed.
-- GitHub reported Dependabot alerts on the push (not triaged this session).
+- GitHub reported Dependabot alerts on the push (not triaged this session) — **10 open on `main`** (4 high, 4 moderate, 2 low) as of the BUG-022 release.
+- **Follow-up — LLM warm-up margin (owner, 2026-10-12):** cold starts on the Modal endpoint now take **~140–150 s**
+  (Qwen3-4B on an L4), against `llm_warmup_max_wait_seconds=180` — 30–40 s spare; `CLAUDE.md` still says 90–110 s.
+  Past 180 s the call raises `WarmupTimeout` (transient → one retry, so no failure). Widening it is **coupled**: the
+  pipeline LLM block's `start_to_close` (400 s, `catalog.py` `LLM_EXTRACT`) must stay ≥ warm-up + request (180 s), so a
+  240 s warm-up needs ≥ 420 s there (and the budget/validator follow it). Not urgent.
 - ⚠️ **R6 gate attempted 2026-10-12 — NO VERDICT yet.** Two runs of `r6_gate.py` both hit a **new bug, to file as
   BUG-022**: (1) the OpenAI-compatible LLM call sets **no `max_tokens`** (`llm-worker/worker/llm.py`, Anthropic has
   4096), so the 4B Qwen model under JSON-schema decoding sometimes loops and generates for minutes; (2) the
