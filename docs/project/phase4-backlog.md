@@ -20,6 +20,7 @@
 
 | Date | Change to this backlog |
 |---|---|
+| 2026-10-13 | **BUG-023 filed → §2 gotcha 7** (quota check and run insert not serialised per user; fix before F.1). **Gotcha 6 rewritten** for ADR-010 §1's amendment (`monthly_runs` skips instead of parking) and the corrected `SKIP` reasoning. |
 | 2026-09-29 | **Postgres backups → §4, deferred past Phase 4** (owner). Found at A.8 of the implementation backlog: no backup exists for either Postgres. Owner: the data is mostly junk today, so loss is not a concern yet. |
 | 2026-09-30 | **BUG-021 filed → §4** — the API container's PID 1 is `uv run`, which ignores a SIGTERM during its own startup (per-start project build); worst case ~30 s added to a `Recreate` rollout. Found fixing the same defect in the workflow worker; owner's call: fix later. |
 | 2026-09-30 | **BUG-020 filed → §4** — every `provider=anthropic` LLM job fails in prod: `anthropic` ≥ 1.4 (prod runs 1.9.0) rejects the `httpx.Timeout` `llm.py` passes. Found by B.6's end-to-end probe; fixed locally with B.6's lockfile + each SDK's own `Timeout`; owner's call: ships with B.7, not a hotfix. |
@@ -58,7 +59,7 @@
 | Doc | Covers |
 |-----|--------|
 | `docs/project/open-questions.md` | Q1–Q8 — full context, options, recommendations |
-| `docs/project/open-bugs.md` | BUG-001 → BUG-022 |
+| `docs/project/open-bugs.md` | BUG-001 → BUG-023 |
 | `docs/project/usage-findings.md` | UF-001, UF-002, UF-003 |
 | `docs/project/workflows-scoping.md` | Temporal Workflows feature scoping + engine comparison |
 | `docs/project/temporal-full-migration.md` | Complete change inventory + strangler-fig sequence |
@@ -219,14 +220,24 @@ PRD-017 (C) / PRD-018 (B). ⚠️ **Index order is not build order here.** ADR-0
    invisible, every meter reads `job_runs`), and it is why ADR-009 §3 moved run counting onto a
    **view** instead of naming a table.
 6. **Choose the Temporal Schedule overlap policy before the first Schedule is created.**
-   ADR-010 §1 has a quota-blocked scheduled run **park on a durable timer**. A Schedule fires on
-   every cron tick regardless, and a parked workflow is still *running* — so without an overlap
-   policy a run parked for an hour under an hourly schedule accumulates **one parked workflow per
-   tick**, all released at once when the meter clears, each then consuming a monthly run. Today's
-   waiting room cannot stack (one `Job` row stays `due`); this is a behaviour the migration
-   introduces. **`BUFFER_ONE` is the recommendation** — at most one firing queued behind the parked
-   one. `SKIP` drops firings, which is the regression ADR-010 §1 rejected; `BUFFER_ALL` reproduces
-   the pile-up. ⚠️ **Not decided** — surfaced while writing ADR-010, after its decision was taken.
+   ADR-010 §1 has a scheduled run blocked on `concurrent_jobs` **park on a durable timer**
+   (`monthly_runs` **skips** the firing since the 2026-10-13 amendment; storage fails). A Schedule
+   fires on every cron tick regardless, and a parked workflow is still *running* — so a short-interval
+   job parked longer than its interval stacks **one parked workflow per tick**. Today's waiting room
+   cannot stack (one `Job` row stays `due`); this is a behaviour the migration introduces. Candidates:
+   `SKIP` (while a run is *parked* the parked run still executes, so nothing is lost — it loses a run
+   only when one *overruns* its interval; corrected 2026-10-13) or `BUFFER_ONE` (one firing queued
+   behind). `BUFFER_ALL` reproduces the pile-up. The choice turns on the **overrun** case; v1 runs a
+   job's ticks concurrently (`ALLOW_ALL`), which neither candidate matches. ⚠️ **Not decided.**
+   ⚠️ **No overlap policy reaches across Schedules** — N scheduled jobs blocked on concurrency are N
+   parked workflows waking together. **Owner, 2026-10-13: a per-user cap on active scheduled jobs**
+   (ADR-010 §1 rider), enforced by the API on create / PATCH `schedule_cron` / resume; parked runs get
+   no cap of their own. Default limit and whether paused schedules count: F.0.
+7. **Serialise the quota check and the run insert per user before F.1** — **BUG-023** (filed
+   2026-10-13). Every admission site counts, compares, and inserts later with nothing holding the two
+   together, so parallel admissions overshoot both count meters. Low today (needs a request burst);
+   the normal path at F.1, where parked runs re-check concurrently by design. One helper, used by every
+   site and by F.1's admission activity. Writeup: `open-bugs.md` → BUG-023.
 
 ---
 

@@ -90,7 +90,7 @@
 | E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | ⬜ |
 | **F** | **Schedule and webhook cutover** | |
 | F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ⬜ |
-| F.1 | Temporal Schedule per recurring job + quota parking (ADR-010 §1) | ⬜ |
+| F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ⬜ |
 | F.2 | `schedule_status` interlock guard + `active_recurring_jobs` scoping | ⬜ |
 | F.3 | Per-job migration runbook (pause v1 → verify → create Schedule) | ⬜ |
 | F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ⬜ |
@@ -1937,19 +1937,28 @@ here — close them as dissolved, not fixed.
 
 #### F.0 — Gate: overlap policy (⚠️ Architect)
 
-`BUFFER_ONE` recommended (gotcha 6). Not decided. Without it a parked run under an hourly
-schedule stacks one workflow per tick. Written as an ADR (X.3) before F.1 creates a Schedule.
+`SKIP` vs `BUFFER_ONE` (gotcha 6) — not decided. Since ADR-010's 2026-10-13 amendment only
+`concurrent_jobs` parks (minutes), so the choice turns on the **overrun** case, not on parking.
+Without a policy a short-interval job parked past its interval stacks one workflow per tick. The
+**per-user cap on active scheduled jobs** is decided (owner, 2026-10-13, ADR-010 §1 rider); F.0
+picks its default and whether paused schedules count. Written as an ADR (X.3) before F.1 creates a
+Schedule.
 **Depends on:** X.3
 
-#### F.1 — Temporal Schedule per recurring job + quota parking
+#### F.1 — Temporal Schedule per recurring job + quota admission
 
 **What:** `ScheduledJobWorkflow` (or `JobWorkflow` with a first step): **fires unconditionally**;
-first step consults the views and **parks per meter** (ADR-010 §1: concurrency + monthly park on a
-durable timer and re-check, storage fails now naming the remedy). Schedule created/paused/deleted
+first step consults the views and **acts per meter** (ADR-010 §1, amended 2026-10-13: concurrency
+parks on a durable timer and re-checks; **monthly skips the firing** — the workflow ends, the skip is
+recorded where the user sees it and ⚠️ **not as a `job_runs` row**, which `quota_run_units` would
+count; storage fails now naming the remedy). The admission check and the run insert go through
+BUG-023's per-user lock — woken parked runs re-check in parallel. The API enforces the per-user
+**active scheduled jobs** cap (F.0) on create, PATCH `schedule_cron` and resume, under the same lock. Schedule created/paused/deleted
 by the API on `schedule_cron` / `schedule_status` writes for **v2-owned** schedules; overlap policy
 from F.0. `next_run_at` for v2 comes from the Schedule (`describe`), not the row.
-**Tests:** time-skipping: parked run releases when the meter clears; storage breach fails.
-**Depends on:** D.3, F.0
+**Tests:** time-skipping: parked run releases when the meter clears; monthly breach skips without
+writing a counted row; storage breach fails; N parked runs waking together admit only up to the limit.
+**Depends on:** D.3, F.0, BUG-023
 
 #### F.2 — `schedule_status` interlock guard + meter scoping
 

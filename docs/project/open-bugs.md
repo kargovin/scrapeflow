@@ -2113,6 +2113,85 @@ unchanged.
 - **`CLAUDE.md` → *LLM cold starts*** — the "request timeout" is now a wall clock, as that row assumed.
 - **Q6 / *LLM transient vs terminal*** — the two new transient classes are bounded per attempt by the cap.
 
+## BUG-023 — The quota check and the run insert are not serialised per user; parallel admissions overshoot both count meters
+
+**Severity:** Low today — needs a burst of parallel requests from one user, and the overshoot is bounded by the
+burst. **Must be fixed before F.1** (ADR-010 §1): parked scheduled runs re-check the meter *concurrently* by
+design, so the gap becomes the normal path there instead of a race.
+**Discovered:** 2026-10-13, by code reading during the owner's review of ADR-010 §1 (the monthly-parking
+backlog). **Not reproduced live.**
+**Status:** Open. Not built. **Not dissolved by Temporal** (backlog §3 does not apply) — the migration makes
+it worse.
+
+### What happens
+
+Every admission site reads a count, compares it to the limit, and inserts the run row **later, in a separate
+statement**, with nothing holding the two together:
+
+| site | check | insert + commit |
+|---|---|---|
+| `POST /jobs` | `check_job_quota` dependency (`routers/jobs.py:66`) | the handler, after SSRF lookups and secret encryption (`jobs.py:~211`) |
+| `POST /batch` | `routers/batch.py:45–46` | `batch.py:96–107` |
+| `POST /crawls` | `routers/crawls.py:46–48` | `crawls.py:99–103` |
+| pipeline run trigger | `routers/pipelines.py:568–573` | the `PipelineRun` insert below it |
+| v1 scheduler | `is_quota_exceeded` (`core/scheduler.py:79, 86`) | `scheduler.py:91–103` |
+
+`_quota_check` (`core/quota.py:82`) is a plain `SELECT count(*)` against `quota_run_units` /
+`quota_active_submissions`. Under `READ COMMITTED`, two requests on two connections both count before either
+commits:
+
+```
+concurrent_jobs limit 5, user has 4 active
+
+  req A: count = 4 → 4+1 ≤ 5 ✅ ┐
+  req B: count = 4 → 4+1 ≤ 5 ✅ ┘ both admitted → 6 active
+```
+
+The overshoot equals the number of admissions that interleave. The per-user rate limiter (60 requests / 60 s)
+does not bound it — it counts requests, and 60 parallel requests are within it. Worst case today: a user at
+0 of 5 concurrent sends 60 `POST /jobs` at once and all 60 are admitted.
+
+### Where it does not fire today
+
+The v1 scheduler checks and inserts **one job at a time** in a single loop with a commit per job, so its own
+checks never overlap each other — only with API requests that land in the same moment.
+
+### Why Temporal makes it worse
+
+- **F.1 — concurrency parking (ADR-010 §1).** Every scheduled run blocked on `concurrent_jobs` parks on a timer
+  and re-checks from an activity. One parked workflow per Schedule, any number of Schedules per user: when a
+  slot frees, all of them re-check in parallel on the workflow worker and all pass. This is the case ADR-010's
+  2026-10-13 amendment found.
+- **I.1 — more than one API replica.** Requests then interleave across processes as well as within one.
+
+### Fix sketch
+
+Serialise **check + insert** per user, in **one transaction**:
+
+1. Take a per-user lock at the start of that transaction — `SELECT … FROM users WHERE id = :u FOR UPDATE`
+   (the `users` row always exists; ⚠️ **not `user_quotas`** — that row is optional, `_quota_check` falls back
+   to defaults when it is missing, and `FOR UPDATE` on a missing row locks nothing) or
+   `pg_advisory_xact_lock` on a key derived from the user id.
+2. Run the count checks after the lock, then insert the run row(s) and commit — the commit releases it.
+3. **Move the check next to the insert.** In `POST /jobs` the check is a dependency that runs before the SSRF
+   DNS lookups (`run_in_executor`); holding the lock across those would serialise a user's requests behind
+   network calls. Validate first, then lock → check → insert → commit.
+4. One helper used by every site in the table, and by F.1's admission activity — not five copies of the lock.
+
+Tests: two (or N) sessions admitting in parallel at `limit − 1` → exactly one admitted, on both count meters.
+The storage meter is out of scope: it is moved by the ledger after the fact and guarded up front by the §8d
+headroom buffer, not by a count.
+
+### Interactions
+
+- **ADR-010 §1** — its *Consequences* name this bug as a precondition of F.1.
+- **P7 (run-counting views)** — the views are correct; this is about *when* they are read relative to the
+  insert, not what they count. Do not "fix" the views.
+- **Dispatch order** — the lock must cover only check + insert; NATS publish / workflow start stay after the
+  commit, as today (`create_job`, `_dispatch_due_jobs`).
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised
