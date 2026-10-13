@@ -11,7 +11,9 @@ not decided here"** table — *"What a quota-blocked scheduled run does"* (ADR-0
 **Supersedes:** nothing. ADR-009 is Accepted and immutable; it **deferred** these two questions by
 name rather than answering them, so this is a resolution, not a reversal.
 **Amended 2026-10-13 (owner, while still Draft):** §1's `monthly_runs` row changed from *park* to
-*skip this firing*, and the rider rewritten to match. The original row and the reason it was
+*skip this firing*, and the rider rewritten to match (overlap policy since decided in ADR-013, Draft).
+§2 gained the library requirements behind "registrable domain" and three rules: sitemap *files* pass
+both gates, scope is the submitted seed, dropped entries are counted. The original row and the reason it was
 reversed are kept in [§1 → *Amendment 2026-10-13*](#amendment-2026-10-13--monthly_runs-skips-it-does-not-park).
 The same review filed **BUG-023** (quota check and run insert are not serialized per user).
 
@@ -194,6 +196,29 @@ above):
 
 ---
 
+### Amendment 2026-10-13 — what the rule applies to, and to which seed
+
+Owner, 2026-10-13, on review:
+
+1. **Sitemap *files* pass both gates too, not only the page URLs they list.** v1 fetches every URL
+   from a `robots.txt` `Sitemap:` line directly (`sitemap.py:45`), before anything reaches the
+   frontier — so neither ADR-009 13d's admission-time SSRF check nor this section's rule, as first
+   worded, covered those fetches; `Sitemap: http://169.254.169.254/…` was still fetched blind. From
+   here: **every sitemap-file fetch — `Sitemap:` lines and the children of a sitemap index — is
+   SSRF-checked and must match the seed's registrable domain**, the same two gates a frontier URL
+   passes. A file that fails either is skipped and the crawl continues (13d's rule for a rejected URL).
+   - **Redirects are not followed blindly** on these fetches: either not followed (`httpx`'s default,
+     which 13d's client switch brings) or each hop re-checked against both gates.
+   - **Sitemap indexes are expanded as indexes.** v1's `.//loc` also matches a `<sitemapindex>`'s
+     entries, so child sitemaps are crawled as if they were pages. The port tells the two apart and
+     fetches children as sitemaps, with a bound on nesting depth and on the number of files.
+2. **Scope is the seed as the user submitted it**, not where it redirects. If `example.com` redirects
+   to `example.co.uk`, entries on `example.co.uk` are dropped — the user can submit the final domain.
+   Scoping by the redirect target would let the seed site's redirect choose the scope.
+3. **Dropped entries are visible.** Each drop is logged with its reason (`ssrf` or `out_of_scope`) and
+   counted per crawl, so a user can see why a sitemap's pages did not appear — the same argument this
+   section uses against exact-origin matching.
+
 ## Consequences
 
 **Paid**
@@ -205,9 +230,12 @@ above):
 - A skip record that the user can see and the meter cannot count — a new mechanism, F.1's to choose.
 - Woken parked runs re-check concurrently, so the meter check and the run insert must be serialised
   per user (BUG-023) before F.1 ships.
-- A PSL dependency in the crawl path, pinned and offline, plus the lockfile BUG-006 says is missing.
-- An open follow-on: the Schedule overlap policy (rider above), due at the schedule-and-webhook
-  cutover.
+- A PSL dependency in the crawl path, pinned and offline, plus the lockfile BUG-006 says is missing,
+  configured against three library defaults (private suffixes, IP hosts, normalisation).
+- Sitemap discovery becomes a checked fetcher: both gates on every sitemap file, redirects not
+  followed blindly, indexes expanded with bounds — and a per-crawl count of dropped entries.
+- A follow-on: the Schedule overlap policy — decided `SKIP` in ADR-013 (Draft), which also carries
+  the per-user scheduled-jobs cap's open parameters.
 
 **Bought**
 
@@ -216,7 +244,8 @@ above):
   (storage), and stops being a weeks-long backlog that one tenant can grow without limit
   (`monthly_runs`).
 - Sitemap and link discovery stop being *"two ways of discovering a URL, one guarded, one not"* —
-  after this and 13d's admission check, both routes pass the same two gates.
+  after this and 13d's admission check, both routes pass the same two gates, and so does every
+  sitemap file the crawl fetches to find them.
 
 **Not addressed here**
 
