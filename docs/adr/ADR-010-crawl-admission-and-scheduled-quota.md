@@ -180,6 +180,18 @@ Two requirements come with it:
   recreate the exact condition BUG-006 exists to record. **BUG-006 is not closed by the migration**
   and this makes it sharper, not moot.
 
+### Three library defaults that would break the rule (verified 2026-10-13, `tldextract` 5.4.0)
+
+These do not change the decision; they are what "registrable domain" has to mean for it to hold.
+Checked against the bundled snapshot (`suffix_list_urls=()`, `cache_dir=None` — the offline mode
+above):
+
+| input | default result | what goes wrong | requirement |
+|---|---|---|---|
+| seed `alice.github.io`, entry `bob.github.io` | both → `github.io` | **another tenant's site is admitted.** The PSL's *private* section (`github.io`, `herokuapp.com`, `blogspot.com`, `s3.amazonaws.com`, …) is ignored by default (`include_psl_private_domains=False`) | **`include_psl_private_domains=True`** → `alice.github.io` ≠ `bob.github.io` |
+| seed `93.184.216.34`, entry any other IP or `localhost` | both → `""` | **`"" == ""` admits every IP host.** An IP or a single-label host has no registrable domain | **no registrable domain → fall back to an exact host match** |
+| `WWW.Example.COM.` vs `www.example.com`; `bücher.de` vs `xn--bcher-kva.de` | `Example.COM`; the two IDN forms differ | the same site compared as two | **normalise both sides before comparing** — lowercase, strip a trailing dot, IDNA-encode |
+
 ---
 
 ## Consequences
