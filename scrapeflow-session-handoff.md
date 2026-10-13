@@ -151,6 +151,34 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🧭 **E.0 DECIDED (2026-10-13, later session, docs only).** `develop` `137152a`, `40dbea9` + this closeout.
+**Not pushed** (develop is ~22 docs commits ahead of `origin/develop`, all on top of the released `0b4ac9e`). No code changed.
+
+- **Owner's ask:** explain the task-queue shape (open item 4) — what a task queue is, why it is needed, why at E.0.
+  Explained with the five queues today (`workflow`, `scrape-http`, `scrape-playwright`, `llm`, `content`), then
+  re-explained "lanes", "fan-out", *k* and "queue timer" in plain words on request (memory: plain-language, point 5).
+- **Decided (owner), recorded in backlog E.0:**
+  - **Bounded fan-out, one queue per engine** — `BatchWorkflow`/`CrawlWorkflow` keep **k = 3** (a setting) scrapes in
+    flight; the rest wait in the workflow, where no timer runs.
+  - **Reserved interactive/batch lanes: not now** — moving an activity to another queue is replay-safe (ADR-012).
+  - **Scrape queue timer (`schedule_to_start`) 60 s → 5 min on every scrape** — *k* is per batch, so concurrent
+    batches still stack (3 × 3 = 9 on 3 Playwright slots → last wait ~74 s; a single job behind them ~111 s), and the
+    timer is **not retried** (`steps.py:19`). 5 min was my "e.g.", taken as the value. Next step if waits grow: a
+    global per-engine cap on the limiter's lease code.
+  - **Per-host limiter on every scrape** (job, pipeline, batch, crawl): **1 req/s + 2 in flight per eTLD+1, fail
+    open**. Acquire/release are activities on the `workflow` queue around the scrape; a wait is a workflow timer (no
+    worker slot held, no queue timer spent); slots are self-expiring Redis leases (same sorted-set Lua pattern as
+    `core/rate_limit.py`). Why it matters here: all egress is **one** Singapore IP — one aggressive crawl can get it
+    banned for every user.
+- **New tasks:** **E.8** (eTLD+1 helper — built once, reused by E.3 — + `host_limiter` + activities; check prod
+  workflow-worker has `REDIS_URL`) and **E.9** (limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`, the
+  5-min timer, recheck pipeline catalog budgets compose; ships with E.2). E.1 now depends on E.9; E.3/E.5 on E.8.
+  Open item 3 (C.13) struck through — it was decided 2026-10-12 but never marked.
+- **Still open:** does robots.txt `Crawl-delay` tighten a host's rate (can wait until E.4). Whether changing a
+  released workflow's timeout needs `patched()` — I believe not; E.9's replay test decides.
+- **Next:** **E.8** — owner sketches acquire/release, or I walk through the parts first (asked, unanswered). ADR-013 §5
+  and BUG-023 still before F.1. Push `develop` when convenient.
+
 📐 **ADR-010 ACCEPTED, ADR-013 DRAFTED, BUG-023 FILED (2026-10-13, docs only).** `develop` `4723627`, `9930660`,
 `74da031`, `a27bee6` + this closeout. **Not pushed.** No code changed; nothing to release.
 
@@ -1268,7 +1296,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Group D — job cutover (D.1).** ~~C.12 click-through~~ ✅ (Preview/Download gap fixed, released `28c881b` — open a pipeline run → `view` the fetch step to see it); ~~release BUG-022's prompt fix~~ ✅ released `cf9d2fb`. ~~Owner runs the R6 gate~~ ✅ **PASS 2026-10-12** (PRD-016 R6 → *Gate result*). ~~C.14~~ 🚀 released 2026-10-12 (`1793c60`). ~~C.13~~ ✅ 2026-10-12 (ADR-012 Draft, `c86a9d9`). ~~Pick up C.13 in `phase4-implementation-backlog.md`~~. ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
+0. **Group E — E.8 (eTLD+1 helper + per-host limiter)** next; ~~E.0~~ ✅ decided 2026-10-13 (backlog E.0). ~~**Group D — job cutover (D.1)**~~ ✅ released + flipped 2026-10-12. ~~C.12 click-through~~ ✅ (Preview/Download gap fixed, released `28c881b` — open a pipeline run → `view` the fetch step to see it); ~~release BUG-022's prompt fix~~ ✅ released `cf9d2fb`. ~~Owner runs the R6 gate~~ ✅ **PASS 2026-10-12** (PRD-016 R6 → *Gate result*). ~~C.14~~ 🚀 released 2026-10-12 (`1793c60`). ~~C.13~~ ✅ 2026-10-12 (ADR-012 Draft, `c86a9d9`). ~~Pick up C.13 in `phase4-implementation-backlog.md`~~. ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
    ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
    `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
    ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
@@ -1314,6 +1342,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-13 (E.0 session close):** `develop` = `40dbea9` + this closeout, docs only, **not pushed**; `main` = `origin/main` = `0b4ac9e` (deployed). Infra repo untouched. `tmp/` untracked, pre-existing.
 - **2026-10-12 (C.14 release, verified after fetch):** `develop` = `main` = `origin/main` = `origin/develop` = `1793c60` before this docs closeout. **Deployed code is `1793c60`.** Infra repo untouched (Flux's own tag bumps only).
 - *Historical:* **2026-10-11, third session close (verified after fetch):** `develop` = `c2590af` (C.12) + this docs closeout, **not pushed** — 12 ahead of `origin/develop` (`071f6f2`) before the closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
 - *Historical:* **2026-10-11, second session close (verified after fetch):** `develop` = `6cfef04` (C.8 code `d75c7b2` + backlog note) + this closeout, **not pushed** — 7 ahead of `origin/develop` (`071f6f2`) before this closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
