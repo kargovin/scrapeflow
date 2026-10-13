@@ -1,7 +1,8 @@
 # ADR-010: Scheduled-run Quota Admission, and Sitemap Origin Scope
 
-**Status:** **Draft.** Both decisions below were taken by the owner on 2026-09-08; this document
-is my write-up of them and has not been reviewed. Promoting it to Accepted is a separate step.
+**Status:** **Accepted 2026-10-13** (owner). Both decisions were taken by the owner on 2026-09-08;
+the write-up was reviewed section by section on 2026-10-13, amended twice in review (below), and
+promoted the same day. ⚠️ **Immutable from here** — a change of decision is a new, superseding ADR.
 **Date:** 2026-09-08
 **Deciders:** @karthik
 **Resolves:** the two open rows in

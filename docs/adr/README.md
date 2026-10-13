@@ -32,7 +32,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-007](ADR-007-job-secrets-storage.md) | Job Secrets Storage | **Accepted** | 2026-04-15 | — | — |
 | [ADR-008](ADR-008-playwright-antibot-hardening.md) | Playwright Worker Anti-Bot Hardening | **Accepted** | 2026-07-03 | — | — |
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Accepted** | 2026-08-04 | — | — |
-| [ADR-010](ADR-010-crawl-admission-and-scheduled-quota.md) | Scheduled-run Quota Admission, and Sitemap Origin Scope | **Draft** | 2026-09-08 | — | — |
+| [ADR-010](ADR-010-crawl-admission-and-scheduled-quota.md) | Scheduled-run Quota Admission, and Sitemap Origin Scope | **Accepted** (2026-10-13, amended in review) | 2026-09-08 | — | — |
 | [ADR-011](ADR-011-artifact-identity-and-paths.md) | Artifact Identity — Run-keyed Paths, Stage-named Objects, and the Removal of `latest/` | **Accepted** | 2026-09-03 | ADR-002 §4 | — |
 | [ADR-012](ADR-012-workflow-code-versioning.md) | Workflow-Code Versioning — `patched()` Plus a Replay Test That Gates the Build | **Draft** (decision: owner, 2026-10-12; text pending review) | 2026-10-12 | — | — |
 | [ADR-013](ADR-013-schedule-policy.md) | Schedule Policy — `SKIP` on Overlap, and a Per-User Cap on Scheduled Jobs | **Draft** (overlap + cap: owner, 2026-10-13; cap default, paused counting, catch-up window open) | 2026-10-13 | — | — |

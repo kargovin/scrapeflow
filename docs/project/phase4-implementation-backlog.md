@@ -7,7 +7,7 @@
 > that answer, not on a guess.
 >
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
-> **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Draft — *not* implementable yet).
+> **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Accepted 2026-10-13), ADR-012 (Draft), ADR-013 (Draft — gates F.1).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
 > **Last updated:** 2026-10-12 (D.1, D.3, D.4 built; D.2 deferred by the owner; D.5 runbook ready) · **Tracking:** the status table below is the tracker.
 
@@ -106,7 +106,7 @@
 | I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ⬜ |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ⬜ |
-| X.2 | Promote ADR-010 — needed by E.0 | ⬜ |
+| X.2 | Promote ADR-010 — needed by E.0 | ✅ 2026-10-13 — Accepted after review; §1 monthly skips, §2 sitemap files gated + submitted-seed scope + drops counted |
 | X.3 | Schedule overlap policy → ADR — **ADR-013 Draft 2026-10-13, `SKIP` (owner)**; promote after §5's three open items — needed by F.0 | 🟡 Draft 2026-10-13 |
 
 ---
@@ -126,7 +126,7 @@
 5. **The lane marker (D.1) is built at the job cutover, not earlier.** Built in B it is inert and
    untestable (16a). Built after D.5 it is a window in which `_recover_stale_pending` re-dispatches
    v2 runs to NATS (§7 mechanism 4).
-6. **ADR-010 must be Accepted before E.0.** A Draft is not a decision. The overlap policy (X.3)
+6. **ADR-010 must be Accepted before E.0** — ✅ Accepted 2026-10-13. The overlap policy (X.3)
    must exist before F.1 creates the first Schedule.
 7. **Two documents the owner already committed to are parallel to C**: PRD-019 (X.1) is written
    during A's build and built after A ships; it is not on this backlog's critical path.
@@ -1852,7 +1852,7 @@ workflow cannot start fails at once (503 on create) instead of waiting for stale
 
 #### E.0 — Gate
 
-1. **ADR-010 Accepted** (X.2). It is Draft; a Draft is not implementable.
+1. ~~**ADR-010 Accepted** (X.2).~~ ✅ Accepted 2026-10-13.
 2. **⚠️ Owner decision:** `CLAUDE.md` records two crw mechanisms "owed before the batch-and-crawl
    cutover shapes the task queues" — a **per-eTLD+1 host limiter** and **interactive/batch reserved
    lanes** — while the owner deferred the crw work "until after the Temporal pipeline". Both
@@ -1882,7 +1882,9 @@ slot per batch (already the view's rule). `dispatch.py`'s batch builder feeds th
 `admit_urls(crawl_id, urls)` activity on the workflow-worker queue — the **one** place seed, extracted
 links and sitemap entries converge (13d): `validate_no_ssrf` per URL (**BUG-010 part 1**; rejected
 ⇒ skipped, crawl continues, never retried); **eTLD+1 scope** for sitemap entries (ADR-010 §2 —
-pinned offline public-suffix list, **with a lockfile**); include/exclude filters; insert with the
+pinned offline public-suffix list, **with a lockfile**; `include_psl_private_domains=True`, exact-host
+fallback for IP / single-label hosts, normalised hosts; scope from the **submitted** seed; each drop
+logged with its reason and counted per crawl); include/exclude filters; insert with the
 index. `crawl_pages` row per admitted URL (P7's unit; 13c).
 **Depends on:** E.0
 
@@ -1892,9 +1894,13 @@ index. `crawl_pages` row per admitted URL (P7's unit; 13c).
 `robots.py`, no DB; target-facing fetches stay on scraper pods — the aiohttp CVE was a response
 parser, so "not a browser" is not "not hostile"). **`sitemap.py` ported to `httpx` — a change, not
 a copy (13d; BUG-006 is why).** `link_extractor.py` ported intact. Both "port and then actually
-run" (13a — neither has ever executed).
+run" (13a — neither has ever executed). **Sitemap *files* pass both gates before they are fetched**
+(ADR-010 §2 amendment): every `Sitemap:` line and sitemap-index child is SSRF-checked and scoped like
+a frontier URL; redirects not followed (or re-checked per hop); indexes expanded as indexes, with a
+nesting-depth and file-count bound — v1's `.//loc` crawls index children as pages.
 **Tests:** sitemap parse fixtures incl. a sitemap index; robots fetch; the SSRF-bait fixture from
-13d's chain passes through E.3's admission and is skipped.
+13d's chain is **not fetched** as a sitemap file and, as an entry, is skipped at E.3's admission; an
+off-domain `Sitemap:` line and a redirecting sitemap are not followed.
 **Depends on:** B.8, E.3
 
 #### E.5 — `CrawlWorkflow`

@@ -27,7 +27,8 @@ When the user is ready to build something, they will say so. Until then, guide a
 | ADR index + per-record status | `docs/adr/README.md` |
 | **Phase 4 scope — single source of truth** | `docs/project/phase4-backlog.md` |
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
-| Crawl admission + scheduled-quota decisions (Draft) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
+| Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
+| Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Draft 2026-10-13**, gates F.1) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
 | Open bugs (BUG-004 → BUG-022) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
@@ -141,7 +142,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-12 *(clock)*
+## Current state — as of 2026-10-13 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -149,6 +150,30 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+📐 **ADR-010 ACCEPTED, ADR-013 DRAFTED, BUG-023 FILED (2026-10-13, docs only).** `develop` `4723627`, `9930660`,
+`74da031`, `a27bee6` + this closeout. **Not pushed.** No code changed; nothing to release.
+
+- **Owner's ask:** explain ADR-010 plainly, then reviewed it section by section and promoted it.
+- **§1 amended — `monthly_runs` now *skips* the tick, it does not park** (owner, option 1). Parking for weeks
+  stacked one workflow per tick per job (10,000 scheduled jobs → 10,000 parked workflows waking on the 1st).
+  Concurrency still parks (minutes); storage still fails. ⚠️ The skip record must **not** be a `job_runs` row —
+  `quota_run_units` counts every row whatever its status. Accepted cost: after the reset a job runs at its *next
+  tick*; a monthly cron loses that month's run.
+- **Overlap policy decided: `SKIP`** (owner) + **a per-user cap on active scheduled jobs** (owner) → **ADR-013,
+  Draft**. Open in its §5 before promotion: cap default (rec. 20), paused schedules don't count (rec.), catch-up
+  window pinned at 365 d (rec. — `SKIP` should collapse missed ticks to one late run; **untested**, F.1 verifies on
+  compose). The first draft's dismissal of `SKIP` was wrong (a parked run still executes) and is corrected.
+- **§2 agreed (eTLD+1) and amended:** `tldextract` defaults verified to break it (private suffixes off →
+  `alice.github.io` = `bob.github.io`; IPs → `""` = `""`; no normalisation) → three requirements. Owner agreed:
+  **sitemap files pass both gates** (v1 fetches `Sitemap:` URLs blind, `sitemap.py:45` — 13d's admission check
+  never covered them), redirects not followed blindly, indexes expanded with bounds; scope = **submitted** seed;
+  drops logged + counted.
+- **BUG-023 filed** — every quota admission site counts, then inserts later, with no per-user lock; parallel
+  requests overshoot both count meters (60 parallel `POST /jobs` at 0/5 → all admitted; code reading, not
+  reproduced). Low today; **must land before F.1** (parked runs re-check concurrently).
+- **Next:** E.0 — its ADR-010 gate is met; the task-queue shape decision (open item 4) remains. ADR-013 §5 and
+  BUG-023 before F.1. Push `develop` when convenient.
 
 🚀 **GROUP D RELEASED + FLIPPED (2026-10-12, same session).** Owner ran `main` `28c881b..0b4ac9e` and infra `9ef396a`
 (v1) then `99ed5c8` (**`JOB_LANE=v2`**). **Deployed code is `0b4ac9e`; new job runs run on Temporal in prod.** Drain gate
@@ -163,8 +188,8 @@ NATS LLM counter unmoved). Not tried in prod: a cancel, a webhook job, a schedul
   the code) — push when convenient. `tmp/` untracked, pre-existing, not mine. **Local compose runs `JOB_LANE=v1`**
   (the default; `.env` untouched) while **prod runs `v2`** — set it in compose to reproduce prod's job lane.
   Owner to delete the `d5-check` API key.
-- **Next: E.0** — needs ADR-010 Accepted (X.2) and the task-queue shape decision (open item 4; the crw per-host
-  limiter / reserved lanes). Open item 10 (jobs as a front end over pipelines) waits for Monitors.
+- **Next: E.0** — ~~needs ADR-010 Accepted (X.2)~~ ✅ 2026-10-13; the task-queue shape decision (open item 4; the
+  crw per-host limiter / reserved lanes) remains. Open item 10 (jobs as a front end over pipelines) waits for Monitors.
 
 🔷 **GROUP D — JOB CUTOVER BUILT (2026-10-12, later session).** `develop` `db774d0` (D.1) ·
 `5e61413` (D.3) · `de91a44` (D.4) · `9bd761e` (D.3 guard) + docs. **Not pushed.** Infra `9ef396a` (`JOB_LANE=v1` on
@@ -1190,7 +1215,7 @@ changed; its **Reversed or withdrawn** and **Amended as a knock-on** tables are 
 catch a stale note. ⚠️ **An accepted ADR is immutable** (`docs/adr/README.md`) — a change of
 decision from here is a new, superseding ADR, not an edit to this one.
 
-**ADR-010 is `Draft` (2026-09-08)** (`docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md`). It
+**ADR-010 is `Accepted` (2026-10-13; drafted 2026-09-08, amended in review — see the 2026-10-13 block in *Current state*)** (`docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md`). It
 resolves the two items ADR-009 deferred by name — per-meter quota parking for scheduled runs, and
 sitemap entries scoped to the seed's registrable domain. **Both decisions are owner-taken and
 dated; the write-up is unreviewed.** Written as a separate ADR rather than an edit because ADR-009
@@ -1219,7 +1244,7 @@ task list: `phase4-implementation-backlog.md`, next task A.1** (Temporal Postgre
 repo). PRD-019 (unwritten) and the ADR-010 promotion are the two documents owed before the sequence
 reaches the batch-and-crawl cutover.
 
-⚠️ **ADR-010 is still `Draft`, and a Draft is not a decision** (`docs/adr/README.md`) — *"do not
+~~⚠️ **ADR-010 is still `Draft`, and a Draft is not a decision**~~ ✅ *Accepted 2026-10-13.* (`docs/adr/README.md`) — *"do not
 implement against it, and do not cite it as settled in another document."* It blocks nothing in the
 queue below, but it **is needed before the batch-and-crawl cutover**, so it wants promoting before
 build work reaches that far.
@@ -1258,9 +1283,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    last and is required first** — before PRD-018, which cannot ship without its primitive. The
    sort-order cost was accepted rather than engineered around; index order is not build order in
    this chain.
-2. **Promote ADR-010** when convenient — it blocks nothing in the queue but is required before the
+2. ~~**Promote ADR-010**~~ ✅ **Accepted 2026-10-13.** ~~when convenient — it blocks nothing in the queue but is required before the
    batch-and-crawl cutover, and it opens the Schedule overlap policy (`phase4-backlog.md` §2
-   gotcha 6), which is genuinely undecided.
+   gotcha 6), which is genuinely undecided.~~ Overlap → `SKIP`, ADR-013 (Draft).
 3. ~~**The pre-migration queue's single release**~~ ✅ **RELEASED 2026-09-19 (`421cbfe`)** — see the
    release block in *Current state*. ~~Three owner-run production scripts~~ ✅ **all three run the
    same day**, each dry-run first, each idempotent on re-run. **Next: ADR-009 §16 *engine up*.**
@@ -1439,6 +1464,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-13 *(clock)* | **📐 ADR-010 reviewed and Accepted; ADR-013 drafted; BUG-023 filed.** Owner: "explain ADR10 in simpler words" → plain walkthrough with diagrams. Owner challenged §1's month-long parking (backlog pile-up, 10,000 jobs) → option 1, `monthly_runs` skips; found the quota check-then-insert race → BUG-023. Owner: per-user scheduled-jobs cap; `SKIP` over `BUFFER_ONE` (timelines for parked vs overrun) → ADR-013 Draft (SDK defaults verified in the api container). §2: `tldextract` 5.4.0 tested in a throwaway container → three requirements; sitemap-file gating, submitted-seed scope, drop counts agreed. Summary of both sections, then promotion. | `4723627`, `9930660`, `74da031`, `a27bee6` + this closeout |
 | 2026-10-12 *(clock, later)* | **BUG-022 prompt fix built, verified live (0/20), released (`cf9d2fb`); R6 rerun PASS; secrets closed; C.12 click-through + fix released (`28c881b`); stuck run closed.** Owner: "lets fix up this bug first" → extraction instruction in the user turn (not system — templates); owner's Modal token rotated (secret `--force` + rollover; README `7cb360e` in `scrapeflow-modal`), new LLM key `6f85a1a0…`; leaked `sf_` key confirmed revoked by hash. Click-through: pipeline outputs lacked Preview/Download → shared `ContentViewer`. Stuck run `8efa14c6…` closed and pipeline `60c31b42…` soft-deleted by SQL at the owner's word. Owner released `28c881b` and closed the session without a rollout watch. | `fa24fee`, `9173837`, `cf9d2fb`, `d96193c`, `b405c00`, `b61632b`, `28c881b`, `5800c7e` + this closeout |
 | 2026-10-12 *(clock)* | **🚀 C.13 built, C.14 released, BUG-022 filed/fixed/released, R6 PASS.** Owner: "go with patched and the replay test; build c13 and do c14". ADR-012 (Draft), replay corpus + CI gate, `PIPELINES_ENABLED`; owner ran the `main` ff (`6675f17..1793c60`). R6's first runs found BUG-022 → fixed, released (`03f72f8`). R6 script fixes (`7e1cfaf`). Loop investigation against the owner's Modal endpoint (token file deleted after): system instruction 0/20 vs 4/10, not built. Owner's full rerun: **R6 PASS**, recorded in PRD-016, backlog C.14, `CLAUDE.md`, `open-bugs.md`, this file. | `c86a9d9`, `3325534`, `626192b`, `1793c60`, `4965e9d`, `03f72f8`, `c62f5a4`, `7e1cfaf`, `3dae1fd`, `def7156` + this closeout |
 | 2026-10-11 *(clock, third session)* | **🔷 C.9 → C.12 built (local).** Read-in; owner: "i'll let you do everything until c13; no need for any walkthrough"; asked what C.13's check is → answered (Worker Versioning, Architect call before C.14). Built one task at a time, each tested, mutation-checked, live-checked on compose and committed: C.9 Webhook activity, C.10 cancel endpoint, C.11 reads + WS + BUG-009, C.12 SPA pages + reconnecting socket. Docs: backlog (four rows, four *Built* notes, open items 2 and 7, stale C.8 row), PRD-016 R6 payload decision, `open-bugs.md` + `phase4-backlog.md` (BUG-009), `CLAUDE.md`, this file. | `5b14291`, `66abdeb`, `88e8024`, `c2590af` + this closeout |
