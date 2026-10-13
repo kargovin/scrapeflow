@@ -107,7 +107,7 @@
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ⬜ |
 | X.2 | Promote ADR-010 — needed by E.0 | ⬜ |
-| X.3 | Schedule overlap policy → ADR (BUFFER_ONE recommended) — needed by F.0 | ⬜ |
+| X.3 | Schedule overlap policy → ADR — **ADR-013 Draft 2026-10-13, `SKIP` (owner)**; promote after §5's three open items — needed by F.0 | 🟡 Draft 2026-10-13 |
 
 ---
 
@@ -1937,12 +1937,12 @@ here — close them as dissolved, not fixed.
 
 #### F.0 — Gate: overlap policy (⚠️ Architect)
 
-`SKIP` vs `BUFFER_ONE` (gotcha 6) — not decided. Since ADR-010's 2026-10-13 amendment only
-`concurrent_jobs` parks (minutes), so the choice turns on the **overrun** case, not on parking.
-Without a policy a short-interval job parked past its interval stacks one workflow per tick. The
-**per-user cap on active scheduled jobs** is decided (owner, 2026-10-13, ADR-010 §1 rider); F.0
-picks its default and whether paused schedules count. Written as an ADR (X.3) before F.1 creates a
-Schedule.
+**Decided 2026-10-13 (owner): `overlap=SKIP`** — **ADR-013** (Draft): `SKIP`,
+`pause_on_failure=False` and the catch-up window set explicitly on every Schedule, plus the
+**per-user cap on active scheduled jobs** (429 `quota_type: "scheduled_jobs"` on create, PATCH
+`schedule_cron` and resume, under BUG-023's lock). Open in its §5 before promotion: the cap's
+default, whether paused schedules count, the catch-up window value. F.1 creates no Schedule until
+ADR-013 is Accepted.
 **Depends on:** X.3
 
 #### F.1 — Temporal Schedule per recurring job + quota admission
@@ -1953,7 +1953,9 @@ parks on a durable timer and re-checks; **monthly skips the firing** — the wor
 recorded where the user sees it and ⚠️ **not as a `job_runs` row**, which `quota_run_units` would
 count; storage fails now naming the remedy). The admission check and the run insert go through
 BUG-023's per-user lock — woken parked runs re-check in parallel. The API enforces the per-user
-**active scheduled jobs** cap (F.0) on create, PATCH `schedule_cron` and resume, under the same lock. Schedule created/paused/deleted
+**active scheduled jobs** cap (ADR-013) on create, PATCH `schedule_cron` and resume, under the same lock.
+Every Schedule is created with ADR-013's three policies set explicitly. **Verify on compose:** after a
+`temporal` outage across several ticks, a recovered Schedule runs once, not once per missed tick (ADR-013 §5). Schedule created/paused/deleted
 by the API on `schedule_cron` / `schedule_status` writes for **v2-owned** schedules; overlap policy
 from F.0. `next_run_at` for v2 comes from the Schedule (`describe`), not the row.
 **Tests:** time-skipping: parked run releases when the meter clears; monthly breach skips without
@@ -2054,7 +2056,7 @@ migration's stated payoff; record the before/after in the handoff.
 |---|---|---|
 | X.1 | **PRD-019** — conditional execution (four obligations on its `phase4-backlog.md` §2 row) | before PRD-018; not on this critical path |
 | X.2 | **Promote ADR-010** (owner review) | E.0 |
-| X.3 | **Schedule overlap policy** ADR — `BUFFER_ONE` recommended | F.0 |
+| X.3 | **Schedule overlap policy** ADR — ADR-013 (Draft), `SKIP` | F.0 |
 
 ---
 

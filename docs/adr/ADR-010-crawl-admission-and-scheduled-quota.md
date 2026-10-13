@@ -115,6 +115,8 @@ So the choice turns on the **overrun** case, not on parking. Note for it: v1 doe
 job's runs at all — `_dispatch_due_jobs` never looks for the job's own active run — so v1 behaves
 like `ALLOW_ALL`, which neither candidate matches. **Not decided here; decide at the
 schedule-and-webhook cutover (F.0), before the first Schedule is created.**
+→ **Decided 2026-10-13 (owner): `SKIP`** — written up in [ADR-013](./ADR-013-schedule-policy.md) (Draft),
+with the cap's open parameters below and the catch-up window.
 
 **No overlap policy reaches across Schedules — so the number of Schedules is capped per user
 (owner, 2026-10-13).** N scheduled jobs blocked on concurrency are N parked workflows waking
@@ -124,7 +126,8 @@ with `schedule_cron`, a PATCH that sets `schedule_cron`, and a PATCH that resume
 `schedule_status` to `active`. It bounds parked runs as a consequence (at most one or two per
 Schedule, by the overlap policy), so **parked runs get no cap of their own**. The check is a
 count-then-insert like the run meters and goes through BUG-023's per-user lock. **Not decided
-here:** the default limit, and whether paused schedules count — F.0's, with the overlap policy.
+here:** the default limit, and whether paused schedules count — carried by
+[ADR-013](./ADR-013-schedule-policy.md) §5.
 
 ---
 

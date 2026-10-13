@@ -20,6 +20,7 @@
 
 | Date | Change to this backlog |
 |---|---|
+| 2026-10-13 | **Gotcha 6 decided: `SKIP`** (owner) — ADR-013 (Draft) written for F.0 / X.3, with the per-user scheduled-jobs cap; three parameters left open in its §5. |
 | 2026-10-13 | **BUG-023 filed → §2 gotcha 7** (quota check and run insert not serialised per user; fix before F.1). **Gotcha 6 rewritten** for ADR-010 §1's amendment (`monthly_runs` skips instead of parking) and the corrected `SKIP` reasoning. |
 | 2026-09-29 | **Postgres backups → §4, deferred past Phase 4** (owner). Found at A.8 of the implementation backlog: no backup exists for either Postgres. Owner: the data is mostly junk today, so loss is not a concern yet. |
 | 2026-09-30 | **BUG-021 filed → §4** — the API container's PID 1 is `uv run`, which ignores a SIGTERM during its own startup (per-start project build); worst case ~30 s added to a `Recreate` rollout. Found fixing the same defect in the workflow worker; owner's call: fix later. |
@@ -219,20 +220,15 @@ PRD-017 (C) / PRD-018 (B). ⚠️ **Index order is not build order here.** ADR-0
    table a new lane does not write to — BUG-005 (batch invisible, `job_id` NULL), P7 (crawls
    invisible, every meter reads `job_runs`), and it is why ADR-009 §3 moved run counting onto a
    **view** instead of naming a table.
-6. **Choose the Temporal Schedule overlap policy before the first Schedule is created.**
+6. **Temporal Schedule overlap policy — ✅ `SKIP` (owner, 2026-10-13; ADR-013, Draft).**
    ADR-010 §1 has a scheduled run blocked on `concurrent_jobs` **park on a durable timer**
-   (`monthly_runs` **skips** the firing since the 2026-10-13 amendment; storage fails). A Schedule
-   fires on every cron tick regardless, and a parked workflow is still *running* — so a short-interval
-   job parked longer than its interval stacks **one parked workflow per tick**. Today's waiting room
-   cannot stack (one `Job` row stays `due`); this is a behaviour the migration introduces. Candidates:
-   `SKIP` (while a run is *parked* the parked run still executes, so nothing is lost — it loses a run
-   only when one *overruns* its interval; corrected 2026-10-13) or `BUFFER_ONE` (one firing queued
-   behind). `BUFFER_ALL` reproduces the pile-up. The choice turns on the **overrun** case; v1 runs a
-   job's ticks concurrently (`ALLOW_ALL`), which neither candidate matches. ⚠️ **Not decided.**
-   ⚠️ **No overlap policy reaches across Schedules** — N scheduled jobs blocked on concurrency are N
-   parked workflows waking together. **Owner, 2026-10-13: a per-user cap on active scheduled jobs**
-   (ADR-010 §1 rider), enforced by the API on create / PATCH `schedule_cron` / resume; parked runs get
-   no cap of their own. Default limit and whether paused schedules count: F.0.
+   (`monthly_runs` skips the firing; storage fails); a parked workflow is still *running*, so `SKIP`
+   drops later ticks while it waits and the parked run itself executes when the slot frees. An
+   overrunning job drops a tick instead of overlapping itself (v1 overlaps — effectively `ALLOW_ALL`).
+   `SKIP`, `pause_on_failure=False` and the catch-up window are set **explicitly** on every Schedule.
+   ⚠️ **No overlap policy reaches across Schedules** — hence the **per-user cap on active scheduled
+   jobs** (owner, 2026-10-13), enforced by the API on create / PATCH `schedule_cron` / resume. Open in
+   ADR-013 §5: the cap's default, whether paused schedules count, the catch-up window.
 7. **Serialise the quota check and the run insert per user before F.1** — **BUG-023** (filed
    2026-10-13). Every admission site counts, compares, and inserts later with nothing holding the two
    together, so parallel admissions overshoot both count meters. Low today (needs a request burst);
