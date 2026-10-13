@@ -80,9 +80,9 @@
 | D.4 | Single dispatch switch in `dispatch.py` (`create_job` + scheduler) + cancel path | ✅ Built 2026-10-12 (local, `de91a44`, unreleased); infra `JOB_LANE=v1` committed locally, **not pushed** (infra `9ef396a`) |
 | D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ✅ **RELEASED + FLIPPED 2026-10-12** (`main` `28c881b..0b4ac9e`; infra `9ef396a` v1, `99ed5c8` **v2**) — **new job runs run on Temporal in prod**; http + playwright verified |
 | **E** | **Batch and crawl cutover** | |
-| E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open. Open: *k*, robots `Crawl-delay` |
+| E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open; k = 3, scrape queue timer 60 s → 5 min. Open: robots `Crawl-delay` |
 | E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ⬜ |
-| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; ships with E.2 | ⬜ |
+| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ⬜ |
 | E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ⬜ |
 | E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ⬜ |
 | E.3 | Crawl frontier: table shape + admission activity (SSRF, eTLD+1, dedup index) | ⬜ |
@@ -1865,7 +1865,12 @@ workflow cannot start fails at once (503 on create) instead of waiting for stale
    - **Bounded fan-out, one queue per engine.** `BatchWorkflow` and `CrawlWorkflow` keep at most
      *k* scrapes in flight and start the next as one finishes. Required whatever else is chosen:
      every scrape has a 60 s `schedule_to_start` (`steps.py`), so an unbounded 100-URL fan-out
-     onto 3 Playwright slots times out most of its own items in the queue. *k* is open.
+     onto 3 Playwright slots times out most of its own items in the queue. **k = 3, a setting.**
+   - **The queue timer (`schedule_to_start`) goes from 60 s to 5 min on every scrape.** *k* is per
+     batch, so concurrent batches still stack up (3 batches × 3 = 9 scrapes on 3 Playwright slots;
+     the last wait ~74 s, a single job behind them ~111 s), and the timer is not retried. 60 s was
+     chosen to catch a queue nobody polls, not to cap a busy one; 5 min still catches a dead worker.
+     If waits grow, the next step is a global per-engine cap on E.8's lease code.
    - **Reserved interactive/batch lanes: not now.** Moving an activity to another queue is
      replay-safe (ADR-012), so the split can be added later without stranding runs.
    - **Per-host limiter on every scrape** (job, pipeline, batch, crawl): **1 request/s and 2 in
@@ -1896,7 +1901,10 @@ share a key, `alice.github.io` ≠ `bob.github.io`; expired lease frees the slot
 
 **What:** wrap the scrape in `JobWorkflow` and `PipelineWorkflow` with E.8's helper, **inside
 `workflow.patched()`** (ADR-012 — adds activity calls to a released workflow body); new replay
-histories for both, old ones untouched. Ships with E.2.
+histories for both, old ones untouched. **Raise `schedule_to_start` to 5 min** for scrapes
+(`steps.py` `SCHEDULE_TO_START`, `pipelines/catalog.py` `SCHEDULE_TO_START_SECONDS`) — pipelines'
+run budgets include it, so recheck the catalog budgets compose; the replay test says whether the
+changed timeout needs `patched()`. Ships with E.2.
 **Depends on:** E.8
 
 #### E.1 — `BatchWorkflow`
