@@ -80,7 +80,9 @@
 | D.4 | Single dispatch switch in `dispatch.py` (`create_job` + scheduler) + cancel path | ✅ Built 2026-10-12 (local, `de91a44`, unreleased); infra `JOB_LANE=v1` committed locally, **not pushed** (infra `9ef396a`) |
 | D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ✅ **RELEASED + FLIPPED 2026-10-12** (`main` `28c881b..0b4ac9e`; infra `9ef396a` v1, `99ed5c8` **v2**) — **new job runs run on Temporal in prod**; http + playwright verified |
 | **E** | **Batch and crawl cutover** | |
-| E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ⬜ |
+| E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open. Open: *k*, robots `Crawl-delay` |
+| E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ⬜ |
+| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; ships with E.2 | ⬜ |
 | E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ⬜ |
 | E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ⬜ |
 | E.3 | Crawl frontier: table shape + admission activity (SSRF, eTLD+1, dedup index) | ⬜ |
@@ -1859,16 +1861,52 @@ workflow cannot start fails at once (503 on create) instead of waiting for stale
    statements are on record. Decide here whether E.1/E.5 build against a single scraper queue per
    engine (today's shape; a 100-URL batch queues every single job behind it) or two lanes. This is
    the one-way-ish door; everything else in §C is activity-port input.
+   **Decided 2026-10-13 (owner):**
+   - **Bounded fan-out, one queue per engine.** `BatchWorkflow` and `CrawlWorkflow` keep at most
+     *k* scrapes in flight and start the next as one finishes. Required whatever else is chosen:
+     every scrape has a 60 s `schedule_to_start` (`steps.py`), so an unbounded 100-URL fan-out
+     onto 3 Playwright slots times out most of its own items in the queue. *k* is open.
+   - **Reserved interactive/batch lanes: not now.** Moving an activity to another queue is
+     replay-safe (ADR-012), so the split can be added later without stranding runs.
+   - **Per-host limiter on every scrape** (job, pipeline, batch, crawl): **1 request/s and 2 in
+     flight per registrable domain (eTLD+1)**, **fail open** when Redis is unavailable (scrape
+     proceeds, loud log). Acquire/release are activities on the `workflow` queue around the scrape;
+     a wait is a workflow timer, so it holds no worker slot and does not spend the queue timeout.
+     Slots are leases that expire on their own. Built in E.8/E.9. Open: whether robots.txt
+     `Crawl-delay` tightens a host's rate.
 **Depends on:** D.5
+
+#### E.8 — Registrable-domain helper + per-host limiter
+
+**What:** (1) the eTLD+1 helper ADR-010 §2 specifies — pinned offline public-suffix list with a
+lockfile, `include_psl_private_domains=True`, exact-host fallback for IP / single-label hosts,
+normalised hosts — built here once, reused by E.3's sitemap scope. (2) `host_limiter`: one atomic
+Redis Lua script per call on `host:{etld1}` — expire stale leases, admit if in-flight < 2 **and**
+requests in the last 1 s < 1, else return the wait; release removes the lease by id. Lease TTL =
+the scrape's longest possible run + margin, so a lost release frees itself. Same sorted-set pattern
+as `core/rate_limit.py`. (3) `acquire_host_slot` / `release_host_slot` activities on the `workflow`
+queue; a Redis error **fails open** (GO + loud log). (4) A workflow helper: acquire → `workflow.sleep`
+on WAIT → scrape → release in `finally`. ⚠️ Check that the prod workflow-worker Deployment has
+`REDIS_URL` (compose gets it from `.env`).
+**Tests:** two concurrent acquires on one host admit 2, the third waits; rate window; subdomains
+share a key, `alice.github.io` ≠ `bob.github.io`; expired lease frees the slot; Redis down → GO.
+**Depends on:** E.0
+
+#### E.9 — Per-host limiter on the job and pipeline lanes
+
+**What:** wrap the scrape in `JobWorkflow` and `PipelineWorkflow` with E.8's helper, **inside
+`workflow.patched()`** (ADR-012 — adds activity calls to a released workflow body); new replay
+histories for both, old ones untouched. Ships with E.2.
+**Depends on:** E.8
 
 #### E.1 — `BatchWorkflow`
 
 **What:** fan out one child `JobWorkflow` per item (`job-run-{run_id}` ids, `REJECT_DUPLICATE`,
-lane marker on each row), fan-in = await all; `batch_status` notify with **absolute totals** (11d —
+lane marker on each row), at most *k* children in flight (E.0 — bounded fan-out), fan-in = await all; `batch_status` notify with **absolute totals** (11d —
 the existing JSON channel); batch webhook row at completion via the D.3 activity; one concurrency
 slot per batch (already the view's rule). `dispatch.py`'s batch builder feeds the child inputs.
-**Tests:** N children; partial failure totals; cancel fans out.
-**Depends on:** D.3, E.0
+**Tests:** N children; never more than *k* in flight; partial failure totals; cancel fans out.
+**Depends on:** D.3, E.0, E.9 (children are `JobWorkflow`s, which carry the limiter)
 
 #### E.2 — 🚀 Batch cutover release
 
@@ -1881,12 +1919,11 @@ slot per batch (already the view's rule). `dispatch.py`'s batch builder feeds th
 **the dedup mechanism is the index `UNIQUE (crawl_id, url)` + `ON CONFLICT DO NOTHING`**, keep it).
 `admit_urls(crawl_id, urls)` activity on the workflow-worker queue — the **one** place seed, extracted
 links and sitemap entries converge (13d): `validate_no_ssrf` per URL (**BUG-010 part 1**; rejected
-⇒ skipped, crawl continues, never retried); **eTLD+1 scope** for sitemap entries (ADR-010 §2 —
-pinned offline public-suffix list, **with a lockfile**; `include_psl_private_domains=True`, exact-host
-fallback for IP / single-label hosts, normalised hosts; scope from the **submitted** seed; each drop
+⇒ skipped, crawl continues, never retried); **eTLD+1 scope** for sitemap entries (ADR-010 §2, via
+E.8's helper; scope from the **submitted** seed; each drop
 logged with its reason and counted per crawl); include/exclude filters; insert with the
 index. `crawl_pages` row per admitted URL (P7's unit; 13c).
-**Depends on:** E.0
+**Depends on:** E.8
 
 #### E.4 — Crawl fetch-side activities
 
@@ -1908,14 +1945,15 @@ off-domain `Sitemap:` line and a redirecting sitemap are not followed.
 **What:** BFS through activities only (never reads Postgres in the body — §6): pop batch →
 `JobWorkflow`-shaped scrape per page (or the scrape activity directly — TL call: **direct
 activity**, a crawl page is not a job and must not create `job_runs` rows) → `record_storage(crawl_page_id=…)`
-(**the per-page insert P7 deferred**) → **per-page storage ceiling check** (§8d — the buffer does
+(**the per-page insert P7 deferred**) — at most *k* pages in flight, each scrape through E.8's
+limiter → **per-page storage ceiling check** (§8d — the buffer does
 not cover crawls) → extract links / sitemap on the seed → `admit_urls` → **`continue-as-new`** every
 N pages (13b — mandatory) → completion when the frontier is empty or `max_pages` reached → crawl
 webhook via **`create_webhook_delivery`** (not the coordinator's bypass — §3 row) → `crawls.status`
 terminal. `crawl_status` notify if the SPA needs it (product call — 13c).
 **Tests:** time-skipping env; frontier exhaustion; `max_pages` cap; continue-as-new boundary;
 ceiling hit mid-crawl completes and charges.
-**Depends on:** E.3, E.4
+**Depends on:** E.3, E.4, E.8
 
 #### E.6 — Crawl compensating gate
 
@@ -2093,8 +2131,12 @@ migration's stated payoff; record the before/after in the handoff.
 2. **C.9** — `waiting` under a `RetryPolicy` can only be written by the activity itself; confirm
    that reading of 15a/15b/15d. **Built on that reading 2026-10-11 (`5b14291`)** under the owner's
    delegation; not separately confirmed — the C.9 *Built* note says exactly what the activity writes.
-3. **C.13** — Worker Versioning vs `patched()`: due before C.14, not after.
-4. **E.0** — task-queue shape (per-host limiter, reserved lanes) vs the crw deferral.
+3. ~~**C.13** — Worker Versioning vs `patched()`: due before C.14, not after.~~ **Answered
+   2026-10-12 (owner): `patched()` + a replay test that gates the api build** (ADR-012, Draft).
+4. ~~**E.0** — task-queue shape (per-host limiter, reserved lanes) vs the crw deferral.~~
+   **Answered 2026-10-13 (owner):** bounded fan-out on one queue per engine; reserved lanes not now
+   (replay-safe to add later); per-host limiter on every scrape — 1 req/s, 2 in flight per eTLD+1,
+   fail open. E.0 has the detail; built in E.8/E.9.
 5. **F.4** — `webhook_deliveries` as a v1-only audit mirror or retired.
 6. **I.1** — Alembic-on-startup under two replicas; no ADR covers it.
 7. ~~**C.11** — BUG-009 is deferred past Phase 4 in `phase4-backlog.md` §4 but is made load-bearing
