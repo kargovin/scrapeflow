@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: int = 60  # window size in seconds
     ws_max_connections_per_user: int = 25  # max concurrent WebSocket connections per user
 
+    # Per-host limiter on scrape targets, per registrable domain (core/host_limiter.py)
+    host_limit_in_flight: int = 2  # scrapes in flight at once
+    host_limit_interval_ms: int = 1000  # min gap between two scrape starts
+
     # LLM
     llm_key_encryption_key: str = Field(
         default="", alias="LLM_KEY_ENCRYPTION_KEY"

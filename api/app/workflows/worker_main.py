@@ -20,6 +20,7 @@ from app.workflows.activities.db import (
     mirror_run_status,
     record_storage,
 )
+from app.workflows.activities.host_slots import acquire_host_slot, release_host_slot
 from app.workflows.activities.job_runs import (
     finish_job_run,
     job_run_processing,
@@ -68,6 +69,8 @@ async def main() -> None:
             record_job_objects,
             job_run_processing,
             finish_job_run,
+            acquire_host_slot,
+            release_host_slot,
         ],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )

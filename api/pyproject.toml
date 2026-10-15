@@ -23,6 +23,7 @@ dependencies = [
     "xxhash>=3.0.0",
     "temporalio>=1.33.0",
     "jsonschema>=4.23.0",
+    "tldextract>=5.4.0",
 ]
 
 [project.optional-dependencies]
