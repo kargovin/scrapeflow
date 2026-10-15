@@ -142,7 +142,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-13 *(clock)*
+## Current state — as of 2026-10-15 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -150,6 +150,32 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔧 **E.8 BUILT (2026-10-15).** `develop` `410f015` (code) · `198a5b5` (backlog) + this closeout. Infra
+`0f71515` (`REDIS_URL` on the workflow-worker) **committed locally, not pushed**. **Nothing pushed**
+(develop ~24 ahead of `origin/develop`; infra 1 ahead of `origin/main`). Detail: backlog E.8 *Built*.
+
+- **Owner's ask:** walk through E.8's four parts, then "build it". The four questions I had posed were
+  asked first (AskUserQuestion) and the owner took every recommendation: busy host → poll ~1 s + ≤250 ms
+  jitter; lease TTL derived from `steps.scrape()`'s numbers (`host_lease_ttl`); wait cap 10 min then
+  scrape anyway; lease id minted by the workflow (`workflow.uuid4()`), a failed acquire activity = GO.
+- **Landed:** `api/app/core/domains.py`, `api/app/core/host_limiter.py`,
+  `api/app/workflows/activities/host_slots.py` (registered in `worker_main.py`),
+  `steps.scrape_with_host_slot` + `_scrape_timeouts` / `SCRAPE_RETRY` lifted out of `scrape()` (same
+  arguments — replay green). New dep **tldextract 5.4.0** (`uv.lock` header went `revision = 3` → `5`:
+  the image's uv is newer). Settings `host_limit_in_flight`, `host_limit_interval_ms`. Compose
+  workflow-worker now `depends_on: redis`.
+- ⚠️ **Found:** the prod workflow-worker had **no `REDIS_URL`** — the limiter would have failed open on
+  every scrape, silently but for a log line. Infra `0f71515` fixes it; must ship before E.9's release
+  (`git pull --rebase` in the infra repo first).
+- **Verified:** 38 new tests, full suite 582 (replay included), 21 mutations all caught (two weak tests
+  strengthened after the first pass). Cancel during a scrape still releases — tested. **Not tried live**:
+  nothing calls the helper until E.9. Local api + workflow-worker were rebuilt on the new image.
+- **Next:** **E.9** — wire `scrape_with_host_slot` into `JobWorkflow` (`job.py:121`) and `PipelineWorkflow`
+  (`pipeline.py:341`, calls `execute_activity` directly) under `patched()`, new replay histories, scrape
+  queue timer 60 s → 5 min (`steps.SCHEDULE_TO_START`, `catalog.SCHEDULE_TO_START_SECONDS`), recheck
+  pipeline budgets compose; ships with E.2. Then E.1. ADR-013 §5 and BUG-023 still before F.1. Push
+  `develop` (and infra) when convenient.
 
 🧭 **E.0 DECIDED (2026-10-13, later session, docs only).** `develop` `137152a`, `40dbea9` + this closeout.
 **Not pushed** (develop is ~22 docs commits ahead of `origin/develop`, all on top of the released `0b4ac9e`). No code changed.
