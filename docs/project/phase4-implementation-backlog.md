@@ -81,7 +81,7 @@
 | D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ✅ **RELEASED + FLIPPED 2026-10-12** (`main` `28c881b..0b4ac9e`; infra `9ef396a` v1, `99ed5c8` **v2**) — **new job runs run on Temporal in prod**; http + playwright verified |
 | **E** | **Batch and crawl cutover** | |
 | E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open; k = 3, scrape queue timer 60 s → 5 min. Open: robots `Crawl-delay` |
-| E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ⬜ |
+| E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ✅ Built 2026-10-15 (local, `410f015`, unreleased; not yet called by any workflow — E.9 wires it); infra `REDIS_URL` on the workflow-worker committed locally, **not pushed** |
 | E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ⬜ |
 | E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ⬜ |
 | E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ⬜ |
@@ -1896,6 +1896,34 @@ on WAIT → scrape → release in `finally`. ⚠️ Check that the prod workflow
 **Tests:** two concurrent acquires on one host admit 2, the third waits; rate window; subdomains
 share a key, `alice.github.io` ≠ `bob.github.io`; expired lease frees the slot; Redis down → GO.
 **Depends on:** E.0
+
+**Built** *(2026-10-15; local, unreleased)*. Nothing calls the helper yet, so no released workflow
+body changed and the replay corpus is untouched. The owner decided the four open questions before the
+build:
+- **Busy host → poll ~1 s + up to 250 ms jitter.** The rate rule's wait is exact (the `last` key's
+  remaining PTTL) plus the same jitter.
+- **Lease TTL derived from `steps.scrape()`'s own numbers** (`host_lease_ttl`): attempts × (queue
+  timer + start-to-close) + retry backoff + 60 s. `scrape()`'s timeouts and retry policy were lifted
+  into `_scrape_timeouts` / `SCRAPE_RETRY` for this — same `execute_activity` arguments, replay
+  unaffected. Today: http 513 s, playwright (60 s render) 783 s; E.9's 5-min queue timer raises both.
+- **Wait cap 10 min, then scrape anyway** (`HOST_WAIT_CAP`) — the limiter delays runs, never fails them.
+- **Lease id from the workflow** (`workflow.uuid4()`, one per scrape, reused across re-asks), so a
+  retried acquire re-admits its own lease instead of taking a second one; **an acquire activity
+  that fails (2 attempts, 5 s each) means GO** — fail open at both layers.
+
+What landed: `app/core/domains.py` (`registrable_domain` — tldextract 5.4.0 pinned by `uv.lock`, no
+fetch, no disk cache, private suffixes on; IP / suffix-only / single-label → the exact host; lowercase,
+port/userinfo/trailing dot stripped, IDN → punycode), `app/core/host_limiter.py` (one Lua script on
+`host:{domain}:leases` + `host:{domain}:last`, Redis `TIME` as the clock; settings
+`host_limit_in_flight=2`, `host_limit_interval_ms=1000`), `app/workflows/activities/host_slots.py`
+(process-level Redis client, 2 s socket timeouts, `RedisError` → GO / no-op + error log), and
+`steps.scrape_with_host_slot` (acquire → durable sleep → scrape → release in `finally`). Compose's
+workflow-worker now waits for Redis. **Prod had no `REDIS_URL` on the workflow-worker** — every acquire
+would have failed open silently; infra `app/workflow-worker.yaml` gains it (committed locally, not
+pushed — must ship before E.9's release).
+Verified: 38 new tests (full suite 582 incl. the replay test), 21 mutations all caught. A cancelled
+scrape still releases (the `finally` activity runs after cancellation — tested, not assumed). Not
+tried live: nothing calls the helper until E.9.
 
 #### E.9 — Per-host limiter on the job and pipeline lanes
 
