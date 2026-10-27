@@ -1,11 +1,16 @@
 """F.7 — a recurring job reads as one: schedule fields on job reads, the filter, the cap usage."""
 
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 import pytest_asyncio
 from croniter import croniter
 
 from app.core.db import AsyncSessionLocal
+from app.core.minio import get_minio
+from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.user_quota import UserQuota
@@ -25,7 +30,15 @@ async def _job(user_id, **fields) -> Job:
         job = Job(user_id=user_id, url="https://example.com", **fields)
         db.add(job)
         await db.flush()
-        db.add(JobRun(job_id=job.id, status="completed", lane="v2"))
+        # A completed run always has completed_at (the latest-result route sorts on it).
+        db.add(
+            JobRun(
+                job_id=job.id,
+                status="completed",
+                lane="v2",
+                completed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
         await db.commit()
         await db.refresh(job)
     return job
@@ -149,3 +162,95 @@ async def test_an_admin_reads_and_sets_the_scheduled_jobs_override(
 
     after = await client.get(f"/admin/users/{db_user.id}/quota", headers=admin_headers)
     assert after.json()["scheduled_jobs_limit"] == 3
+
+
+# --- a recurring job's runs, each with its own time and output (owner, after F.6 prod check) ----
+
+
+class _Minio:
+    """Returns each object's key as its content, so a test can tell which run it read."""
+
+    async def get_object(self, bucket, key):
+        response = MagicMock()
+        response.read = AsyncMock(return_value=key.encode())
+        return response
+
+
+@pytest.fixture
+def minio():
+    app.dependency_overrides[get_minio] = lambda: _Minio()
+    yield
+    app.dependency_overrides.pop(get_minio, None)
+
+
+async def _runs(job, *runs):
+    """(status, created_at, completed_at) per run; returns the rows."""
+    rows = []
+    async with AsyncSessionLocal() as db:
+        for status, created, completed in runs:
+            run = JobRun(job_id=job.id, status=status, lane="v2", created_at=created)
+            run.completed_at = completed
+            if status == "completed":
+                run.result_path = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+            db.add(run)
+            rows.append(run)
+        await db.commit()
+    return rows
+
+
+T0 = datetime(2026, 10, 27, 18, 0, tzinfo=UTC)
+
+
+async def test_each_run_reads_with_its_own_time(client, headers, db_user):
+    job = await _job(db_user.id, **_scheduled())
+    first, second = await _runs(
+        job,
+        ("completed", T0, T0 + timedelta(seconds=5)),
+        ("completed", T0 + timedelta(minutes=5), T0 + timedelta(minutes=5, seconds=4)),
+    )
+
+    rows = (await client.get(f"/jobs/{job.id}/runs", headers=headers)).json()
+
+    by_run = {r["run_id"]: r for r in rows}
+    assert datetime.fromisoformat(by_run[str(first.id)]["run_created_at"]) == T0
+    assert datetime.fromisoformat(by_run[str(second.id)]["run_created_at"]) == T0 + timedelta(
+        minutes=5
+    )
+    # created_at stays the job's: every row has the same one.
+    assert len({r["created_at"] for r in rows}) == 1
+
+
+async def test_a_runs_output_is_read_by_its_id(client, headers, db_user, minio):
+    job = await _job(db_user.id, **_scheduled())
+    first, second = await _runs(
+        job,
+        ("completed", T0, T0 + timedelta(seconds=5)),
+        ("completed", T0 + timedelta(minutes=5), T0 + timedelta(minutes=5, seconds=4)),
+    )
+
+    body = (await client.get(f"/jobs/{job.id}/runs/{first.id}/result", headers=headers)).json()
+
+    assert body["content"] == first.result_path.partition("/")[2]
+    assert body["run_id"] == str(first.id)
+    assert datetime.fromisoformat(body["completed_at"]) == T0 + timedelta(seconds=5)
+    # The latest-result route says which run it chose.
+    latest = (await client.get(f"/jobs/{job.id}/result", headers=headers)).json()
+    assert latest["run_id"] == str(second.id)
+
+
+async def test_a_run_without_output_or_of_another_job_is_404(
+    client, headers, db_user, other_user, minio
+):
+    job = await _job(db_user.id, **_scheduled())
+    other_job = await _job(db_user.id, **_scheduled())
+    [failed] = await _runs(job, ("failed", T0, T0))
+    [elsewhere] = await _runs(other_job, ("completed", T0, T0))
+    theirs = await _job(other_user.id, **_scheduled())
+    [their_run] = await _runs(theirs, ("completed", T0, T0))
+
+    for path in (
+        f"/jobs/{job.id}/runs/{failed.id}/result",
+        f"/jobs/{job.id}/runs/{elsewhere.id}/result",
+        f"/jobs/{theirs.id}/runs/{their_run.id}/result",
+    ):
+        assert (await client.get(path, headers=headers)).status_code == 404, path

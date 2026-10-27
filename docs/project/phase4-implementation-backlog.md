@@ -2605,6 +2605,12 @@ schedules", and the job's latest 20 runs (user mode — no admin runs endpoint e
 tick `SKIP` drops is counted by Temporal (`num_actions_skipped_overlap`), not shown (ADR-013 §4).
 9 API tests; `npm run build` (tsc) clean. ⚠️ **Click-through not done** — no browser here (Clerk login).
 
+**Fixed after the prod check** *(2026-10-28; owner's click-through on the released F.6)*: the runs list showed the
+**job's** creation time on every run (`JobResponse.created_at` is the job's) — `run_created_at` added to every job
+read; and the result viewer did not say which run it showed — `JobResultResponse` now carries `run_id` +
+`completed_at` ("latest completed run · …"), and `GET /jobs/{id}/runs/{run_id}/result` opens any completed run,
+with view / hide per run as on a batch's items. 3 tests, 4 mutants caught; suite 770. Ships in a second F release.
+
 ## Group G — Consumer deletion
 
 #### G.1 — 🚀 Delete `result_consumer.py`

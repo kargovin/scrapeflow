@@ -150,6 +150,8 @@ class JobResponse(BaseModel):
     result_path: str | None
     error: str | None
     run_id: uuid.UUID
+    # The run's own creation time; created_at is the job's.
+    run_created_at: datetime | None = None
     diff_detected: bool | None = None
     created_at: datetime
     updated_at: datetime
@@ -176,6 +178,9 @@ class JobResultResponse(BaseModel):
     output_format: str
     result_path: str
     warnings: list[str] | None = None
+    # The job run the content came from (job routes only; a batch item or crawl page has none).
+    run_id: uuid.UUID | None = None
+    completed_at: datetime | None = None
 
 
 class CancelJobResponse(BaseModel):

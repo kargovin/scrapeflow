@@ -369,6 +369,7 @@ async def create_job(
         created_at=job.created_at,
         updated_at=job.updated_at,
         run_id=job_run.id,
+        run_created_at=job_run.created_at,
         webhook_secret=webhook_secret_plain,
         has_proxy=body.proxy_url is not None,
         has_cookies=bool(body.cookies),
@@ -398,6 +399,7 @@ async def list_jobs(
             created_at=job.created_at,
             updated_at=job.updated_at,
             run_id=run.id,
+            run_created_at=run.created_at,
             status=run.status,
             result_path=run.result_path,
             diff_detected=run.diff_detected,
@@ -433,6 +435,7 @@ async def get_job(
         created_at=job.created_at,
         updated_at=job.updated_at,
         run_id=run.id,
+        run_created_at=run.created_at,
         status=run.status,
         result_path=run.result_path,
         diff_detected=run.diff_detected,
@@ -534,6 +537,7 @@ async def list_job_runs(
             created_at=job.created_at,
             updated_at=job.updated_at,
             run_id=run.id,
+            run_created_at=run.created_at,
             status=run.status,
             result_path=run.result_path,
             diff_detected=run.diff_detected,
@@ -701,6 +705,7 @@ async def patch_jobs(
         created_at=job.created_at,
         updated_at=job.updated_at,
         run_id=run.id,
+        run_created_at=run.created_at,
         status=run.status,
         result_path=run.result_path,
         diff_detected=run.diff_detected,
@@ -758,10 +763,17 @@ async def load_completed_result(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No completed result available"
         )
+    return await run_result(minio_client, job, run)
 
-    return await read_stored_result(
+
+async def run_result(minio_client: Minio, job: Job, run: JobRun) -> JobResultResponse:
+    """One completed run's stored content, saying which run it is."""
+    response = await read_stored_result(
         minio_client, run.result_path, job.output_format.value, run.warnings
     )
+    response.run_id = run.id
+    response.completed_at = run.completed_at
+    return response
 
 
 _FORMAT_BY_EXTENSION = {"md": "markdown", "json": "json", "html": "html"}
@@ -802,6 +814,26 @@ async def get_job_result(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     return await load_completed_result(job, db, minio_client)
+
+
+@router.get("/{job_id}/runs/{run_id}/result", response_model=JobResultResponse)
+async def get_job_run_result(
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
+) -> JobResultResponse:
+    """One run's output — a recurring job's earlier runs, not only its latest."""
+    job = await db.get(Job, job_id)
+    if job is None or job.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    run = await db.get(JobRun, run_id)
+    if run is None or run.job_id != job.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status != "completed" or run.result_path is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No result for this run")
+    return await run_result(minio_client, job, run)
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})

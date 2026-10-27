@@ -89,6 +89,8 @@ export interface Job {
   created_at: string
   updated_at: string
   run_id: string
+  // The run's own creation time; created_at is the job's.
+  run_created_at?: string | null
   completed_at?: string | null
   // F.7 — null on a job without a schedule; next_run_at is null while paused.
   schedule_cron: string | null
@@ -107,6 +109,9 @@ export interface JobResult {
   output_format: string
   result_path: string
   warnings: string[] | null
+  // The job run it came from (job routes only).
+  run_id?: string | null
+  completed_at?: string | null
 }
 
 export interface ApiKey {

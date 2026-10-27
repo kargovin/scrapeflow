@@ -174,9 +174,14 @@ Detail and every call: implementation backlog F.1–F.7 *Built* + the **F.6 runb
 - ⚠️ The machine's clock jumped ~2 h mid-session (sleep?) — the sweep Schedule shows 22 `missed_catchup` for it.
 - **Compose left clean:** test jobs deleted (the e2e one through the API), objects released through the ledger,
   test users and the ad-hoc webhook receiver container removed. The workflow worker runs the final code.
-- **Next (owner):** read F.1/F.4 (expect questions; confirm the F.4 call), then run **F.6** per the runbook (ff
-  `main`, verify a 5-minute schedule + its webhook, click through F.7). Then G.1. Dependabot's 64 alerts and
-  BUG-024 still wait.
+- 🚀 **F.6 RELEASED 2026-10-27 (owner ran `main` `261f931..3b9cf9c`)** — CI replay 41 passed; api + workflow-worker on
+  `3b9cf9c`; migration 4.8 applied; `webhook-sweep` present (5 min, SKIP); `migrate_schedule --all` / `--reconcile`
+  both 0; owner's 5-minute schedule: both webhook POSTs arrived, pause worked, delete 204. Owner's click-through
+  found two F.7 gaps (run times showed the job's; the result did not say which run) — **fixed, not yet released**.
+  ⚠️ My prod read (SDK describe) was refused by the classifier; the owner ran steps 2–4.
+- **Next (owner):** release the run-history fix (`816356d`, ff `main` — api image only, no migration) and click
+  through a recurring job's page again; confirm the F.4 call (`webhook_deliveries` kept as the delivery record).
+  Then G.1. Dependabot's 64 alerts and BUG-024 still wait.
 
 📐 **F.0 DONE — ADR-013 ACCEPTED (2026-10-27, sixth session, docs only).** Owner asked for F.0 and the
 catch-up window in plain terms, then: "go with all three recommendations; update ADR-013 as accepted".

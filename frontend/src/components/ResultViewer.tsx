@@ -26,8 +26,15 @@ export default function ResultViewer({ jobId, outputFormat, status, resultPath, 
     <ContentViewer
       title="Result"
       subtitle={
-        <span className="inline-flex px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">
-          {format}
+        <span className="flex items-center gap-2">
+          <span className="inline-flex px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">
+            {format}
+          </span>
+          {data?.completed_at && (
+            <span className="text-xs text-gray-500">
+              latest completed run · {new Date(data.completed_at).toLocaleString()}
+            </span>
+          )}
         </span>
       }
       format={format}
