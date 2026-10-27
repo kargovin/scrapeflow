@@ -237,6 +237,8 @@ services:
           target: /app/app
         - action: rebuild
           path: ../api/pyproject.toml
+    # The crawl gate fixture (E.6).
+    networks: [default, crawl-fixture]
 
   # Temporal workflow worker — a second entrypoint of the api image, not a separate service
   # (phase4-implementation-backlog A.5). No hot reload: restart it to pick up code changes.
@@ -263,6 +265,8 @@ services:
         condition: service_healthy
     stop_grace_period: 30s
     restart: unless-stopped
+    # The crawl gate fixture (E.6).
+    networks: [default, crawl-fixture]
 
   # ── Python Playwright worker ─────────────────────────────────────────────────
 
@@ -313,6 +317,8 @@ services:
     # Above PLAYWRIGHT_GRACEFUL_SHUTDOWN_SECONDS (630): an in-flight scrape finishes before the kill.
     stop_grace_period: 660s
     restart: unless-stopped
+    # The crawl gate fixture (E.6).
+    networks: [default, crawl-fixture]
 
   llm-worker:
     build:
@@ -410,6 +416,8 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 30s
     restart: unless-stopped
+    # The crawl gate fixture (E.6).
+    networks: [default, crawl-fixture]
 
   # ── Crawl coordinator ───────────────────────────────────────────────────────
 
@@ -438,6 +446,28 @@ services:
       nats-init:
         condition: service_completed_successfully
     restart: unless-stopped
+
+  # ── Crawl gate fixture site (E.6) ───────────────────────────────────────────
+  # contracts/fixtures/crawl-site/README.md. Its own network sits in a public range, so the SSRF
+  # check (unchanged) sees www./docs.crawlfixture.com as outside sites; on the default network
+  # internal.crawlfixture.com resolves privately — the in-scope SSRF bait.
+  crawl-fixture:
+    image: nginx:1.27-alpine
+    profiles: [gate]
+    volumes:
+      - ../contracts/fixtures/crawl-site/site:/usr/share/nginx/html:ro
+    networks:
+      default:
+        aliases: [internal.crawlfixture.com]
+      crawl-fixture:
+        aliases: [www.crawlfixture.com, docs.crawlfixture.com]
+
+networks:
+  default:
+  crawl-fixture:
+    ipam:
+      config:
+        - subnet: 11.222.33.0/24
 
 volumes:
   postgres_data:

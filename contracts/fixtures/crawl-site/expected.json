@@ -1,0 +1,19 @@
+{
+  "seed_url": "http://www.crawlfixture.com/",
+  "request": {"max_depth": 3, "max_pages": 50, "engine": "http", "respect_robots": true},
+  "status": "completed",
+  "total_queued": 7,
+  "total_completed": 6,
+  "total_failed": 1,
+  "dropped": {"out_of_scope": 2, "ssrf": 1, "sitemap_ssrf": 1, "sitemap_out_of_scope": 1},
+  "pages": [
+    {"url": "http://www.crawlfixture.com/", "depth": 0, "status": "completed", "file": "index.html"},
+    {"url": "http://www.crawlfixture.com/a.html", "depth": 1, "status": "completed", "file": "a.html"},
+    {"url": "http://www.crawlfixture.com/b.html", "depth": 1, "status": "completed", "file": "b.html"},
+    {"url": "http://www.crawlfixture.com/private/secret.html", "depth": 1, "status": "failed", "error": "robots_txt_disallowed"},
+    {"url": "http://www.crawlfixture.com/d.html", "depth": 1, "status": "completed", "file": "d.html"},
+    {"url": "http://docs.crawlfixture.com/guide.html", "depth": 1, "status": "completed", "file": "guide.html"},
+    {"url": "http://www.crawlfixture.com/c.html", "depth": 2, "status": "completed", "file": "c.html"}
+  ],
+  "never_requested": ["/bait-sitemap.xml", "/secret.html"]
+}

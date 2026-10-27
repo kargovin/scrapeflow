@@ -1,0 +1,9 @@
+User-agent: *
+Disallow: /private/
+
+# The real sitemap: an index, expanded as an index.
+Sitemap: http://www.crawlfixture.com/sitemap.xml
+# In scope, but the host resolves to a private address: vetted out, never fetched.
+Sitemap: http://internal.crawlfixture.com/bait-sitemap.xml
+# The cloud metadata address: out of scope, never fetched.
+Sitemap: http://169.254.169.254/latest/meta-data/
