@@ -252,6 +252,7 @@ async def due_job(db_user):
             url="https://example.com",
             schedule_cron="* * * * *",
             schedule_status="active",
+            schedule_lane="v1",
             next_run_at=datetime.now(UTC) - timedelta(minutes=1),
             webhook_url="https://hooks.example.com/in",
         )

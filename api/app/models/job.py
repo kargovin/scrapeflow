@@ -73,6 +73,18 @@ class Job(Base):
 
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # The engine that fires the schedule (F.1): v1's scheduler loop or a Temporal Schedule.
+    # NULL with schedule_status.
+    schedule_lane: Mapped[str | None] = mapped_column(
+        VARCHAR(2), CheckConstraint("schedule_lane IN ('v1', 'v2')", name="chk_jobs_schedule_lane")
+    )
+    # A tick that made no run, for the user (ADR-010 §1): never a job_runs row, which the
+    # monthly meter would count.
+    schedule_skipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    schedule_skip_reason: Mapped[str | None] = mapped_column(Text)
+    # Set while a v2 tick waits for a concurrency slot.
+    schedule_waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     webhook_secret: Mapped[str | None] = mapped_column(nullable=True)  # Fernet-encrypted at rest

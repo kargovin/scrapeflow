@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     default_quota_monthly_runs: int = 500
     default_quota_concurrent_jobs: int = 5
     default_quota_storage_bytes: int = 5368709120  # 5 GB
+    # ADR-013 §5: active scheduled jobs per user; paused ones do not count.
+    default_quota_scheduled_jobs: int = 20
 
     # ADR-009 16d: the pipeline lane has no v1 to fall back to — off refuses new pipelines, edits and
     # runs (503); reads and cancel stay on so in-flight runs can be watched and stopped.
@@ -86,6 +88,9 @@ class Settings(BaseSettings):
     job_lane: Literal["v1", "v2"] = "v1"
     # The same switch for batches (E.2): every run of a batch is on the lane it was created on.
     batch_lane: Literal["v1", "v2"] = "v1"
+    # The same switch for schedules (F.1): v2 = a Temporal Schedule per job. A schedule keeps the
+    # lane it was armed on (jobs.schedule_lane); scripts/migrate_schedule.py moves one.
+    schedule_lane: Literal["v1", "v2"] = "v1"
     # E.0: a v2 batch's scrapes in flight at once; the rest wait in its workflow.
     batch_max_in_flight: int = Field(default=3, ge=1)
     # The same bound for a crawl's pages (E.5), and the pages per run before continue-as-new

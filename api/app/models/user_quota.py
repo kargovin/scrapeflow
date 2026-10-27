@@ -16,6 +16,7 @@ class UserQuota(Base):
     monthly_runs_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     concurrent_jobs_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     storage_bytes_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    scheduled_jobs_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     storage_bytes_used: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

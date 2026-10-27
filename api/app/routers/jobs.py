@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import auth_from_token, get_current_user
+from app.core import schedules
 from app.core.credentials import resolve_credentials
 from app.core.db import get_db
 from app.core.dispatch import (
@@ -38,7 +39,7 @@ from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
-from app.core.quota import Admit, admission
+from app.core.quota import Admit, admission, check_scheduled_jobs_quota, lock_user
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.job import Job
@@ -88,6 +89,74 @@ def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
                 detail=f"Schedule interval must be at least {min_minutes} minutes",
             )
         prev = curr
+
+
+def _v1_next_run(cron: str | None, lane: str | None) -> datetime | None:
+    """v1's dispatch clock. A v2 schedule leaves it NULL — v1's loop selects on it."""
+    if cron is None or lane != "v1":
+        return None
+    return croniter(cron, datetime.now(UTC)).get_next(datetime)
+
+
+def _validate_cron(cron: str) -> None:
+    if not croniter.is_valid(cron):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Invalid cron expression"
+        )
+    validate_cron_min_interval(cron, settings.schedule_min_interval_minutes)
+
+
+_SCHEDULE_FIELDS = ("schedule_cron", "schedule_status", "schedule_lane", "next_run_at")
+
+
+async def _apply_schedule_changes(job: Job, changes: dict, db: AsyncSession) -> bool:
+    """Writes a PATCH's schedule fields onto the job; returns whether it arms a schedule.
+
+    ``schedule_cron: null`` removes the schedule. A job gaining one is armed on today's lane; a
+    job that has one keeps its lane — resuming a v2 schedule never re-arms v1 (ADR-009 16c).
+    Arming checks the cap (ADR-013) under the user's lock; the caller commits.
+    """
+    was_active = job.schedule_status == "active"
+    if "schedule_cron" in changes:
+        cron = changes["schedule_cron"]
+        if cron is None:
+            if changes.get("schedule_status") is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="schedule_status needs a schedule_cron",
+                )
+            job.schedule_cron = job.schedule_status = job.schedule_lane = job.next_run_at = None
+            return False
+        _validate_cron(cron)
+        job.schedule_cron = cron
+        if job.schedule_status is None:
+            job.schedule_status = "active"
+    if "schedule_status" in changes:
+        if changes["schedule_status"] is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="To remove a schedule, set schedule_cron to null",
+            )
+        if job.schedule_cron is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="The job has no schedule",
+            )
+        job.schedule_status = changes["schedule_status"]
+    if job.schedule_status is None:
+        return False
+    if job.schedule_lane is None:
+        job.schedule_lane = settings.schedule_lane
+    job.next_run_at = (
+        _v1_next_run(job.schedule_cron, job.schedule_lane)
+        if job.schedule_status == "active"
+        else job.next_run_at
+    )
+    arms = job.schedule_status == "active" and not was_active
+    if arms:
+        await lock_user(job.user_id, db)
+        await check_scheduled_jobs_quota(job.user_id, db, exclude_job_id=job.id)
+    return arms
 
 
 def _jobs_with_latest_run_stmt(
@@ -165,11 +234,7 @@ async def create_job(
 
     # validate cron exp and also validate min intervals constraint is not broken
     if body.schedule_cron:
-        if not croniter.is_valid(body.schedule_cron):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Invalid cron expression"
-            )
-        validate_cron_min_interval(body.schedule_cron, settings.schedule_min_interval_minutes)
+        _validate_cron(body.schedule_cron)
 
     # Generate a token and encrypt it using Fernet
     webhook_secret_plain: str | None = None
@@ -191,12 +256,18 @@ async def create_job(
         )
 
     await admit()
+    if body.schedule_cron:
+        # ADR-013: under the lock admit() took, committed with the job.
+        await check_scheduled_jobs_quota(user.id, db)
     job = Job(
         user_id=user.id,
         url=body.url,
         output_format=body.output_format,
         engine=body.engine,
         schedule_cron=body.schedule_cron,
+        schedule_status="active" if body.schedule_cron else None,
+        schedule_lane=settings.schedule_lane if body.schedule_cron else None,
+        next_run_at=_v1_next_run(body.schedule_cron, settings.schedule_lane),
         webhook_url=body.webhook_url,
         webhook_secret=webhook_secret_encrypted if body.webhook_url else None,
         llm_config=body.llm_config.model_dump(mode="json") if body.llm_config else None,
@@ -253,6 +324,24 @@ async def create_job(
         )
         await db.execute(upsert)
         await db.commit()
+
+    if schedules.is_v2(job):
+        # Before the first run: a job whose schedule cannot be armed is not run either.
+        try:
+            await schedules.put(await lazy_client(request.app.state), job)
+        except Exception as exc:
+            logger.exception("job_schedule_put_failed", job_id=str(job.id))
+            job.schedule_status = "paused"
+            await fail_unstarted_run(db, job, job_run, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "job_id": str(job.id),
+                    "run_id": str(job_run.id),
+                    "error": "the schedule could not be armed: the job was created with its "
+                    "schedule paused and was not run",
+                },
+            ) from None
 
     # Resolve credentials: per-job secret > platform default > None (PRD-005)
     credentials = await resolve_credentials(job, db)
@@ -394,6 +483,8 @@ async def cancel_job(
                 ),
             )
 
+        if job.schedule_lane == "v2":
+            await schedules.forget(lambda: lazy_client(request.app.state), [job.id])
         await db.delete(job)
         await db.commit()
         logger.info(
@@ -458,6 +549,7 @@ async def list_job_runs(
 async def patch_jobs(
     body: JobPatch,
     job_id: uuid.UUID,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -472,6 +564,9 @@ async def patch_jobs(
     # Pop secrets now so they don't reach the setattr loop, but defer DB writes until after all validations.
     proxy_url_pending = updates.pop("proxy_url", _UNSET)
     cookies_pending = updates.pop("cookies", _UNSET)
+    schedule_changes = {
+        f: updates.pop(f) for f in ("schedule_cron", "schedule_status") if f in updates
+    }
 
     # actions maps to job.playwright_actions — validate engine constraint before writing
     if "actions" in updates:
@@ -484,15 +579,7 @@ async def patch_jobs(
         job.playwright_actions = actions_val
 
     for field, value in updates.items():
-        if field == "schedule_cron":
-            if not croniter.is_valid(value):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="Invalid cron expression",
-                )
-            validate_cron_min_interval(value, settings.schedule_min_interval_minutes)
-            job.next_run_at = croniter(value, datetime.now(UTC)).get_next(datetime)
-        elif field == "webhook_url":
+        if field == "webhook_url":
             if value is None:
                 job.webhook_secret = None
             else:
@@ -523,6 +610,11 @@ async def patch_jobs(
                         )
 
         setattr(job, field, value)
+
+    if schedule_changes:
+        before = {f: getattr(job, f) for f in _SCHEDULE_FIELDS}
+        arms = await _apply_schedule_changes(job, schedule_changes, db)
+        engine_involved = before["schedule_lane"] == "v2" or job.schedule_lane == "v2"
 
     # All validations passed — write secrets now.
     if proxy_url_pending is not _UNSET:
@@ -576,6 +668,25 @@ async def patch_jobs(
             )
 
     await db.commit()
+
+    if schedule_changes and engine_involved:
+        try:
+            await schedules.sync(await lazy_client(request.app.state), job)
+        except Exception as exc:
+            logger.warning("job_schedule_sync_failed", job_id=str(job_id), error=str(exc))
+            if job.schedule_status == "active" and (
+                arms or job.schedule_cron != before["schedule_cron"]
+            ):
+                # The engine would not fire what the row says: put the schedule back as it was.
+                for field, value in before.items():
+                    setattr(job, field, value)
+                await db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Workflow engine unavailable: the schedule was not changed",
+                ) from None
+            # Disarming: the row already stops every tick at admission.
+
     stmt = _jobs_with_latest_run_stmt(user.id, job_id=job_id)
     result = await db.execute(stmt)
     row = result.one()

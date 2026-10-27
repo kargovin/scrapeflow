@@ -757,6 +757,8 @@ async def test_create_job_valid_cron_job(client, auth_headers, mock_jetstream):
         headers=auth_headers,
     )
     assert response.status_code == 201
+    # Armed now (F.1): left behind, the dev stack's scheduler would fire it every hour.
+    await _delete_job(response.json()["id"])
 
 
 async def test_create_job_invalid_cron_job(client, auth_headers, mock_jetstream):
@@ -936,6 +938,13 @@ async def test_patch_job_schedule_cron(client, auth_headers, mock_jetstream):
         assert job is not None
         assert job.schedule_cron == "0 * * * *"
         assert job.next_run_at is not None
+    await _delete_job(job_id)
+
+
+async def _delete_job(job_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Job).where(Job.id == uuid.UUID(job_id)))
+        await db.commit()
 
 
 async def test_patch_job_invalid_cron(client, auth_headers, mock_jetstream):

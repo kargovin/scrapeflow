@@ -62,6 +62,7 @@ async def due_job(db_user):
         url="https://example.com",
         schedule_cron="* * * * *",
         schedule_status="active",
+        schedule_lane="v1",
         next_run_at=datetime.now(UTC) - timedelta(minutes=1),
     )
     async with AsyncSessionLocal() as db:
@@ -80,6 +81,7 @@ async def future_job(db_user):
         url="https://example.com",
         schedule_cron="* * * * *",
         schedule_status="active",
+        schedule_lane="v1",
         next_run_at=datetime.now(UTC) + timedelta(minutes=5),
     )
     async with AsyncSessionLocal() as db:

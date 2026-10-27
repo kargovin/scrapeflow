@@ -21,6 +21,7 @@ Limits come from the user_quotas row; NULL columns fall back to settings default
 admit()             — lock the user, then the 429 checks; every API site that inserts a run
 lock_user()         — the lock alone; the scheduler takes it before is_quota_exceeded()
 check_user_quota()  — raises HTTP 429
+check_scheduled_jobs_quota() — ADR-013's cap on active scheduled jobs; 429, under lock_user()
 is_quota_exceeded() — returns bool; use in scheduler (no HTTP context)
 check_storage_quota() — used by result_consumer
 increment_storage_bytes() / decrement_storage_bytes()
@@ -41,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.storage import delete_minio_object
 from app.models.batch import Batch, BatchItem
+from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.quota_views import quota_active_submissions, quota_run_units
 from app.models.user import User
@@ -211,6 +213,44 @@ async def is_quota_exceeded(user_id: uuid.UUID, db: AsyncSession, quota_type: st
     """
     exceeded, _ = await _quota_check(user_id, db, quota_type)
     return exceeded
+
+
+async def check_scheduled_jobs_quota(
+    user_id: uuid.UUID, db: AsyncSession, exclude_job_id: uuid.UUID | None = None
+) -> None:
+    """Raises 429 if one more active schedule would pass the user's cap (ADR-013 §2).
+
+    Every lane counts; a paused schedule does not. ``exclude_job_id`` is the job being armed, so
+    re-arming a job that already holds its place is not counted twice. The caller holds
+    ``lock_user`` and commits the arming in the same transaction.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Job)
+        .where(Job.user_id == user_id, Job.schedule_status == "active")
+    )
+    if exclude_job_id is not None:
+        stmt = stmt.where(Job.id != exclude_job_id)
+    used = await db.scalar(stmt) or 0
+    quota_row = await db.get(UserQuota, user_id)
+    limit = (
+        quota_row.scheduled_jobs_limit
+        if quota_row and quota_row.scheduled_jobs_limit is not None
+        else settings.default_quota_scheduled_jobs
+    )
+    if used + 1 > limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "quota_exceeded",
+                "quota_type": "scheduled_jobs",
+                "message": (
+                    f"Active scheduled job limit reached ({used}/{limit}). "
+                    "Pause or remove a schedule to add another."
+                ),
+                "resets_at": None,
+            },
+        )
 
 
 def _storage_usage(quota_row: UserQuota | None) -> tuple[int, int]:

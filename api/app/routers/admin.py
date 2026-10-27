@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import get_current_admin_user
+from app.core import schedules
 from app.core.db import get_db
 from app.core.dispatch import cancel_active_runs, cancel_workflows
 from app.core.ledger import release_run_objects, release_user_objects
@@ -180,6 +181,7 @@ async def admin_patch_user_quota(
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_user(
     user_id: uuid.UUID,
+    request: Request,
     admin: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
     minio_client: Minio = Depends(get_minio),
@@ -205,6 +207,16 @@ async def admin_delete_user(
             ),
         )
 
+    await schedules.forget(
+        lambda: lazy_client(request.app.state),
+        list(
+            (
+                await db.scalars(
+                    select(Job.id).where(Job.user_id == user_id, Job.schedule_lane == "v2")
+                )
+            ).all()
+        ),
+    )
     await db.delete(user)
     await db.commit()
     logger.info(
@@ -334,6 +346,8 @@ async def admin_delete_or_cancel_job(
                     "the job was not deleted. Retry."
                 ),
             )
+        if job.schedule_lane == "v2":
+            await schedules.forget(lambda: lazy_client(request.app.state), [job.id])
         await db.delete(job)
         await db.commit()
         logger.info(

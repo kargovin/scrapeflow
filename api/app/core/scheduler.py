@@ -69,6 +69,8 @@ async def _dispatch_due_jobs(
             .where(
                 Job.schedule_cron.is_not(None),
                 Job.schedule_status == "active",
+                # A v2 schedule is a Temporal Schedule's; firing it here too would run it twice.
+                Job.schedule_lane == "v1",
                 Job.next_run_at <= datetime.now(UTC),
             )
             .with_for_update(skip_locked=True)

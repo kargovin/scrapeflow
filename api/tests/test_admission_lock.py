@@ -167,6 +167,7 @@ async def test_scheduler_admits_under_the_lock(db_user, mock_jetstream):
             url="https://example.com",
             schedule_cron="* * * * *",
             schedule_status="active",
+            schedule_lane="v1",
             next_run_at=datetime.now(UTC) - timedelta(minutes=1),
         )
         db.add(due)

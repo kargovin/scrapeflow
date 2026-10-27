@@ -20,6 +20,7 @@ from tests.test_workflows_crawl import Harness as CrawlHarness
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
 from tests.test_workflows_pipeline import CLEAN_GUARD, R6, RUN_INPUT, Harness
+from tests.test_workflows_scheduled_job import Harness as ScheduledHarness
 
 
 async def _webhook_flaky(input):
@@ -175,6 +176,16 @@ CRAWL_SCENARIOS = {
 }
 
 
+# F.1 — name -> (admission verdicts in turn, what the child run does).
+SCHEDULED_SCENARIOS = {
+    "harness_scheduled_admitted_completed": (["admitted"], "completed"),
+    "harness_scheduled_waited_then_admitted": (["waiting", "waiting", "admitted"], "completed"),
+    "harness_scheduled_skipped": (["skipped"], "completed"),
+    "harness_scheduled_storage_failed": (["failed"], "completed"),
+    "harness_scheduled_run_failed": (["admitted"], "failed"),
+}
+
+
 async def main() -> None:
     runs = [(name, Harness, kwargs, run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
     runs += [(name, JobHarness, kwargs, None) for name, kwargs in JOB_SCENARIOS.items()]
@@ -198,6 +209,14 @@ async def main() -> None:
         await h.run(input, during=during)
         history = h.first_history if name.endswith("continued_as_new") else h.history
         path.write_text(history.to_json() + "\n")
+        print(path)
+    for name, (verdicts, child) in SCHEDULED_SCENARIOS.items():
+        path = HISTORIES / f"{name}.json"
+        if path.exists():
+            continue
+        h = ScheduledHarness(verdicts, child=child)
+        await h.run()
+        path.write_text(h.history.to_json() + "\n")
         print(path)
     for name, (setup, batch_input) in BATCH_SCENARIOS.items():
         path = HISTORIES / f"{name}.json"

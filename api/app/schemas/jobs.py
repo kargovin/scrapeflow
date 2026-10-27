@@ -1,6 +1,7 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
@@ -124,7 +125,8 @@ class _MutableJobFields(BaseModel):
 class JobPatch(_MutableJobFields):
     model_config = ConfigDict(extra="forbid")
 
-    schedule_status: str | None = None
+    # null is refused at the handler: removing a schedule is `schedule_cron: null`.
+    schedule_status: Literal["active", "paused"] | None = None
 
 
 class JobCreate(_MutableJobFields):

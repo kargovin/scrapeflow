@@ -37,6 +37,7 @@ from app.workflows.activities.job_runs import (
     read_llm_settings,
     record_job_objects,
 )
+from app.workflows.activities.schedules import admit_scheduled_run
 from app.workflows.activities.webhook import deliver_webhook
 from app.workflows.batch import BatchWorkflow
 from app.workflows.client import connect
@@ -46,6 +47,7 @@ from app.workflows.job import JobWorkflow
 from app.workflows.pipeline import PipelineWorkflow
 from app.workflows.probe import LLMProbeWorkflow, ScrapeProbeWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
+from app.workflows.scheduled_job import ScheduledJobWorkflow
 
 logger = structlog.get_logger()
 
@@ -69,6 +71,7 @@ async def main() -> None:
             JobWorkflow,
             BatchWorkflow,
             CrawlWorkflow,
+            ScheduledJobWorkflow,
         ],
         activities=[
             say_hello,
@@ -91,6 +94,7 @@ async def main() -> None:
             claim_crawl_pages,
             record_crawl_page,
             finish_crawl,
+            admit_scheduled_run,
         ],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )
