@@ -2133,8 +2133,8 @@ burst. **Must be fixed before F.1** (ADR-010 §1): parked scheduled runs re-chec
 design, so the gap becomes the normal path there instead of a race.
 **Discovered:** 2026-10-13, by code reading during the owner's review of ADR-010 §1 (the monthly-parking
 backlog). **Not reproduced live.**
-**Status:** Open. Not built. **Not dissolved by Temporal** (backlog §3 does not apply) — the migration makes
-it worse.
+**Status:** ✅ **FIXED 2026-10-27 (`2983a47`, local, unreleased)** — ships with the next release. **Not dissolved
+by Temporal** (backlog §3 does not apply) — the migration makes it worse.
 
 ### What happens
 
@@ -2194,6 +2194,42 @@ Serialise **check + insert** per user, in **one transaction**:
 Tests: two (or N) sessions admitting in parallel at `limit − 1` → exactly one admitted, on both count meters.
 The storage meter is out of scope: it is moved by the ledger after the fact and guarded up front by the §8d
 headroom buffer, not by a count.
+
+### Fix (built 2026-10-27, `2983a47`)
+
+As sketched. `core/quota.py`:
+
+- **`lock_user(user_id, db)`** — `SELECT users.id … FOR NO KEY UPDATE`. ⚠️ **NO KEY UPDATE, not UPDATE**: every
+  row inserted with this `user_id` (a job, a crawl, a ledger row) takes `KEY SHARE` on the same `users` row for
+  its FK check, and `FOR UPDATE` would block those for as long as the lock is held.
+- **`admit(user_id, db, *, runs=1, storage=True, headroom_bytes=0)`** — lock, then the three 429 checks. The
+  caller inserts and commits in the same transaction; the commit releases the lock.
+- **`admission(...)`** — `admit` bound to its arguments. `check_job_quota` / `check_batch_quota` /
+  `check_crawl_quota` stay FastAPI dependencies (tests override them in `conftest.py`) but now **return** the
+  bound admission, and each handler awaits it **after** its SSRF lookups, right before the insert.
+
+| site | change |
+|---|---|
+| `POST /jobs` | `await admit()` before `Job(...)` — was a dependency that ran before the SSRF lookups |
+| `POST /batch` | `await admit()` before `Batch(...)`; `runs=len(urls)`, `storage=False` (unchanged — batch never checked storage) |
+| `POST /crawls` | `await admit()` after the SSRF lookups; the **one-active-crawl-per-origin** check (also a count → insert, 409) now sits under the lock too |
+| pipeline run trigger | the three checks → one `admit(..., headroom_bytes=…)` |
+| v1 scheduler | `lock_user` before `is_quota_exceeded`; the per-job commit releases it |
+
+F.1's admission activity calls `lock_user` + the checks the same way.
+
+⚠️ **A pipeline run still enters with no concurrency slot.** It holds one only while a block is `running`
+(ADR-009 15a), and it is inserted with every block `pending` — so the lock makes the trigger's
+`monthly_runs` check exact but cannot make `concurrent_jobs` exact for pipelines: the slot is taken later,
+by the workflow, outside any admission. A property of 15a, not of this fix.
+
+**Tests** (`tests/test_admission_lock.py`, + one in `test_pipelines.py`): five parallel admissions at
+`limit − 1` admit exactly one, for `concurrent_jobs` and for `monthly_runs`; a held lock does not block an
+insert that references the user; and each of the five sites waits on a lock held from outside (2 s) — the
+scheduler asserted by *no run row written while held*, since an unblocked pass alone takes ~1 s.
+**Mutation pass: 7/7 caught, twice** (lock removed from `admit`; `FOR UPDATE` instead of `NO KEY`; the
+`admit()` call removed from each of jobs, batch, crawls; the pipeline's lock removed; the scheduler's lock
+removed). Full API suite **703** (695 + 8).
 
 ### Interactions
 

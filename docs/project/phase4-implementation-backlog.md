@@ -2408,7 +2408,7 @@ by the API on `schedule_cron` / `schedule_status` writes for **v2-owned** schedu
 from F.0. `next_run_at` for v2 comes from the Schedule (`describe`), not the row.
 **Tests:** time-skipping: parked run releases when the meter clears; monthly breach skips without
 writing a counted row; storage breach fails; N parked runs waking together admit only up to the limit.
-**Depends on:** D.3, F.0, BUG-023
+**Depends on:** D.3, F.0, BUG-023 (✅ fixed 2026-10-27, `2983a47` — the activity takes `quota.lock_user`, then the checks, then inserts, in one transaction)
 
 #### F.2 — `schedule_status` interlock guard + meter scoping
 

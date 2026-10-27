@@ -20,6 +20,7 @@
 
 | Date | Change to this backlog |
 |---|---|
+| 2026-10-27 | **BUG-023 fixed** (`2983a47`, local): per-user `FOR NO KEY UPDATE` lock around check → insert at all five admission sites. F.1 is unblocked. |
 | 2026-10-27 | **ADR-013 → Accepted** (owner took §5's three recommendations: cap 20, paused not counted, catch-up 365 d). Gotcha 6 restated. F.0 done; BUG-023 is next, then F.1. |
 | 2026-10-27 | **E.7 RELEASED — Group E closed** (owner). Crawls run on `CrawlWorkflow` in prod; `coordinator/` deleted and pruned. **BUG-008, BUG-012 closed as dissolved**; **BUG-010 part 1 fixed and deployed**; **BUG-025 deployed**. |
 | 2026-10-27 | **E.3–E.6 + E.10 built, E.7 prepared** (implementation backlog). **BUG-008 and BUG-012 dissolve at E.7** (`coordinator/` deleted on `develop`; close when it ships). **BUG-010 part 1 built** (admission SSRF). **BUG-024 filed → §4** (the SSRF check admits `100.64.0.0/10` and multicast; owner's call). **BUG-025 filed and fixed** (admin webhook-deliveries list 500s on batch/crawl rows). |
@@ -234,7 +235,7 @@ PRD-017 (C) / PRD-018 (B). ⚠️ **Index order is not build order here.** ADR-0
    jobs** (owner, 2026-10-13), enforced by the API on create / PATCH `schedule_cron` / resume. ADR-013 §5
    (owner, 2026-10-27): cap default **20**, paused schedules **do not count**, `catchup_window` **365 days**.
 7. **Serialise the quota check and the run insert per user before F.1** — **BUG-023** (filed
-   2026-10-13). Every admission site counts, compares, and inserts later with nothing holding the two
+   2026-10-13; ✅ **fixed 2026-10-27, `2983a47`**, unreleased — `quota.admit` / `quota.lock_user`). Every admission site counts, compares, and inserts later with nothing holding the two
    together, so parallel admissions overshoot both count meters. Low today (needs a request burst);
    the normal path at F.1, where parked runs re-check concurrently by design. One helper, used by every
    site and by F.1's admission activity. Writeup: `open-bugs.md` → BUG-023.
