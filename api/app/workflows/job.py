@@ -77,7 +77,7 @@ class JobWorkflow:
     """One run of a job on the v2 lane: what ``result_consumer.py`` does for it on v1.
 
     Scrape → charge → (LLM → charge) → ``completed``, each status mirrored to ``job_runs`` on the
-    ``job_status`` channel and the webhook row written for ``webhook_loop.py`` to deliver. The API
+    ``job_status`` channel and the webhook row written for ``WebhookDeliveryWorkflow`` to deliver. The API
     cancels the row first; every mirror refuses to move a run out of a state it did not set, so
     the workflow stops at the next step and drops what it had not charged. A step in flight
     always finishes — v1 never aborted a worker either.

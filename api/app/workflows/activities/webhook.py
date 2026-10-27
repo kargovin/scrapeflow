@@ -1,6 +1,6 @@
 """The Webhook block's activity — workflow-worker queue (it writes the block's status).
 
-The wire contract is the job lane's (``core/webhook_loop.py``), byte for byte: HMAC-SHA256 over
+The wire contract is the job lane's (``activities/webhook_deliveries.py``), byte for byte: HMAC-SHA256 over
 the raw body, ``X-ScrapeFlow-Signature: sha256=<hex>`` always sent (``b""`` with no secret),
 success = status < 300, 10 s per POST. Changing any of it breaks receivers silently.
 

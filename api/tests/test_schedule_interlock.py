@@ -1,4 +1,4 @@
-"""F.2 — a schedule belongs to one engine (ADR-009 16c), and the recurring-jobs meters see both."""
+"""F.2 + F.6 — a schedule belongs to one engine (ADR-009 16c), and the recurring-jobs meters see both."""
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -6,16 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from croniter import croniter
-from sqlalchemy import select
 
 from app.core.db import AsyncSessionLocal
 from app.core.minio import get_minio
 from app.core.redis import get_redis
-from app.core.scheduler import _dispatch_due_jobs
 from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
-from app.settings import settings
 from tests.test_admin import (  # noqa: F401
     _make_mock_minio,
     _make_mock_redis,
@@ -61,22 +58,7 @@ async def _get(job_id) -> Job:
         return await db.get(Job, job_id)
 
 
-async def _pending_runs(job_id) -> int:
-    async with AsyncSessionLocal() as db:
-        return len(
-            (
-                await db.scalars(
-                    select(JobRun).where(JobRun.job_id == job_id, JobRun.status == "pending")
-                )
-            ).all()
-        )
-
-
-async def test_resuming_a_v2_schedule_never_re_arms_it_on_v1(
-    client, headers, db_user, temporal, monkeypatch
-):
-    # Even with the switch back on v1, and a stale v1 clock on the row.
-    monkeypatch.setattr(settings, "schedule_lane", "v1")
+async def test_resuming_a_v2_schedule_keeps_it_on_v2(client, headers, db_user, temporal):
     job = await _job(
         db_user.id,
         schedule_status="paused",
@@ -92,14 +74,12 @@ async def test_resuming_a_v2_schedule_never_re_arms_it_on_v1(
     job = await _get(job.id)
     assert (job.schedule_status, job.schedule_lane, job.next_run_at) == ("active", "v2", None)
     temporal.create_schedule.assert_awaited_once()
-    await _dispatch_due_jobs(AsyncSessionLocal, AsyncMock())
-    assert await _pending_runs(job.id) == 0
 
 
-async def test_resuming_a_v1_schedule_keeps_it_on_v1(
-    client, headers, db_user, temporal, monkeypatch
+async def test_resuming_a_v1_schedule_left_from_before_moves_it_to_v2(
+    client, headers, db_user, temporal
 ):
-    monkeypatch.setattr(settings, "schedule_lane", "v2")
+    # v1's loop is gone (F.6): re-arming on v1 would arm nothing.
     job = await _job(
         db_user.id,
         schedule_status="paused",
@@ -113,16 +93,24 @@ async def test_resuming_a_v1_schedule_keeps_it_on_v1(
     assert resp.status_code == 200
 
     job = await _get(job.id)
-    assert (job.schedule_status, job.schedule_lane) == ("active", "v1")
-    # Its clock restarts from now: a resume replays no missed ticks.
-    assert job.next_run_at > datetime.now(UTC)
+    assert (job.schedule_status, job.schedule_lane, job.next_run_at) == ("active", "v2", None)
+    [call] = temporal.create_schedule.call_args_list
+    assert call.args[0] == f"job-schedule-{job.id}"
+
+
+async def test_pausing_a_v1_schedule_needs_no_engine(client, headers, db_user, temporal):
+    job = await _job(db_user.id, schedule_status="active", schedule_lane="v1")
+
+    resp = await client.patch(
+        f"/jobs/{job.id}", json={"schedule_status": "paused"}, headers=headers
+    )
+
+    assert resp.status_code == 200
+    assert (await _get(job.id)).schedule_status == "paused"
     temporal.create_schedule.assert_not_called()
 
 
-async def test_a_job_gaining_a_schedule_takes_the_switchs_lane(
-    client, headers, db_user, temporal, monkeypatch
-):
-    monkeypatch.setattr(settings, "schedule_lane", "v2")
+async def test_a_job_gaining_a_schedule_is_armed_on_v2(client, headers, db_user, temporal):
     async with AsyncSessionLocal() as db:
         job = Job(user_id=db_user.id, url="https://example.com")
         db.add(job)
@@ -136,17 +124,6 @@ async def test_a_job_gaining_a_schedule_takes_the_switchs_lane(
     assert resp.status_code == 200
     job = await _get(job.id)
     assert (job.schedule_status, job.schedule_lane) == ("active", "v2")
-
-
-async def test_the_v1_loop_fires_v1_schedules_only(db_user, mock_jetstream):
-    due = datetime.now(UTC) - timedelta(minutes=1)
-    v1 = await _job(db_user.id, schedule_status="active", schedule_lane="v1", next_run_at=due)
-    v2 = await _job(db_user.id, schedule_status="active", schedule_lane="v2", next_run_at=due)
-
-    await _dispatch_due_jobs(AsyncSessionLocal, mock_jetstream)
-
-    assert await _pending_runs(v1.id) == 1
-    assert await _pending_runs(v2.id) == 0
 
 
 # --- the meters ----------------------------------------------------------------------------------
@@ -169,7 +146,7 @@ async def test_recurring_jobs_count_both_lanes(client, admin_headers, db_user): 
         db_user.id,
         schedule_status="active",
         schedule_lane="v1",
-        next_run_at=datetime.now(UTC) + timedelta(days=3),
+        next_run_at=datetime.now(UTC) + timedelta(seconds=30),
     )
     await _job(db_user.id, schedule_status="active", schedule_lane="v2")
     await _job(db_user.id, schedule_status="active", schedule_lane="v2")
@@ -177,10 +154,11 @@ async def test_recurring_jobs_count_both_lanes(client, admin_headers, db_user): 
 
     op = await _stats(client, admin_headers, db_user.id)
 
-    # A schedule moved to Temporal is still a recurring job (16c's first consequence).
+    # A schedule moved to Temporal is still a recurring job (16c's first consequence); one left
+    # on v1 is counted apart, as nothing fires it.
     assert op["active_recurring_jobs"] == 3
     assert op["active_recurring_jobs_by_lane"] == {"v1": 1, "v2": 2}
-    # v2's hourly cron fires before v1's clock, three days out.
+    # The next run is v2's cron; the v1 row's old clock fires nothing.
     expected = croniter("0 * * * *", datetime.now(UTC)).get_next(datetime)
     assert datetime.fromisoformat(op["next_scheduled_run_at"]) == expected
 

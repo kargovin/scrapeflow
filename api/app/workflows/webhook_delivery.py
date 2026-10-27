@@ -40,7 +40,8 @@ class AttemptOutcome(BaseModel):
 
 @workflow.defn
 class WebhookDeliveryWorkflow:
-    """Delivers one ``webhook_deliveries`` row: what ``webhook_loop.py`` did for it, on a timer.
+    """Delivers one ``webhook_deliveries`` row: what ``webhook_loop.py`` did for it (F.6 deleted
+    it), on a timer.
 
     The row holds the payload, the attempt count and the backoff (``attempt_webhook_delivery``);
     the workflow only waits between attempts. Jobs, batches and crawls write rows; a pipeline

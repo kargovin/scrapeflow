@@ -47,13 +47,13 @@ def is_v2(job: Job) -> bool:
 def next_run(job: Job, now: datetime | None = None) -> datetime | None:
     """When the job next fires, or None when it is not armed.
 
-    v1 keeps its own clock in ``next_run_at``. v2's is the cron itself, the Schedule's spec in UTC;
-    a tick the Schedule drops under SKIP still has this time, it just makes no run.
+    It is the cron's, the Schedule's spec in UTC; a tick the Schedule drops under SKIP still has
+    this time, it just makes no run. A v1 schedule has none: nothing fires it since F.6.
     """
     if job.schedule_status != "active" or job.schedule_cron is None:
         return None
-    if job.schedule_lane == "v1":
-        return job.next_run_at
+    if job.schedule_lane != "v2":
+        return None
     return croniter(job.schedule_cron, now or datetime.now(UTC)).get_next(datetime)
 
 

@@ -3,7 +3,6 @@
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,7 +14,6 @@ from app.constants import NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.dispatch import build_scrape_input, build_scrape_message
 from app.core.result_consumer import _handle_result
-from app.core.scheduler import _dispatch_due_jobs, _recover_stale_pending
 from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -23,27 +21,6 @@ from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
 from app.workflows.job import JobRunInput, JobWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
-
-STALE = timedelta(minutes=15)  # past the 10-minute stale_pending_threshold
-
-
-def _published_run_ids(mock_js: AsyncMock) -> set[str]:
-    return {json.loads(c.args[1].decode())["run_id"] for c in mock_js.publish.call_args_list}
-
-
-@pytest_asyncio.fixture
-async def stale_runs_on_both_lanes(db_user):
-    """One stale pending run per lane, on the same job."""
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        created = datetime.now(UTC) - STALE
-        v1 = JobRun(job_id=job.id, status="pending", lane="v1", created_at=created)
-        v2 = JobRun(job_id=job.id, status="pending", lane="v2", created_at=created)
-        db.add_all([v1, v2])
-        await db.commit()
-    return v1, v2
 
 
 async def test_a_new_run_is_on_v1_unless_told_otherwise(db_user):
@@ -56,18 +33,6 @@ async def test_a_new_run_is_on_v1_unless_told_otherwise(db_user):
         await db.commit()
         await db.refresh(run)
     assert run.lane == "v1"
-
-
-async def test_recovery_republishes_v1_runs_only(stale_runs_on_both_lanes):
-    v1, v2 = stale_runs_on_both_lanes
-    mock_js = AsyncMock()
-
-    await _recover_stale_pending(AsyncSessionLocal, mock_js)
-
-    published = _published_run_ids(mock_js)
-    assert str(v1.id) in published
-    # Temporal owns the v2 run; a NATS copy would scrape it twice.
-    assert str(v2.id) not in published
 
 
 async def test_the_result_consumer_discards_a_result_for_a_v2_run(db_user):
@@ -242,48 +207,6 @@ async def test_the_scrape_input_carries_what_the_nats_message_carries(db_user):
     for field in ("run_id", "engine", "crawl_context", "schema_version"):
         message.pop(field, None)
     assert scrape_input == message
-
-
-@pytest_asyncio.fixture
-async def due_job(db_user):
-    async with AsyncSessionLocal() as db:
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            schedule_cron="* * * * *",
-            schedule_status="active",
-            schedule_lane="v1",
-            next_run_at=datetime.now(UTC) - timedelta(minutes=1),
-            webhook_url="https://hooks.example.com/in",
-        )
-        db.add(job)
-        await db.commit()
-        await db.refresh(job)
-    return job
-
-
-async def test_a_scheduled_run_follows_the_switch(due_job, temporal, lane):
-    lane("v2")
-    mock_js = AsyncMock()
-    await _dispatch_due_jobs(AsyncSessionLocal, mock_js, AsyncMock(return_value=temporal))
-
-    [run] = await _runs(str(due_job.id))
-    assert (run.lane, run.status) == ("v2", "pending")
-    started = [c.kwargs["id"] for c in temporal.start_workflow.call_args_list]
-    assert f"job-run-{run.id}" in started
-    assert str(run.id) not in _published_run_ids(mock_js)
-
-
-async def test_a_scheduled_v2_run_that_cannot_start_is_failed(due_job, lane):
-    lane("v2")
-
-    async def down():
-        raise RuntimeError("engine down")
-
-    await _dispatch_due_jobs(AsyncSessionLocal, AsyncMock(), down)
-
-    [run] = await _runs(str(due_job.id))
-    assert (run.status, run.error) == ("failed", "could not start workflow: engine down")
 
 
 async def _job_with_run(user_id, run_lane) -> tuple[Job, JobRun]:

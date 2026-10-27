@@ -73,8 +73,9 @@ class Job(Base):
 
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # The engine that fires the schedule (F.1): v1's scheduler loop or a Temporal Schedule.
-    # NULL with schedule_status.
+    # The engine that fires the schedule: a Temporal Schedule (v2). 'v1' is a schedule armed
+    # before F.6 deleted v1's loop — nothing fires it until it is resumed or migrated
+    # (scripts/migrate_schedule.py), both of which move it to v2. NULL with schedule_status.
     schedule_lane: Mapped[str | None] = mapped_column(
         VARCHAR(2), CheckConstraint("schedule_lane IN ('v1', 'v2')", name="chk_jobs_schedule_lane")
     )

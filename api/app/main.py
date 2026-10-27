@@ -9,12 +9,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import minio, nats
-from app.core.advisory import maxdeliver_advisory_subscriber
-from app.core.db import AsyncSessionLocal
 from app.core.job_notifier import JobNotifier
 from app.core.redis import close_pool, create_pool
 from app.core.result_consumer import start_result_consumer
-from app.core.scheduler import scheduler_loop
 from app.middleware.correlation import CorrelationIdMiddleware
 from app.routers import (
     admin,
@@ -28,7 +25,6 @@ from app.routers import (
     users,
 )
 from app.settings import settings
-from app.workflows.client import lazy_client
 
 logger = structlog.get_logger()  # structured JSON logger — see settings.py for log level config
 
@@ -74,32 +70,14 @@ async def lifespan(app: FastAPI):
     result_consumer_task = await start_result_consumer(app.state.nats_js, app.state.minio)
     logger.info("NATS result consumer started")
 
-    # Scheduler — dispatches due cron jobs every 60s
-    scheduler_task = asyncio.create_task(
-        scheduler_loop(AsyncSessionLocal, app.state.nats_js, lambda: lazy_client(app.state))
-    )
-    logger.info("Scheduler loop started")
-
-    # Webhook delivery is a workflow per row since F.4 (core/webhook_delivery.py).
-
-    # MaxDeliver advisory subscriber — marks stalled runs as failed when NATS exhausts retries
-    advisory_task = asyncio.create_task(
-        maxdeliver_advisory_subscriber(app.state.nats_client, AsyncSessionLocal)
-    )
-    logger.info("MaxDeliver advisory subscriber started")
+    # Schedules, webhook delivery and stalled runs are Temporal's since F.6: Schedules
+    # (core/schedules.py), a workflow per webhook row (core/webhook_delivery.py), activity timeouts.
 
     yield
 
     # Shutdown — cancel all background tasks together
     result_consumer_task.cancel()
-    scheduler_task.cancel()
-    advisory_task.cancel()
-    await asyncio.gather(
-        result_consumer_task,
-        scheduler_task,
-        advisory_task,
-        return_exceptions=True,
-    )
+    await asyncio.gather(result_consumer_task, return_exceptions=True)
     logger.info("Background tasks stopped")
 
     await app.state.job_notifier.stop()

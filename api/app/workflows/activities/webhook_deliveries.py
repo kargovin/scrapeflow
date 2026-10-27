@@ -1,4 +1,4 @@
-"""Job, batch and crawl webhooks — ``webhook_loop.py``'s attempt, one call per attempt (F.4).
+"""Job, batch and crawl webhooks — the deleted ``webhook_loop.py``'s attempt, one call per attempt (F.4).
 
 The wire contract is unchanged, byte for byte: the row's payload as JSON, HMAC-SHA256 over it with
 the job's or batch's secret (``b""`` when there is none — a crawl has none),

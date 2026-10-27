@@ -100,7 +100,9 @@ def _scrape_lanes() -> dict[str, str]:
                 "block_images": True,
             },
         ).to_nats_bytes(),
-        # core/scheduler.py — both the cron dispatch and stale-pending recovery
+        # A scheduled run's shape. Its producer (core/scheduler.py, the cron dispatch and
+        # stale-pending recovery) was deleted at F.6 — schedules are Temporal's; the shape stays
+        # while v1 workers parse it, and goes with NATS (H.2).
         "scheduled": api.ScrapeMessage(
             artifact_id=RUN_ID,
             run_id=RUN_ID,

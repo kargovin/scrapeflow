@@ -1,11 +1,9 @@
 """F.3 — scripts/migrate_schedule.py: the per-job move between engines, in the safe order."""
 
 import uuid
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from temporalio.client import ScheduleAlreadyRunningError
 
 from app.core.db import AsyncSessionLocal
@@ -112,36 +110,6 @@ async def test_a_dry_run_changes_nothing(db_user):
     assert report.moved
     assert (await _get(job.id)).schedule_lane == "v1"
     client.create_schedule.assert_not_called()
-
-
-async def test_rollback_pauses_the_schedule_then_hands_back_with_a_fresh_clock(db_user):
-    job = await _job(db_user.id, schedule_lane="v2")
-    client = _client()
-
-    report = await migrate_schedule.rollback(AsyncSessionLocal, client, [job.id], apply=True)
-
-    assert report.moved
-    handle = client.get_schedule_handle.return_value
-    assert handle.update.call_args.args[0](MagicMock()).schedule.state.paused is True
-    handle.delete.assert_awaited_once()
-    job = await _get(job.id)
-    assert (job.schedule_lane, job.schedule_status) == ("v1", "active")
-    assert job.next_run_at > datetime.now(UTC)
-
-
-@pytest.mark.parametrize("v2_run,open_ticks", [(True, 0), (False, 1)])
-async def test_rollback_waits_for_a_v2_run_or_an_open_tick(db_user, v2_run, open_ticks):
-    job = await _job(db_user.id, schedule_lane="v2")
-    if v2_run:
-        await _run(job, "v2", "pending")
-    client = _client(running_actions=open_ticks)
-
-    report = await migrate_schedule.rollback(AsyncSessionLocal, client, [job.id], apply=True)
-
-    assert report.waiting and not report.moved
-    client.get_schedule_handle.return_value.delete.assert_not_called()
-    job = await _get(job.id)
-    assert (job.schedule_lane, job.schedule_status) == ("v2", "paused")
 
 
 async def test_reconcile_puts_v2_schedules_and_deletes_orphans(db_user):

@@ -19,10 +19,10 @@ that widens both views, not an edit here.
 Limits come from the user_quotas row; NULL columns fall back to settings defaults.
 
 admit()             — lock the user, then the 429 checks; every API site that inserts a run
-lock_user()         — the lock alone; the scheduler takes it before is_quota_exceeded()
+lock_user()         — the lock alone; scheduled-run admission takes it before is_quota_exceeded()
 check_user_quota()  — raises HTTP 429
 check_scheduled_jobs_quota() — ADR-013's cap on active scheduled jobs; 429, under lock_user()
-is_quota_exceeded() — returns bool; use in scheduler (no HTTP context)
+is_quota_exceeded() — returns bool; for scheduled-run admission (no HTTP context)
 check_storage_quota() — used by result_consumer
 increment_storage_bytes() / decrement_storage_bytes()
                     — called by core/ledger.py only; nothing else moves the counter
@@ -209,7 +209,7 @@ async def check_user_quota(
 async def is_quota_exceeded(user_id: uuid.UUID, db: AsyncSession, quota_type: str) -> bool:
     """Returns True if the quota is exceeded. No HTTP exception raised.
 
-    Used by the scheduler, which has no HTTP context and must not 429.
+    Used by scheduled-run admission (an activity), which has no HTTP context and must not 429.
     """
     exceeded, _ = await _quota_check(user_id, db, quota_type)
     return exceeded

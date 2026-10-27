@@ -91,13 +91,6 @@ def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
         prev = curr
 
 
-def _v1_next_run(cron: str | None, lane: str | None) -> datetime | None:
-    """v1's dispatch clock. A v2 schedule leaves it NULL — v1's loop selects on it."""
-    if cron is None or lane != "v1":
-        return None
-    return croniter(cron, datetime.now(UTC)).get_next(datetime)
-
-
 def _validate_cron(cron: str) -> None:
     if not croniter.is_valid(cron):
         raise HTTPException(
@@ -112,8 +105,8 @@ _SCHEDULE_FIELDS = ("schedule_cron", "schedule_status", "schedule_lane", "next_r
 async def _apply_schedule_changes(job: Job, changes: dict, db: AsyncSession) -> bool:
     """Writes a PATCH's schedule fields onto the job; returns whether it arms a schedule.
 
-    ``schedule_cron: null`` removes the schedule. A job gaining one is armed on today's lane; a
-    job that has one keeps its lane — resuming a v2 schedule never re-arms v1 (ADR-009 16c).
+    ``schedule_cron: null`` removes the schedule. Every armed schedule is a Temporal Schedule: v1's
+    loop is gone (F.6), so a v1 schedule left paused from before moves to v2 when it is resumed.
     Arming checks the cap (ADR-013) under the user's lock; the caller commits.
     """
     was_active = job.schedule_status == "active"
@@ -145,13 +138,9 @@ async def _apply_schedule_changes(job: Job, changes: dict, db: AsyncSession) -> 
         job.schedule_status = changes["schedule_status"]
     if job.schedule_status is None:
         return False
-    if job.schedule_lane is None:
-        job.schedule_lane = settings.schedule_lane
-    job.next_run_at = (
-        _v1_next_run(job.schedule_cron, job.schedule_lane)
-        if job.schedule_status == "active"
-        else job.next_run_at
-    )
+    if job.schedule_lane is None or job.schedule_status == "active":
+        job.schedule_lane = "v2"
+        job.next_run_at = None
     arms = job.schedule_status == "active" and not was_active
     if arms:
         await lock_user(job.user_id, db)
@@ -266,8 +255,7 @@ async def create_job(
         engine=body.engine,
         schedule_cron=body.schedule_cron,
         schedule_status="active" if body.schedule_cron else None,
-        schedule_lane=settings.schedule_lane if body.schedule_cron else None,
-        next_run_at=_v1_next_run(body.schedule_cron, settings.schedule_lane),
+        schedule_lane="v2" if body.schedule_cron else None,
         webhook_url=body.webhook_url,
         webhook_secret=webhook_secret_encrypted if body.webhook_url else None,
         llm_config=body.llm_config.model_dump(mode="json") if body.llm_config else None,

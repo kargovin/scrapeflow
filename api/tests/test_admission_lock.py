@@ -6,7 +6,6 @@ The wiring tests hold the user's lock from outside and show each admission site 
 """
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 
 import pytest_asyncio
 from fastapi import HTTPException
@@ -14,13 +13,12 @@ from sqlalchemy import func, select
 
 from app.core.db import AsyncSessionLocal
 from app.core.quota import admit, lock_user
-from app.core.scheduler import _dispatch_due_jobs
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.user_quota import UserQuota
 
 PARALLEL = 5
-HELD = 2  # well past an unblocked admission, DNS lookups and a cold scheduler pass included
+HELD = 2  # well past an unblocked admission, DNS lookups included
 
 
 @pytest_asyncio.fixture
@@ -158,27 +156,3 @@ async def test_create_crawl_admits_under_the_lock(quota_client, db_user, headers
 
     assert resp.status_code == 429
     assert resp.json()["detail"]["quota_type"] == "concurrent_jobs"
-
-
-async def test_scheduler_admits_under_the_lock(db_user, mock_jetstream):
-    async with AsyncSessionLocal() as db:
-        due = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            schedule_cron="* * * * *",
-            schedule_status="active",
-            schedule_lane="v1",
-            next_run_at=datetime.now(UTC) - timedelta(minutes=1),
-        )
-        db.add(due)
-        await db.commit()
-        await db.refresh(due)
-
-    async with AsyncSessionLocal() as holder:
-        await lock_user(db_user.id, holder)
-        task = asyncio.create_task(_dispatch_due_jobs(AsyncSessionLocal, mock_jetstream))
-        await asyncio.sleep(HELD)
-        assert await _run_count(due.id) == 0, "the scheduler inserted a run under a held lock"
-        await holder.rollback()
-    await asyncio.wait_for(task, timeout=10)
-    assert await _run_count(due.id) == 1

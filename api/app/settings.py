@@ -65,7 +65,6 @@ class Settings(BaseSettings):
 
     # Cron Scheduler
     schedule_min_interval_minutes: int = 5
-    stale_pending_threshold_minutes: int = 10  # re-publish pending runs older than this
 
     # Webhook delivery
     webhook_max_attempts: int = 5
@@ -88,9 +87,6 @@ class Settings(BaseSettings):
     job_lane: Literal["v1", "v2"] = "v1"
     # The same switch for batches (E.2): every run of a batch is on the lane it was created on.
     batch_lane: Literal["v1", "v2"] = "v1"
-    # The same switch for schedules (F.1): v2 = a Temporal Schedule per job. A schedule keeps the
-    # lane it was armed on (jobs.schedule_lane); scripts/migrate_schedule.py moves one.
-    schedule_lane: Literal["v1", "v2"] = "v1"
     # E.0: a v2 batch's scrapes in flight at once; the rest wait in its workflow.
     batch_max_in_flight: int = Field(default=3, ge=1)
     # The same bound for a crawl's pages (E.5), and the pages per run before continue-as-new

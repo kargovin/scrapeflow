@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RUN_HTTP_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.result_consumer import _handle_result
+from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
@@ -749,15 +750,27 @@ async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_jet
     assert response.status_code == 201
 
 
+@pytest.fixture
+def schedule_engine():
+    """A fake Temporal client: a job with a cron puts its Schedule (F.1), never the dev stack's."""
+    client = MagicMock()
+    client.create_schedule = AsyncMock()
+    client.get_schedule_handle = MagicMock(return_value=MagicMock(update=AsyncMock()))
+    app.state.temporal = client
+    yield client
+    app.state.temporal = None
+
+
 # Cron validation unit test
-async def test_create_job_valid_cron_job(client, auth_headers, mock_jetstream):
+async def test_create_job_valid_cron_job(client, auth_headers, mock_jetstream, schedule_engine):
     response = await client.post(
         "/jobs",
         json={"url": "https://domain.com", "schedule_cron": "0 * * * *"},
         headers=auth_headers,
     )
     assert response.status_code == 201
-    # Armed now (F.1): left behind, the dev stack's scheduler would fire it every hour.
+    schedule_engine.create_schedule.assert_awaited_once()
+    # Armed: left behind, it would count against the shared test user's scheduled-jobs cap.
     await _delete_job(response.json()["id"])
 
 
@@ -920,8 +933,8 @@ async def test_list_job_runs_pagination(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_patch_job_schedule_cron(client, auth_headers, mock_jetstream):
-    """PATCH /jobs/{id} with schedule_cron updates cron and recalculates next_run_at."""
+async def test_patch_job_schedule_cron(client, auth_headers, mock_jetstream, schedule_engine):
+    """PATCH /jobs/{id} with schedule_cron arms the job's schedule."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
     )
@@ -937,7 +950,8 @@ async def test_patch_job_schedule_cron(client, auth_headers, mock_jetstream):
         job = await db.get(Job, uuid.UUID(job_id))
         assert job is not None
         assert job.schedule_cron == "0 * * * *"
-        assert job.next_run_at is not None
+        assert (job.schedule_status, job.schedule_lane) == ("active", "v2")
+    schedule_engine.create_schedule.assert_awaited_once()
     await _delete_job(job_id)
 
 

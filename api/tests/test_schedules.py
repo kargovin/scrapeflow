@@ -321,7 +321,6 @@ def temporal():
 
 @pytest.fixture
 def v2(monkeypatch):
-    monkeypatch.setattr(settings, "schedule_lane", "v2")
     monkeypatch.setattr(settings, "job_lane", "v2")
 
 
@@ -356,19 +355,6 @@ async def test_a_job_created_with_a_cron_is_armed_on_v2_with_a_schedule(
     assert schedule.state.paused is False
     # The first run still goes at once, as before.
     assert len(temporal.start_workflow.call_args_list) == 1
-
-
-async def test_a_job_created_with_a_cron_on_v1_is_armed_for_the_v1_loop(
-    client, headers, db_user, temporal, monkeypatch, mock_jetstream
-):
-    monkeypatch.setattr(settings, "schedule_lane", "v1")
-    resp = await _create(client, headers)
-    assert resp.status_code == 201
-    job = await _get(uuid.UUID(resp.json()["id"]))
-
-    assert (job.schedule_status, job.schedule_lane) == ("active", "v1")
-    assert job.next_run_at > datetime.now(UTC)
-    temporal.create_schedule.assert_not_called()
 
 
 async def test_a_schedule_that_cannot_be_armed_pauses_it_and_fails_the_first_run(
