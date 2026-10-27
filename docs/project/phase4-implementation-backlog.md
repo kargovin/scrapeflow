@@ -79,7 +79,7 @@
 | D.3 | `JobWorkflow` + job-lane webhook row activity | ✅ Built 2026-10-12 (local, `5e61413` + `9bd761e`, unreleased) |
 | D.4 | Single dispatch switch in `dispatch.py` (`create_job` + scheduler) + cancel path | ✅ Built 2026-10-12 (local, `de91a44`, unreleased); infra `JOB_LANE=v1` committed locally, **not pushed** (infra `9ef396a`) |
 | D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ✅ **RELEASED + FLIPPED 2026-10-12** (`main` `28c881b..0b4ac9e`; infra `9ef396a` v1, `99ed5c8` **v2**) — **new job runs run on Temporal in prod**; http + playwright verified |
-| **E** | **Batch and crawl cutover** | |
+| **E** | **Batch and crawl cutover** — ✅ **closed 2026-10-27** (owner) | |
 | E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open; k = 3, scrape queue timer 60 s → 5 min. Open: robots `Crawl-delay` |
 | E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ✅ **RELEASED 2026-10-27** with E.2 (`410f015`; infra `0f71515` `REDIS_URL`) |
 | E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ✅ **RELEASED 2026-10-27** with E.2 (`ba18cf3`); budget audit after rollout: 0 versions declare a budget, 0 short |
@@ -89,8 +89,8 @@
 | E.4 | Crawl fetch-side activities: robots + sitemap on `httpx`, link extraction port | ✅ Built 2026-10-27 (local, `c36bf95`, unreleased) — `crawl` queue on the Playwright worker's Temporal Deployment |
 | E.5 | `CrawlWorkflow`: BFS via activities, continue-as-new, per-page ledger + ceiling | ✅ Built 2026-10-27 (local, `c36bf95`, unreleased) |
 | E.6 | Crawl compensating gate (no v1 reference exists) | ✅ Built + **PASSED on compose** 2026-10-27 (`aefc1d4`), http and playwright |
-| E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | 🔧 **Ready to release** — `coordinator/` deleted (`56cff93`); infra `bf591bc` committed locally, not pushed; see E.7 runbook |
-| E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ✅ Built 2026-10-27 (local, `6c1b847`, unreleased; owner: build before the E.7 release) — **click-through not done** |
+| E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | ✅ **RELEASED 2026-10-27** (`main` `faa1f83..261f931`; infra `bf591bc`) — **crawls run on `CrawlWorkflow` in prod; the coordinator is gone**; owner verified a crawl + the SPA |
+| E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ✅ **RELEASED 2026-10-27** with E.7 (`6c1b847`) — owner clicked through in prod (crawl + batch results) |
 | **F** | **Schedule and webhook cutover** | |
 | F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ⬜ |
 | F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ⬜ |
@@ -2320,6 +2320,20 @@ No new env vars (defaults: `CRAWL_MAX_IN_FLIGHT` 3, `CRAWL_PAGES_PER_RUN` 100, `
 
 **Rollback:** a code revert (ff `main` to a revert commit) + re-adding the infra manifests. There is
 nothing working to roll back *to* — v1 crawls never completed (13a) — so prefer a forward fix.
+
+**Released** *(2026-10-27; owner: "lets do e7; skip audit as crawl never ran before as it was broken")*.
+Step 0 skipped by the owner (no crawl ever ran in prod). Infra `bf591bc` pushed first → Flux pruned
+`scrapeflow-coordinator` (Deployment, pods, ImageRepository, ImagePolicy) within ~10 s. `develop`
+pushed; the owner ran the `main` ff `faa1f83..261f931`. CI: `replay` 32 passed (31 histories),
+`build-api` and `build-playwright-worker` green. Flux bumped api, workflow-worker, playwright-worker and
+playwright-worker-temporal to `261f931`; all four rollouts complete; api log `Running upgrade
+56ab6118641d -> 532e93f0d629`; workflow worker started clean; the new Temporal Playwright pod logged
+`temporal_worker_started … crawl_queue=crawl`; the NATS Playwright pod resubscribed (one `fetch_error`
+came from the old pod during its drain). **Verify (owner):** a crawl of a public site worked end to end,
+and the SPA's Crawls and Batches pages showed the results — E.10's click-through, done in prod.
+⚠️ My read-only check of the crawl's rows (psql on the Postgres pod) was **refused by the permission
+classifier as a production read**, so page counts, ledger bytes and the workflow history were not
+recorded here. **Group E closed by the owner.**
 
 #### E.10 — Batches + crawls in the SPA
 

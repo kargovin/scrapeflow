@@ -836,9 +836,9 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
 error anywhere) — **but entirely latent: no crawl has ever been run in production**
 **Discovered:** 2026-08-23 (tracing ADR-009 §9's option-(a) bridge against the live NATS stream)
 **Status:** Open — **WILL NOT FIX on the v1/NATS path.** See *Disposition*.
-> 🔧 **Dissolves at E.7 (prepared 2026-10-27, unreleased).** `coordinator/` is deleted on `develop`
-> (`56cff93`) and crawls run on `CrawlWorkflow` (`c36bf95`), whose result handling is the workflow
-> itself. Close as **dissolved, not fixed** when E.7 ships.
+> ⛔ **CLOSED as dissolved, not fixed — 2026-10-27 (E.7, `261f931`).** `coordinator/` is deleted and
+> its Deployment pruned from prod; crawls run on `CrawlWorkflow`, whose result handling is the
+> workflow itself. Owner verified a crawl completing in prod.
 
 ### What happens
 
@@ -1057,11 +1057,11 @@ unsubscribed is gone; that is another argument for the client-side re-read in §
 
 ## BUG-010 — URLs discovered *during* a crawl are never SSRF-checked, and no worker checks either
 
-> 🔧 **Part 1 built 2026-10-27 (E.3, `c36bf95`, unreleased):** every URL entering a crawl's frontier —
+> ✅ **Part 1 FIXED — deployed 2026-10-27 (E.3, released with E.7 `261f931`):** every URL entering a crawl's frontier —
 > seed, extracted link, sitemap entry — and every sitemap *file* is SSRF-checked at admission
 > (`activities/crawls.py`); a refused one is kept as a `dropped` row, counted in `crawls.dropped`, and
-> the crawl continues. Proven on compose by E.6's bait (`internal.crawlfixture.com`). Close part 1
-> when E.7 ships. The worker-side check stays a separate cross-lane item. ⚠️ See **BUG-024** — the
+> the crawl continues. Proven on compose by E.6's bait (`internal.crawlfixture.com`). The worker-side
+> check (part 2) stays a separate, open cross-lane item. ⚠️ See **BUG-024** — the
 > check itself lets some non-public ranges through.
 
 **Severity:** High by shape, latent by accident — a crawled site can choose URLs the platform
@@ -1266,8 +1266,8 @@ this, and P9 was a fresh visit on 2026-09-11.)*
 
 ## BUG-012 — `reenqueue_stalled` deletes `crawl_pages` while `crawl_queue` still references them; the coordinator cannot start
 
-> 🔧 **Dissolves at E.7 (prepared 2026-10-27, unreleased):** `reenqueue_stalled` is deleted with
-> `coordinator/` (`56cff93`). Close as **dissolved** when E.7 ships.
+> ⛔ **CLOSED as dissolved — 2026-10-27 (E.7, `261f931`):** `reenqueue_stalled` was deleted with
+> `coordinator/`, and the Deployment is gone from prod.
 
 **Severity:** High (the coordinator crash-loops on boot and never reaches its loops — a total
 crawl-lane outage, not a degradation)
@@ -2236,7 +2236,7 @@ still passes. One test per range. Not dissolved by Temporal.
 batch with a `webhook_url`** on either lane.
 **Discovered:** 2026-10-27 — the E.5 tests left a `crawl.failed` row in the shared dev DB and
 `test_admin_list_webhook_deliveries` failed on it.
-**Status:** ✅ **Fixed 2026-10-27 (`f66ec0b`, unreleased — ships with E.7).**
+**Status:** ✅ **CLOSED — fixed `f66ec0b`, deployed 2026-10-27 with E.7 (`261f931`).**
 
 `AdminWebhookDeliveryResponse` declared `job_id` and `run_id` as required UUIDs. A batch's row has no
 `job_id`; a crawl's has neither, so validating the page raised and the whole list 500'd. Both are now

@@ -151,6 +151,18 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🚀 **E.7 RELEASED — GROUP E CLOSED (2026-10-27, fifth session).** Owner: "lets do e7; skip audit as crawl
+never ran before as it was broken" → infra `bf591bc` pushed (by me — allowed this time); Flux pruned the
+coordinator in ~10 s; `develop` pushed; **the owner ran the `main` ff `faa1f83..261f931`**. CI `replay` 32
+passed, `build-api` + `build-playwright-worker` green; four Deployments on `261f931`, migration 4.7 applied,
+`crawl` queue polled. **Owner verified** a public crawl end to end and clicked through the Crawls and
+Batches pages (E.10 done in prod). Owner: "good to close sec E". **Deployed code is `261f931`.**
+BUG-008 / BUG-012 closed as dissolved, BUG-010 part 1 fixed, BUG-025 closed. ⚠️ My psql read of the
+crawl's rows was refused by the classifier ("Production Reads") — no server-side numbers recorded.
+⚠️ GitHub reported **64 Dependabot alerts** on `main` at the push (4 critical) — up from 0 after the
+2026-09-19 sweep; not looked at. **Next: Group F — F.0** (ADR-013 §5's three open parameters), then
+BUG-023 before F.1. BUG-024 (SSRF admits `100.64/10`) waits on the owner.
+
 🔧 **E.3–E.6 + E.10 BUILT; E.7 READY TO RELEASE (2026-10-27, fourth session).** Owner: "plan and build
 from e3-e6; no need to show me the plan; build it and get ready to deploy at e7; if possible also build
 e10 before we deploy at e7" — built under that delegation, no walkthrough. **Nothing pushed.** `develop`
@@ -1464,6 +1476,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-27 (E.7 release close):** `main` = `origin/main` = `develop` = `origin/develop` = `261f931` (deployed) before this docs closeout, which sits on `develop`. Infra `main` = `origin/main` = `bf591bc` (+ Flux's tag bumps). `tmp/` untracked, pre-existing.
 - **2026-10-27 (E.3–E.7 prep session close):** `develop` = `f66ec0b` + docs closeout, **not pushed** (6+ ahead of `origin/develop`); `main` = `origin/main` = `faa1f83` (deployed). Infra `main` = `bf591bc`, **1 ahead** of `origin/main` (`538ea8c`), not pushed. Compose: `crawl-fixture` (profile `gate`) up; api, workflow-worker and both Temporal scrape workers on the `crawl-fixture` network. `tmp/` untracked, pre-existing.
 - **2026-10-27 (E.2 session close):** `main` = `origin/main` = `faa1f83` (deployed); `develop` = docs closeout on top, pushed. Infra `main` = `origin/main` = `538ea8c` (`BATCH_LANE=v2`). `tmp/` untracked, pre-existing.
 - **2026-10-27 (E.1 session close, fetched):** `develop` = `71e43fa` + docs closeout, **not pushed** (~29 ahead of `origin/develop`); `main` = `origin/main` = `0b4ac9e` (deployed). Infra `main` 2 ahead of `origin/main` (`0f71515`, `1e38aaa`), 0 behind. `tmp/` untracked, pre-existing.
@@ -1618,6 +1631,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-27 *(clock, fifth)* | **🚀 E.7 RELEASED, Group E closed.** Infra push (coordinator pruned), owner's `main` ff `faa1f83..261f931`, rollouts + migration 4.7 watched; owner verified a crawl and the SPA pages. Bugs closed in the docs. | docs closeout; infra `bf591bc` pushed |
 | 2026-10-27 *(clock, fourth)* | **🔧 E.3–E.6 + E.10 BUILT, E.7 READY.** Owner: "plan and build from e3-e6 … get ready to deploy at e7; if possible also build e10". Crawl frontier + admission, crawl-queue activities on the Playwright worker, `CrawlWorkflow`, E.6 fixture gate (passed on compose, both engines), `coordinator/` deleted (+ infra local), SPA batches/crawls pages; BUG-024 filed, BUG-025 fixed. 695 API tests, corpus 31. | `c36bf95`, `aefc1d4`, `56cff93`, `6c1b847`, `f66ec0b`; infra `bf591bc` |
 | 2026-10-27 *(clock, third)* | **🚀 E.2 RELEASED + FLIPPED.** Owner: "lets do e2". Owner ran infra push, `main` ff (`0b4ac9e..faa1f83`) and the flip push (`538ea8c`); I watched CI, rollouts, ran the budget audit (clean), the drain gate (clean) and checked the owner's 3-URL batch end to end (3/0, v2, NATS untouched). | infra `538ea8c` + this closeout |
 | 2026-10-27 *(clock, later)* | **🔧 E.1 BUILT, E.2 READY.** Owner: "build it and get ready to deploy for e2 by making changes in infra repo too". `BatchWorkflow` + `finish_batch` + batch-aware job-run activities + `BATCH_LANE` + unified cancel; 24 tests (636), 26/26 mutations, 3 replay histories (26), live on compose. Infra `1e38aaa` `BATCH_LANE: 'v1'` (local). Found: E.9's pre-release audit cannot run before the release — moved to E.2 step 1 | `71e43fa` + infra `1e38aaa` + docs closeout |
