@@ -2527,6 +2527,12 @@ to v2 when resumed (or by `migrate_schedule --all`); a v1 row left **active** fi
 `JOB_LANE=v1` / `BATCH_LANE=v1` runs lose stale-pending recovery and the MaxDeliver advisory (their
 webhooks still go, via the sweep). G deletes them. Suite **757** at this commit (+ F.7: 766).
 
+**Mutation pass (2026-10-27, before release, owner's ask): 55/55 caught** across F.1–F.7 (admission per meter,
+the lock, the tick workflow, the Schedule's policies, arming/disarming and the cap, the interlock, the
+migrate script, the webhook attempt/backoff/sweep/starts, the meters, the reads). Two real gaps found and
+closed by tests: the child's `ParentClosePolicy.ABANDON`, and a resume one below the cap (the job's own row
+autoflushes as `active` before the count). Suite **767**.
+
 **Ships (one release, F.1–F.7):** api image only (also the workflow worker) — `69fcd7b..56a06e6` +
 docs. **One Alembic revision** (4.8 `437442ce59b2`: five `ADD COLUMN`s, one CHECK, the v1 backfill;
 the quota views read none of them). **No infra change, no new env vars** (`DEFAULT_QUOTA_SCHEDULED_JOBS`

@@ -6,6 +6,7 @@ from datetime import timedelta
 from itertools import pairwise
 
 from temporalio import activity, workflow
+from temporalio.api.enums.v1 import ParentClosePolicy as ApiParentClosePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
@@ -27,6 +28,7 @@ from app.workflows.scheduled_job import (
 )
 
 JOB_ID = "11111111-1111-1111-1111-111111111111"
+PARENT_CLOSE_POLICY_ABANDON = ApiParentClosePolicy.PARENT_CLOSE_POLICY_ABANDON
 
 
 def _run(run_id: str) -> JobRunInput:
@@ -122,6 +124,13 @@ async def test_an_admitted_tick_runs_its_job_as_a_child_named_after_the_run():
     [(child_id, child_input)] = CHILD["runs"]
     assert child_id == f"job-run-{ask.run_id}"
     assert child_input == _run(ask.run_id)
+    # The run outlives a terminated tick: its row is the run's record.
+    [started] = [
+        e.start_child_workflow_execution_initiated_event_attributes
+        for e in h.history.events
+        if e.HasField("start_child_workflow_execution_initiated_event_attributes")
+    ]
+    assert started.parent_close_policy == PARENT_CLOSE_POLICY_ABANDON
 
 
 async def test_a_full_concurrency_meter_waits_on_a_doubling_timer_with_one_run_id():

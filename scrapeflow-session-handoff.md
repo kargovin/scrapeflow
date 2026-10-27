@@ -165,7 +165,12 @@ Detail and every call: implementation backlog F.1–F.7 *Built* + the **F.6 runb
 - **Found and fixed:** **BUG-026** (create with a cron never armed a schedule — 176 dev rows left unarmed on purpose),
   **BUG-027** (the admin quota form's GET never existed), **BUG-028** (per-user webhook meters counted jobs only).
 - ⚠️ **After the F.6 release the v1 lanes are no working rollback** (no stale-pending recovery, no MaxDeliver
-  advisory); G deletes them. ⚠️ **Not done:** a mutation pass; the F.7 click-through (no browser); a prod check.
+  advisory); G deletes them. ⚠️ **Not done:** the F.7 click-through (no browser); a prod check.
+- ✅ **Mutation pass (owner: "do a mutation test before we do a release"): 55/55 caught**, each by its named test.
+  First run 51/55: two were harness errors (an emptied `if` body → syntax error; now `pass`), two were real gaps,
+  closed by new tests — the scheduled run's `ParentClosePolicy.ABANDON` (asserted on the history) and resuming
+  **one below the cap** (the row is already `active` in the session when the count autoflushes, so without
+  `exclude_job_id` that user could never resume). Clean after: no orphan users, objects or Schedules. Suite 767.
 - ⚠️ The machine's clock jumped ~2 h mid-session (sleep?) — the sweep Schedule shows 22 `missed_catchup` for it.
 - **Compose left clean:** test jobs deleted (the e2e one through the API), objects released through the ledger,
   test users and the ad-hoc webhook receiver container removed. The workflow worker runs the final code.

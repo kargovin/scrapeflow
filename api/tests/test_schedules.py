@@ -539,6 +539,22 @@ async def test_resuming_past_the_cap_is_429(client, headers, db_user, temporal, 
     assert (await _get(paused.id)).schedule_status == "paused"
 
 
+async def test_resuming_one_below_the_cap_is_allowed(
+    client, headers, db_user, temporal, v2, mock_jetstream
+):
+    # The row is already `active` in the session when the count runs (autoflush): without
+    # excluding it, a user one below the cap could never resume.
+    await _quota(db_user.id, scheduled_jobs_limit=1)
+    paused = await _with_run(await _job(db_user.id, schedule_status="paused"))
+
+    resp = await client.patch(
+        f"/jobs/{paused.id}", json={"schedule_status": "active"}, headers=headers
+    )
+
+    assert resp.status_code == 200
+    assert (await _get(paused.id)).schedule_status == "active"
+
+
 async def test_adding_a_cron_past_the_cap_is_429_but_changing_one_is_not(
     client, headers, db_user, temporal, v2, mock_jetstream
 ):
