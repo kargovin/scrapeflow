@@ -151,6 +151,30 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🔧 **E.1 BUILT; E.2 READY TO RELEASE (2026-10-27, later session).** `develop` `71e43fa` (code) + docs
+closeout. Infra `1e38aaa` (`BATCH_LANE: 'v1'`) on top of `0f71515` (`REDIS_URL`), **both committed
+locally, not pushed** (infra 2 ahead, 0 behind at the fetch). **Nothing pushed**; develop ~29 ahead of
+`origin/develop`. Detail: backlog E.1 *Built* + **E.2 runbook**.
+
+- **Owner's ask:** "build it and get ready to deploy for e2 by making changes in infra repo too" — no
+  walkthrough; I declined the mentor-mode default because "build it" was explicit.
+- **Landed:** `app/workflows/batch.py` (`BatchWorkflow`, `batch-{id}`, child `JobWorkflow` per item,
+  k = `BATCH_MAX_IN_FLIGHT` 3), `activities/batches.py` (`finish_batch`), `core/batch_progress.py`
+  (lock / recount / notify), batch-aware job-run activities (owner + LLM from the batch, item mirror,
+  absolute recount, `batch_status`), `dispatch.start_batch` / `fail_unstarted_batch` / `cancel_batch` /
+  `cancel_batch_workflow` / `build_batch_scrape_input`, `BATCH_LANE` in `create_batch`, unified cancel route.
+- **Calls made (reversible):** children are the job lane's own `JobWorkflow`; counters recounted, never
+  incremented; the parent closes the batch. v1 knock-ons: cancel now also cancels a `processing` run, and
+  notifies `batch_status`.
+- **Verified:** 24 new tests, full suite 636; 26/26 mutations caught; corpus 23 → 26; **live on compose**
+  (`BATCH_LANE=v2` override, `.env` untouched): partial failure 4/1 with the webhook row, k-bound visible
+  in start times, playwright cancel → all `CANCELED`, nothing charged, Redis clean. Compose back on `v1`.
+- ⚠️ **Found:** E.9's "run `scripts.audit_pipeline_budgets` in prod **before** the release" is impossible —
+  the script is not in the deployed image. Corrected in the backlog: run it after E.2 step 1, before the flip.
+- **Next (owner):** run **E.2** — `git pull --rebase` + push infra first, ff `main` to `develop`, audit,
+  drain gate, flip `BATCH_LANE` → `'v2'`, verify one 3-URL batch with `curl`. Then E.3 (crawl frontier).
+  ADR-013 §5 and BUG-023 still before F.1.
+
 🔧 **E.9 BUILT (2026-10-27).** `develop` `ba18cf3` (code) + backlog/closeout. **Nothing pushed** (develop ~26
 ahead of `origin/develop`; infra still 1 ahead — `0f71515`, `REDIS_URL`). Detail: backlog E.9 *Built*.
 
@@ -1396,6 +1420,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-27 (E.1 session close, fetched):** `develop` = `71e43fa` + docs closeout, **not pushed** (~29 ahead of `origin/develop`); `main` = `origin/main` = `0b4ac9e` (deployed). Infra `main` 2 ahead of `origin/main` (`0f71515`, `1e38aaa`), 0 behind. `tmp/` untracked, pre-existing.
 - **2026-10-13 (E.0 session close):** `develop` = `40dbea9` + this closeout, docs only, **not pushed**; `main` = `origin/main` = `0b4ac9e` (deployed). Infra repo untouched. `tmp/` untracked, pre-existing.
 - **2026-10-12 (C.14 release, verified after fetch):** `develop` = `main` = `origin/main` = `origin/develop` = `1793c60` before this docs closeout. **Deployed code is `1793c60`.** Infra repo untouched (Flux's own tag bumps only).
 - *Historical:* **2026-10-11, third session close (verified after fetch):** `develop` = `c2590af` (C.12) + this docs closeout, **not pushed** — 12 ahead of `origin/develop` (`071f6f2`) before the closeout, 0 behind. `main` = `origin/main` = `6675f17`, unchanged. Infra repo untouched.
@@ -1547,6 +1572,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-27 *(clock, later)* | **🔧 E.1 BUILT, E.2 READY.** Owner: "build it and get ready to deploy for e2 by making changes in infra repo too". `BatchWorkflow` + `finish_batch` + batch-aware job-run activities + `BATCH_LANE` + unified cancel; 24 tests (636), 26/26 mutations, 3 replay histories (26), live on compose. Infra `1e38aaa` `BATCH_LANE: 'v1'` (local). Found: E.9's pre-release audit cannot run before the release — moved to E.2 step 1 | `71e43fa` + infra `1e38aaa` + docs closeout |
 | 2026-10-13 *(clock)* | **📐 ADR-010 reviewed and Accepted; ADR-013 drafted; BUG-023 filed.** Owner: "explain ADR10 in simpler words" → plain walkthrough with diagrams. Owner challenged §1's month-long parking (backlog pile-up, 10,000 jobs) → option 1, `monthly_runs` skips; found the quota check-then-insert race → BUG-023. Owner: per-user scheduled-jobs cap; `SKIP` over `BUFFER_ONE` (timelines for parked vs overrun) → ADR-013 Draft (SDK defaults verified in the api container). §2: `tldextract` 5.4.0 tested in a throwaway container → three requirements; sitemap-file gating, submitted-seed scope, drop counts agreed. Summary of both sections, then promotion. | `4723627`, `9930660`, `74da031`, `a27bee6` + this closeout |
 | 2026-10-12 *(clock, later)* | **BUG-022 prompt fix built, verified live (0/20), released (`cf9d2fb`); R6 rerun PASS; secrets closed; C.12 click-through + fix released (`28c881b`); stuck run closed.** Owner: "lets fix up this bug first" → extraction instruction in the user turn (not system — templates); owner's Modal token rotated (secret `--force` + rollover; README `7cb360e` in `scrapeflow-modal`), new LLM key `6f85a1a0…`; leaked `sf_` key confirmed revoked by hash. Click-through: pipeline outputs lacked Preview/Download → shared `ContentViewer`. Stuck run `8efa14c6…` closed and pipeline `60c31b42…` soft-deleted by SQL at the owner's word. Owner released `28c881b` and closed the session without a rollout watch. | `fa24fee`, `9173837`, `cf9d2fb`, `d96193c`, `b405c00`, `b61632b`, `28c881b`, `5800c7e` + this closeout |
 | 2026-10-12 *(clock)* | **🚀 C.13 built, C.14 released, BUG-022 filed/fixed/released, R6 PASS.** Owner: "go with patched and the replay test; build c13 and do c14". ADR-012 (Draft), replay corpus + CI gate, `PIPELINES_ENABLED`; owner ran the `main` ff (`6675f17..1793c60`). R6's first runs found BUG-022 → fixed, released (`03f72f8`). R6 script fixes (`7e1cfaf`). Loop investigation against the owner's Modal endpoint (token file deleted after): system instruction 0/20 vs 4/10, not built. Owner's full rerun: **R6 PASS**, recorded in PRD-016, backlog C.14, `CLAUDE.md`, `open-bugs.md`, this file. | `c86a9d9`, `3325534`, `626192b`, `1793c60`, `4965e9d`, `03f72f8`, `c62f5a4`, `7e1cfaf`, `3dae1fd`, `def7156` + this closeout |

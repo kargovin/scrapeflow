@@ -82,9 +82,9 @@
 | **E** | **Batch and crawl cutover** | |
 | E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open; k = 3, scrape queue timer 60 s → 5 min. Open: robots `Crawl-delay` |
 | E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ✅ Built 2026-10-15 (local, `410f015`, unreleased; not yet called by any workflow — E.9 wires it); infra `REDIS_URL` on the workflow-worker committed locally, **not pushed** |
-| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ✅ Built 2026-10-27 (local, `ba18cf3`, unreleased; ships with E.2). Before release: push infra `0f71515` (`REDIS_URL`) and run `scripts.audit_pipeline_budgets` in prod |
-| E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ⬜ |
-| E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ⬜ |
+| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ✅ Built 2026-10-27 (local, `ba18cf3`, unreleased; ships with E.2). Push infra `0f71515` (`REDIS_URL`) with the release; `scripts.audit_pipeline_budgets` runs **after** rollout (E.2 step 1) |
+| E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ✅ Built 2026-10-27 (local, `71e43fa`, unreleased); infra `BATCH_LANE=v1` committed locally, **not pushed** (infra `1e38aaa`) |
+| E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ⬜ **Ready** — runbook below (E.2); ships E.8 + E.9 + E.1 |
 | E.3 | Crawl frontier: table shape + admission activity (SSRF, eTLD+1, dedup index) | ⬜ |
 | E.4 | Crawl fetch-side activities: robots + sitemap on `httpx`, link extraction port | ⬜ |
 | E.5 | `CrawlWorkflow`: BFS via activities, continue-as-new, per-page ledger + ceiling | ⬜ |
@@ -1968,7 +1968,7 @@ playwright 1,503 s.
 - **Saved versions with a declared budget** may now be shorter than their blocks need (budgets are only
   checked at save; versions never change) — such a run is not refused, its blocks' `schedule_to_close`
   is cut. `api/scripts/audit_pipeline_budgets.py` (read-only) lists them; **run it in prod before the
-  release**: `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m
+  release** (⚠️ corrected 2026-10-27: the script is not in the pre-release image — run it right after E.2's step 1, before the flip): `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m
   scripts.audit_pipeline_budgets`. Dev has none. Versions with no declared budget are unaffected
   (computed at trigger).
 
@@ -1989,9 +1989,119 @@ slot per batch (already the view's rule). `dispatch.py`'s batch builder feeds th
 **Tests:** N children; never more than *k* in flight; partial failure totals; cancel fans out.
 **Depends on:** D.3, E.0, E.9 (children are `JobWorkflow`s, which carry the limiter)
 
+**Built** *(2026-10-27; local, unreleased — owner: "build it and get ready to deploy for E.2", no
+walkthrough)*. `develop` `71e43fa`; infra `1e38aaa` (`BATCH_LANE: 'v1'` on the api Deployment).
+
+- **`BATCH_LANE=v1|v2`** (`settings.batch_lane`, default `v1`) — `create_batch` writes it on every run
+  of the batch in the insert transaction; nothing reads the setting after that. `JOB_LANE` no longer
+  touches batches. `batch_max_in_flight` (default **3**, ≥ 1) is *k*, read at dispatch and carried in
+  the workflow input (a setting read in the body would not be deterministic).
+- **`BatchWorkflow`** (`app/workflows/batch.py`, id **`batch-{batch_id}`**, `REJECT_DUPLICATE`) — one
+  child **`JobWorkflow`** per item (`job-run-{run_id}`, `REJECT_DUPLICATE`, `workflow` queue),
+  `wait_condition(in_flight < k)` before each start, fan-in = await all, then **`finish_batch`**. A
+  failed child is logged and not re-raised: the child has written its own outcome. Inputs come from
+  **`dispatch.build_batch_scrape_input`**, the twin of `build_batch_scrape_message` (a test pins equal
+  values).
+- **The children are the job lane's own workflow, unchanged** — so they carry E.9's host slot, the
+  5-min scrape timer, the LLM step and every mirror rule. What changed is the five **activities**
+  (`activities/job_runs.py`): for a run with `job_id` null they take the owner and the LLM step from the
+  **batch**, copy each status to the **item** (`processing` → item stays `running`), **recount** the
+  batch's `completed`/`failed` from its items and notify **`batch_status`** with absolute totals +
+  `item_url`/`item_status` (`app/core/batch_progress.py`, 11d). No per-item webhook. The storage-wall
+  path now uses the module's own discard + notify instead of v1's `handle_storage_quota_exceeded` — same
+  outcome on a job run (the job suite is unchanged and green), and on a batch run it fails the item and
+  leaves closing the batch to `finish_batch`.
+- **`finish_batch`** (`activities/batches.py`) — one transaction: any run still active (its child never
+  started, or was terminated) is **failed** `internal error: the run's workflow ended without an outcome`
+  — or **cancelled** on a cancel; recount; `completed` if every item completed, else `partial_failure`;
+  the **`batch.completed`** webhook row (dedup key: the first item's run); notify. A batch already closed
+  is returned as it is (a retry); one the API cancelled stays `cancelled`, no webhook.
+- **Cancel** (`DELETE /batch/{id}`, both lanes, `dispatch.cancel_batch`): rows first — conditional
+  `UPDATE job_runs … WHERE status IN (pending, running, processing)`, items `pending/running` →
+  `cancelled`, batch `cancelled`, **a `batch_status` notify** — then, for a v2 batch, a best-effort cancel
+  of `batch-{id}`; the workflow passes it to the children in flight (each stops at its next boundary and
+  drops what it had not charged) and starts no more. A cancel that loses the race with `finish_batch` →
+  409.
+- **Locks: run → batch → item** everywhere (mirrors, `finish_batch`, the cancel route). The recount reads
+  after the batch lock, so it sees an item another child committed meanwhile.
+- **A v2 batch whose workflow cannot start**: every run and item `failed` `could not start workflow: …`,
+  batch `partial_failure` + its `batch.completed` row, notify, **503** `{batch_id, error}` — the job
+  lane's rule (D.4 call 5).
+- `create_batch`'s `queued → running` is now conditional on `queued`, so a fast v2 batch that already
+  closed is not reopened.
+
+**Calls made (reversible):** children are real `JobWorkflow`s rather than a batch-only body (one body,
+one set of mirror rules, the limiter for free); counters are recounted, never incremented; the parent
+closes the batch, not the last mirror (no "last one out" race between children).
+
+**Knock-ons on v1 (deliberate, small):** the cancel route now also cancels a run in its LLM step
+(`processing`) — v1 used to leave it running, and its result then overwrote the cancelled item — and it
+notifies `batch_status`, so a watcher sees `cancelled` at once instead of at its 300 s timeout.
+
+**Verified.** 24 new tests (`tests/test_workflows_batch.py`: workflow on mocked activities, activities on
+the real DB, one end-to-end on the real activities + real limiter, router/lane/cancel), **full suite
+636**; **26 mutations, every one caught by its named test** (one — the recount — only after its test was
+given unequal counts). Corpus 23 → **26** (`harness_batch_completed`, `…_child_failed`,
+`…_cancelled_mid_scrape`; the parent's history is ~10 events per child, so a 500-URL batch is ~5,000 —
+far below 51,200). **Tried live on compose** (`BATCH_LANE=v2` via a temporary override file, `.env`
+untouched; workflow worker restarted on the new code): 4 × `example.com` + `expired.badssl.com` →
+`partial_failure` 4/1, three children started at once and the 4th and 5th as slots freed, one
+`batch.completed` row, 4 ledger rows, workflow `COMPLETED`, children 4 `COMPLETED` + 1 `FAILED`; a
+3-URL playwright batch cancelled mid-render → batch/runs/items `cancelled`, workflow and all three
+children `CANCELED`, nothing charged; no `host:` keys left in Redis. Test user and its objects removed;
+compose back on `v1`.
+
 #### E.2 — 🚀 Batch cutover release
 
-**Runbook:** as D.5 with `BATCH_LANE`; drain gate on the batch flow; one 3-URL batch verified.
+**Ships:** the api image (also the workflow worker's) — E.8 (`410f015`), E.9 (`ba18cf3`), E.1
+(`71e43fa`) and the docs since `0b4ac9e`. **`api/` only; no Alembic revision**; one new dependency
+(`tldextract` 5.4.0). No scrape/LLM worker image. Infra: **`0f71515`** (`REDIS_URL` on the
+workflow-worker — without it the limiter fails open on every scrape, silently but for a log line) and
+**`1e38aaa`** (`BATCH_LANE: 'v1'`), both committed locally, **not pushed**.
+
+**Runbook** (owner-run; ⚠️ `git pull --rebase` in the infra repo first — Flux's image-automation
+commits land on its `main`):
+1. **Code lands dormant.** Push infra (`0f71515` + `1e38aaa`) **first** — the env change rolls the
+   current images, harmless — then ff `main` to `develop` and push. Watch: CI `replay` (26 histories)
+   and `build-api` green; api + workflow-worker rollouts on the new SHA; the workflow worker's startup
+   log clean (it now registers `BatchWorkflow` + `finish_batch` + the host-slot activities). Confirm:
+   `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -c "from app.settings import settings; print(settings.batch_lane, settings.batch_max_in_flight)"`
+   → `v1 3`, and `kubectl -n scrapeflow exec deploy/scrapeflow-workflow-worker -c workflow-worker -- printenv REDIS_URL`.
+   **Then the budget audit** — ⚠️ correction to E.9's note: the script is new in E.9, so it is not in the
+   image running before this release and cannot be run "before" it; run it now, while the batch lane is
+   still `v1`:
+   `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m scripts.audit_pipeline_budgets`.
+   Any `SHORT` line = a saved version whose blocks will be cut; fix by saving a new version with a
+   larger (or no) budget. Job runs pick up the host slot from this point (`patched("host-slot")`) —
+   watch the workflow worker for `Host slot acquire failed` (= Redis unreachable, failing open).
+2. **Drain gate** (16b) on the batch flow:
+   `SELECT count(*) FROM job_runs WHERE batch_item_id IS NOT NULL AND lane = 'v1' AND status IN ('pending','running','processing')`
+   = 0, and from the `nats-box` pod `nats --server nats://scrapeflow-nats:4222 consumer info SCRAPEFLOW
+   <durable> --json` → `num_pending` 0 and `num_ack_pending` 0 for `go-worker`,
+   `python-playwright-worker`, `python-llm-worker`, `api-result-consumer`. (Jobs are on v2 since D.5,
+   so only a v1 batch can hold these.)
+3. **Flip:** `BATCH_LANE` → `'v2'` in `clusters/k3s-server/scrapeflow/app/api.yaml`, push (an api
+   rollout, no rebuild). Confirm with the step-1 `print` → `v2 3`.
+4. **Verify:** one **3-URL batch** with `curl` and an API key, in your own terminal (the SPA cannot
+   create batches):
+   `curl -s -X POST https://scrapeflow.govindappa.com/batch -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d '{"urls":["https://example.com/?a","https://example.com/?b","https://example.com/?c"]}'`,
+   then `GET /batch/{id}` until `completed` (3/0). Each run's row says `lane = 'v2'`; the Temporal UI
+   (port-forward `scrapeflow-temporal-ui`) shows `batch-<id>` **Completed** with three `job-run-*`
+   children **Completed**; NATS `go-worker` `delivered` did not move; `storage_objects` has 3 rows for
+   the runs. The three scrapes run ≤ 2 at a time, ≥ 1 s apart (one host). Optional: a playwright batch
+   cancelled mid-render (`DELETE /batch/{id}` → batch `cancelled`, workflow `Canceled`), and one with a
+   `webhook_url` (a `batch.completed` row in `webhook_deliveries`).
+
+**Rollback:** `BATCH_LANE` back to `'v1'`, push. New batches go to NATS; v2 batches in flight finish
+on v2 (their runs are marked; recovery and the result consumer never touch them); no drain needed in
+this direction. Rolling back E.8/E.9 themselves is a code revert (the `host-slot` patch stays in
+recorded histories — ADR-012).
+
+**Behaviour changes users can see on v2:** each item's `started_at` is its *scheduling* time (as jobs on
+v2); a batch on one site runs at most 2 scrapes at a time, ≥ 1 s apart (per-host limiter), and at most
+*k* = 3 items of a batch are in flight; a batch whose workflow cannot start fails at once (503). Both
+lanes: cancel reaches an item in its LLM step and notifies watchers.
+
 **Depends on:** E.1
 
 #### E.3 — Crawl frontier: table shape + admission activity
