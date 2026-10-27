@@ -1,4 +1,4 @@
-"""E.8 — registrable-domain helper, per-host limiter, its activities and the workflow helper."""
+"""E.8 + E.9 — domain helper, per-host limiter, its activities, the workflow helper."""
 
 import asyncio
 import uuid
@@ -218,10 +218,14 @@ async def test_acquire_activity_without_host_goes():
 def test_host_lease_ttl():
     http = ScrapeInput(artifact_id="r1", url="https://a.com", output_format="html")
     pw = http.model_copy(update={"playwright_options": {"timeout_seconds": 60}})
-    queue_s = steps.SCHEDULE_TO_START.total_seconds()
-    # 3 attempts x (queue timer + run) + 1 s + 2 s backoff + 60 s margin
-    assert steps.host_lease_ttl(http, "http") == timedelta(seconds=3 * (queue_s + 90) + 3 + 60)
-    assert steps.host_lease_ttl(pw, "playwright") == timedelta(seconds=3 * (queue_s + 180) + 3 + 60)
+    # 3 attempts x (5 min queue timer + run) + 1 s + 2 s backoff + 60 s margin
+    assert steps.host_lease_ttl(http, "http") == timedelta(seconds=3 * (300 + 90) + 3 + 60)
+    assert steps.host_lease_ttl(pw, "playwright") == timedelta(seconds=3 * (300 + 180) + 3 + 60)
+
+
+def test_only_scrapes_get_the_long_queue_timer():
+    assert steps.SCRAPE_SCHEDULE_TO_START == timedelta(minutes=5)
+    assert steps.SCHEDULE_TO_START == timedelta(seconds=60)
 
 
 # ── workflow helper ──────────────────────────────────────────────────────────
@@ -230,28 +234,41 @@ SCRAPE_INPUT = ScrapeInput(artifact_id="r1", url="https://www.shop.com/p", outpu
 SCRAPE_OUTPUT = ScrapeOutput(
     result=StoredObject(path="b/history/r1/scrape.html", size=1), content_hash="00c0ffee12345678"
 )
+BUSY = HostSlot(domain="shop.com", wait_ms=1000)
 
 
 @workflow.defn(sandboxed=False)
 class HostSlotHarness:
     @workflow.run
     async def run(self, input: ScrapeInput) -> ScrapeOutput:
-        return await steps.scrape_with_host_slot(input, "http")
+        held = await steps.wait_for_host_slot(input.url, steps.host_lease_ttl(input, "http"))
+        try:
+            return await steps.scrape(input, "http")
+        finally:
+            await steps.release_host_slot(held)
 
 
 class Harness:
-    def __init__(self, slots=(), scrape=None, acquire_error=False):
+    def __init__(self, slots=(), scrape=None, acquire_error=False, acquire_gate=None):
         self.slots = list(slots)
         self.acquired: list[HostSlotInput] = []
         self.released: list[HostSlotRelease] = []
         self.scraped = 0
+        self.asked = asyncio.Event()
+        self.asked_at: list = []
         self._scrape = scrape
         self._acquire_error = acquire_error
+        # Awaited inside the acquire activity, after it is called.
+        self._acquire_gate = acquire_gate
 
     def activities(self):
         @activity.defn(name=ACQUIRE_HOST_SLOT_ACTIVITY)
         async def acquire(input: HostSlotInput) -> HostSlot:
             self.acquired.append(input)
+            self.asked_at.append(activity.info().current_attempt_scheduled_time)
+            self.asked.set()
+            if self._acquire_gate:
+                await self._acquire_gate.wait()
             if self._acquire_error:
                 raise RuntimeError("worker broke")
             return self.slots.pop(0) if self.slots else HostSlot(domain="shop.com")
@@ -310,8 +327,7 @@ async def test_slot_held_around_the_scrape():
 
 
 async def test_waits_then_scrapes():
-    busy = HostSlot(domain="shop.com", wait_ms=1500)
-    h = Harness(slots=[busy, busy])
+    h = Harness(slots=[BUSY, BUSY])
     assert await h.run() == SCRAPE_OUTPUT
     assert len(h.acquired) == 3
     # One lease id across the retries, so a retried acquire cannot leave a second lease.
@@ -326,6 +342,24 @@ async def test_wait_cap_scrapes_without_a_slot():
     waits = HOST_WAIT_CAP // timedelta(minutes=1)
     assert len(h.acquired) == waits + 1
     assert h.scraped == 1
+    # No lease was granted, so there is none to release.
+    assert h.released == []
+
+
+async def test_the_last_wait_stops_at_the_cap():
+    # 7 min, then the 3 min left of the cap — not another 7.
+    h = Harness(slots=[HostSlot(domain="shop.com", wait_ms=7 * 60_000)] * 10)
+    assert await h.run() == SCRAPE_OUTPUT
+    assert len(h.acquired) == 3
+    assert h.asked_at[-1] - h.asked_at[0] < HOST_WAIT_CAP + timedelta(seconds=15)
+
+
+async def test_reasks_back_off_to_a_few_dozen():
+    # Busy for the whole cap: 1, 2, 4, 8, 16 s, then 30 s until 10 min.
+    h = Harness(slots=[BUSY] * 1000)
+    assert await h.run() == SCRAPE_OUTPUT
+    assert 20 <= len(h.acquired) <= 30
+    assert h.scraped == 1
 
 
 async def test_acquire_activity_failure_goes():
@@ -334,6 +368,35 @@ async def test_acquire_activity_failure_goes():
     assert len(h.acquired) == 2  # the activity's retry policy
     assert h.scraped == 1
     assert h.released == []
+
+
+async def test_cancel_during_the_wait_ends_it_without_a_scrape():
+    async def cancel(handle):
+        await h.asked.wait()
+        await handle.cancel()
+
+    h = Harness(slots=[BUSY] * 1000)
+    result = await h.run(during=cancel)
+    assert isinstance(result, WorkflowFailureError)
+    assert h.scraped == 0
+    assert len(h.acquired) < 5
+    assert h.released == []
+
+
+async def test_cancel_during_a_granted_acquire_releases_the_lease():
+    gate = asyncio.Event()
+
+    async def cancel(handle):
+        await h.asked.wait()
+        await handle.cancel()
+        gate.set()
+
+    h = Harness(acquire_gate=gate)
+    result = await h.run(during=cancel)
+    assert isinstance(result, WorkflowFailureError)
+    assert h.scraped == 0
+    (acquired,) = h.acquired
+    assert h.released == [HostSlotRelease(domain="shop.com", lease_id=acquired.lease_id)]
 
 
 async def test_failed_scrape_releases():

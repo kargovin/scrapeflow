@@ -71,6 +71,14 @@ from app.workflows.pipeline import (
     WebhookInput,
 )
 from app.workflows.queues import CONTENT_QUEUE, LLM_QUEUE, SCRAPE_HTTP_QUEUE, WORKFLOW_QUEUE
+from app.workflows.steps import (
+    ACQUIRE_HOST_SLOT_ACTIVITY,
+    HOST_LEASE_MARGIN,
+    RELEASE_HOST_SLOT_ACTIVITY,
+    HostSlot,
+    HostSlotInput,
+    HostSlotRelease,
+)
 
 SCRAPE_PATH = "scrapeflow-results/history/a-fetch/scrape.html"
 SHOT_PATH = "scrapeflow-results/screenshots/a-fetch/0.png"
@@ -164,8 +172,14 @@ class Harness:
         validate=_validate_ok,
         webhook=_webhook_ok,
         usage=None,
+        slots=(),
     ):
         self.calls: list = []
+        self.acquired: list[HostSlotInput] = []
+        self.released: list[HostSlotRelease] = []
+        self.asked = asyncio.Event()
+        # What each acquire returns, in turn; then a granted slot.
+        self.slots = list(slots)
         self.scraped: list[ScrapeInput] = []
         self.scrape_info: list = []
         self.extracted: list[LLMInput] = []
@@ -229,7 +243,18 @@ class Harness:
             self.webhook_info.append(activity.info())
             return await self._webhook(input)
 
-        return [mirror_block, mirror_run, record, webhook], scrape, llm, [clean, validate]
+        @activity.defn(name=ACQUIRE_HOST_SLOT_ACTIVITY)
+        async def acquire(input: HostSlotInput) -> HostSlot:
+            self.acquired.append(input)
+            self.asked.set()
+            return self.slots.pop(0) if self.slots else HostSlot(domain="example.com")
+
+        @activity.defn(name=RELEASE_HOST_SLOT_ACTIVITY)
+        async def release(input: HostSlotRelease) -> None:
+            self.released.append(input)
+
+        workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
+        return workflow_queue, scrape, llm, [clean, validate]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
         db_activities, scrape, llm, content = self.activities()
@@ -344,6 +369,60 @@ async def test_a_spent_run_budget_fails_the_block_before_it_starts():
     assert h.calls[-1] == MirrorRunInput(
         run_id="r1", status="failed", error="fetch: the run's time budget is spent"
     )
+
+
+# --- E.9: the per-host slot around a Scrape block ----------------------------------------------
+
+BUSY = HostSlot(domain="example.com", wait_ms=1000)
+
+
+async def test_the_scrape_block_runs_inside_a_host_slot():
+    h = Harness()
+    assert await h.run() == LLM_PATH
+    (acquired,) = h.acquired
+    assert acquired.url == "https://example.com"
+    # The activity holds the slot at most its budget (schedule_to_close).
+    timing = SCRAPE.timing(PARSED.blocks[0].config)
+    assert acquired.lease_ttl_ms == (timing.budget + HOST_LEASE_MARGIN.total_seconds()) * 1000
+    assert h.released == [HostSlotRelease(domain="example.com", lease_id=acquired.lease_id)]
+
+
+async def test_a_host_wait_comes_out_of_the_run_budget_not_past_it():
+    # Budget for the scrape alone, less 30 s; the host makes it wait 60 s first.
+    timing = SCRAPE.timing(PARSED.blocks[0].config)
+    h = Harness(slots=[HostSlot(domain="example.com", wait_ms=60_000)])
+    await h.run(RUN_INPUT.model_copy(update={"time_budget_seconds": timing.budget + 30}))
+    [info] = h.scrape_info
+    assert info.schedule_to_close_timeout <= timedelta(seconds=timing.budget - 25)
+
+
+async def test_a_failed_scrape_block_still_frees_the_host():
+    async def scrape(input):
+        raise ApplicationError("blocked:akamai", type="ScrapeFailed", non_retryable=True)
+
+    h = Harness(scrape=scrape)
+    assert isinstance(await h.run(), WorkflowFailureError)
+    assert len(h.released) == 1
+
+
+async def test_a_cancel_while_waiting_for_the_host_cancels_without_scraping():
+    async def cancel_while_waiting(handle):
+        await h.asked.wait()
+        await handle.cancel()
+
+    h = Harness(slots=[BUSY] * 1000)
+    result = await h.run(during=cancel_while_waiting)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert isinstance(result.cause, CancelledError)
+    assert h.scraped == []
+    assert h.released == []
+    assert h.calls[-2:] == [
+        MirrorBlockInput(
+            run_id="r1", block_id="fetch", status="failed", error="cancelled before it finished"
+        ),
+        MirrorRunInput(run_id="r1", status="cancelled"),
+    ]
 
 
 async def test_a_failed_block_fails_the_block_the_run_and_the_workflow():

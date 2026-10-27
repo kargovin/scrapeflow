@@ -29,6 +29,8 @@ from app.settings import settings
 from app.workflows.client import get_temporal, get_temporal_or_none
 from app.workflows.pipeline import PipelineRunInput, PipelineWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
+from scripts.audit_pipeline_budgets import audit
+from tests.test_workflows_pipeline import DEFINITION, PARSED
 
 SCHEMA = {"type": "object", "properties": {"title": {"type": "string"}}}
 
@@ -1157,3 +1159,25 @@ async def test_switched_off_refuses_new_work_but_keeps_reads_and_cancel(
     assert (await client.get(pipeline_url, headers=headers)).status_code == 200
     assert (await client.get(url, headers=headers)).status_code == 200
     assert (await client.post(f"{url}/cancel", headers=headers)).status_code == 202
+
+
+# --- E.9: saved versions whose declared budget the new scrape numbers outgrew -------------------
+
+
+async def test_budget_audit_lists_versions_declared_too_short(db_user, capsys):
+    need = PARSED.run_budget_seconds
+    async with AsyncSessionLocal() as db:
+        pipeline = Pipeline(user_id=db_user.id, name=f"audit-{uuid.uuid4().hex[:8]}")
+        db.add(pipeline)
+        await db.flush()
+        for version, declared in ((1, need - 1), (2, need), (3, None)):
+            definition = {**DEFINITION, "time_budget_seconds": declared}
+            db.add(PipelineVersion(pipeline_id=pipeline.id, version=version, definition=definition))
+        await db.commit()
+
+        await audit(db)
+
+    out = [line for line in capsys.readouterr().out.splitlines() if str(pipeline.id) in line]
+    assert out == [
+        f"SHORT {pipeline.name} v1 ({pipeline.id}): declared {need - 1} s, blocks need {need} s"
+    ]

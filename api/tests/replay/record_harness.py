@@ -11,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 
 from app.workflows.job import RECORD_JOB_OBJECTS_ACTIVITY, JobLLM
 from app.workflows.pipeline import RUN_CANCELLED_ERROR, StorageUsage
+from app.workflows.steps import HostSlot
 from tests.replay.export_history import HISTORIES
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
@@ -30,12 +31,38 @@ async def _llm_overloaded(input):
     raise ApplicationError("503 overloaded", type="LLMTransient")
 
 
+BUSY = HostSlot(domain="example.com", wait_ms=1000)
+
+
+def _cancel_while_waiting(h):
+    async def during(handle):
+        await h.asked.wait()
+        await handle.cancel()
+
+    return during
+
+
+def _cancel_after_three_asks(h):
+    async def during(handle):
+        while len(h.acquired) < 3:
+            await asyncio.sleep(0.01)
+        await handle.cancel()
+
+    return during
+
+
 SCENARIOS = {
     "harness_r6_webhook_delivered_after_retries": ({"webhook": _webhook_flaky}, R6),
     "harness_r6_webhook_run_cancelled_on_retry": ({"webhook": _webhook_cancelled}, R6),
     "harness_clean_validate_llm_completed": ({}, CLEAN_GUARD),
     "harness_llm_retries_exhausted": ({"llm": _llm_overloaded}, RUN_INPUT),
     "harness_storage_wall_completed": ({"usage": StorageUsage(used=150, limit=100)}, RUN_INPUT),
+    # E.9 — the host-slot branch (patch "host-slot").
+    "harness_r6_host_slot_waited_delivered": ({"slots": [BUSY, BUSY]}, R6),
+    "harness_pipeline_host_wait_cancelled": (
+        {"slots": [BUSY] * 1000, "during": _cancel_while_waiting},
+        RUN_INPUT,
+    ),
 }
 
 
@@ -52,17 +79,30 @@ JOB_SCENARIOS = {
         "job_llm": KEY,
         "replies": {RECORD_JOB_OBJECTS_ACTIVITY: "failed"},
     },
+    # E.9 — the host-slot branch (patch "host-slot").
+    "harness_job_host_slot_waited_llm_completed": {"job_llm": KEY, "slots": [BUSY, BUSY]},
+    "harness_job_host_slot_failed_open": {"slots": [HostSlot()]},
+    "harness_job_host_slot_scrape_failed": {"scrape": _scrape_blocked},
+    "harness_job_host_wait_cancelled": {"slots": [BUSY] * 1000, "during": _cancel_while_waiting},
+    "harness_job_host_wait_cancelled_after_timers": {
+        "slots": [BUSY] * 1000,
+        "during": _cancel_after_three_asks,
+    },
 }
 
 
 async def main() -> None:
-    runs = [(name, Harness(**kwargs), run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
-    runs += [(name, JobHarness(**kwargs), None) for name, kwargs in JOB_SCENARIOS.items()]
-    for name, h, run_input in runs:
+    runs = [(name, Harness, kwargs, run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
+    runs += [(name, JobHarness, kwargs, None) for name, kwargs in JOB_SCENARIOS.items()]
+    for name, harness, kwargs, run_input in runs:
         path = HISTORIES / f"{name}.json"
         if path.exists():
             continue
-        await (h.run(run_input) if run_input is not None else h.run())
+        kwargs = dict(kwargs)
+        during = kwargs.pop("during", None)
+        h = harness(**kwargs)
+        run_kwargs = {"during": during(h)} if during else {}
+        await (h.run(run_input, **run_kwargs) if run_input is not None else h.run(**run_kwargs))
         path.write_text(h.history.to_json() + "\n")
         print(path)
 

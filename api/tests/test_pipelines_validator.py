@@ -396,7 +396,10 @@ def test_max_blocks_per_pipeline(monkeypatch):
 
 
 def _needed(definition) -> int:
-    return sum(b.timing.budget + BLOCK_OVERHEAD_SECONDS for b in validate(definition).blocks)
+    return sum(
+        b.timing.budget + b.timing.host_slot + BLOCK_OVERHEAD_SECONDS
+        for b in validate(definition).blocks
+    )
 
 
 def test_run_budget_defaults_to_what_the_blocks_need():
@@ -437,6 +440,26 @@ def test_playwright_timeout_raises_the_scrape_budget():
     assert SCRAPE.timing(slow).start_to_close == 660
     assert SCRAPE.timing(slow).budget > SCRAPE.timing(fast).budget
     assert SCRAPE.timing(slow).heartbeat == 90
+
+
+def test_scrape_need_counts_the_queue_timer_and_the_host_wait():
+    http = SCRAPE.timing(ScrapeConfigV1(url="https://example.com"))
+    playwright = SCRAPE.timing(ScrapeConfigV1(url="https://example.com", engine="playwright"))
+    # 3 attempts x (5 min queue timer + run) + 5 s + 10 s backoff.
+    assert http.budget == 3 * (300 + 90) + 15
+    assert playwright.budget == 3 * (300 + 180) + 15
+    # + the host-slot wait (10 min cap + its activities) + the DB overhead.
+    assert http.need == http.budget + 660 + BLOCK_OVERHEAD_SECONDS
+    assert playwright.need == playwright.budget + 660 + BLOCK_OVERHEAD_SECONDS
+
+
+def test_only_scrape_blocks_get_the_long_queue_timer_and_a_host_wait():
+    for block_type in CATALOG.values():
+        if block_type is SCRAPE:
+            continue
+        model = block_type.config_versions[block_type.current_version]
+        timing = block_type.timing(model.model_construct())
+        assert (timing.schedule_to_start, timing.host_slot) == (60, 0), block_type.name
 
 
 def test_webhook_ladder_matches_adr_15c():

@@ -8,6 +8,7 @@ from datetime import timedelta
 import asyncpg
 import pytest
 import pytest_asyncio
+import redis.asyncio as aioredis
 from sqlalchemy import select
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
@@ -16,6 +17,7 @@ from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from app.core import host_limiter
 from app.core.db import AsyncSessionLocal
 from app.main import app
 from app.models.job import Job
@@ -25,7 +27,8 @@ from app.models.storage_object import StorageObject
 from app.models.user_quota import UserQuota
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
-from app.workflows.activities import job_runs
+from app.workflows import steps
+from app.workflows.activities import host_slots, job_runs
 from app.workflows.activities.contracts import (
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
@@ -62,6 +65,13 @@ from app.workflows.queues import (
     SCRAPE_HTTP_QUEUE,
     SCRAPE_PLAYWRIGHT_QUEUE,
     WORKFLOW_QUEUE,
+)
+from app.workflows.steps import (
+    ACQUIRE_HOST_SLOT_ACTIVITY,
+    RELEASE_HOST_SLOT_ACTIVITY,
+    HostSlot,
+    HostSlotInput,
+    HostSlotRelease,
 )
 
 BUCKET = settings.minio_bucket
@@ -105,8 +115,17 @@ async def _llm_ok(input: LLMInput) -> LLMOutput:
 class Harness:
     """Mocked activities on their real queues; records every DB-activity call in order."""
 
-    def __init__(self, scrape=_scrape_ok, llm=_llm_ok, job_llm=None, replies=None, record=None):
+    def __init__(
+        self, scrape=_scrape_ok, llm=_llm_ok, job_llm=None, replies=None, record=None, slots=()
+    ):
         self.calls: list = []
+        # Host-slot and scrape activities in call order, beside the DB calls.
+        self.order: list[str] = []
+        self.acquired: list[HostSlotInput] = []
+        self.released: list[HostSlotRelease] = []
+        self.asked = asyncio.Event()
+        # What each acquire returns, in turn; then a granted slot.
+        self.slots = list(slots)
         self.scraped: list[ScrapeInput] = []
         self.extracted: list[LLMInput] = []
         self.job_llm = job_llm or JobLLM()
@@ -135,6 +154,7 @@ class Harness:
         @activity.defn(name=RECORD_JOB_OBJECTS_ACTIVITY)
         async def record(input: RecordJobObjectsInput) -> str:
             self.calls.append(input)
+            self.order.append("record")
             if self._record is not None:
                 return await self._record(input)
             return reply(RECORD_JOB_OBJECTS_ACTIVITY, self._state)
@@ -149,8 +169,21 @@ class Harness:
             self.calls.append(input)
             return reply(FINISH_JOB_RUN_ACTIVITY, input.status)
 
+        @activity.defn(name=ACQUIRE_HOST_SLOT_ACTIVITY)
+        async def acquire(input: HostSlotInput) -> HostSlot:
+            self.order.append("acquire")
+            self.acquired.append(input)
+            self.asked.set()
+            return self.slots.pop(0) if self.slots else HostSlot(domain="example.com")
+
+        @activity.defn(name=RELEASE_HOST_SLOT_ACTIVITY)
+        async def release(input: HostSlotRelease) -> None:
+            self.order.append("release")
+            self.released.append(input)
+
         @activity.defn(name=SCRAPE_ACTIVITY)
         async def scrape(input: ScrapeInput) -> ScrapeOutput:
+            self.order.append("scrape")
             self.scraped.append(input)
             return await self._scrape(input)
 
@@ -159,7 +192,7 @@ class Harness:
             self.extracted.append(input)
             return await self._llm(input)
 
-        return [started, load, record, processing, finish], scrape, llm
+        return [started, load, record, processing, finish, acquire, release], scrape, llm
 
     async def run(self, run_input=RUN_INPUT, during=None, timeout=timedelta(days=1)):
         db_activities, scrape, llm = self.activities()
@@ -400,6 +433,88 @@ async def test_a_workflow_cancel_lets_the_scrape_finish_then_drops_its_objects()
         ("started", "r1"),
         FinishJobRunInput(run_id="r1", status="cancelled", discard=[SCRAPE_PATH, SHOT_PATH]),
     ]
+
+
+# --- E.9: the per-host slot around the scrape ---------------------------------------------------
+
+BUSY = HostSlot(domain="example.com", wait_ms=1000)
+
+
+async def test_the_scrape_runs_inside_a_host_slot():
+    h = Harness()
+    assert await h.run() == SCRAPE_PATH
+    assert h.order == ["acquire", "scrape", "release", "record"]
+    (acquired,) = h.acquired
+    assert acquired.url == "https://example.com"
+    ttl = steps.host_lease_ttl(RUN_INPUT.scrape, "http")
+    assert acquired.lease_ttl_ms == ttl.total_seconds() * 1000
+    assert h.released == [HostSlotRelease(domain="example.com", lease_id=acquired.lease_id)]
+
+
+async def test_only_the_scrape_gets_the_five_minute_queue_timer():
+    h = Harness(job_llm=KEY)
+    await h.run()
+    timers = {
+        e.activity_task_scheduled_event_attributes.activity_type.name: (
+            e.activity_task_scheduled_event_attributes.schedule_to_start_timeout.ToTimedelta()
+        )
+        for e in h.history.events
+        if e.HasField("activity_task_scheduled_event_attributes")
+    }
+    assert timers[SCRAPE_ACTIVITY] == timedelta(minutes=5)
+    assert timers[LLM_EXTRACT_ACTIVITY] == timedelta(seconds=60)
+
+
+async def test_a_busy_host_delays_the_scrape():
+    h = Harness(slots=[BUSY, BUSY])
+    assert await h.run() == SCRAPE_PATH
+    assert h.order == ["acquire", "acquire", "acquire", "scrape", "release", "record"]
+
+
+async def test_a_failed_scrape_still_frees_the_host():
+    async def scrape(input):
+        raise ApplicationError("blocked:akamai", type="ScrapeFailed", non_retryable=True)
+
+    h = Harness(scrape=scrape)
+    assert isinstance(await h.run(), WorkflowFailureError)
+    assert h.order == ["acquire", "scrape", "release"]
+
+
+async def test_a_cancel_while_waiting_for_the_host_cancels_without_scraping():
+    async def cancel_while_waiting(handle):
+        await h.asked.wait()
+        await handle.cancel()
+
+    h = Harness(slots=[BUSY] * 1000)
+    result = await h.run(during=cancel_while_waiting)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert isinstance(result.cause, CancelledError)
+    assert h.scraped == []
+    assert h.released == []
+    assert h.calls == [("started", "r1"), FinishJobRunInput(run_id="r1", status="cancelled")]
+
+
+async def test_a_cancel_during_the_scrape_still_frees_the_host():
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def scrape(input):
+        started.set()
+        await release.wait()
+        return _scrape_output()
+
+    async def cancel_mid_scrape(handle):
+        await started.wait()
+        await handle.cancel()
+        await asyncio.sleep(0.5)
+        release.set()
+
+    h = Harness(scrape=scrape, replies={FINISH_JOB_RUN_ACTIVITY: "cancelled"})
+    result = await h.run(during=cancel_mid_scrape)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert h.order == ["acquire", "scrape", "release"]
+    assert h.calls[-1] == FinishJobRunInput(run_id="r1", status="cancelled", discard=[SCRAPE_PATH])
 
 
 async def test_an_unexpected_exception_fails_the_run_instead_of_hanging():
@@ -715,6 +830,15 @@ async def test_read_llm_settings_reads_the_job_and_its_key_now(db_user):
 # ---------------------------------------------------------------------------
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def worker_redis(monkeypatch):
+    # A fresh client per test: the module-level one would outlive the test's event loop.
+    client = aioredis.Redis.from_url(settings.redis_url, decode_responses=True)
+    monkeypatch.setattr(host_slots, "_redis", client)
+    yield client
+    await client.aclose()
+
+
 async def _run_real(run: JobRun, scrape, during=None):
     @activity.defn(name=SCRAPE_ACTIVITY)
     async def scrape_activity(input: ScrapeInput) -> ScrapeOutput:
@@ -738,6 +862,8 @@ async def _run_real(run: JobRun, scrape, during=None):
                     record_job_objects,
                     job_run_processing,
                     finish_job_run,
+                    host_slots.acquire_host_slot,
+                    host_slots.release_host_slot,
                 ],
             ),
             Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape_activity]),
@@ -760,11 +886,14 @@ async def _run_real(run: JobRun, scrape, during=None):
             return await handle.result()
 
 
-async def test_a_job_run_completes_end_to_end_on_the_real_mirrors(db_user):
+async def test_a_job_run_completes_end_to_end_on_the_real_mirrors(db_user, worker_redis):
     run = await _job_run(db_user.id)
     page = await _put(f"{BUCKET}/history/{run.id}/scrape.html")
+    leases, _ = host_limiter._keys("example.com")
+    held_during_scrape = []
 
     async def scrape(input):
+        held_during_scrape.append(await worker_redis.zcard(leases))
         return ScrapeOutput.model_validate(
             {"result": {"path": page, "size": 10}, "content_hash": HASH}
         )
@@ -773,6 +902,9 @@ async def test_a_job_run_completes_end_to_end_on_the_real_mirrors(db_user):
     row = await _row(run.id)
     assert (row.status, row.result_path, row.content_hash) == ("completed", page, HASH)
     assert await _ledger([page]) == [page]
+    # The real limiter: a lease in Redis while the scrape ran, gone after.
+    assert held_during_scrape == [1]
+    assert await worker_redis.zcard(leases) == 0
     await _remove(page)
 
 

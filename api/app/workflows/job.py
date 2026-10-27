@@ -118,9 +118,12 @@ class JobWorkflow:
             # Cancelled from the engine while the row still said running (an operator).
             return await self._cancel(run_id)
         try:
-            scraped: ScrapeOutput = await self._finish(steps.scrape(input.scrape, input.engine))
+            scraped = await self._scrape(input)
         except ActivityError as exc:
             return await self._fail(run_id, _activity_error(exc))
+        except asyncio.CancelledError:
+            # Cancelled while waiting for the host: nothing was scraped.
+            return await self._cancel(run_id)
         objects = [scraped.result, *scraped.screenshots]
         paths = [o.path for o in objects]
         if self._cancel_requested:
@@ -168,6 +171,21 @@ class JobWorkflow:
             return self._stopped(state)
         # v1 stores the scrape's warnings only on a run without an LLM step.
         return await self._complete(run_id, extracted.result.path)
+
+    async def _scrape(self, input: JobRunInput) -> ScrapeOutput:
+        if not workflow.patched(steps.HOST_SLOT_PATCH):
+            return await self._finish(steps.scrape(input.scrape, input.engine))
+        try:
+            held = await steps.wait_for_host_slot(
+                input.scrape.url, steps.host_lease_ttl(input.scrape, input.engine)
+            )
+        except asyncio.CancelledError:
+            self._cancel_requested = True
+            raise
+        try:
+            return await self._finish(steps.scrape(input.scrape, input.engine))
+        finally:
+            await self._finish(steps.release_host_slot(held))
 
     async def _record(
         self, run_id: str, objects: list[StoredObject], content_hash: str | None = None

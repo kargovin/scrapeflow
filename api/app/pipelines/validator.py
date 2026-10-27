@@ -13,7 +13,6 @@ from jsonschema import validators as jsonschema_validators
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.pipelines.catalog import (
-    BLOCK_OVERHEAD_SECONDS,
     CATALOG,
     SCRAPE,
     WEBHOOK,
@@ -291,7 +290,7 @@ def _budget_problems(
 ) -> tuple[int, list[Problem]]:
     """PRD-016 R4: budgets compose. The run ceiling must cover every block's own budget."""
     needed = run_need_seconds(b.timing for b in parsed)
-    breakdown = " + ".join(f"{b.id} {b.timing.budget + BLOCK_OVERHEAD_SECONDS}" for b in parsed)
+    breakdown = " + ".join(f"{b.id} {b.timing.need}" for b in parsed)
     ceiling = settings.pipeline_max_run_seconds
     problems = []
     if declared is not None and declared < needed:

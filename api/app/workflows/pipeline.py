@@ -10,7 +10,13 @@ from temporalio.exceptions import ActivityError, ApplicationError, CancelledErro
 from temporalio.workflow import ActivityCancellationType
 
 with workflow.unsafe.imports_passed_through():
-    from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, CATALOG, InputBinding, Timing
+    from app.pipelines.catalog import (
+        BLOCK_OVERHEAD_SECONDS,
+        CATALOG,
+        HOST_SLOT_SECONDS,
+        InputBinding,
+        Timing,
+    )
     from app.pipelines.definition import (
         CleanBlock,
         LLMExtractBlock,
@@ -20,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
         WebhookBlock,
     )
     from app.schemas.jobs import Engine
+    from app.workflows import steps
     from app.workflows.activities.contracts import (
         CLEAN_ACTIVITY,
         LLM_EXTRACT_ACTIVITY,
@@ -130,6 +137,10 @@ class WebhookInput(BaseModel):
 # Three per block — running, record_storage, completed — must fit BLOCK_OVERHEAD_SECONDS.
 DB_ACTIVITY_SECONDS = 20
 assert 3 * DB_ACTIVITY_SECONDS <= BLOCK_OVERHEAD_SECONDS
+# A Scrape block's host-slot wait: the cap, its last acquire, the release.
+assert (
+    steps.HOST_WAIT_CAP + 2 * steps.HOST_SLOT_ACTIVITY_TIMEOUT
+).total_seconds() <= HOST_SLOT_SECONDS
 
 
 async def _db(activity: str, arg: BaseModel, result_type: type) -> Any:
@@ -162,6 +173,11 @@ def _block_options(timing: Timing, remaining_s: float) -> dict[str, Any]:
     if timing.heartbeat is not None:
         options["heartbeat_timeout"] = timedelta(seconds=timing.heartbeat)
     return options
+
+
+def _scrape_url(block: ScrapeBlock, input: PipelineRunInput) -> str:
+    url = block.config.url
+    return input.inputs[url.input] if isinstance(url, InputBinding) else str(url)
 
 
 def _is_cancellation(exc: BaseException) -> bool:
@@ -217,10 +233,15 @@ class PipelineWorkflow:
             try:
                 # ADR-009 15a/15d: an effect block may wait between attempts, and a cancel
                 # interrupts that wait; a running attempt still finishes (R3).
-                objects = await self._finish(
-                    self._execute(block, input, input_ref, deadline),
-                    interruptible=block_type.kind == "effect",
-                )
+                if isinstance(block, ScrapeBlock) and workflow.patched(steps.HOST_SLOT_PATCH):
+                    objects = await self._scrape_in_host_slot(
+                        block, input, input_ref, deadline, timing
+                    )
+                else:
+                    objects = await self._finish(
+                        self._execute(block, input, input_ref, deadline),
+                        interruptible=block_type.kind == "effect",
+                    )
                 usage = None
                 if objects:
                     usage = await self._finish(
@@ -316,6 +337,28 @@ class PipelineWorkflow:
             raise asyncio.CancelledError()
         return None
 
+    async def _scrape_in_host_slot(
+        self,
+        block: ScrapeBlock,
+        input: PipelineRunInput,
+        input_ref: str | None,
+        deadline: datetime,
+        timing: Timing,
+    ) -> list[StoredObject]:
+        # The block's activity can hold the slot no longer than its budget (schedule_to_close).
+        lease_ttl = timedelta(seconds=timing.budget) + steps.HOST_LEASE_MARGIN
+        try:
+            held = await steps.wait_for_host_slot(_scrape_url(block, input), lease_ttl)
+        except asyncio.CancelledError:
+            # Cancelled while waiting for the host: nothing was scraped.
+            self._cancel_requested = True
+            raise
+        try:
+            # After the wait, so the block's budget is cut to what the run has left.
+            return await self._finish(self._execute(block, input, input_ref, deadline))
+        finally:
+            await self._finish(steps.release_host_slot(held))
+
     async def _execute(
         self,
         block: RunBlock,
@@ -332,11 +375,7 @@ class PipelineWorkflow:
 
         if isinstance(block, ScrapeBlock):
             config = block.config
-            url = (
-                input.inputs[config.url.input]
-                if isinstance(config.url, InputBinding)
-                else str(config.url)
-            )
+            url = _scrape_url(block, input)
             playwright = config.engine == Engine.playwright
             scraped = await workflow.execute_activity(
                 SCRAPE_ACTIVITY,

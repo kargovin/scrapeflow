@@ -20,7 +20,7 @@ HISTORIES = sorted((Path(__file__).parent / "replay" / "histories").glob("*.json
 
 
 def test_the_corpus_is_not_empty():
-    assert len(HISTORIES) >= 14
+    assert len(HISTORIES) >= 23
 
 
 @pytest.mark.parametrize("path", HISTORIES, ids=lambda p: p.stem)

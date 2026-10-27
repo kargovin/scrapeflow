@@ -44,6 +44,12 @@ ALL_REFS = PAGES | {EXTRACTION}
 # Per-attempt queue wait (schedule_to_start), as the probe workflows use: a queue nobody polls
 # fails the attempt instead of waiting out the whole budget.
 SCHEDULE_TO_START_SECONDS = 60
+# Scrapes queue behind other runs' fan-out (E.0); 5 min still catches a queue nobody polls.
+SCRAPE_SCHEDULE_TO_START_SECONDS = 300
+
+# A Scrape block's wait for a per-host slot before its activity starts: the wait cap plus the
+# last acquire and the release (pipeline.py asserts it covers steps.py's numbers).
+HOST_SLOT_SECONDS = 660
 
 # Allowance per block for C.6's mirror and accounting activities around it. C.6's own timeouts
 # must fit inside this, or the run budget no longer composes.
@@ -96,6 +102,8 @@ class Timing:
     maximum_interval: int
     heartbeat: int | None = None
     schedule_to_start: int = SCHEDULE_TO_START_SECONDS
+    # Time the run spends around the block outside its activity (a host-slot wait).
+    host_slot: int = 0
 
     @property
     def budget(self) -> int:
@@ -110,8 +118,13 @@ class Timing:
         per_attempt = self.schedule_to_start + self.start_to_close
         return self.maximum_attempts * per_attempt + math.ceil(waits)
 
+    @property
+    def need(self) -> int:
+        """What the run budgets for the block: its budget, its host-slot wait, the DB overhead."""
+        return self.budget + self.host_slot + BLOCK_OVERHEAD_SECONDS
 
-def _worker_retry(start_to_close: int, heartbeat: int | None = None) -> Timing:
+
+def _worker_retry(start_to_close: int, heartbeat: int | None = None, **extra: int) -> Timing:
     # The NATS workers' transient-retry numbers, on all three: 5 s, x2, 60 s cap, 3 attempts.
     return Timing(
         start_to_close=start_to_close,
@@ -120,6 +133,7 @@ def _worker_retry(start_to_close: int, heartbeat: int | None = None) -> Timing:
         backoff_coefficient=2,
         maximum_interval=60,
         heartbeat=heartbeat,
+        **extra,
     )
 
 
@@ -279,12 +293,16 @@ class BlockType:
 
 
 def _scrape_timing(config: ScrapeConfigV1) -> Timing:
+    extra = {
+        "schedule_to_start": SCRAPE_SCHEDULE_TO_START_SECONDS,
+        "host_slot": HOST_SLOT_SECONDS,
+    }
     if config.engine == Engine.playwright:
         # goto and wait_for_load_state each get timeout_seconds (BUG-015), + actions and upload.
         render_s = (config.playwright_options or PlaywrightOptions()).timeout_seconds
         # The activity heartbeats every 30 s.
-        return _worker_retry(2 * render_s + 60, heartbeat=90)
-    return _worker_retry(90)
+        return _worker_retry(2 * render_s + 60, heartbeat=90, **extra)
+    return _worker_retry(90, **extra)
 
 
 def _pass_through(_config: Any, ref: str | None) -> str:
@@ -366,5 +384,5 @@ CATALOG: Mapping[str, BlockType] = {
 
 
 def run_need_seconds(timings: Iterable[Timing]) -> int:
-    """What a run needs when it declares no ceiling: every block's budget plus its allowance."""
-    return sum(t.budget + BLOCK_OVERHEAD_SECONDS for t in timings)
+    """What a run needs when it declares no ceiling: every block's need."""
+    return sum(t.need for t in timings)
