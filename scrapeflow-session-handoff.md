@@ -28,7 +28,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | **Phase 4 scope — single source of truth** | `docs/project/phase4-backlog.md` |
 | **Phase 4 engine decision + coexistence contract** | `docs/adr/ADR-009-workflow-engine-temporal.md` |
 | Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
-| Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Draft 2026-10-13**, gates F.1) | `docs/adr/ADR-013-schedule-policy.md` |
+| Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Accepted 2026-10-27**; cap 20, paused not counted, catch-up 365 d) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
 | Open bugs (BUG-004 → BUG-022) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
@@ -143,6 +143,13 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 ---
 
 ## Current state — as of 2026-10-27 *(clock)*
+
+📐 **F.0 DONE — ADR-013 ACCEPTED (2026-10-27, sixth session, docs only).** Owner asked for F.0 and the
+catch-up window in plain terms, then: "go with all three recommendations; update ADR-013 as accepted".
+§5 decided: `default_quota_scheduled_jobs = 20` (per-user override), only `schedule_status = 'active'`
+counts (resume is checked), `catchup_window = 365 days` pinned. F.1's compose check gained a second
+item: a resumed Schedule must not replay ticks missed while paused. **Next: BUG-023** (per-user lock on
+check → insert), then F.1. Dependabot's 64 alerts still unexamined.
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -1476,6 +1483,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-27 (F.0 close):** `develop` = `dd7a353` + the ADR-013 acceptance commit, not pushed; `main` = `origin/main` = `261f931` (deployed). Infra unchanged.
 - **2026-10-27 (E.7 release close):** `main` = `origin/main` = `develop` = `origin/develop` = `261f931` (deployed) before this docs closeout, which sits on `develop`. Infra `main` = `origin/main` = `bf591bc` (+ Flux's tag bumps). `tmp/` untracked, pre-existing.
 - **2026-10-27 (E.3–E.7 prep session close):** `develop` = `f66ec0b` + docs closeout, **not pushed** (6+ ahead of `origin/develop`); `main` = `origin/main` = `faa1f83` (deployed). Infra `main` = `bf591bc`, **1 ahead** of `origin/main` (`538ea8c`), not pushed. Compose: `crawl-fixture` (profile `gate`) up; api, workflow-worker and both Temporal scrape workers on the `crawl-fixture` network. `tmp/` untracked, pre-existing.
 - **2026-10-27 (E.2 session close):** `main` = `origin/main` = `faa1f83` (deployed); `develop` = docs closeout on top, pushed. Infra `main` = `origin/main` = `538ea8c` (`BATCH_LANE=v2`). `tmp/` untracked, pre-existing.
@@ -1631,6 +1639,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-27 *(clock, sixth)* | **📐 F.0 done — ADR-013 Accepted.** Plain walkthrough of F.0 and the catch-up window; owner took §5 as recommended (cap 20, paused not counted, catch-up 365 d). Docs only. | ADR-013 acceptance commit |
 | 2026-10-27 *(clock, fifth)* | **🚀 E.7 RELEASED, Group E closed.** Infra push (coordinator pruned), owner's `main` ff `faa1f83..261f931`, rollouts + migration 4.7 watched; owner verified a crawl and the SPA pages. Bugs closed in the docs. | docs closeout; infra `bf591bc` pushed |
 | 2026-10-27 *(clock, fourth)* | **🔧 E.3–E.6 + E.10 BUILT, E.7 READY.** Owner: "plan and build from e3-e6 … get ready to deploy at e7; if possible also build e10". Crawl frontier + admission, crawl-queue activities on the Playwright worker, `CrawlWorkflow`, E.6 fixture gate (passed on compose, both engines), `coordinator/` deleted (+ infra local), SPA batches/crawls pages; BUG-024 filed, BUG-025 fixed. 695 API tests, corpus 31. | `c36bf95`, `aefc1d4`, `56cff93`, `6c1b847`, `f66ec0b`; infra `bf591bc` |
 | 2026-10-27 *(clock, third)* | **🚀 E.2 RELEASED + FLIPPED.** Owner: "lets do e2". Owner ran infra push, `main` ff (`0b4ac9e..faa1f83`) and the flip push (`538ea8c`); I watched CI, rollouts, ran the budget audit (clean), the drain gate (clean) and checked the owner's 3-URL batch end to end (3/0, v2, NATS untouched). | infra `538ea8c` + this closeout |

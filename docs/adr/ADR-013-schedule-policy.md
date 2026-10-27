@@ -1,9 +1,10 @@
 # ADR-013: Schedule Policy — `SKIP` on Overlap, and a Per-User Cap on Scheduled Jobs
 
-**Status:** **Draft.** The overlap decision is the owner's, taken 2026-10-13 (*"go with SKIP"*); the per-user
-cap's existence is the owner's, same day (recorded in ADR-010 §1's rider). Its **default value**, whether
-**paused** schedules count, and the **catch-up window** are recommendations in this text, not decisions —
-see §5. Written by the Tech Lead; awaits the owner's review before promotion.
+**Status:** **Accepted 2026-10-27** (owner). The overlap decision is the owner's, taken 2026-10-13 (*"go with
+SKIP"*); the per-user cap's existence is the owner's, same day (recorded in ADR-010 §1's rider). §5's three
+parameters — the cap's default, whether paused schedules count, the catch-up window — were the Tech Lead's
+recommendations and were taken as written by the owner on 2026-10-27. ⚠️ **Immutable from here** — a change
+of decision is a new, superseding ADR.
 **Date:** 2026-10-13
 **Deciders:** @karthik
 **Resolves:** implementation backlog **F.0** (gate before F.1 creates the first Temporal Schedule; tracked as
@@ -57,7 +58,7 @@ blocked on concurrency are N parked workflows. That is what the per-user cap is 
 3. **`pause_on_failure=False`**, explicit. A run that fails — a dead site, a bad LLM key, a storage breach
    (ADR-010 §1) — does not stop the job's future ticks, as on v1. A paused Schedule nobody un-pauses is a
    silent stop, and nothing in the product would surface it.
-4. **`catchup_window`: set explicitly** — value per §5.
+4. **`catchup_window=timedelta(days=365)`**, explicit — the SDK default, pinned (§5).
 
 ### What `SKIP` does in the two cases that matter
 
@@ -113,10 +114,10 @@ overrun case drops a tick, and the job runs at the pace it can actually sustain.
 - **Code that relies on these:** F.1 (Schedule create / pause / delete) passes all three policies; F.1's
   admission activity and the cap check share BUG-023's lock.
 
-## 5. Open — the owner's call before promotion
+## 5. Parameters — decided 2026-10-27 (owner)
 
-| item | recommendation | why |
+| item | decision | why |
 |---|---|---|
-| **Default cap** (`settings.default_quota_scheduled_jobs`) | **20**, overridable per user | Bounds parked workflows per user to 20. It is not the meter that limits cost — at the 5-minute floor a single job makes 288 runs a day against a 500-run monthly default, so `monthly_runs` binds first; the cap exists to bound Temporal state, so it can be generous. A product number, not an engineering one |
-| **Do paused schedules count?** | **No** — only `schedule_status = 'active'` | A paused Schedule fires nothing and parks nothing, so it costs nothing the cap protects. Counting it would make users delete schedules they mean to resume. The resume check above is what keeps this safe |
-| **`catchup_window`** | **Pin the 365-day default explicitly** | With `SKIP`, a recovered server's missed ticks should collapse to **one** late run: the first starts a workflow, the rest find it open and are dropped. So a long window means *"after any outage, the job runs once, late"*, and a short one means *"a daily or weekly job's tick during an outage is lost until its next tick"*. One late run is the better outcome, and it is less than v1 (which replays every missed tick). ⚠️ **The collapse is reasoned from the policy definitions, not tested** — verify at F.1 on compose (a 1-minute Schedule, stop `temporal` for 5 minutes, count executions on restart). ⚠️ *Changed from the Tech Lead's earlier suggestion of a short window (2026-10-13), which did not account for `SKIP` already bounding the catch-up* |
+| **Default cap** (`settings.default_quota_scheduled_jobs`) | **20**, overridable per user (`user_quotas` column, nullable) | Bounds parked workflows per user to 20. It is not the meter that limits cost — at the 5-minute floor a single job makes 288 runs a day against a 500-run monthly default, so `monthly_runs` binds first; the cap exists to bound Temporal state, so it can be generous. A product number, not an engineering one |
+| **Do paused schedules count?** | **No** — only `schedule_status = 'active'` counts | A paused Schedule fires nothing and parks nothing, so it costs nothing the cap protects. Counting it would make users delete schedules they mean to resume. The resume check above is what keeps this safe |
+| **`catchup_window`** | **365 days**, pinned explicitly | With `SKIP`, a recovered server's missed ticks should collapse to **one** late run: the first starts a workflow, the rest find it open and are dropped. So a long window means *"after any outage, the job runs once, late"*, and a short one means *"a daily or weekly job's tick during an outage is lost until its next tick"*. One late run is the better outcome, and it is less than v1 (which replays every missed tick). ⚠️ **The collapse is reasoned from the policy definitions, not tested** — verify at F.1 on compose (a 1-minute Schedule, stop `temporal` for 5 minutes, count executions on restart). ⚠️ *Changed from the Tech Lead's earlier suggestion of a short window (2026-10-13), which did not account for `SKIP` already bounding the catch-up* |

@@ -7,7 +7,7 @@
 > that answer, not on a guess.
 >
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
-> **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Accepted 2026-10-13), ADR-012 (Draft), ADR-013 (Draft — gates F.1).
+> **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Accepted 2026-10-13), ADR-012 (Draft), ADR-013 (Accepted 2026-10-27).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
 > **Last updated:** 2026-10-12 (D.1, D.3, D.4 built; D.2 deferred by the owner; D.5 runbook ready) · **Tracking:** the status table below is the tracker.
 
@@ -92,7 +92,7 @@
 | E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | ✅ **RELEASED 2026-10-27** (`main` `faa1f83..261f931`; infra `bf591bc`) — **crawls run on `CrawlWorkflow` in prod; the coordinator is gone**; owner verified a crawl + the SPA |
 | E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ✅ **RELEASED 2026-10-27** with E.7 (`6c1b847`) — owner clicked through in prod (crawl + batch results) |
 | **F** | **Schedule and webhook cutover** | |
-| F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ⬜ |
+| F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ✅ 2026-10-27 — ADR-013 Accepted (owner) |
 | F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ⬜ |
 | F.2 | `schedule_status` interlock guard + `active_recurring_jobs` scoping | ⬜ |
 | F.3 | Per-job migration runbook (pause v1 → verify → create Schedule) | ⬜ |
@@ -111,7 +111,7 @@
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ⬜ |
 | X.2 | Promote ADR-010 — needed by E.0 | ✅ 2026-10-13 — Accepted after review; §1 monthly skips, §2 sitemap files gated + submitted-seed scope + drops counted |
-| X.3 | Schedule overlap policy → ADR — **ADR-013 Draft 2026-10-13, `SKIP` (owner)**; promote after §5's three open items — needed by F.0 | 🟡 Draft 2026-10-13 |
+| X.3 | Schedule overlap policy → ADR — **ADR-013, `SKIP` (owner)** | ✅ Accepted 2026-10-27 |
 
 ---
 
@@ -2384,12 +2384,12 @@ built once, against lanes that finish.
 
 #### F.0 — Gate: overlap policy (⚠️ Architect)
 
-**Decided 2026-10-13 (owner): `overlap=SKIP`** — **ADR-013** (Draft): `SKIP`,
+✅ **Done 2026-10-27 — ADR-013 Accepted (owner).** Overlap decided 2026-10-13: **ADR-013**: `SKIP`,
 `pause_on_failure=False` and the catch-up window set explicitly on every Schedule, plus the
 **per-user cap on active scheduled jobs** (429 `quota_type: "scheduled_jobs"` on create, PATCH
-`schedule_cron` and resume, under BUG-023's lock). Open in its §5 before promotion: the cap's
-default, whether paused schedules count, the catch-up window value. F.1 creates no Schedule until
-ADR-013 is Accepted.
+`schedule_cron` and resume, under BUG-023's lock). §5, taken as recommended (owner, 2026-10-27):
+`default_quota_scheduled_jobs = 20` (per-user override), only `schedule_status = 'active'` counts,
+`catchup_window = 365 days` pinned.
 **Depends on:** X.3
 
 #### F.1 — Temporal Schedule per recurring job + quota admission
@@ -2402,7 +2402,8 @@ count; storage fails now naming the remedy). The admission check and the run ins
 BUG-023's per-user lock — woken parked runs re-check in parallel. The API enforces the per-user
 **active scheduled jobs** cap (ADR-013) on create, PATCH `schedule_cron` and resume, under the same lock.
 Every Schedule is created with ADR-013's three policies set explicitly. **Verify on compose:** after a
-`temporal` outage across several ticks, a recovered Schedule runs once, not once per missed tick (ADR-013 §5). Schedule created/paused/deleted
+`temporal` outage across several ticks, a recovered Schedule runs once, not once per missed tick (ADR-013 §5);
+and a Schedule resumed after a pause does not replay the ticks it missed while paused. Schedule created/paused/deleted
 by the API on `schedule_cron` / `schedule_status` writes for **v2-owned** schedules; overlap policy
 from F.0. `next_run_at` for v2 comes from the Schedule (`describe`), not the row.
 **Tests:** time-skipping: parked run releases when the meter clears; monthly breach skips without
@@ -2524,7 +2525,7 @@ migration's stated payoff; record the before/after in the handoff.
 |---|---|---|
 | X.1 | **PRD-019** — conditional execution (four obligations on its `phase4-backlog.md` §2 row) | before PRD-018; not on this critical path |
 | X.2 | **Promote ADR-010** (owner review) | E.0 |
-| X.3 | **Schedule overlap policy** ADR — ADR-013 (Draft), `SKIP` | F.0 |
+| X.3 | ~~**Schedule overlap policy** ADR — ADR-013, `SKIP`~~ ✅ Accepted 2026-10-27 | F.0 |
 
 ---
 

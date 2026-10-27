@@ -20,6 +20,7 @@
 
 | Date | Change to this backlog |
 |---|---|
+| 2026-10-27 | **ADR-013 → Accepted** (owner took §5's three recommendations: cap 20, paused not counted, catch-up 365 d). Gotcha 6 restated. F.0 done; BUG-023 is next, then F.1. |
 | 2026-10-27 | **E.7 RELEASED — Group E closed** (owner). Crawls run on `CrawlWorkflow` in prod; `coordinator/` deleted and pruned. **BUG-008, BUG-012 closed as dissolved**; **BUG-010 part 1 fixed and deployed**; **BUG-025 deployed**. |
 | 2026-10-27 | **E.3–E.6 + E.10 built, E.7 prepared** (implementation backlog). **BUG-008 and BUG-012 dissolve at E.7** (`coordinator/` deleted on `develop`; close when it ships). **BUG-010 part 1 built** (admission SSRF). **BUG-024 filed → §4** (the SSRF check admits `100.64.0.0/10` and multicast; owner's call). **BUG-025 filed and fixed** (admin webhook-deliveries list 500s on batch/crawl rows). |
 | 2026-10-13 | **ADR-010 → Accepted** (owner, after review; §2 amended — sitemap files gated, submitted-seed scope, drops counted). ADR-010 row restated. |
@@ -223,15 +224,15 @@ PRD-017 (C) / PRD-018 (B). ⚠️ **Index order is not build order here.** ADR-0
    table a new lane does not write to — BUG-005 (batch invisible, `job_id` NULL), P7 (crawls
    invisible, every meter reads `job_runs`), and it is why ADR-009 §3 moved run counting onto a
    **view** instead of naming a table.
-6. **Temporal Schedule overlap policy — ✅ `SKIP` (owner, 2026-10-13; ADR-013, Draft).**
+6. **Temporal Schedule overlap policy — ✅ `SKIP` (owner, 2026-10-13; ADR-013, Accepted 2026-10-27).**
    ADR-010 §1 has a scheduled run blocked on `concurrent_jobs` **park on a durable timer**
    (`monthly_runs` skips the firing; storage fails); a parked workflow is still *running*, so `SKIP`
    drops later ticks while it waits and the parked run itself executes when the slot frees. An
    overrunning job drops a tick instead of overlapping itself (v1 overlaps — effectively `ALLOW_ALL`).
    `SKIP`, `pause_on_failure=False` and the catch-up window are set **explicitly** on every Schedule.
    ⚠️ **No overlap policy reaches across Schedules** — hence the **per-user cap on active scheduled
-   jobs** (owner, 2026-10-13), enforced by the API on create / PATCH `schedule_cron` / resume. Open in
-   ADR-013 §5: the cap's default, whether paused schedules count, the catch-up window.
+   jobs** (owner, 2026-10-13), enforced by the API on create / PATCH `schedule_cron` / resume. ADR-013 §5
+   (owner, 2026-10-27): cap default **20**, paused schedules **do not count**, `catchup_window` **365 days**.
 7. **Serialise the quota check and the run insert per user before F.1** — **BUG-023** (filed
    2026-10-13). Every admission site counts, compares, and inserts later with nothing holding the two
    together, so parallel admissions overshoot both count meters. Low today (needs a request burst);
