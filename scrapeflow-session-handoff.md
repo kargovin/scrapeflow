@@ -142,7 +142,19 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-27 *(clock)*
+## Current state — as of 2026-10-28 *(clock)*
+
+🚀 **GROUP F RELEASED + CLOSED (2026-10-28, seventh session).** Owner: "pushed; see both the changes; close out this
+session and sec F". **Deployed code is `41a348f`** (api + workflow-worker; CI green). Releases: `261f931..3b9cf9c`
+(F.1–F.7 + BUG-023, 2026-10-27 — owner ran the runbook, steps 2–4 in their own terminal) and `41a348f` (the
+run-history fix the owner's click-through asked for: each run's own time, "latest completed run · …", view/hide
+per run). F.4's call confirmed: `webhook_deliveries` stays as the delivery record. Prod now: every schedule is a
+Temporal Schedule, every job/batch/crawl webhook a `WebhookDeliveryWorkflow`, `webhook-sweep` every 5 min; the
+API runs one background task (the v1 result consumer). Detail: backlog F.6 *Released*.
+- ⚠️ **v1 lanes are no working rollback any more** (no stale-pending recovery, no MaxDeliver advisory) — G.1 deletes
+  `result_consumer.py` next (drain gate: no `lane='v1'` non-terminal rows; `api-result-consumer` zero/zero).
+- **Next: Group G — G.1.** Still waiting: Dependabot's 64 alerts (4 critical), BUG-024 (SSRF `100.64/10`, owner's call),
+  BUG-018/019/021 (owner: later). `tmp/` untracked, not mine.
 
 🔧 **GROUP F BUILT — F.1–F.7 (2026-10-27, seventh session; nothing pushed, nothing released).** Owner: "i'll be
 afk; pls plan and build f1-f7; wait for me to come back to do the release" — planned and built under that

@@ -2133,7 +2133,7 @@ burst. **Must be fixed before F.1** (ADR-010 §1): parked scheduled runs re-chec
 design, so the gap becomes the normal path there instead of a race.
 **Discovered:** 2026-10-13, by code reading during the owner's review of ADR-010 §1 (the monthly-parking
 backlog). **Not reproduced live.**
-**Status:** ✅ **FIXED 2026-10-27 (`2983a47`, local, unreleased)** — ships with the next release. **Not dissolved
+**Status:** ✅ **CLOSED — fixed 2026-10-27 (`2983a47`), DEPLOYED 2026-10-27 with Group F (`3b9cf9c`).** **Not dissolved
 by Temporal** (backlog §3 does not apply) — the migration makes it worse.
 
 ### What happens
@@ -2286,7 +2286,7 @@ optional and the response carries `batch_id` and `crawl_id`; one test lists a ba
 went at once and no tick ever followed. **No prod impact known**: production has never had an armed
 schedule. In dev, 176 jobs had a cron and no schedule state.
 **Discovered:** 2026-10-27, building F.1 (code reading, confirmed in the dev DB).
-**Status:** ✅ **FIXED in F.1 (`69fcd7b`), local, unreleased** — ships with Group F's release.
+**Status:** ✅ **CLOSED — fixed in F.1 (`69fcd7b`), DEPLOYED 2026-10-27 (`3b9cf9c`)**
 
 `create_job` stored `schedule_cron` and set neither `schedule_status` nor `next_run_at`, and the v1
 loop selected `schedule_status = 'active' AND next_run_at <= now()`. A PATCH of `schedule_cron` set
@@ -2305,7 +2305,7 @@ string (a bad value 500'd on the CHECK; now 422), and `schedule_cron: null` cras
 **Severity:** Low (admin UI) — the form's placeholders were always blank and "Storage used" never
 showed; saving still worked.
 **Discovered:** 2026-10-27, adding the scheduled-jobs field to the form in F.7.
-**Status:** ✅ **FIXED in F.7 (`56a06e6`), local, unreleased.**
+**Status:** ✅ **CLOSED — fixed in F.7 (`56a06e6`), DEPLOYED 2026-10-27 (`3b9cf9c`).**
 
 `Users.tsx` reads `GET /admin/users/{id}/quota`, which did not exist (only the `PATCH` did), so the
 query 405'd. The GET is added; it returns the overrides (NULL = the default). ⚠️ Unchanged: saving the
@@ -2318,7 +2318,7 @@ form sends `null` for every blank field, which **clears** an override — blank 
 **Severity:** Low (admin stats per user) — the same defect class as BUG-005 and P7: a well-formed,
 too-small number.
 **Discovered:** 2026-10-27, scoping the three webhook meters in F.5 (code reading).
-**Status:** ✅ **FIXED in F.5 (`539114e`), local, unreleased.**
+**Status:** ✅ **CLOSED — fixed in F.5 (`539114e`), DEPLOYED 2026-10-27 (`3b9cf9c`).**
 
 `GET /admin/stats/users/{id}` scoped `webhook_deliveries` through `job_id` alone, so that user's batch
 and crawl delivery rows were left out of pending, exhausted and the 7-day success rate (the

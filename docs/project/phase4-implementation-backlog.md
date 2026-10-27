@@ -91,15 +91,15 @@
 | E.6 | Crawl compensating gate (no v1 reference exists) | ✅ Built + **PASSED on compose** 2026-10-27 (`aefc1d4`), http and playwright |
 | E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | ✅ **RELEASED 2026-10-27** (`main` `faa1f83..261f931`; infra `bf591bc`) — **crawls run on `CrawlWorkflow` in prod; the coordinator is gone**; owner verified a crawl + the SPA |
 | E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ✅ **RELEASED 2026-10-27** with E.7 (`6c1b847`) — owner clicked through in prod (crawl + batch results) |
-| **F** | **Schedule and webhook cutover** | |
+| **F** | **Schedule and webhook cutover** — ✅ **closed 2026-10-28** (owner) | |
 | F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ✅ 2026-10-27 — ADR-013 Accepted (owner) |
-| F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ✅ Built 2026-10-27 (local, `69fcd7b`, migration 4.8 `437442ce59b2`, unreleased) — outage collapse + pause/resume verified on compose |
-| F.2 | `schedule_status` interlock guard + `active_recurring_jobs` scoping | ✅ Built 2026-10-27 (local, `e2cadca` + the lane guard in F.1, unreleased) |
-| F.3 | Per-job migration runbook (pause v1 → verify → create Schedule) | ✅ Built 2026-10-27 (local, `a46109d`; rollback mode removed at F.6) |
-| F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ✅ Built 2026-10-27 (local, `35ada75`) — a workflow per row + a sweep Schedule; the table stays — **owner confirmed 2026-10-28** |
-| F.5 | Three webhook meters scoped to the job lane (15e) | ✅ Built 2026-10-27 (local, `539114e`; BUG-028 fixed with it) |
-| F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | 🔧 Built 2026-10-27 (local, `981e0fc`); **release owner-run — runbook in F.6** |
-| F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ✅ Built 2026-10-27 (local, `56a06e6`; BUG-027 fixed with it), ships with F.6 — click-through owed |
+| F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ✅ Built 2026-10-27 (`69fcd7b`, migration 4.8 `437442ce59b2`; **released 2026-10-27** with F.6) — outage collapse + pause/resume verified on compose |
+| F.2 | `schedule_status` interlock guard + `active_recurring_jobs` scoping | ✅ Built 2026-10-27 (`e2cadca` + the lane guard in F.1; **released 2026-10-27** with F.6) |
+| F.3 | Per-job migration runbook (pause v1 → verify → create Schedule) | ✅ Built 2026-10-27 (`a46109d`; rollback mode removed at F.6; **released 2026-10-27** with F.6) |
+| F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ✅ Built 2026-10-27 (`35ada75`; **released 2026-10-27** with F.6) — a workflow per row + a sweep Schedule; the table stays — **owner confirmed 2026-10-28** |
+| F.5 | Three webhook meters scoped to the job lane (15e) | ✅ Built 2026-10-27 (`539114e`; BUG-028 fixed with it; **released 2026-10-27** with F.6) |
+| F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | ✅ **RELEASED 2026-10-27** (`main` `261f931..3b9cf9c`; no infra change) — schedules + webhooks on Temporal in prod; owner verified a 5-min schedule, its webhooks, pause, delete |
+| F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ✅ **RELEASED** with F.6 (`56a06e6`) + run-history fix **`41a348f` 2026-10-28** — owner clicked through in prod |
 | **G** | **Consumer deletion** | |
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ⬜ |
 | **H** | **NATS removal** | |
@@ -2569,6 +2569,18 @@ task on a worker that does not know `ScheduledJobWorkflow` (SDK from the api pod
 `job-schedule-*` and `webhook-sweep`). Migration 4.8 is additive — the old code ignores the columns, but
 its loop selects `next_run_at`, which v2 rows leave NULL, so those schedules stay silent until set.
 Prefer a forward fix.
+
+**Released** *(2026-10-27 / 2026-10-28; owner: "doing f6 runbook")*. Step 0 (owner): no armed schedules, no v1
+runs in flight, no pending webhooks — ⚠️ the runbook's first query named `schedule_lane`, which 4.8 only adds;
+corrected (`3b9cf9c`). `develop` pushed; **the owner ran the `main` ff `261f931..3b9cf9c`** (it also carried
+BUG-023's fix, `2983a47`). CI `replay` 41 passed, `build-api` green; Flux rolled api + workflow-worker to
+`3b9cf9c`, 0 restarts; api log `Running upgrade 532e93f0d629 -> 437442ce59b2`, no loop start lines; worker
+started clean. Steps 2–3 (owner — my SDK read was refused by the classifier as a production read):
+`webhook-sweep` every 5 min, `SKIP`, the only Schedule; `migrate_schedule --all` and `--reconcile` both 0.
+Step 4 (owner): a `*/5` job — both webhook POSTs arrived, pause worked, `DELETE ?permanent=true` 204. The
+owner's click-through found two F.7 gaps (below), fixed and released as `41a348f` 2026-10-28 (CI green, both
+Deployments on it); owner: "see both the changes". F.4's open call **confirmed by the owner** ("keep
+webhook_del"). **Group F closed by the owner.**
 
 #### F.7 — Scheduled jobs in the SPA
 
