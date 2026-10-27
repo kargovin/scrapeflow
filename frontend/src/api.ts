@@ -214,3 +214,72 @@ export interface BlockProblem {
   block_id: string | null
   message: string
 }
+
+// ---------------------------------------------------------------------------
+// Batches and crawls (E.10)
+// ---------------------------------------------------------------------------
+
+export interface Batch {
+  id: string
+  user_id: string
+  // Admin routes only.
+  user_email?: string | null
+  status: string
+  output_format: string
+  engine: string
+  total: number
+  completed: number
+  failed: number
+  webhook_url: string | null
+  respect_robots: boolean
+  llm_config: Record<string, unknown> | null
+  created_at: string
+  completed_at: string | null
+}
+
+export interface BatchItem {
+  id: string
+  url: string
+  status: string
+  result_path: string | null
+  error: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+export interface Crawl {
+  id: string
+  user_id: string
+  user_email?: string | null
+  seed_url: string
+  status: string
+  max_depth: number
+  max_pages: number
+  include_paths: string[] | null
+  exclude_paths: string[] | null
+  ignore_sitemap: boolean
+  output_format: string
+  engine: string
+  webhook_url: string | null
+  respect_robots: boolean
+  total_queued: number
+  total_completed: number
+  total_failed: number
+  // URLs the crawl refused to fetch, by reason.
+  dropped: Record<string, number>
+  error: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+export interface CrawlPage {
+  id: string
+  crawl_id: string
+  url: string
+  depth: number
+  status: string
+  result_path: string | null
+  error: string | null
+  created_at: string
+  completed_at: string | null
+}

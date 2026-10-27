@@ -7,6 +7,7 @@ import redis.asyncio as aioredis
 import structlog
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, status
+from miniopy_async import Minio
 from nats.js import JetStreamContext
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,7 @@ from app.core.dispatch import (
 from app.core.dispatch import cancel_batch as cancel_batch_rows
 from app.core.encryption import get_fernet
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
+from app.core.minio import get_minio
 from app.core.nats import get_jetstream
 from app.core.quota import check_user_quota
 from app.core.rate_limit import check_rate_limit_n
@@ -32,8 +34,9 @@ from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
 from app.models.user import User
+from app.routers.jobs import read_stored_result
 from app.schemas.batch import BatchCreate, BatchItemResponse, BatchResponse
-from app.schemas.jobs import Engine
+from app.schemas.jobs import Engine, JobResultResponse
 from app.settings import settings
 from app.workflows.client import lazy_client
 
@@ -155,16 +158,63 @@ async def create_batch(
     return BatchResponse.model_validate(batch)
 
 
+async def owned_batch(db: AsyncSession, batch_id: uuid.UUID, user: User) -> Batch:
+    batch = await db.get(Batch, batch_id)
+    if batch is None or batch.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Batch not found")
+    return batch
+
+
+async def list_items(
+    db: AsyncSession, batch_id: uuid.UUID, limit: int, offset: int
+) -> list[BatchItemResponse]:
+    result = await db.execute(
+        select(BatchItem)
+        .where(BatchItem.batch_id == batch_id)
+        .order_by(BatchItem.created_at.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return [BatchItemResponse.model_validate(item) for item in result.scalars()]
+
+
+async def item_result(
+    db: AsyncSession, minio_client: Minio, batch_id: uuid.UUID, item_id: uuid.UUID
+) -> JobResultResponse:
+    item = await db.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+    if item.status != "completed" or item.result_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No completed result available"
+        )
+    return await read_stored_result(minio_client, item.result_path)
+
+
+@router.get("", response_model=list[BatchResponse])
+async def list_batches(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[BatchResponse]:
+    result = await db.execute(
+        select(Batch)
+        .where(Batch.user_id == user.id)
+        .order_by(Batch.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return [BatchResponse.model_validate(b) for b in result.scalars()]
+
+
 @router.get("/{batch_id}", response_model=BatchResponse)
 async def get_batch(
     batch_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> BatchResponse:
-    batch = await db.get(Batch, batch_id)
-    if batch is None or batch.user_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Batch not found")
-    return BatchResponse.model_validate(batch)
+    return BatchResponse.model_validate(await owned_batch(db, batch_id, user))
 
 
 @router.get("/{batch_id}/items", response_model=list[BatchItemResponse])
@@ -175,18 +225,20 @@ async def list_batch_items(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[BatchItemResponse]:
-    batch = await db.get(Batch, batch_id)
-    if batch is None or batch.user_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Batch not found")
+    await owned_batch(db, batch_id, user)
+    return await list_items(db, batch_id, limit, offset)
 
-    result = await db.execute(
-        select(BatchItem)
-        .where(BatchItem.batch_id == batch_id)
-        .order_by(BatchItem.created_at.asc())
-        .limit(limit)
-        .offset(offset)
-    )
-    return [BatchItemResponse.model_validate(item) for item in result.scalars()]
+
+@router.get("/{batch_id}/items/{item_id}/result", response_model=JobResultResponse)
+async def get_batch_item_result(
+    batch_id: uuid.UUID,
+    item_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
+) -> JobResultResponse:
+    await owned_batch(db, batch_id, user)
+    return await item_result(db, minio_client, batch_id, item_id)
 
 
 @router.delete("/{batch_id}", status_code=status.HTTP_204_NO_CONTENT)

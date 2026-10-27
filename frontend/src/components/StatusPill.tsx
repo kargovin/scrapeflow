@@ -1,5 +1,7 @@
 const COLOURS: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-700',
+  queued: 'bg-yellow-100 text-yellow-700',
+  partial_failure: 'bg-orange-100 text-orange-700',
   running: 'bg-blue-100 text-blue-700',
   waiting: 'bg-amber-100 text-amber-700',
   processing: 'bg-purple-100 text-purple-700',

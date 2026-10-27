@@ -51,4 +51,6 @@ class BatchResponse(BaseModel):
     llm_config: dict | None = None
     created_at: datetime
     completed_at: datetime | None = None
+    # Admin reads only (GET /admin/batches).
+    user_email: str | None = None
     model_config = {"from_attributes": True}
