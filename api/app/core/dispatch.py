@@ -10,7 +10,8 @@ The wire models in ``app.messages`` stay ORM-free; this module is the bridge fro
 to messages.
 
 ``dispatch_run`` is the one switch between the engines for a job's run (ADR-009 16d): the run's
-``lane``, written when the row was inserted, picks NATS or ``JobWorkflow``.
+``lane``, written when the row was inserted, picks NATS or ``JobWorkflow``. A batch's runs share
+one lane; on v2 the batch is one ``BatchWorkflow`` (``start_batch``).
 """
 
 import uuid
@@ -19,18 +20,22 @@ from datetime import UTC, datetime
 
 import structlog
 from nats.js import JetStreamContext
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-from app.core.webhooks import create_webhook_delivery
+from app.core import batch_progress
+from app.core.webhooks import create_batch_webhook_delivery, create_webhook_delivery
 from app.messages import Credentials, MessageOptions, ScrapeMessage
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.settings import settings
+from app.workflows import batch as batch_workflow
 from app.workflows.activities import contracts
+from app.workflows.batch import BatchInput, BatchWorkflow
 from app.workflows.job import JobRunInput, JobWorkflow, workflow_id
 from app.workflows.queues import WORKFLOW_QUEUE
 
@@ -128,6 +133,105 @@ async def cancel_workflows(runs: list[JobRun], temporal: TemporalClient) -> None
         logger.warning("job_workflow_cancel_not_sent", error=str(exc))
 
 
+async def start_batch(
+    batch: Batch, items: list[BatchItem], runs: list[JobRun], temporal: TemporalClient
+) -> None:
+    """Starts a committed v2 batch's workflow. Raises if the engine refused it."""
+    client = await temporal()
+    await client.start_workflow(
+        BatchWorkflow.run,
+        BatchInput(
+            batch_id=str(batch.id),
+            max_in_flight=settings.batch_max_in_flight,
+            runs=[
+                JobRunInput(
+                    run_id=str(run.id),
+                    engine=batch.engine,
+                    scrape=build_batch_scrape_input(batch, item, run),
+                )
+                for item, run in zip(items, runs, strict=True)
+            ],
+        ),
+        id=batch_workflow.workflow_id(batch.id),
+        task_queue=WORKFLOW_QUEUE,
+        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+    )
+
+
+async def fail_unstarted_batch(
+    db: AsyncSession, batch: Batch, runs: list[JobRun], exc: Exception
+) -> None:
+    """A v2 batch whose workflow never started: every item failed, closed as v1 closes one."""
+    now = datetime.now(UTC)
+    error = f"could not start workflow: {exc}"
+    for run in runs:
+        run.status, run.error, run.completed_at = "failed", error, now
+    await db.execute(
+        update(BatchItem)
+        .where(BatchItem.batch_id == batch.id)
+        .values(status="failed", error=error, completed_at=now)
+    )
+    await batch_progress.recount(db, batch)
+    batch.status = "partial_failure"
+    batch.completed_at = now
+    if batch.webhook_url:
+        await create_batch_webhook_delivery(db, batch, runs[0].id, event="batch.completed")
+    await batch_progress.notify(db, batch)
+    await db.commit()
+
+
+async def cancel_batch(db: AsyncSession, batch_id: uuid.UUID) -> list[JobRun] | None:
+    """Cancels the batch, its active runs and their items; notifies, commits. Both lanes.
+
+    Returns the runs it cancelled, or None if the batch closed while this waited on its lock.
+    """
+    # Lock order run → batch → item, as the v2 mirrors take them. The status test is in the
+    # UPDATE, as in cancel_active_runs: a run that just finished stays finished.
+    runs = list(
+        (
+            await db.scalars(
+                update(JobRun)
+                .where(
+                    JobRun.batch_item_id.in_(
+                        select(BatchItem.id).where(BatchItem.batch_id == batch_id)
+                    ),
+                    JobRun.status.in_(("pending", "running", "processing")),
+                )
+                .values(status="cancelled")
+                .returning(JobRun)
+            )
+        ).all()
+    )
+    batch = await batch_progress.lock(db, batch_id)
+    if batch is None or batch.status in batch_progress.TERMINAL:
+        await db.rollback()
+        return None
+    await db.execute(
+        update(BatchItem)
+        .where(BatchItem.batch_id == batch_id, BatchItem.status.in_(("pending", "running")))
+        .values(status="cancelled")
+    )
+    batch.status = "cancelled"
+    await batch_progress.recount(db, batch)
+    await batch_progress.notify(db, batch)
+    await db.commit()
+    return runs
+
+
+async def cancel_batch_workflow(
+    batch_id: uuid.UUID, runs: list[JobRun], temporal: TemporalClient
+) -> None:
+    """Best effort, after the rows are cancelled — as ``cancel_workflows``. The batch's workflow
+    passes the cancel to its children in flight."""
+    if not any(run.lane == "v2" for run in runs):
+        return
+    try:
+        client = await temporal()
+        await client.get_workflow_handle(batch_workflow.workflow_id(batch_id)).cancel()
+    except Exception as exc:
+        logger.warning("batch_workflow_cancel_not_sent", batch_id=str(batch_id), error=str(exc))
+
+
 def build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> ScrapeMessage:
     """Build the dispatch message for one run of a job, manual or scheduled.
 
@@ -180,4 +284,14 @@ def build_batch_scrape_message(batch: Batch, item: BatchItem, run: JobRun) -> Sc
         output_format=batch.output_format,
         engine=batch.engine,
         options=MessageOptions(respect_robots=batch.respect_robots),
+    )
+
+
+def build_batch_scrape_input(batch: Batch, item: BatchItem, run: JobRun) -> contracts.ScrapeInput:
+    """The v2 twin of ``build_batch_scrape_message``: the same values, the activity's shape."""
+    return contracts.ScrapeInput(
+        artifact_id=str(run.id),
+        url=item.url,
+        output_format=batch.output_format,
+        options=contracts.ScrapeOptions(respect_robots=batch.respect_robots),
     )

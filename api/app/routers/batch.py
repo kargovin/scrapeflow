@@ -6,7 +6,7 @@ from asyncio import get_running_loop
 import redis.asyncio as aioredis
 import structlog
 from cryptography.fernet import Fernet
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, status
 from nats.js import JetStreamContext
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import auth_from_token, get_current_user
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
-from app.core.dispatch import build_batch_scrape_message
+from app.core.dispatch import (
+    build_batch_scrape_message,
+    cancel_batch_workflow,
+    fail_unstarted_batch,
+    start_batch,
+)
+from app.core.dispatch import cancel_batch as cancel_batch_rows
 from app.core.encryption import get_fernet
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.nats import get_jetstream
@@ -28,6 +34,8 @@ from app.models.llm_keys import UserLLMKey
 from app.models.user import User
 from app.schemas.batch import BatchCreate, BatchItemResponse, BatchResponse
 from app.schemas.jobs import Engine
+from app.settings import settings
+from app.workflows.client import lazy_client
 
 router = APIRouter(prefix="/batch", tags=["batch"])
 logger = structlog.get_logger()
@@ -49,6 +57,7 @@ async def check_batch_quota(
 @router.post("", response_model=BatchResponse, status_code=status.HTTP_201_CREATED)
 async def create_batch(
     body: BatchCreate,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     js: JetStreamContext = Depends(get_jetstream),
@@ -100,9 +109,10 @@ async def create_batch(
     db.add_all(items)
     await db.flush()
 
-    # One job_run per item — batch_item_id set, job_id null (ADR-006 §4).
-    # The batch lane moves at the batch cutover, not with JOB_LANE.
-    runs = [JobRun(batch_item_id=item.id, status="pending", lane="v1") for item in items]
+    # One job_run per item — batch_item_id set, job_id null (ADR-006 §4). Every run of a batch is
+    # on one lane, BATCH_LANE's at insert (E.2) — not JOB_LANE's.
+    lane = settings.batch_lane
+    runs = [JobRun(batch_item_id=item.id, status="pending", lane=lane) for item in items]
     db.add_all(runs)
     await db.commit()
 
@@ -111,19 +121,33 @@ async def create_batch(
         await db.refresh(item)
         await db.refresh(run)
 
-    # Dispatch one NATS message per item — identical fat-message schema, no batch_item_id.
-    # Workers are unaware they are running a batch job (ADR-006 §4).
-    subject = (
-        NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-        if body.engine == Engine.playwright
-        else NATS_JOBS_RUN_HTTP_SUBJECT
-    )
-    for item, run in zip(items, runs, strict=True):
-        message = build_batch_scrape_message(batch, item, run)
-        await js.publish(subject, message.to_nats_bytes())
+    if lane == "v1":
+        # Dispatch one NATS message per item — identical fat-message schema, no batch_item_id.
+        # Workers are unaware they are running a batch job (ADR-006 §4).
+        subject = (
+            NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
+            if body.engine == Engine.playwright
+            else NATS_JOBS_RUN_HTTP_SUBJECT
+        )
+        for item, run in zip(items, runs, strict=True):
+            message = build_batch_scrape_message(batch, item, run)
+            await js.publish(subject, message.to_nats_bytes())
+    else:
+        try:
+            await start_batch(batch, items, runs, lambda: lazy_client(request.app.state))
+        except Exception as exc:
+            # v2 has no stale-pending recovery: a batch whose workflow did not start is failed.
+            logger.exception("batch_start_failed", batch_id=str(batch.id))
+            await fail_unstarted_batch(db, batch, runs, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"batch_id": str(batch.id), "error": runs[0].error},
+            ) from None
 
-    # Transition batch to "running" after first dispatch.
-    await db.execute(update(Batch).where(Batch.id == batch.id).values(status="running"))
+    # Transition batch to "running" after first dispatch — unless a fast v2 batch has closed.
+    await db.execute(
+        update(Batch).where(Batch.id == batch.id, Batch.status == "queued").values(status="running")
+    )
     await db.commit()
     await db.refresh(batch)
 
@@ -168,6 +192,7 @@ async def list_batch_items(
 @router.delete("/{batch_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def cancel_batch(
     batch_id: uuid.UUID,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
@@ -181,31 +206,16 @@ async def cancel_batch(
             detail=f"Batch is already {batch.status}",
         )
 
-    # Cancel all pending/running items — result consumer discards results for cancelled runs.
-    pending_items_result = await db.execute(
-        select(BatchItem).where(
-            BatchItem.batch_id == batch_id,
-            BatchItem.status.in_(("pending", "running")),
+    # Rows first: the v1 result consumer discards results for cancelled runs, and a v2 child's
+    # next mirror refuses to move one. The engine is told after, best effort.
+    runs = await cancel_batch_rows(db, batch_id)
+    if runs is None:
+        await db.refresh(batch)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Batch is already {batch.status}",
         )
-    )
-    pending_items = pending_items_result.scalars().all()
-    for item in pending_items:
-        item.status = "cancelled"
-
-    # Cancel the corresponding job_runs so result consumer ignores their results.
-    if pending_items:
-        item_ids = [item.id for item in pending_items]
-        pending_runs_result = await db.execute(
-            select(JobRun).where(
-                JobRun.batch_item_id.in_(item_ids),
-                JobRun.status.in_(("pending", "running")),
-            )
-        )
-        for run in pending_runs_result.scalars().all():
-            run.status = "cancelled"
-
-    batch.status = "cancelled"
-    await db.commit()
+    await cancel_batch_workflow(batch_id, runs, lambda: lazy_client(request.app.state))
     logger.info("batch_cancelled", batch_id=str(batch_id), user_id=str(user.id))
 
 

@@ -14,6 +14,7 @@ import structlog
 from temporalio.worker import Worker
 
 from app.settings import settings
+from app.workflows.activities.batches import finish_batch
 from app.workflows.activities.db import (
     check_cancelled,
     mirror_block_status,
@@ -29,6 +30,7 @@ from app.workflows.activities.job_runs import (
     record_job_objects,
 )
 from app.workflows.activities.webhook import deliver_webhook
+from app.workflows.batch import BatchWorkflow
 from app.workflows.client import connect
 from app.workflows.hello import HelloWorkflow, say_hello
 from app.workflows.job import JobWorkflow
@@ -56,6 +58,7 @@ async def main() -> None:
             LLMProbeWorkflow,
             PipelineWorkflow,
             JobWorkflow,
+            BatchWorkflow,
         ],
         activities=[
             say_hello,
@@ -69,6 +72,7 @@ async def main() -> None:
             record_job_objects,
             job_run_processing,
             finish_job_run,
+            finish_batch,
             acquire_host_slot,
             release_host_slot,
         ],

@@ -13,6 +13,8 @@ from app.workflows.job import RECORD_JOB_OBJECTS_ACTIVITY, JobLLM
 from app.workflows.pipeline import RUN_CANCELLED_ERROR, StorageUsage
 from app.workflows.steps import HostSlot
 from tests.replay.export_history import HISTORIES
+from tests.test_workflows_batch import Harness as BatchHarness
+from tests.test_workflows_batch import _batch_input, _scrape_ok, _scraped
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
 from tests.test_workflows_pipeline import CLEAN_GUARD, R6, RUN_INPUT, Harness
@@ -91,6 +93,43 @@ JOB_SCENARIOS = {
 }
 
 
+async def _scrape_r1_blocked(input):
+    if input.artifact_id == "r1":
+        return await _scrape_blocked(input)
+    return await _scrape_ok(input)
+
+
+def _batch_cancelled_mid_scrape():
+    scraping, release = asyncio.Event(), asyncio.Event()
+    seen: list[str] = []
+
+    async def scrape(input):
+        seen.append(input.artifact_id)
+        if len(seen) == 2:
+            scraping.set()
+        await release.wait()
+        return _scraped(input.artifact_id)
+
+    async def during(handle):
+        await scraping.wait()
+        await handle.cancel()
+        await asyncio.sleep(0.5)
+        release.set()
+
+    return {"scrape": scrape}, during
+
+
+# E.1 — name -> () -> (harness kwargs, during or None), BatchInput.
+BATCH_SCENARIOS = {
+    "harness_batch_completed": (lambda: ({}, None), _batch_input(4, k=2)),
+    "harness_batch_child_failed": (
+        lambda: ({"scrape": _scrape_r1_blocked}, None),
+        _batch_input(3),
+    ),
+    "harness_batch_cancelled_mid_scrape": (_batch_cancelled_mid_scrape, _batch_input(5, k=2)),
+}
+
+
 async def main() -> None:
     runs = [(name, Harness, kwargs, run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
     runs += [(name, JobHarness, kwargs, None) for name, kwargs in JOB_SCENARIOS.items()]
@@ -103,6 +142,15 @@ async def main() -> None:
         h = harness(**kwargs)
         run_kwargs = {"during": during(h)} if during else {}
         await (h.run(run_input, **run_kwargs) if run_input is not None else h.run(**run_kwargs))
+        path.write_text(h.history.to_json() + "\n")
+        print(path)
+    for name, (setup, batch_input) in BATCH_SCENARIOS.items():
+        path = HISTORIES / f"{name}.json"
+        if path.exists():
+            continue
+        kwargs, during = setup()
+        h = BatchHarness(**kwargs)
+        await h.run(batch_input, during=during)
         path.write_text(h.history.to_json() + "\n")
         print(path)
 

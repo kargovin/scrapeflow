@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     # ADR-009 16d: the engine new job runs go to — on-demand and scheduled alike. A run keeps the
     # lane it was created on (job_runs.lane), so flipping this back never strands one.
     job_lane: Literal["v1", "v2"] = "v1"
+    # The same switch for batches (E.2): every run of a batch is on the lane it was created on.
+    batch_lane: Literal["v1", "v2"] = "v1"
+    # E.0: a v2 batch's scrapes in flight at once; the rest wait in its workflow.
+    batch_max_in_flight: int = Field(default=3, ge=1)
     # Pipelines (PRD-016 R1, R4) — read by app/pipelines/validator.py; per-user count is C.4's
     max_blocks_per_pipeline: int = 20
     max_pipelines_per_user: int = 50
