@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     # E.0: a v2 batch's scrapes in flight at once; the rest wait in its workflow.
     batch_max_in_flight: int = Field(default=3, ge=1)
     # The same bound for a crawl's pages (E.5), and the pages per run before continue-as-new
-    # (ADR-009 13b — ~45 history events a page, against Temporal's 51,200-event limit).
+    # (ADR-009 13b — ~35-40 history events a page measured, against Temporal's 51,200 limit).
     crawl_max_in_flight: int = Field(default=3, ge=1)
     crawl_pages_per_run: int = Field(default=100, ge=1)
     # Pipelines (PRD-016 R1, R4) — read by app/pipelines/validator.py; per-user count is C.4's
