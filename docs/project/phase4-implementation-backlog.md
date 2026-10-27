@@ -82,7 +82,7 @@
 | **E** | **Batch and crawl cutover** | |
 | E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open; k = 3, scrape queue timer 60 s → 5 min. Open: robots `Crawl-delay` |
 | E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ✅ Built 2026-10-15 (local, `410f015`, unreleased; not yet called by any workflow — E.9 wires it); infra `REDIS_URL` on the workflow-worker committed locally, **not pushed** |
-| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ⬜ |
+| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ✅ Built 2026-10-27 (local, `ba18cf3`, unreleased; ships with E.2). Before release: push infra `0f71515` (`REDIS_URL`) and run `scripts.audit_pipeline_budgets` in prod |
 | E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ⬜ |
 | E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ⬜ |
 | E.3 | Crawl frontier: table shape + admission activity (SSRF, eTLD+1, dedup index) | ⬜ |
@@ -1934,6 +1934,51 @@ histories for both, old ones untouched. **Raise `schedule_to_start` to 5 min** f
 run budgets include it, so recheck the catalog budgets compose; the replay test says whether the
 changed timeout needs `patched()`. Ships with E.2.
 **Depends on:** E.8
+
+**Built** *(2026-10-27; local, unreleased — ships with E.2)*. The owner took all four recommendations
+from the walkthrough before the build:
+- **A cancel ends the host wait** — nothing has started, so nothing is lost. The scrape itself stays
+  shielded (R3); the wait is not. The acquire activity *is* shielded, so a cancel cannot land between
+  Redis granting a lease and the workflow learning of it — a lease granted under a cancel is released.
+- **A Scrape block's need counts the host-slot wait**: `catalog.HOST_SLOT_SECONDS = 660` (10 min cap +
+  the last acquire + the release, 15 s each), on `Timing.host_slot`; `Timing.need` = budget + host slot
+  + `BLOCK_OVERHEAD_SECONDS` is what `run_need_seconds` and the validator's breakdown read.
+  `pipeline.py` asserts it covers `steps.py`'s numbers. Without it a full host wait came out of later
+  blocks' time and the last block failed *"the run's time budget is spent"*.
+- **Re-asks back off**: the limiter's own answer first (exact for the rate window), then 2, 4, 8, 16 s,
+  capped at 30 s, + ≤250 ms jitter (`workflow.random()`); the last sleep is clamped to what is left of the
+  cap. A wait to the cap is **25 acquires** (measured), not ~600 — ~600 × ~8 events per scrape would have
+  put a pipeline with ~10 waiting Scrape blocks near Temporal's 51,200-event limit.
+- **Only scrapes get the 5-min queue timer**: `steps.SCRAPE_SCHEDULE_TO_START` and
+  `catalog.SCRAPE_SCHEDULE_TO_START_SECONDS`; LLM, Clean, Validate and Webhook stay at 60 s.
+
+What landed: E.8's `scrape_with_host_slot` is split into `steps.wait_for_host_slot(url, lease_ttl)` →
+`HostSlotRelease | None` and `steps.release_host_slot(held)`, so each workflow puts its own shield around
+its own scrape. `JobWorkflow._scrape` and `PipelineWorkflow._scrape_in_host_slot` call them under
+`workflow.patched("host-slot")` (`steps.HOST_SLOT_PATCH`); the release runs through each workflow's
+`_finish`. The pipeline's lease TTL is the block's `Timing.budget` + 60 s (its `schedule_to_close`), and
+its block options are computed *after* the wait, so the scrape's budget is cut to what the run has left.
+A wait past the cap now returns no lease (E.8 released one that was never granted). Host-slot activities
+gained `schedule_to_close = 15 s`, so the allowance composes. New numbers: http Scrape budget
+465 → 1,185 s, need 1,905 s; playwright (60 s render) 735 → 1,455 s, need 2,175 s; leases http 1,233 s,
+playwright 1,503 s.
+- **The timer change needs no `patched()`** — answered: all 14 pre-E.9 histories replay on the new code,
+  which runs every scrape with the 5-min timer (Temporal matches recorded commands by activity type, not
+  timeouts). Runs already in flight keep the timer recorded when their activity was scheduled.
+- **Saved versions with a declared budget** may now be shorter than their blocks need (budgets are only
+  checked at save; versions never change) — such a run is not refused, its blocks' `schedule_to_close`
+  is cut. `api/scripts/audit_pipeline_budgets.py` (read-only) lists them; **run it in prod before the
+  release**: `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m
+  scripts.audit_pipeline_budgets`. Dev has none. Versions with no declared budget are unaffected
+  (computed at trigger).
+
+Verified: 27 new tests (full suite 609, replay included); 20 mutations all caught, each by a named test
+(one — the cap clamp — only after a test was added for it). **Tried live on compose**: three pipeline
+runs fired at once at `example.com` / `www.example.com` shared one key; scrapes started 1.4 s and 2.4 s
+apart, re-asks backed off (1.2 s → 2.1 s), no `host:` keys left in Redis. Corpus +9 histories (7 harness
+— granted, waited, failed open, scrape failed, cancel during the acquire, cancel during a timer; 2
+compose exports of those live runs); the corpus floor is 23. ⚠️ Histories written from inside the api
+container are root-owned and the pre-commit hook cannot open them — `chown 1000:1000` them first.
 
 #### E.1 — `BatchWorkflow`
 

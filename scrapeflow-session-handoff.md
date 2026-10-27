@@ -142,7 +142,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-15 *(clock)*
+## Current state — as of 2026-10-27 *(clock)*
 
 Phases 1–3 complete and production-verified at `scrapeflow.govindappa.com`. **Phase 4 is in
 progress, and Phase 4 *is* the Temporal durable-workflows migration.** The design phase closed on
@@ -150,6 +150,29 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 `ed4d63c`), P8 / BUG-007 (2026-09-15, `f503f8b`) and P7 (2026-09-18) — was RELEASED 2026-09-19 as
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
+
+🔧 **E.9 BUILT (2026-10-27).** `develop` `ba18cf3` (code) + backlog/closeout. **Nothing pushed** (develop ~26
+ahead of `origin/develop`; infra still 1 ahead — `0f71515`, `REDIS_URL`). Detail: backlog E.9 *Built*.
+
+- **Owner's ask:** walk through E.9's parts, then "take all four recommendations, build it". The four:
+  a cancel ends the host wait; a Scrape block's need counts the wait (660 s); re-asks back off 1 s → 30 s
+  (history size — ~600 polls at 1 s would near the 51,200-event limit in a many-scrape pipeline); the LLM
+  queue timer stays 60 s.
+- **Landed:** `steps.wait_for_host_slot` / `release_host_slot` (E.8's `scrape_with_host_slot` split, so
+  each workflow shields its own scrape); `JobWorkflow._scrape` + `PipelineWorkflow._scrape_in_host_slot`
+  under `patched("host-slot")`; `SCRAPE_SCHEDULE_TO_START` (5 min) on both sides; `Timing.host_slot` +
+  `Timing.need`; `scripts/audit_pipeline_budgets.py`.
+- **Answered:** the timer change needs no `patched()` — the 14 old histories replay on the 5-min timer.
+- **Verified:** 27 new tests, full suite 609; 20 mutations all caught; **tried live on compose** (three
+  pipeline runs on one host: scrapes ≥ 1 s apart, re-asks backed off, Redis clean). Corpus 14 → 23.
+  The local workflow-worker was restarted on the new code.
+- Full-suite warnings: one run showed 37, the re-run the usual 5 (all pre-existing, v1 tests); the changed
+  test files produce none.
+- ⚠️ Histories written in the container are root-owned → the pre-commit hook fails; `chown 1000:1000`.
+- **Before E.2's release:** push infra `0f71515`; run `scripts.audit_pipeline_budgets` in prod (any SHORT
+  line = a saved version whose blocks would be cut).
+- **Next: E.1** (`BatchWorkflow`, k = 3 children). ADR-013 §5 and BUG-023 still before F.1. Push `develop`
+  (and infra) when convenient.
 
 🔧 **E.8 BUILT (2026-10-15).** `develop` `410f015` (code) · `198a5b5` (backlog) + this closeout. Infra
 `0f71515` (`REDIS_URL` on the workflow-worker) **committed locally, not pushed**. **Nothing pushed**
