@@ -59,7 +59,8 @@ class MessageOptions(BaseModel):
 
 
 class CrawlContext(BaseModel):
-    """Set only when the BFS coordinator dispatched this run (ADR-005)."""
+    """The NATS crawl lane's; nothing has set it since E.7 deleted the coordinator (crawls run
+    on ``CrawlWorkflow``). Goes with NATS (H.2)."""
 
     crawl_id: str
     crawl_page_id: str
@@ -71,8 +72,7 @@ class ScrapeMessage(BaseModel):
 
     Built in one place on the API side — ``core/dispatch.py``, which every scrape
     dispatcher (``routers/jobs.py``, ``routers/batch.py``, ``core/scheduler.py`` for
-    both dispatch and stale-pending recovery) calls — plus the coordinator's own copy
-    of this shape.
+    both dispatch and stale-pending recovery) calls.
 
     ``artifact_id`` is the primary key of the row that owns the execution —
     ``job_runs.id`` on the job, scheduled and batch lanes, ``crawl_pages.id`` on the

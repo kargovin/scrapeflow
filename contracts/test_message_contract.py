@@ -40,7 +40,7 @@ def _load(name: str, relpath: str):
     """Import a module by file path.
 
     Each service builds from its own context with its own dependency manifest, so
-    there is no package to import from. All four message modules depend on nothing
+    there is no package to import from. All three message modules depend on nothing
     but pydantic, which is what makes loading them side by side possible at all.
     """
     spec = importlib.util.spec_from_file_location(name, REPO / relpath)
@@ -51,7 +51,6 @@ def _load(name: str, relpath: str):
 
 
 api = _load("contract_api_messages", "api/app/messages.py")
-coordinator = _load("contract_coordinator_messages", "coordinator/coordinator/messages.py")
 playwright = _load("contract_playwright_models", "playwright-worker/worker/models.py")
 llm = _load("contract_llm_models", "llm-worker/worker/models.py")
 
@@ -120,16 +119,16 @@ def _scrape_lanes() -> dict[str, str]:
             engine="http",
             options=api.MessageOptions(respect_robots=False),
         ).to_nats_bytes(),
-        # coordinator/dispatcher.py — no run_id at all
-        "crawl": coordinator.ScrapeMessage(
+        # The NATS crawl lane's shape — no run_id at all. Its producer (the coordinator) was deleted
+        # at E.7, crawls run on CrawlWorkflow; the shape stays pinned while v1 workers parse it,
+        # and goes with NATS (H.2).
+        "crawl": api.ScrapeMessage(
             artifact_id=JOB_PAGE_ID,
             url="https://example.com/page",
             output_format="html",
             engine="playwright",
-            options=coordinator.MessageOptions(respect_robots=True),
-            crawl_context=coordinator.CrawlContext(
-                crawl_id=CRAWL_ID, crawl_page_id=JOB_PAGE_ID, depth=2
-            ),
+            options=api.MessageOptions(respect_robots=True),
+            crawl_context=api.CrawlContext(crawl_id=CRAWL_ID, crawl_page_id=JOB_PAGE_ID, depth=2),
         ).to_nats_bytes(),
     }
 
@@ -239,17 +238,8 @@ def test_llm_stage_writes_beside_the_scrape_it_reads():
 
 
 # ---------------------------------------------------------------------------
-# The producer/consumer duplicate cannot drift
+# The workers cannot drift from the producer
 # ---------------------------------------------------------------------------
-
-
-def test_api_and_coordinator_scrape_models_declare_the_same_fields():
-    """
-    ADR-011 §6 rejected a shared contracts package and accepted a duplicate instead.
-    This is what holds the duplicate honest — nothing else does.
-    """
-    assert set(api.ScrapeMessage.model_fields) == set(coordinator.ScrapeMessage.model_fields)
-    assert api.SCHEMA_VERSION == coordinator.SCHEMA_VERSION
 
 
 def test_workers_accept_every_field_the_producers_declare():
@@ -297,7 +287,7 @@ def test_a_producer_cannot_build_a_message_without_an_artifact_id():
     dispatch, in development, on the first batch anyone runs — a loud local error
     instead of a silent production one.
     """
-    for model in (api.ScrapeMessage, coordinator.ScrapeMessage):
+    for model in (api.ScrapeMessage,):
         with pytest.raises(ValidationError):
             model(url="https://example.com/", output_format="html", engine="http")
         with pytest.raises(ValidationError):

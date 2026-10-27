@@ -659,14 +659,11 @@ async def _handle_result(msg: Msg, js: JetStreamContext, minio: Minio) -> None:
         await msg.ack()
         return
 
-    # Crawl result messages carry crawl_context — coordinator handles those via its
-    # own durable consumer. Ack here to prevent double-processing.
+    # A crawl page's result (crawl_context set): nothing has dispatched one since E.7 —
+    # crawls run on CrawlWorkflow — so this acks a stray one, never handled here.
     #
-    # This check MUST stay above the required-field parse below. A crawl page has no
-    # job_runs row, so ADR-011 §2 stops the coordinator fabricating a run_id for one —
-    # and run_id is parsed as a required key. Checking after the parse would send every
-    # crawl page down the malformed branch: the same end state, but an ERROR-level
-    # "Malformed result message" line per page for traffic that is not malformed.
+    # This check MUST stay above the required-field parse below: a crawl page has no
+    # job_runs row and so no run_id (ADR-011 §2), and run_id is parsed as a required key.
     if data.get("crawl_context") is not None:
         await msg.ack()
         return
