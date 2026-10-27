@@ -25,7 +25,7 @@ from app.models.job_runs import JobRun
 from app.models.user import User
 from app.models.user_quota import UserQuota
 from app.models.webhook_delivery import WebhookDelivery
-from app.routers.jobs import load_completed_result
+from app.routers.jobs import load_completed_result, scheduled_filter
 from app.schemas.admin import (
     AdminStatsResponse,
     AdminUserDetailResponse,
@@ -55,6 +55,7 @@ def _admin_jobs_with_latest_run_stmt(
     engine: str | None = None,
     limit: int | None = None,
     offset: int | None = None,
+    scheduled: bool | None = None,
 ):
     """Build the jobs+latest_run query for admin endpoints.
 
@@ -88,6 +89,8 @@ def _admin_jobs_with_latest_run_stmt(
         stmt = stmt.where(latest_run.status == status)
     if engine is not None:
         stmt = stmt.where(Job.engine == engine)
+    if scheduled is not None:
+        stmt = stmt.where(scheduled_filter(scheduled))
     if limit is not None:
         stmt = stmt.limit(limit)
     if offset is not None:
@@ -141,6 +144,28 @@ async def admin_get_user(
         created_at=user.created_at,
         job_counts=job_counts,
     )
+
+
+@router.get("/users/{user_id}/quota", response_model=UserQuotaResponse)
+async def admin_get_user_quota(
+    user_id: uuid.UUID,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserQuotaResponse:
+    """The user's overrides (NULL = the default) — the Users page's quota form reads it."""
+    if await db.get(User, user_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    quota_row = await db.get(UserQuota, user_id)
+    if quota_row is None:
+        return UserQuotaResponse(
+            monthly_runs_limit=None,
+            concurrent_jobs_limit=None,
+            storage_bytes_limit=None,
+            scheduled_jobs_limit=None,
+            storage_bytes_used=0,
+            updated_at=datetime.now(UTC),
+        )
+    return UserQuotaResponse.model_validate(quota_row)
 
 
 @router.patch("/users/{user_id}/quota", response_model=UserQuotaResponse)
@@ -243,6 +268,7 @@ async def admin_list_jobs(
     user_id: uuid.UUID | None = Query(default=None),
     status: str | None = Query(default=None),
     engine: str | None = Query(default=None),
+    scheduled: bool | None = Query(default=None),
 ) -> list[JobResponse]:
     stmt = _admin_jobs_with_latest_run_stmt(
         user_id=user_id,
@@ -250,11 +276,13 @@ async def admin_list_jobs(
         engine=engine,
         limit=limit,
         offset=offset,
+        scheduled=scheduled,
     )
     result = await db.execute(stmt)
     return [
         JobResponse(
             id=job.id,
+            **schedules.response_fields(job),
             user_id=job.user_id,
             user_email=user_email,
             url=job.url,
@@ -286,6 +314,7 @@ async def admin_get_job(
     job, run, user_email = row
     return JobResponse(
         id=job.id,
+        **schedules.response_fields(job),
         user_id=job.user_id,
         user_email=user_email,
         url=job.url,

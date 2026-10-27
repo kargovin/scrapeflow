@@ -5,6 +5,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { apiGet, apiDelete, type Job } from '../api'
 import { useLiveSocket } from '../lib/useLiveSocket'
 import LiveBadge from '../components/LiveBadge'
+import SchedulePanel from '../components/SchedulePanel'
 
 // Lazy — pulls Monaco + react-markdown into a separate chunk so the rest of the
 // admin panel (Users, Jobs list, Stats) doesn't download the editor.
@@ -134,6 +135,8 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
           ))}
         </dl>
       </div>
+
+      <SchedulePanel job={job} mode={mode} />
 
       <Suspense fallback={<p className="mb-6 text-sm text-gray-500">Loading result viewer…</p>}>
         <ResultViewer

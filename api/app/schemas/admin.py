@@ -101,12 +101,15 @@ class UserQuotaPatch(BaseModel):
     monthly_runs_limit: int | None = Field(default=None, ge=1)
     concurrent_jobs_limit: int | None = Field(default=None, ge=1)
     storage_bytes_limit: int | None = Field(default=None, ge=1)
+    # ADR-013: active scheduled jobs; 0 refuses every new schedule.
+    scheduled_jobs_limit: int | None = Field(default=None, ge=0)
 
 
 class UserQuotaResponse(BaseModel):
     monthly_runs_limit: int | None
     concurrent_jobs_limit: int | None
     storage_bytes_limit: int | None
+    scheduled_jobs_limit: int | None
     storage_bytes_used: int
     updated_at: datetime
 

@@ -215,15 +215,10 @@ async def is_quota_exceeded(user_id: uuid.UUID, db: AsyncSession, quota_type: st
     return exceeded
 
 
-async def check_scheduled_jobs_quota(
+async def scheduled_jobs_usage(
     user_id: uuid.UUID, db: AsyncSession, exclude_job_id: uuid.UUID | None = None
-) -> None:
-    """Raises 429 if one more active schedule would pass the user's cap (ADR-013 §2).
-
-    Every lane counts; a paused schedule does not. ``exclude_job_id`` is the job being armed, so
-    re-arming a job that already holds its place is not counted twice. The caller holds
-    ``lock_user`` and commits the arming in the same transaction.
-    """
+) -> tuple[int, int]:
+    """(active schedules, limit) — every lane counts, a paused schedule does not (ADR-013 §5)."""
     stmt = (
         select(func.count())
         .select_from(Job)
@@ -238,6 +233,19 @@ async def check_scheduled_jobs_quota(
         if quota_row and quota_row.scheduled_jobs_limit is not None
         else settings.default_quota_scheduled_jobs
     )
+    return used, limit
+
+
+async def check_scheduled_jobs_quota(
+    user_id: uuid.UUID, db: AsyncSession, exclude_job_id: uuid.UUID | None = None
+) -> None:
+    """Raises 429 if one more active schedule would pass the user's cap (ADR-013 §2).
+
+    Every lane counts; a paused schedule does not. ``exclude_job_id`` is the job being armed, so
+    re-arming a job that already holds its place is not counted twice. The caller holds
+    ``lock_user`` and commits the arming in the same transaction.
+    """
+    used, limit = await scheduled_jobs_usage(user_id, db, exclude_job_id)
     if used + 1 > limit:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

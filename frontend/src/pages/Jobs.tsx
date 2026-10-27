@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '@clerk/clerk-react'
 import { useNavigate } from 'react-router-dom'
 import { apiGet, type Job, type AdminUser } from '../api'
+import { describeCron } from '../lib/cron'
 import type { Query } from '@tanstack/react-query'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
@@ -22,6 +23,7 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
   const [offset, setOffset] = useState(0)
   const [statusFilter, setStatusFilter] = useState('')
   const [userFilter, setUserFilter] = useState('')
+  const [scheduledOnly, setScheduledOnly] = useState(false)
   const limit = 50
 
   const isAdmin = mode === 'admin'
@@ -46,9 +48,10 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
   if (statusFilter) params.set('status', statusFilter)
   if (isAdmin && userFilter) params.set('user_id', userFilter)
+  if (scheduledOnly) params.set('scheduled', 'true')
 
   const { data: jobs, isLoading, isError } = useQuery<Job[]>({
-    queryKey: ['jobs', mode, offset, statusFilter, userFilter],
+    queryKey: ['jobs', mode, offset, statusFilter, userFilter, scheduledOnly],
     queryFn: () => apiGet(`${apiBase}?${params}`, token!),
     enabled: !!token,
     refetchInterval: (query: Query<Job[]>) =>
@@ -60,6 +63,14 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-gray-900">Jobs</h2>
         <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1 text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={scheduledOnly}
+              onChange={e => { setScheduledOnly(e.target.checked); setOffset(0) }}
+            />
+            Recurring only
+          </label>
           {isAdmin && (
             <select
               value={userFilter}
@@ -101,6 +112,7 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
                   )}
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Engine</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Schedule</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
                 </tr>
               </thead>
@@ -128,6 +140,27 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-gray-500">{job.output_format}</td>
+                    <td className="px-4 py-3 text-gray-500">
+                      {job.schedule_cron && job.schedule_status ? (
+                        <span className="flex flex-col" title={job.schedule_cron}>
+                          <span className="inline-flex items-center gap-1">
+                            <span
+                              className={`inline-flex px-2 py-0.5 text-xs rounded-full ${job.schedule_status === 'active' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-500'}`}
+                            >
+                              {job.schedule_status === 'active' ? 'recurring' : 'paused'}
+                            </span>
+                            <span className="text-xs">{describeCron(job.schedule_cron)}</span>
+                          </span>
+                          {job.next_run_at && (
+                            <span className="text-xs text-gray-400">
+                              next {new Date(job.next_run_at).toLocaleString()}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-gray-500">
                       {new Date(job.created_at).toLocaleString()}
                     </td>

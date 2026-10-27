@@ -159,6 +159,15 @@ class JobResponse(BaseModel):
     has_cookies: bool = False
     actions: list[dict] | None = None
     webhook_events: list[str] | None = None
+    # F.7 — the job's schedule; all None for a job without one. next_run_at is None while paused.
+    schedule_cron: str | None = None
+    schedule_status: Literal["active", "paused"] | None = None
+    next_run_at: datetime | None = None
+    # The last tick that made no run (ADR-010 §1: monthly_runs, or concurrent_jobs past the wait
+    # cap), and since when a tick has been waiting for a concurrency slot.
+    schedule_skipped_at: datetime | None = None
+    schedule_skip_reason: str | None = None
+    schedule_waiting_since: datetime | None = None
     model_config = {"from_attributes": True}
 
 

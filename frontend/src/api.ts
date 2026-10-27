@@ -64,8 +64,15 @@ export interface UserQuota {
   monthly_runs_limit: number | null
   concurrent_jobs_limit: number | null
   storage_bytes_limit: number | null
+  scheduled_jobs_limit: number | null
   storage_bytes_used: number
   updated_at: string
+}
+
+// ADR-013: active scheduled jobs against the user's cap.
+export interface ScheduledJobsUsage {
+  active: number
+  limit: number
 }
 
 export interface Job {
@@ -82,6 +89,14 @@ export interface Job {
   created_at: string
   updated_at: string
   run_id: string
+  completed_at?: string | null
+  // F.7 — null on a job without a schedule; next_run_at is null while paused.
+  schedule_cron: string | null
+  schedule_status: 'active' | 'paused' | null
+  next_run_at: string | null
+  schedule_skipped_at: string | null
+  schedule_skip_reason: string | null
+  schedule_waiting_since: string | null
 }
 
 // Back-compat alias — the same shape is returned by both /admin/jobs and /jobs.

@@ -57,6 +57,18 @@ def next_run(job: Job, now: datetime | None = None) -> datetime | None:
     return croniter(job.schedule_cron, now or datetime.now(UTC)).get_next(datetime)
 
 
+def response_fields(job: Job) -> dict:
+    """The job's schedule as ``JobResponse`` carries it (F.7)."""
+    return {
+        "schedule_cron": job.schedule_cron,
+        "schedule_status": job.schedule_status,
+        "next_run_at": next_run(job),
+        "schedule_skipped_at": job.schedule_skipped_at,
+        "schedule_skip_reason": job.schedule_skip_reason,
+        "schedule_waiting_since": job.schedule_waiting_since,
+    }
+
+
 def build(job: Job) -> Schedule:
     return Schedule(
         action=ScheduleActionStartWorkflow(

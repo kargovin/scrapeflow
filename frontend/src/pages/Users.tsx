@@ -21,6 +21,7 @@ function QuotaForm({ userId, token, onClose }: QuotaFormProps) {
   const [monthly, setMonthly] = useState('')
   const [concurrent, setConcurrent] = useState('')
   const [storage, setStorage] = useState('')
+  const [scheduled, setScheduled] = useState('')
 
   const { data: quota } = useQuery<UserQuota>({
     queryKey: ['quota', userId],
@@ -42,6 +43,7 @@ function QuotaForm({ userId, token, onClose }: QuotaFormProps) {
       monthly_runs_limit: monthly ? parseInt(monthly) : null,
       concurrent_jobs_limit: concurrent ? parseInt(concurrent) : null,
       storage_bytes_limit: storage ? parseInt(storage) * 1024 * 1024 * 1024 : null,
+      scheduled_jobs_limit: scheduled ? parseInt(scheduled) : null,
     })
   }
 
@@ -82,6 +84,16 @@ function QuotaForm({ userId, token, onClose }: QuotaFormProps) {
               value={storage}
               onChange={e => setStorage(e.target.value)}
               placeholder={quota?.storage_bytes_limit ? String(quota.storage_bytes_limit / 1024 ** 3) : ''}
+              className="mt-1 w-full text-sm border border-gray-300 rounded px-2 py-1"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-600">Active scheduled jobs (blank = default 20)</span>
+            <input
+              type="number"
+              value={scheduled}
+              onChange={e => setScheduled(e.target.value)}
+              placeholder={String(quota?.scheduled_jobs_limit ?? '')}
               className="mt-1 w-full text-sm border border-gray-300 rounded px-2 py-1"
             />
           </label>

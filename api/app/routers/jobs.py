@@ -91,6 +91,11 @@ def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
         prev = curr
 
 
+def scheduled_filter(scheduled: bool):
+    """A job has a schedule while schedule_status is set, active or paused."""
+    return Job.schedule_status.is_not(None) if scheduled else Job.schedule_status.is_(None)
+
+
 def _validate_cron(cron: str) -> None:
     if not croniter.is_valid(cron):
         raise HTTPException(
@@ -153,6 +158,7 @@ def _jobs_with_latest_run_stmt(
     job_id: uuid.UUID | None = None,
     limit: int | None = None,
     offset: int | None = None,
+    scheduled: bool | None = None,
 ):
     latest_run_sq = (
         select(JobRun)
@@ -185,6 +191,8 @@ def _jobs_with_latest_run_stmt(
     )
     if job_id is not None:
         stmt = stmt.where(Job.id == job_id)
+    if scheduled is not None:
+        stmt = stmt.where(scheduled_filter(scheduled))
     if limit is not None:
         stmt = stmt.limit(limit)
     if offset is not None:
@@ -351,6 +359,7 @@ async def create_job(
 
     return JobResponse(
         id=job.id,
+        **schedules.response_fields(job),
         user_id=job.user_id,
         url=job.url,
         status=job_run.status,
@@ -374,13 +383,15 @@ async def list_jobs(
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    scheduled: bool | None = Query(default=None, description="true: jobs with a schedule only"),
 ) -> list[JobResponse]:
-    stmt = _jobs_with_latest_run_stmt(user.id, limit=limit, offset=offset)
+    stmt = _jobs_with_latest_run_stmt(user.id, limit=limit, offset=offset, scheduled=scheduled)
     result = await db.execute(stmt)
     rows = result.all()
     return [
         JobResponse(
             id=job.id,
+            **schedules.response_fields(job),
             user_id=job.user_id,
             url=job.url,
             output_format=job.output_format,
@@ -415,6 +426,7 @@ async def get_job(
     job, run, has_proxy, has_cookies = row
     return JobResponse(
         id=job.id,
+        **schedules.response_fields(job),
         user_id=job.user_id,
         url=job.url,
         output_format=job.output_format,
@@ -515,6 +527,7 @@ async def list_job_runs(
     return [
         JobResponse(
             id=job.id,
+            **schedules.response_fields(job),
             user_id=job.user_id,
             url=job.url,
             output_format=job.output_format,
@@ -681,6 +694,7 @@ async def patch_jobs(
     job, run, has_proxy, has_cookies = row
     return JobResponse(
         id=job.id,
+        **schedules.response_fields(job),
         user_id=job.user_id,
         url=job.url,
         output_format=job.output_format,

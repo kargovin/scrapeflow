@@ -13,6 +13,13 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ScheduledJobsUsage(BaseModel):
+    """ADR-013's cap: active scheduled jobs against the limit (paused ones do not count)."""
+
+    active: int
+    limit: int
+
+
 class ApiKeyCreate(BaseModel):
     name: str
 
