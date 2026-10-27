@@ -21,7 +21,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from temporalio import activity
 
-from app.core import crawl_progress
+from app.core import crawl_progress, webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.core.domains import registrable_domain
 from app.core.ledger import record_object
@@ -393,6 +393,8 @@ async def finish_crawl(input: FinishCrawlInput) -> str:
             await create_crawl_webhook_delivery(db, crawl, event=f"crawl.{crawl.status}")
         await crawl_progress.notify(db, crawl)
         await db.commit()
+        if crawl.webhook_url:
+            await webhook_delivery.start_pending(activity.client, db, crawl_id=crawl.id)
         logger.info(
             "crawl_finished",
             crawl_id=str(crawl.id),

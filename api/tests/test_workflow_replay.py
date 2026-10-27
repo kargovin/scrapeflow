@@ -18,6 +18,7 @@ from app.workflows.crawl import CrawlWorkflow
 from app.workflows.job import JobWorkflow
 from app.workflows.pipeline import PipelineWorkflow
 from app.workflows.scheduled_job import ScheduledJobWorkflow
+from app.workflows.webhook_delivery import WebhookDeliveryWorkflow, WebhookSweepWorkflow
 
 HISTORIES = sorted((Path(__file__).parent / "replay" / "histories").glob("*.json"))
 
@@ -36,6 +37,8 @@ async def test_history_replays_on_current_code(path: Path):
             BatchWorkflow,
             CrawlWorkflow,
             ScheduledJobWorkflow,
+            WebhookDeliveryWorkflow,
+            WebhookSweepWorkflow,
         ],
         data_converter=pydantic_data_converter,
     )

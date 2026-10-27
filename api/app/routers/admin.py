@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import get_current_admin_user
-from app.core import schedules
+from app.core import schedules, webhook_delivery
 from app.core.db import get_db
 from app.core.dispatch import cancel_active_runs, cancel_workflows
 from app.core.ledger import release_run_objects, release_user_objects
@@ -398,6 +398,7 @@ async def admin_list_webhook_deliveries(
 )
 async def admin_retry_webhook_delivery(
     delivery_id: uuid.UUID,
+    request: Request,
     admin: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> AdminWebhookDeliveryResponse:
@@ -411,6 +412,11 @@ async def admin_retry_webhook_delivery(
     delivery.next_attempt_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(delivery)
+    try:
+        await webhook_delivery.start(await lazy_client(request.app.state), [delivery.id])
+    except Exception as exc:
+        # The row is pending again: the sweep starts it.
+        logger.warning("webhook_retry_start_failed", delivery_id=str(delivery_id), error=str(exc))
     logger.info(
         "admin_webhook_delivery_retried",
         delivery_id=str(delivery_id),

@@ -18,7 +18,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 
-from app.core import batch_progress
+from app.core import batch_progress, webhook_delivery
 from app.core import minio as minio_client
 from app.core.db import AsyncSessionLocal
 from app.core.ledger import record_object
@@ -240,4 +240,6 @@ async def finish_job_run(input: FinishJobRunInput) -> str:
             )
         await _notify(db, run)
         await db.commit()
+        if job is not None:
+            await webhook_delivery.start_pending(activity.client, db, run_id=run.id)
         return run.status

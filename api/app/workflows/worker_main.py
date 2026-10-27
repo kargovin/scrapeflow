@@ -13,6 +13,7 @@ from datetime import timedelta
 import structlog
 from temporalio.worker import Worker
 
+from app.core import webhook_delivery
 from app.settings import settings
 from app.workflows.activities.batches import finish_batch
 from app.workflows.activities.crawls import (
@@ -39,6 +40,10 @@ from app.workflows.activities.job_runs import (
 )
 from app.workflows.activities.schedules import admit_scheduled_run
 from app.workflows.activities.webhook import deliver_webhook
+from app.workflows.activities.webhook_deliveries import (
+    attempt_webhook_delivery,
+    sweep_pending_webhooks,
+)
 from app.workflows.batch import BatchWorkflow
 from app.workflows.client import connect
 from app.workflows.crawl import CrawlWorkflow
@@ -48,6 +53,7 @@ from app.workflows.pipeline import PipelineWorkflow
 from app.workflows.probe import LLMProbeWorkflow, ScrapeProbeWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 from app.workflows.scheduled_job import ScheduledJobWorkflow
+from app.workflows.webhook_delivery import WebhookDeliveryWorkflow, WebhookSweepWorkflow
 
 logger = structlog.get_logger()
 
@@ -60,6 +66,8 @@ async def main() -> None:
         loop.add_signal_handler(sig, stop.set)
 
     client = await connect()
+    # The job lane's delivery backstop (F.4): a pending row nothing is delivering.
+    await webhook_delivery.ensure_sweep(client)
     worker = Worker(
         client,
         task_queue=WORKFLOW_QUEUE,
@@ -72,6 +80,8 @@ async def main() -> None:
             BatchWorkflow,
             CrawlWorkflow,
             ScheduledJobWorkflow,
+            WebhookDeliveryWorkflow,
+            WebhookSweepWorkflow,
         ],
         activities=[
             say_hello,
@@ -95,6 +105,8 @@ async def main() -> None:
             record_crawl_page,
             finish_crawl,
             admit_scheduled_run,
+            attempt_webhook_delivery,
+            sweep_pending_webhooks,
         ],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )

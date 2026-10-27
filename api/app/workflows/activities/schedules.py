@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 
+from app.core import webhook_delivery
 from app.core.credentials import resolve_credentials
 from app.core.db import AsyncSessionLocal
 from app.core.dispatch import build_scrape_input
@@ -69,6 +70,7 @@ async def _fail(db: AsyncSession, job: Job, run_id: uuid.UUID, now: datetime) ->
         )
     await db.execute(text("SELECT pg_notify('job_status', :p)"), {"p": f"{job.id}:{run.id}:failed"})
     await db.commit()
+    await webhook_delivery.start_pending(activity.client, db, run_id=run.id)
     logger.warning("scheduled_run_failed_storage_full", job_id=str(job.id), run_id=str(run.id))
     return Admission(verdict="failed")
 

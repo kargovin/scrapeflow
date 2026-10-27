@@ -3,6 +3,7 @@
 import asyncio
 import uuid
 from datetime import timedelta
+from itertools import pairwise
 
 from temporalio import activity, workflow
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -129,7 +130,7 @@ async def test_a_full_concurrency_meter_waits_on_a_doubling_timer_with_one_run_i
 
     assert len(h.asks) == 6
     assert len({ask.run_id for ask, _ in h.asks}) == 1
-    gaps = [b - a for (_, a), (_, b) in zip(h.asks, h.asks[1:], strict=False)]
+    gaps = [b - a for (_, a), (_, b) in pairwise(h.asks)]
     expected = [WAIT_FIRST * 2**i for i in range(5)]
     expected = [min(e, WAIT_MAX) for e in expected]
     for gap, want in zip(gaps, expected, strict=True):

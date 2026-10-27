@@ -2,11 +2,9 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 
-import httpx
 import structlog
 from alembic import command
 from alembic.config import Config
-from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -17,7 +15,6 @@ from app.core.job_notifier import JobNotifier
 from app.core.redis import close_pool, create_pool
 from app.core.result_consumer import start_result_consumer
 from app.core.scheduler import scheduler_loop
-from app.core.webhook_loop import webhook_delivery_loop
 from app.middleware.correlation import CorrelationIdMiddleware
 from app.routers import (
     admin,
@@ -77,23 +74,13 @@ async def lifespan(app: FastAPI):
     result_consumer_task = await start_result_consumer(app.state.nats_js, app.state.minio)
     logger.info("NATS result consumer started")
 
-    # Shared HTTP client for webhook delivery (reused across all deliveries)
-    http_client = httpx.AsyncClient()
-
-    # Fernet instance — same key used for LLM key encryption (validated at settings load)
-    fernet = Fernet(settings.llm_key_encryption_key)
-
     # Scheduler — dispatches due cron jobs every 60s
     scheduler_task = asyncio.create_task(
         scheduler_loop(AsyncSessionLocal, app.state.nats_js, lambda: lazy_client(app.state))
     )
     logger.info("Scheduler loop started")
 
-    # Webhook delivery loop — retries pending deliveries every 15s
-    webhook_task = asyncio.create_task(
-        webhook_delivery_loop(AsyncSessionLocal, http_client, fernet)
-    )
-    logger.info("Webhook delivery loop started")
+    # Webhook delivery is a workflow per row since F.4 (core/webhook_delivery.py).
 
     # MaxDeliver advisory subscriber — marks stalled runs as failed when NATS exhausts retries
     advisory_task = asyncio.create_task(
@@ -106,19 +93,14 @@ async def lifespan(app: FastAPI):
     # Shutdown — cancel all background tasks together
     result_consumer_task.cancel()
     scheduler_task.cancel()
-    webhook_task.cancel()
     advisory_task.cancel()
     await asyncio.gather(
         result_consumer_task,
         scheduler_task,
-        webhook_task,
         advisory_task,
         return_exceptions=True,
     )
     logger.info("Background tasks stopped")
-
-    await http_client.aclose()
-    logger.info("HTTP client closed")
 
     await app.state.job_notifier.stop()
     logger.info("JobNotifier stopped")

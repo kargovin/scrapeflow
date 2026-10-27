@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from temporalio import activity
 
-from app.core import batch_progress
+from app.core import batch_progress, webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.core.webhooks import create_batch_webhook_delivery
 from app.models.batch import BatchItem
@@ -70,4 +70,6 @@ async def finish_batch(input: FinishBatchInput) -> str:
                 await create_batch_webhook_delivery(db, batch, first_run, event="batch.completed")
         await batch_progress.notify(db, batch)
         await db.commit()
+        if batch.webhook_url:
+            await webhook_delivery.start_pending(activity.client, db, batch_id=batch.id)
         return batch.status
