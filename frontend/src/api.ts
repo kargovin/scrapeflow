@@ -113,6 +113,7 @@ export interface AdminStats {
     webhook_deliveries_pending: number
     webhook_deliveries_exhausted: number
     active_recurring_jobs: number
+    active_recurring_jobs_by_lane: Record<string, number>
     next_scheduled_run_at: string | null
   }
   historical: {

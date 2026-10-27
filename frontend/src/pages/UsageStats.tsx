@@ -64,7 +64,14 @@ export default function UsageStats() {
           <Stat label="Running" value={op.jobs_running} />
           <Stat label="Pending" value={op.jobs_pending} />
           <Stat label="Webhooks pending" value={op.webhook_deliveries_pending} />
-          <Stat label="Recurring jobs" value={op.active_recurring_jobs} />
+          <Stat
+            label="Recurring jobs"
+            value={
+              op.active_recurring_jobs_by_lane.v1
+                ? `${op.active_recurring_jobs} (${op.active_recurring_jobs_by_lane.v1} on v1)`
+                : op.active_recurring_jobs
+            }
+          />
         </div>
       </div>
 

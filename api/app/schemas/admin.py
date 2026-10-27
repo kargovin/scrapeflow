@@ -61,7 +61,11 @@ class OperationalStats(BaseModel):
     jobs_by_engine: dict[str, int]
     webhook_deliveries_pending: int
     webhook_deliveries_exhausted: int
+    # Every lane (ADR-009 16c): a schedule moved to Temporal stays `active` on its row.
     active_recurring_jobs: int
+    # Which engine fires them; a `v1` count after the schedule cutover is a stranded schedule.
+    active_recurring_jobs_by_lane: dict[str, int]
+    # v1 from its clock column, v2 from the cron (core/schedules.next_run).
     next_scheduled_run_at: datetime | None
 
 

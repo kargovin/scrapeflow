@@ -499,24 +499,15 @@ async def _build_operational_stats(
         )
     ).scalar_one()
 
-    active_recurring = (
-        await db.execute(
-            _job_user_scope(
-                select(func.count()).select_from(Job).where(Job.schedule_status == "active")
-            )
-        )
-    ).scalar_one()
-
-    next_run = (
-        await db.execute(
-            _job_user_scope(
-                select(func.min(Job.next_run_at)).where(
-                    Job.schedule_status == "active",
-                    Job.next_run_at.is_not(None),
-                )
-            )
-        )
-    ).scalar_one()
+    # Bounded by the per-user cap (ADR-013), so read whole: v2's next run is the cron's, not a column.
+    active_schedules = (
+        await db.scalars(_job_user_scope(select(Job).where(Job.schedule_status == "active")))
+    ).all()
+    by_lane: dict[str, int] = {}
+    for job in active_schedules:
+        by_lane[job.schedule_lane or "v1"] = by_lane.get(job.schedule_lane or "v1", 0) + 1
+    now = datetime.now(UTC)
+    next_runs = [t for t in (schedules.next_run(job, now) for job in active_schedules) if t]
 
     return OperationalStats(
         jobs_running=jobs_running,
@@ -524,8 +515,9 @@ async def _build_operational_stats(
         jobs_by_engine=jobs_by_engine,
         webhook_deliveries_pending=wh_pending,
         webhook_deliveries_exhausted=wh_exhausted,
-        active_recurring_jobs=active_recurring,
-        next_scheduled_run_at=next_run,
+        active_recurring_jobs=len(active_schedules),
+        active_recurring_jobs_by_lane=by_lane,
+        next_scheduled_run_at=min(next_runs, default=None),
     )
 
 
