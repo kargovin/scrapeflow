@@ -160,6 +160,10 @@ push as a production deploy), I watched. Infra `0f71515` + `1e38aaa` → rollout
 `go-worker` delivered 1218 unchanged, Redis clean. Detail: backlog E.2 *Released*. ⚠️ The Temporal
 server pod has no CLI — read workflows with the SDK from the api pod (`kubectl exec -i … python -`).
 **Deployed code is `faa1f83`.** **Next: E.3** (crawl frontier: table shape + admission activity).
+Owner questions at close: batch takes `engine` (http default, playwright allowed — but no
+`playwright_options`/actions/cookies/proxy) and one `llm_config` for every item (scrape → LLM per item;
+**not yet run live on v2 — owner tabled that check until after the crawl cutover**). **Filed E.10**
+(owner): batches + crawls in the SPA, after E.7 — no list endpoints and no pages exist today.
 
 🔧 **E.1 BUILT; E.2 READY TO RELEASE (2026-10-27, later session).** `develop` `71e43fa` (code) + docs
 closeout. Infra `1e38aaa` (`BATCH_LANE: 'v1'`) on top of `0f71515` (`REDIS_URL`), **both committed

@@ -90,6 +90,7 @@
 | E.5 | `CrawlWorkflow`: BFS via activities, continue-as-new, per-page ledger + ceiling | ⬜ |
 | E.6 | Crawl compensating gate (no v1 reference exists) | ⬜ |
 | E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | ⬜ |
+| E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ⬜ (filed 2026-10-27, owner) |
 | **F** | **Schedule and webhook cutover** | |
 | F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ⬜ |
 | F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ⬜ |
@@ -2177,6 +2178,30 @@ them — none in prod as of 2026-09-19). Delete `coordinator/` (service, image, 
 infra Deployment, `coordinator/messages.py`'s deliberate duplicate). BUG-008 and BUG-012 dissolve
 here — close them as dissolved, not fixed.
 **Depends on:** E.6
+
+#### E.10 — Batches + crawls in the SPA
+
+**Why:** neither lane is visible in the SPA. A batch item's run has `job_id` NULL, so the `Jobs` pages
+never list it; there are no batch or crawl pages at all (PRD-011 scoped the SPA to the `/admin/*`
+routes of the day; Phase 3's `prod-todo.md` #2 assumed "job/batch detail views" that were never
+built). Not migration work — filed by the owner 2026-10-27 to land **after E.7**, so both pages are
+built once, against lanes that finish.
+**What:**
+- **API reads:** `GET /batch` and `GET /crawls` (owner's, paged, newest first) and `GET /admin/batches`,
+  `GET /admin/crawls` (all users, `user_email` joined, as `/admin/jobs`). Today only by-id reads exist.
+  An item's / page's **result content** read (owner-scoped, plus the admin twin) through
+  `load_completed_result()`'s pattern — `GET /batch/{id}/items` returns `result_path` only.
+- **SPA:** Batches and Crawls list + detail pages under both `/app/dashboard/` and `/app/admin/`, one
+  component set switched by `mode` (the `Jobs`/`JobDetail` rule). Detail = counters + items/pages
+  table; a row opens its result in `ResultViewer`/`ContentViewer`. Cancel from the detail page (user
+  mode: `DELETE /batch/{id}`, `DELETE /crawls/{id}`).
+- **Live status:** batch detail on `GET /batch/{id}/watch` through `useLiveSocket` (C.12's reconnecting
+  socket); the `batch_status` payload already carries absolute totals + `item_url`/`item_status` (E.1).
+  Crawls have no watch endpoint — add one only if E.5 emits a `crawl_status` notify (13c's product call).
+- No create forms (the SPA creates no jobs either; creation stays API/MCP).
+**Tests:** API read tests incl. cross-tenant 404 and admin-only 403; SPA build; click-through on compose
+(a batch with a failed item, a cancelled batch, a finished crawl).
+**Depends on:** E.2, E.7
 
 ---
 
