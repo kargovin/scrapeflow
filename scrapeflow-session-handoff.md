@@ -171,8 +171,13 @@ ahead of `origin/develop`; infra still 1 ahead — `0f71515`, `REDIS_URL`). Deta
 - ⚠️ Histories written in the container are root-owned → the pre-commit hook fails; `chown 1000:1000`.
 - **Before E.2's release:** push infra `0f71515`; run `scripts.audit_pipeline_budgets` in prod (any SHORT
   line = a saved version whose blocks would be cut).
-- **Next: E.1** (`BatchWorkflow`, k = 3 children). ADR-013 §5 and BUG-023 still before F.1. Push `develop`
-  (and infra) when convenient.
+- After the build the owner asked what "host-slot" means — explained plainly: a *slot* is the limiter's
+  permission to hit one site now (≤ 2 in flight, ≤ 1 start/s per eTLD+1, waited for on a durable timer,
+  self-expiring); `"host-slot"` is the `patched()` id that lets pre-deploy runs keep the old path.
+- **Next (owner, 2026-10-27): E.1 then E.2** — `BatchWorkflow` (child `JobWorkflow`s, k = 3 in flight,
+  absolute-total notify, cancel fans out), then the batch cutover release, which carries E.8 + E.9. E.2's
+  pre-release steps: push infra `0f71515`; run `scripts.audit_pipeline_budgets` in prod. ADR-013 §5 and
+  BUG-023 still before F.1. Push `develop` (and infra) when convenient.
 
 🔧 **E.8 BUILT (2026-10-15).** `develop` `410f015` (code) · `198a5b5` (backlog) + this closeout. Infra
 `0f71515` (`REDIS_URL` on the workflow-worker) **committed locally, not pushed**. **Nothing pushed**
