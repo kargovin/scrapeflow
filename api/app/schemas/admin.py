@@ -25,8 +25,11 @@ class AdminUserDetailResponse(AdminUserResponse):
 
 class AdminWebhookDeliveryResponse(BaseModel):
     id: uuid.UUID
-    job_id: uuid.UUID
-    run_id: uuid.UUID
+    # Exactly one of the three owners; a crawl's row has no run.
+    job_id: uuid.UUID | None = None
+    batch_id: uuid.UUID | None = None
+    crawl_id: uuid.UUID | None = None
+    run_id: uuid.UUID | None = None
     webhook_url: str
     payload: dict
     status: str

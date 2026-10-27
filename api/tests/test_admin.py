@@ -624,6 +624,55 @@ async def test_admin_list_webhook_deliveries(client, admin_headers, db_user):
     assert str(delivery_id) in ids
 
 
+async def test_admin_list_webhook_deliveries_shows_batch_and_crawl_rows(
+    client, admin_headers, db_user
+):
+    """A batch's row has no job, a crawl's has no run either: both list, owner named."""
+    from app.models.batch import Batch, BatchItem
+    from app.models.crawl import Crawl
+
+    async with AsyncSessionLocal() as db:
+        batch = Batch(user_id=db_user.id, status="completed", total=1)
+        crawl = Crawl(user_id=db_user.id, seed_url="https://wh-crawl.example.com/")
+        db.add_all([batch, crawl])
+        await db.flush()
+        item = BatchItem(batch_id=batch.id, url="https://wh-batch.example.com/")
+        db.add(item)
+        await db.flush()
+        run = JobRun(batch_item_id=item.id, status="completed")
+        db.add(run)
+        await db.flush()
+        rows = [
+            WebhookDelivery(
+                batch_id=batch.id,
+                run_id=run.id,
+                event="batch.completed",
+                webhook_url="https://hooks.example.com/b",
+                payload={},
+            ),
+            WebhookDelivery(
+                crawl_id=crawl.id,
+                event="crawl.completed",
+                webhook_url="https://hooks.example.com/c",
+                payload={},
+            ),
+        ]
+        db.add_all(rows)
+        await db.commit()
+
+    resp = await client.get("/admin/webhooks/deliveries", headers=admin_headers)
+    assert resp.status_code == 200
+    by_id = {d["id"]: d for d in resp.json()}
+    assert (by_id[str(rows[0].id)]["batch_id"], by_id[str(rows[0].id)]["job_id"]) == (
+        str(batch.id),
+        None,
+    )
+    assert (by_id[str(rows[1].id)]["crawl_id"], by_id[str(rows[1].id)]["run_id"]) == (
+        str(crawl.id),
+        None,
+    )
+
+
 async def test_admin_list_webhook_deliveries_filter_status(client, admin_headers, db_user):
     """status filter returns only deliveries matching that status."""
     async with AsyncSessionLocal() as db:
