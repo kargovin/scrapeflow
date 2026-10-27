@@ -151,6 +151,16 @@ progress, and Phase 4 *is* the Temporal durable-workflows migration.** The desig
 one `main` fast-forward (`421cbfe`).** Production is on it, reconciled and swept. **The entry
 condition for Phase 4 build work (16e) is met; the next step is ADR-009 §16's *engine up*.**
 
+🚀 **E.2 RELEASED + FLIPPED (2026-10-27, third session).** New batches run on Temporal in prod
+(`BATCH_LANE=v2`). Owner: "lets do e2"; the owner ran the three pushes (the classifier refused my infra
+push as a production deploy), I watched. Infra `0f71515` + `1e38aaa` → rollouts on `0b4ac9e`; `main`
+`0b4ac9e..faa1f83` → CI replay 27 passed, both pods on `faa1f83`, worker clean, `v1 3`, budget audit
+0/0; drain gate clean (prod has never had a batch); flip infra `538ea8c` → `v2 3`. Verify batch
+`ee92b25d…` 3/0 `completed`, all `lane = 'v2'`, `batch-…` + 3 children `COMPLETED`, 3 ledger rows,
+`go-worker` delivered 1218 unchanged, Redis clean. Detail: backlog E.2 *Released*. ⚠️ The Temporal
+server pod has no CLI — read workflows with the SDK from the api pod (`kubectl exec -i … python -`).
+**Deployed code is `faa1f83`.** **Next: E.3** (crawl frontier: table shape + admission activity).
+
 🔧 **E.1 BUILT; E.2 READY TO RELEASE (2026-10-27, later session).** `develop` `71e43fa` (code) + docs
 closeout. Infra `1e38aaa` (`BATCH_LANE: 'v1'`) on top of `0f71515` (`REDIS_URL`), **both committed
 locally, not pushed** (infra 2 ahead, 0 behind at the fetch). **Nothing pushed**; develop ~29 ahead of
@@ -1420,6 +1430,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-27 (E.2 session close):** `main` = `origin/main` = `faa1f83` (deployed); `develop` = docs closeout on top, pushed. Infra `main` = `origin/main` = `538ea8c` (`BATCH_LANE=v2`). `tmp/` untracked, pre-existing.
 - **2026-10-27 (E.1 session close, fetched):** `develop` = `71e43fa` + docs closeout, **not pushed** (~29 ahead of `origin/develop`); `main` = `origin/main` = `0b4ac9e` (deployed). Infra `main` 2 ahead of `origin/main` (`0f71515`, `1e38aaa`), 0 behind. `tmp/` untracked, pre-existing.
 - **2026-10-13 (E.0 session close):** `develop` = `40dbea9` + this closeout, docs only, **not pushed**; `main` = `origin/main` = `0b4ac9e` (deployed). Infra repo untouched. `tmp/` untracked, pre-existing.
 - **2026-10-12 (C.14 release, verified after fetch):** `develop` = `main` = `origin/main` = `origin/develop` = `1793c60` before this docs closeout. **Deployed code is `1793c60`.** Infra repo untouched (Flux's own tag bumps only).
@@ -1572,6 +1583,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-27 *(clock, third)* | **🚀 E.2 RELEASED + FLIPPED.** Owner: "lets do e2". Owner ran infra push, `main` ff (`0b4ac9e..faa1f83`) and the flip push (`538ea8c`); I watched CI, rollouts, ran the budget audit (clean), the drain gate (clean) and checked the owner's 3-URL batch end to end (3/0, v2, NATS untouched). | infra `538ea8c` + this closeout |
 | 2026-10-27 *(clock, later)* | **🔧 E.1 BUILT, E.2 READY.** Owner: "build it and get ready to deploy for e2 by making changes in infra repo too". `BatchWorkflow` + `finish_batch` + batch-aware job-run activities + `BATCH_LANE` + unified cancel; 24 tests (636), 26/26 mutations, 3 replay histories (26), live on compose. Infra `1e38aaa` `BATCH_LANE: 'v1'` (local). Found: E.9's pre-release audit cannot run before the release — moved to E.2 step 1 | `71e43fa` + infra `1e38aaa` + docs closeout |
 | 2026-10-13 *(clock)* | **📐 ADR-010 reviewed and Accepted; ADR-013 drafted; BUG-023 filed.** Owner: "explain ADR10 in simpler words" → plain walkthrough with diagrams. Owner challenged §1's month-long parking (backlog pile-up, 10,000 jobs) → option 1, `monthly_runs` skips; found the quota check-then-insert race → BUG-023. Owner: per-user scheduled-jobs cap; `SKIP` over `BUFFER_ONE` (timelines for parked vs overrun) → ADR-013 Draft (SDK defaults verified in the api container). §2: `tldextract` 5.4.0 tested in a throwaway container → three requirements; sitemap-file gating, submitted-seed scope, drop counts agreed. Summary of both sections, then promotion. | `4723627`, `9930660`, `74da031`, `a27bee6` + this closeout |
 | 2026-10-12 *(clock, later)* | **BUG-022 prompt fix built, verified live (0/20), released (`cf9d2fb`); R6 rerun PASS; secrets closed; C.12 click-through + fix released (`28c881b`); stuck run closed.** Owner: "lets fix up this bug first" → extraction instruction in the user turn (not system — templates); owner's Modal token rotated (secret `--force` + rollover; README `7cb360e` in `scrapeflow-modal`), new LLM key `6f85a1a0…`; leaked `sf_` key confirmed revoked by hash. Click-through: pipeline outputs lacked Preview/Download → shared `ContentViewer`. Stuck run `8efa14c6…` closed and pipeline `60c31b42…` soft-deleted by SQL at the owner's word. Owner released `28c881b` and closed the session without a rollout watch. | `fa24fee`, `9173837`, `cf9d2fb`, `d96193c`, `b405c00`, `b61632b`, `28c881b`, `5800c7e` + this closeout |

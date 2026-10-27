@@ -81,10 +81,10 @@
 | D.5 | 🚀 Job cutover release: drain gate → flip → verify; rollback runbook | ✅ **RELEASED + FLIPPED 2026-10-12** (`main` `28c881b..0b4ac9e`; infra `9ef396a` v1, `99ed5c8` **v2**) — **new job runs run on Temporal in prod**; http + playwright verified |
 | **E** | **Batch and crawl cutover** | |
 | E.0 | Gate: ADR-010 Accepted; task-queue shape decision (per-host limiter / lanes) | ✅ 2026-10-13 — bounded fan-out on one queue per engine; no lanes yet; per-host limiter on every scrape, 1 req/s + 2 in flight per eTLD+1, fail open; k = 3, scrape queue timer 60 s → 5 min. Open: robots `Crawl-delay` |
-| E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ✅ Built 2026-10-15 (local, `410f015`, unreleased; not yet called by any workflow — E.9 wires it); infra `REDIS_URL` on the workflow-worker committed locally, **not pushed** |
-| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ✅ Built 2026-10-27 (local, `ba18cf3`, unreleased; ships with E.2). Push infra `0f71515` (`REDIS_URL`) with the release; `scripts.audit_pipeline_budgets` runs **after** rollout (E.2 step 1) |
-| E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ✅ Built 2026-10-27 (local, `71e43fa`, unreleased); infra `BATCH_LANE=v1` committed locally, **not pushed** (infra `1e38aaa`) |
-| E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ⬜ **Ready** — runbook below (E.2); ships E.8 + E.9 + E.1 |
+| E.8 | eTLD+1 helper + per-host limiter (Redis leases, acquire/release activities, fail open) | ✅ **RELEASED 2026-10-27** with E.2 (`410f015`; infra `0f71515` `REDIS_URL`) |
+| E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ✅ **RELEASED 2026-10-27** with E.2 (`ba18cf3`); budget audit after rollout: 0 versions declare a budget, 0 short |
+| E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ✅ **RELEASED 2026-10-27** with E.2 (`71e43fa`; infra `1e38aaa` `BATCH_LANE=v1`) |
+| E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ✅ **RELEASED + FLIPPED 2026-10-27** (`main` `0b4ac9e..faa1f83`; infra `0f71515` + `1e38aaa` v1, `538ea8c` **v2**) — **new batches run on Temporal in prod**; 3-URL http batch verified |
 | E.3 | Crawl frontier: table shape + admission activity (SSRF, eTLD+1, dedup index) | ⬜ |
 | E.4 | Crawl fetch-side activities: robots + sitemap on `httpx`, link extraction port | ⬜ |
 | E.5 | `CrawlWorkflow`: BFS via activities, continue-as-new, per-page ledger + ceiling | ⬜ |
@@ -2103,6 +2103,20 @@ v2); a batch on one site runs at most 2 scrapes at a time, ≥ 1 s apart (per-ho
 lanes: cancel reaches an item in its LLM step and notifies watchers.
 
 **Depends on:** E.1
+
+**Released** *(2026-10-27; owner ran the pushes, I watched)*. Infra `0f71515` + `1e38aaa` pushed
+first (api + workflow-worker rolled on `0b4ac9e`, `REDIS_URL` and `BATCH_LANE=v1` present); `main`
+`0b4ac9e..faa1f83` — CI `replay` 27 passed, `build-api` green; Flux bumped both Deployments to
+`faa1f83` (infra `72fbb8d`, which also reflowed the init containers' `command:` lists — content
+unchanged); workflow worker started clean; `v1 3`; budget audit: 0 versions declare a budget.
+Drain gate: 0 active v1 batch runs (prod's `batches` table was empty), all four NATS consumers
+0 pending / 0 ack-pending. Flip infra `538ea8c` → `v2 3`. **Verify:** batch `ee92b25d…` (3 ×
+`example.com`) `completed` 3/0 in 8.8 s; every run `lane = 'v2'`; `batch-ee92b25d…` `COMPLETED`
+(result `completed`, 32 events, one `finish_batch`) with three `JobWorkflow` children `COMPLETED`;
+one `storage_objects` row per run; the children finished 2.1–2.4 s apart (one host, limiter);
+`go-worker` delivered 1218 before and after; no host-slot keys left in Redis; no `Host slot acquire
+failed` in the worker log. The playwright-cancel and webhook checks (optional) were not run in prod.
+⚠️ The server pod has no `temporal`/`tctl` CLI — read workflows with the SDK from the api pod.
 
 #### E.3 — Crawl frontier: table shape + admission activity
 
