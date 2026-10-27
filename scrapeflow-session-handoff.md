@@ -180,8 +180,8 @@ Detail and every call: implementation backlog F.1–F.7 *Built* + the **F.6 runb
   found two F.7 gaps (run times showed the job's; the result did not say which run) — **fixed, not yet released**.
   ⚠️ My prod read (SDK describe) was refused by the classifier; the owner ran steps 2–4.
 - **Next (owner):** release the run-history fix (`816356d`, ff `main` — api image only, no migration) and click
-  through a recurring job's page again; confirm the F.4 call (`webhook_deliveries` kept as the delivery record).
-  Then G.1. Dependabot's 64 alerts and BUG-024 still wait.
+  through a recurring job's page again. ✅ F.4 call **confirmed by the owner 2026-10-28** ("keep webhook_del"):
+  `webhook_deliveries` stays as the delivery record. Then G.1. Dependabot's 64 alerts and BUG-024 still wait.
 
 📐 **F.0 DONE — ADR-013 ACCEPTED (2026-10-27, sixth session, docs only).** Owner asked for F.0 and the
 catch-up window in plain terms, then: "go with all three recommendations; update ADR-013 as accepted".

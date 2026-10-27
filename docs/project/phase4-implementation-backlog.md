@@ -96,7 +96,7 @@
 | F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ✅ Built 2026-10-27 (local, `69fcd7b`, migration 4.8 `437442ce59b2`, unreleased) — outage collapse + pause/resume verified on compose |
 | F.2 | `schedule_status` interlock guard + `active_recurring_jobs` scoping | ✅ Built 2026-10-27 (local, `e2cadca` + the lane guard in F.1, unreleased) |
 | F.3 | Per-job migration runbook (pause v1 → verify → create Schedule) | ✅ Built 2026-10-27 (local, `a46109d`; rollback mode removed at F.6) |
-| F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ✅ Built 2026-10-27 (local, `35ada75`) — a workflow per row + a sweep Schedule; the table stays (TL call, owner to confirm) |
+| F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ✅ Built 2026-10-27 (local, `35ada75`) — a workflow per row + a sweep Schedule; the table stays — **owner confirmed 2026-10-28** |
 | F.5 | Three webhook meters scoped to the job lane (15e) | ✅ Built 2026-10-27 (local, `539114e`; BUG-028 fixed with it) |
 | F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | 🔧 Built 2026-10-27 (local, `981e0fc`); **release owner-run — runbook in F.6** |
 | F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ✅ Built 2026-10-27 (local, `56a06e6`; BUG-027 fixed with it), ships with F.6 — click-through owed |
@@ -2484,7 +2484,8 @@ mirror (the activity writes the row for the admin endpoints) or retire with the 
 **Depends on:** C.9, D.3
 
 **Built** *(2026-10-27, `35ada75`)*. **`webhook_deliveries` survives — not as an audit mirror but as
-the delivery record** (TL call, ⚠️ owner to confirm): every writer of a row (job, batch and crawl
+the delivery record** (TL call; ✅ **owner confirmed 2026-10-28: "keep webhook_del"** — this is the deferral
+table's decision in ADR-009, made at the step that retires the job lane's loop): every writer of a row (job, batch and crawl
 finish activities, the storage-full scheduled tick, the API's unstarted-run paths, an admin retry) then
 starts `WebhookDeliveryWorkflow` (`webhook-delivery-{row_id}`, `USE_EXISTING` + `ALLOW_DUPLICATE`)
 best effort, and a system **`webhook-sweep` Schedule** (every 5 min, `SKIP`, created by the workflow
