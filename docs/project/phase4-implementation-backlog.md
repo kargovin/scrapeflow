@@ -85,12 +85,12 @@
 | E.9 | Per-host limiter on `JobWorkflow` + `PipelineWorkflow` under `patched()`; scrape queue timer → 5 min; ships with E.2 | ✅ **RELEASED 2026-10-27** with E.2 (`ba18cf3`); budget audit after rollout: 0 versions declare a budget, 0 short |
 | E.1 | `BatchWorkflow` (fan-out child `JobWorkflow`, absolute-total notify) | ✅ **RELEASED 2026-10-27** with E.2 (`71e43fa`; infra `1e38aaa` `BATCH_LANE=v1`) |
 | E.2 | 🚀 Batch cutover release: drain gate → flip → verify | ✅ **RELEASED + FLIPPED 2026-10-27** (`main` `0b4ac9e..faa1f83`; infra `0f71515` + `1e38aaa` v1, `538ea8c` **v2**) — **new batches run on Temporal in prod**; 3-URL http batch verified |
-| E.3 | Crawl frontier: table shape + admission activity (SSRF, eTLD+1, dedup index) | ⬜ |
-| E.4 | Crawl fetch-side activities: robots + sitemap on `httpx`, link extraction port | ⬜ |
-| E.5 | `CrawlWorkflow`: BFS via activities, continue-as-new, per-page ledger + ceiling | ⬜ |
-| E.6 | Crawl compensating gate (no v1 reference exists) | ⬜ |
-| E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | ⬜ |
-| E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ⬜ (filed 2026-10-27, owner) |
+| E.3 | Crawl frontier: table shape + admission activity (SSRF, eTLD+1, dedup index) | ✅ Built 2026-10-27 (local, `c36bf95`, migration 4.7 `532e93f0d629`, unreleased) — one table, refusals kept as `dropped` rows |
+| E.4 | Crawl fetch-side activities: robots + sitemap on `httpx`, link extraction port | ✅ Built 2026-10-27 (local, `c36bf95`, unreleased) — `crawl` queue on the Playwright worker's Temporal Deployment |
+| E.5 | `CrawlWorkflow`: BFS via activities, continue-as-new, per-page ledger + ceiling | ✅ Built 2026-10-27 (local, `c36bf95`, unreleased) |
+| E.6 | Crawl compensating gate (no v1 reference exists) | ✅ Built + **PASSED on compose** 2026-10-27 (`aefc1d4`), http and playwright |
+| E.7 | 🚀 Crawl cutover release; `coordinator/` deletion | 🔧 **Ready to release** — `coordinator/` deleted (`56cff93`); infra `bf591bc` committed locally, not pushed; see E.7 runbook |
+| E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ✅ Built 2026-10-27 (local, `6c1b847`, unreleased; owner: build before the E.7 release) — **click-through not done** |
 | **F** | **Schedule and webhook cutover** | |
 | F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ⬜ |
 | F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ⬜ |
@@ -2132,6 +2132,26 @@ logged with its reason and counted per crawl); include/exclude filters; insert w
 index. `crawl_pages` row per admitted URL (P7's unit; 13c).
 **Depends on:** E.8
 
+**Built** *(2026-10-27; local, unreleased — owner: "plan and build from e3-e6 … get ready to deploy
+at e7"; no walkthrough)*. `c36bf95`, migration 4.7 `532e93f0d629`.
+- **13b's open item, decided: one table.** `crawl_queue` stays the queue **and** the seen-set; the
+  dedup is still `UNIQUE (crawl_id, url)` + `ON CONFLICT DO NOTHING`. A refused URL is kept as a
+  `status = 'dropped'` row with `drop_reason`, so a rediscovered one is neither re-checked nor counted
+  twice, and a retried admission is exact (counts come from the rows the insert returns). URLs past
+  `max_pages` are **not** stored (unbounded) and not counted — logged as `crawl_frontier_full`.
+- **`admit_urls(UrlBatch)`** on the workflow queue — the one gate for seed, links and sitemap entries,
+  under the crawl row lock (which also makes the `max_pages` cap exact under parallel pages). Order:
+  normalise (http(s) only, fragment dropped) → **scope** (sitemap entries and files only: eTLD+1 of the
+  **submitted** seed, E.8's helper) → **path filters** (links *and* sitemap entries now — v1 filtered
+  links only; never the seed) → **SSRF** (`validate_no_ssrf_core`, cached per host for the call only).
+  Reasons: `invalid`, `out_of_scope`, `filtered`, `ssrf`, `unresolved` (an unresolvable host).
+  Counts by reason in **`crawls.dropped`** (JSONB); each drop logged `crawl_url_dropped` with url,
+  reason, source. **The seed goes through it too** — the API no longer inserts it; a refused seed
+  fails the crawl (`the seed URL was refused: ssrf`).
+- **`vet_urls`** — the same gate for sitemap *files* before they are fetched; refusals counted as
+  `sitemap_<reason>`, never stored (a file is not a page).
+- `crawls.error` (new) — why a crawl failed, or the storage-wall note on a completed one.
+
 #### E.4 — Crawl fetch-side activities
 
 **TL call — home: the Playwright worker's Temporal deployment** (Python, `httpx` already there in
@@ -2146,6 +2166,29 @@ nesting-depth and file-count bound — v1's `.//loc` crawls index children as pa
 13d's chain is **not fetched** as a sitemap file and, as an entry, is skipped at E.3's admission; an
 off-domain `Sitemap:` line and a redirecting sitemap are not followed.
 **Depends on:** B.8, E.3
+
+**Built** *(2026-10-27; local, unreleased)*. `playwright-worker/worker/crawl.py`, `link_extractor.py`,
+a **second `Worker` in `temporal_main.py` on the new `crawl` queue** (`CRAWL_MAX_ACTIVITIES` 10, not
+bounded by browser slots), contracts twinned in `worker/contracts.py` + `contracts/test_activity_contract.py`.
+- **`DiscoverSitemaps(seed_url)`** — robots.txt `Sitemap:` lines (relative ones made absolute), else
+  `/sitemap.xml`; **returned, not fetched**. robots.txt follows a redirect only on its own host (http →
+  https), ≤ 2 hops, 512 KB cap.
+- **`FetchSitemap(url, max_entries)`** — one file, `follow_redirects=False`: a redirect comes back as
+  `kind="redirect"` + `location` for the workflow to vet (≤ 3 hops). `urlset` vs `sitemapindex` read by
+  root tag (v1's `.//loc` read index children as pages); gzip (bounded inflate), plain-text sitemaps;
+  **DOCTYPE/ENTITY refused** (entity expansion); 10 MB cap; results capped at `max_entries` and 256 KiB
+  of URL text (history payload). Anything unreadable is `unavailable` — the crawl goes on.
+- **TL call made here:** the workflow, not the worker, decides what is fetched next. Every sitemap
+  URL (robots line, index child, redirect target) passes `vet_urls` first, so **SSRF has one
+  implementation** (the API's) and the scraper image gains no second copy to drift. The workflow bounds
+  expansion: ≤ 20 files, index depth ≤ 2, entries ≤ `max_pages`.
+- **`ExtractLinks(path, base_url)`** — reads the stored page from MinIO; `link_extractor.py` ported
+  intact but for **`html.parser` instead of lxml** (not in this image); called with no path filters —
+  admission applies and counts them. Capped at 10,000 links / 256 KiB.
+- ⚠️ **Coupling:** an **http** crawl's sitemap and link steps run on the Playwright pod. If it is down,
+  those activities time out (60 s queue timer) and the crawl completes with what it fetched.
+- Tests: 35 new (`tests/test_crawl.py` on an `httpx.MockTransport` that records every request, so
+  "not fetched" is asserted; the coordinator's link tests ported). Suite 239.
 
 #### E.5 — `CrawlWorkflow`
 
@@ -2162,6 +2205,48 @@ terminal. `crawl_status` notify if the SPA needs it (product call — 13c).
 ceiling hit mid-crawl completes and charges.
 **Depends on:** E.3, E.4, E.8
 
+**Built** *(2026-10-27; local, unreleased)*. `app/workflows/crawl.py`, `activities/crawls.py`,
+`core/crawl_progress.py`, `dispatch.start_crawl` / `fail_unstarted_crawl` / `cancel_crawl` /
+`cancel_crawl_workflow`; `crawl-{id}`, `REJECT_DUPLICATE`.
+- **Loop:** `crawl_started` → admit the seed → `claim_crawl_pages(limit = free slots, in_flight)` →
+  one task per page: host slot (E.8, `wait_for_host_slot`) → `Scrape` (**always `html`** — links are
+  read from the stored page, v1's rule; the crawl's `output_format` is still not applied) → release →
+  `record_crawl_page` → links (depth < `max_depth`) → sitemaps (seed only, unless `ignore_sitemap`) →
+  admit. ≤ `CRAWL_MAX_IN_FLIGHT` (3) pages at once — in practice 2 on one site (the limiter).
+- **Claim is retry-safe**: it hands back any page claimed but not in the workflow's `in_flight` list
+  first (a retried claim whose answer was lost), so no page is stranded `running`. The `crawl_pages`
+  row is written at claim — **P7's unit, counted from here** — and starts `running` (= scheduled, as
+  jobs on v2). BFS order: `depth`, then `created_at`.
+- **Per-page charge** (the insert P7 deferred): `record_object(crawl_page_id=…)` to the crawl's owner.
+  **Ceiling per page (§8d):** the page that crosses the limit is kept and charged; the record says
+  `storage_full`, the claim refuses at the limit, and the crawl finishes `completed` with
+  `error = "storage limit reached: the crawl stopped early"`.
+- **Counters recounted** from `crawl_pages` under the crawl lock, never incremented (11d);
+  **`crawl_status` notify** (JSON, absolute totals + the page) on every write — 13c's product call taken
+  so E.10 has a live view; `JobNotifier` gained the channel, `/crawls/{id}/watch` the route.
+- **Cancel:** row first (`dispatch.cancel_crawl` locks the crawl, skips the pending frontier), engine
+  second (best effort). A host wait ends; a scrape in flight finishes and its record drops the object
+  uncharged (`cancelled` page, `skipped` queue row); `finish_crawl` leaves an API-cancelled crawl
+  cancelled and writes no webhook. A crawl cancelled by row only stops at its next claim/record.
+- **`finish_crawl`:** the crawl → its outcome (unless already terminal), leftover frontier `skipped`,
+  a page still `running` → `cancelled`/`failed` (`NO_OUTCOME`), webhook **`crawl.completed` /
+  `crawl.failed`** via the new `create_crawl_webhook_delivery` (not the coordinator's bypass; written
+  once, on the move to terminal). ⚠️ Crawls have no `webhook_secret` column, so `webhook_loop` signs
+  them with an empty key — as v1 would have; not fixed here.
+- **continue-as-new** every `CRAWL_PAGES_PER_RUN` (100) pages or when Temporal suggests it, after the
+  in-flight pages drain; the seed is admitted once. Measured: **~34 events a page** (13b's budget was
+  ~5/page *without* continue-as-new; with it, 100 pages ≈ 4,000 events).
+- An internal error / accounting failure fails the crawl (`storage_accounting_failed`) instead of
+  failing the workflow task forever. A crawl whose workflow cannot start is failed at once (503 on
+  `POST /crawls`, `crawl.failed` row).
+- **Tests:** 17 workflow (time-skipping, fake frontier: exhaustion, `max_depth`, k bound, claim
+  hand-back, continue-as-new, failed scrape, link failure, refused seed, accounting failure, storage
+  wall, cancel mid-scrape / by row only / during the host wait, sitemap expansion through the gate,
+  bounds, history size) + 25 activity tests on the real DB (every admission rule incl. `github.io`
+  siblings and the real check on `169.254.169.254`, quota views see the pages, ledger, wall,
+  idempotency) + router tests updated. Replay corpus **26 → 31** (`harness_crawl_*`, five).
+  Full API suite **695**. ⚠️ **No mutation pass this time** (E.8/E.9/E.1 had one) — not run.
+
 #### E.6 — Crawl compensating gate
 
 **Why:** 13a — no v1 crawl ever completed, so §9's diff-against-v1 pre-gate **cannot exist**.
@@ -2171,6 +2256,24 @@ sitemap entry, a cross-domain sitemap entry and an out-of-scope subdomain. Expec
 written down; the crawl must produce exactly it, charge exactly its bytes, skip the bait.
 **Depends on:** E.5
 
+**Built + PASSED on compose** *(2026-10-27)*. `aefc1d4`. `contracts/fixtures/crawl-site/` (README has
+the case table), `expected.json`, `contracts/test_crawl_fixture.py` (keeps the expected file true to
+the site), `api/scripts/crawl_gate.py`.
+- **How the fixture is reachable without weakening SSRF:** a compose network `crawl-fixture` on
+  **`11.222.33.0/24`** — a public range — so `www.`/`docs.crawlfixture.com` look like outside sites to
+  the unchanged check; on the default network `internal.crawlfixture.com` resolves to the container's
+  private address (the in-scope SSRF bait). ⚠️ An `SSRF_ALLOWED_HOSTS` setting was tried first and
+  **refused by the permission classifier as a security weakening** — rightly; it is not in the code.
+- **The gate:** one crawl through `POST /crawls` as a throwaway user; must match the page set (URL,
+  depth, status, error), counters, `dropped` (`out_of_scope` 2, `ssrf` 1, `sitemap_ssrf` 1,
+  `sitemap_out_of_scope` 1) and charge exactly the bytes served (http) or stored (playwright).
+  **http: PASSED, 1,098 bytes, 11.5–22 s; playwright: PASSED, 1,122 bytes, 14.7 s.** nginx log: no
+  request for `bait-sitemap.xml` or `/secret.html`; every page once; robots.txt 8× (7 pages + discovery).
+- Also run live: a playwright crawl cancelled after 4 s → workflow `CANCELED`, in-flight pages
+  `cancelled`, counter = ledger (339 B), no `host:` keys left.
+- **Not built:** E.6's "served from a pod" — there is no prod gate; the prod check at E.7 is a crawl of
+  a real public site.
+
 #### E.7 — 🚀 Crawl cutover release + `coordinator/` deletion
 
 **Runbook:** `POST /crawls` routes to `CrawlWorkflow` (no drain gate needed — the crawl flow has
@@ -2179,6 +2282,44 @@ them — none in prod as of 2026-09-19). Delete `coordinator/` (service, image, 
 infra Deployment, `coordinator/messages.py`'s deliberate duplicate). BUG-008 and BUG-012 dissolve
 here — close them as dissolved, not fixed.
 **Depends on:** E.6
+
+**Prepared** *(2026-10-27; nothing pushed)*. `coordinator/` deleted with its CI job and compose service
+(`56cff93`); the NATS contract test's crawl fixture is now built from the API's own `ScrapeMessage`
+(identical bytes; the Go fixture unchanged) and goes with NATS at H.2. Infra **`bf591bc`** (local, 1
+ahead of `origin/main` at the fetch): removes `app/coordinator.yaml`, its kustomization entry, and the
+`scrapeflow-coordinator` ImageRepository + ImagePolicy — Flux prunes (`prune: true`). **No lane
+switch:** a crawl has no v1 to return to (13a), so `POST /crawls` always starts `CrawlWorkflow`.
+
+**Ships:** api image (also the workflow worker) and **playwright-worker image** (both its Deployments
+roll; the NATS one is unaffected by the crawl code) — `c36bf95..` (E.3–E.7, E.10, BUG-025) + docs.
+**One Alembic revision** (4.7 `532e93f0d629`, three `ADD COLUMN`s; the quota views read none of them).
+No new env vars (defaults: `CRAWL_MAX_IN_FLIGHT` 3, `CRAWL_PAGES_PER_RUN` 100, `CRAWL_MAX_ACTIVITIES` 10).
+
+**Runbook** (owner-run; ⚠️ `git pull --rebase` in the infra repo first):
+0. **Before:** `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python
+   scripts/audit_crawl_quota.py` — any v1 crawl `queued`/`running` would hold a slot forever (no
+   workflow will ever pick it up). None in prod as of 2026-09-19; if there are, `UPDATE crawls SET
+   status='cancelled' WHERE status IN ('queued','running')` (all v1 by construction).
+1. **Infra first — the coordinator goes before the new API arrives.** Push `bf591bc`; confirm
+   `kubectl -n scrapeflow get deploy scrapeflow-coordinator` → NotFound. ⚠️ Order matters: a running
+   coordinator polls `crawl_queue` for `pending` rows — which `admit_urls` now writes — and would
+   dispatch them over NATS beside the workflow.
+2. **ff `main` to `develop`, push.** Watch CI `replay` (31 histories), `build-api`, `build-playwright-worker`;
+   Flux bumps api, workflow-worker, playwright-worker, playwright-worker-temporal. Check: api log
+   `Running upgrade 56ab6118641d -> 532e93f0d629`; workflow-worker started clean (registers
+   `CrawlWorkflow` + six crawl activities); `kubectl -n scrapeflow logs deploy/scrapeflow-playwright-worker-temporal | grep temporal_worker_started`
+   shows `crawl_queue=crawl`.
+3. **Verify** (your terminal, an API key): `POST /crawls` `{"seed_url":"https://quotes.toscrape.com/","max_pages":5,"max_depth":1}`
+   → poll `GET /crawls/{id}` to `completed`: 5 pages `completed` (the cap), `total_queued` 5,
+   `dropped` likely `{}`; `GET /crawls/{id}/pages/{page}/result` returns HTML; `storage_objects` rows
+   carry `crawl_page_id`; the Temporal UI shows `crawl-{id}` Completed. Then `DELETE
+   /crawls/{id}?permanent=true` → 204 and the counter back. Optional: `https://example.com/` (1 page,
+   the iana link is off-origin; `/sitemap.xml` 404 → unavailable) and a cancel mid-crawl.
+4. **Close** BUG-008 and BUG-012 as **dissolved**; BUG-010 part 1 as **fixed** (the worker-side check,
+   part 2, stays filed). E.10 click-through on prod (batches + crawls pages, both modes).
+
+**Rollback:** a code revert (ff `main` to a revert commit) + re-adding the infra manifests. There is
+nothing working to roll back *to* — v1 crawls never completed (13a) — so prefer a forward fix.
 
 #### E.10 — Batches + crawls in the SPA
 
@@ -2203,6 +2344,23 @@ built once, against lanes that finish.
 **Tests:** API read tests incl. cross-tenant 404 and admin-only 403; SPA build; click-through on compose
 (a batch with a failed item, a cancelled batch, a finished crawl).
 **Depends on:** E.2, E.7
+
+**Built** *(2026-10-27; local, unreleased — the owner asked for it before the E.7 release)*. `6c1b847`
+(+ the crawl reads in `c36bf95`).
+- **API:** `GET /batch`, `GET /crawls` (owner, newest first, paged); `GET /batch/{id}/items/{item}/result`,
+  `GET /crawls/{id}/pages/{page}/result` through a shared `routers/jobs.read_stored_result` (format from
+  the object's extension — an item with an LLM step stored `llm.json`); admin twins in
+  `routers/admin_lanes.py` (`/admin/batches[/{id}[/items[/{item}/result]]]`, same for crawls; `user_id`
+  and `status` filters; `user_email` joined). `/crawls/{id}/watch` (E.5's `crawl_status`).
+- **SPA:** `Batches`, `BatchDetail`, `Crawls`, `CrawlDetail` under `/app/dashboard/` and `/app/admin/`,
+  switched by `mode`; nav entries in both shells; detail = counters + items/pages table, `view` opens the
+  output in `ContentViewer` (`components/StoredResult.tsx`); the crawl page shows the refusals by reason
+  and the page-status filter; cancel in user mode; live on the owner's view via `useLiveSocket`, admin
+  polls 5 s. New pages use `useApi()` (a fresh token per request), not the `['token']` query — BUG-018
+  is not ridden on them.
+- **Tests:** 11 API (`tests/test_lane_reads.py`: owner scope, cross-tenant 404 incl. another batch's item
+  through mine, admin 403 on all eight routes, admin lists with email/filters); SPA `npm run build` (tsc)
+  clean. ⚠️ **Click-through on compose not done** — no browser in this session (Clerk login).
 
 ---
 

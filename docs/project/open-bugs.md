@@ -836,6 +836,9 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
 error anywhere) — **but entirely latent: no crawl has ever been run in production**
 **Discovered:** 2026-08-23 (tracing ADR-009 §9's option-(a) bridge against the live NATS stream)
 **Status:** Open — **WILL NOT FIX on the v1/NATS path.** See *Disposition*.
+> 🔧 **Dissolves at E.7 (prepared 2026-10-27, unreleased).** `coordinator/` is deleted on `develop`
+> (`56cff93`) and crawls run on `CrawlWorkflow` (`c36bf95`), whose result handling is the workflow
+> itself. Close as **dissolved, not fixed** when E.7 ships.
 
 ### What happens
 
@@ -1054,6 +1057,13 @@ unsubscribed is gone; that is another argument for the client-side re-read in §
 
 ## BUG-010 — URLs discovered *during* a crawl are never SSRF-checked, and no worker checks either
 
+> 🔧 **Part 1 built 2026-10-27 (E.3, `c36bf95`, unreleased):** every URL entering a crawl's frontier —
+> seed, extracted link, sitemap entry — and every sitemap *file* is SSRF-checked at admission
+> (`activities/crawls.py`); a refused one is kept as a `dropped` row, counted in `crawls.dropped`, and
+> the crawl continues. Proven on compose by E.6's bait (`internal.crawlfixture.com`). Close part 1
+> when E.7 ships. The worker-side check stays a separate cross-lane item. ⚠️ See **BUG-024** — the
+> check itself lets some non-public ranges through.
+
 **Severity:** High by shape, latent by accident — a crawled site can choose URLs the platform
 fetches from inside the cluster, and the response body is served back to the tenant. It has never
 fired only because the code path that reaches it is dead (**BUG-008**), and **the Temporal
@@ -1255,6 +1265,9 @@ this, and P9 was a fresh visit on 2026-09-11.)*
 ---
 
 ## BUG-012 — `reenqueue_stalled` deletes `crawl_pages` while `crawl_queue` still references them; the coordinator cannot start
+
+> 🔧 **Dissolves at E.7 (prepared 2026-10-27, unreleased):** `reenqueue_stalled` is deleted with
+> `coordinator/` (`56cff93`). Close as **dissolved** when E.7 ships.
 
 **Severity:** High (the coordinator crash-loops on boot and never reaches its loops — a total
 crawl-lane outage, not a degradation)
@@ -2189,6 +2202,45 @@ headroom buffer, not by a count.
   insert, not what they count. Do not "fix" the views.
 - **Dispatch order** — the lock must cover only check + insert; NATS publish / workflow start stay after the
   commit, as today (`create_job`, `_dispatch_due_jobs`).
+
+---
+
+## BUG-024 — The SSRF check lets carrier-grade-NAT and multicast addresses through
+
+**Severity:** Medium by shape — any lane's user-supplied URL (job, batch, crawl seed and frontier,
+webhook) that resolves into `100.64.0.0/10` is fetched. That range is not public: it is carrier-grade
+NAT shared space, and **Tailscale assigns node addresses from it** — on a homelab that runs Tailscale
+those are internal hosts. Multicast (`224.0.0.0/4`) passes too (no practical fetch).
+**Discovered:** 2026-10-27, designing E.6's fixture network (by code reading, then confirmed in the api
+container on Python 3.12.14). **Not exploited, not reproduced against a real internal host.**
+**Status:** Open. **Not fixed** — it changes the front door for every lane, so it is the owner's call.
+
+### What happens
+
+`core/security.validate_no_ssrf_core` refuses an address when it is `is_loopback`, `is_private`,
+`is_link_local` or `is_reserved`. `100.64.0.1` is none of these (`is_global` is also False — it is
+simply not in Python's private list), so it is admitted. `198.18.0.0/15`, `0.0.0.0`, `fd00::/8` and
+IPv4-mapped loopback *are* refused.
+
+### Fix (proposed)
+
+Refuse unless `ip.is_global and not ip.is_multicast` — an allow-list of public space rather than a
+deny-list of named private ranges. Check E.6's fixture subnet (`11.222.33.0/24`, `is_global` True)
+still passes. One test per range. Not dissolved by Temporal.
+
+---
+
+## BUG-025 — `GET /admin/webhooks/deliveries` 500s once any batch or crawl delivery row exists
+
+**Severity:** Low (admin-only list; the SPA does not call it) — but **live in production since the first
+batch with a `webhook_url`** on either lane.
+**Discovered:** 2026-10-27 — the E.5 tests left a `crawl.failed` row in the shared dev DB and
+`test_admin_list_webhook_deliveries` failed on it.
+**Status:** ✅ **Fixed 2026-10-27 (`f66ec0b`, unreleased — ships with E.7).**
+
+`AdminWebhookDeliveryResponse` declared `job_id` and `run_id` as required UUIDs. A batch's row has no
+`job_id`; a crawl's has neither, so validating the page raised and the whole list 500'd. Both are now
+optional and the response carries `batch_id` and `crawl_id`; one test lists a batch row and a crawl row.
 
 ---
 
