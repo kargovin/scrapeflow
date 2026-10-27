@@ -23,6 +23,10 @@ from app.routers.crawls import check_crawl_quota
 from app.routers.jobs import check_job_quota
 
 
+async def _admit_all() -> None:
+    return None
+
+
 @pytest_asyncio.fixture(autouse=True, loop_scope="session", scope="session")
 async def init_clients():
     """Initialize all clients once for the entire test session."""
@@ -44,9 +48,9 @@ async def client():
     Use quota_client for tests that need real quota enforcement.
     """
     app.dependency_overrides[check_rate_limit] = lambda: None
-    app.dependency_overrides[check_job_quota] = lambda: None
-    app.dependency_overrides[check_batch_quota] = lambda: None
-    app.dependency_overrides[check_crawl_quota] = lambda: None
+    app.dependency_overrides[check_job_quota] = lambda: _admit_all
+    app.dependency_overrides[check_batch_quota] = lambda: _admit_all
+    app.dependency_overrides[check_crawl_quota] = lambda: _admit_all
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.pop(check_rate_limit, None)
@@ -58,9 +62,9 @@ async def client():
 @pytest_asyncio.fixture
 async def rate_limited_client():
     """Like `client` but with the real rate limiter active. Used only by rate-limit integration tests."""
-    app.dependency_overrides[check_job_quota] = lambda: None
-    app.dependency_overrides[check_batch_quota] = lambda: None
-    app.dependency_overrides[check_crawl_quota] = lambda: None
+    app.dependency_overrides[check_job_quota] = lambda: _admit_all
+    app.dependency_overrides[check_batch_quota] = lambda: _admit_all
+    app.dependency_overrides[check_crawl_quota] = lambda: _admit_all
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.pop(check_job_quota, None)

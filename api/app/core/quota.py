@@ -18,7 +18,9 @@ that widens both views, not an edit here.
 
 Limits come from the user_quotas row; NULL columns fall back to settings defaults.
 
-check_user_quota()  — raises HTTP 429; use at API endpoints (POST /jobs, /batch, /crawls)
+admit()             — lock the user, then the 429 checks; every API site that inserts a run
+lock_user()         — the lock alone; the scheduler takes it before is_quota_exceeded()
+check_user_quota()  — raises HTTP 429
 is_quota_exceeded() — returns bool; use in scheduler (no HTTP context)
 check_storage_quota() — used by result_consumer
 increment_storage_bytes() / decrement_storage_bytes()
@@ -27,7 +29,9 @@ increment_storage_bytes() / decrement_storage_bytes()
 
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from functools import partial
 
 import structlog
 from fastapi import HTTPException, status
@@ -39,10 +43,48 @@ from app.core.storage import delete_minio_object
 from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
 from app.models.quota_views import quota_active_submissions, quota_run_units
+from app.models.user import User
 from app.models.user_quota import UserQuota
 from app.settings import settings
 
 logger = structlog.get_logger()
+
+
+async def lock_user(user_id: uuid.UUID, db: AsyncSession) -> None:
+    """Serialise this user's admissions until the transaction ends (BUG-023).
+
+    A count followed by an insert admits every request that counts before the first commits.
+    Hold it only around count → insert → commit: no network calls inside.
+    ⚠️ NO KEY UPDATE, not UPDATE — the FK check of every row inserted with this user_id
+    takes KEY SHARE on the same row, and UPDATE would block those for the duration.
+    """
+    await db.execute(select(User.id).where(User.id == user_id).with_for_update(key_share=True))
+
+
+async def admit(
+    user_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    runs: int = 1,
+    storage: bool = True,
+    headroom_bytes: int = 0,
+) -> None:
+    """Lock the user, then raise 429 if a meter refuses. The caller inserts its run row(s)
+    and commits in this same transaction — the commit releases the lock."""
+    await lock_user(user_id, db)
+    await check_user_quota(user_id, db, "monthly_runs", batch_count=runs)
+    await check_user_quota(user_id, db, "concurrent_jobs")
+    if storage:
+        await check_user_quota(user_id, db, "storage_bytes", headroom_bytes=headroom_bytes)
+
+
+Admit = Callable[[], Awaitable[None]]
+
+
+def admission(user_id: uuid.UUID, db: AsyncSession, **kwargs) -> Admit:
+    """admit() bound to its arguments — what the routers' quota dependencies return, so a
+    test can override the dependency and the handler still awaits it at its insert."""
+    return partial(admit, user_id, db, **kwargs)
 
 
 def _first_of_next_month(now: datetime) -> datetime:

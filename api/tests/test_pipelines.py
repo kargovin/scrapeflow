@@ -18,6 +18,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from app.core.db import AsyncSessionLocal
 from app.core.minio import get_minio
 from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
+from app.core.quota import lock_user
 from app.main import app
 from app.models.llm_keys import UserLLMKey
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
@@ -251,6 +252,19 @@ async def _create(client, headers, definition, name="p"):
 async def _runs(user_id):
     async with AsyncSessionLocal() as db:
         return (await db.scalars(select(PipelineRun).where(PipelineRun.user_id == user_id))).all()
+
+
+async def test_run_admits_under_the_users_lock(client, headers, key, db_user, temporal):
+    pipeline = await _create(client, headers, runnable(key.id))
+    async with AsyncSessionLocal() as holder:
+        await lock_user(db_user.id, holder)
+        task = asyncio.create_task(
+            client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)
+        )
+        await asyncio.sleep(2)
+        assert not task.done(), "the run trigger did not wait for the user's lock"
+        await holder.rollback()
+    assert (await asyncio.wait_for(task, timeout=10)).status_code == 202
 
 
 async def test_run_commits_rows_then_starts_the_workflow(

@@ -26,7 +26,7 @@ from app.core.encryption import get_fernet
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
-from app.core.quota import check_user_quota
+from app.core.quota import Admit, admission
 from app.core.rate_limit import check_rate_limit_n
 from app.core.redis import get_redis
 from app.core.security import validate_no_ssrf
@@ -48,13 +48,12 @@ async def check_batch_quota(
     body: BatchCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> None:
-    """FastAPI dependency — raises 429 if monthly_runs or concurrent_jobs quota is exceeded.
+) -> Admit:
+    """FastAPI dependency — the admission create_batch awaits right before its insert.
 
-    Monthly check uses batch_count=len(urls) so the full batch is pre-approved atomically.
+    Monthly check uses runs=len(urls) so the full batch is pre-approved atomically.
     """
-    await check_user_quota(user.id, db, "monthly_runs", batch_count=len(body.urls))
-    await check_user_quota(user.id, db, "concurrent_jobs")
+    return admission(user.id, db, runs=len(body.urls), storage=False)
 
 
 @router.post("", response_model=BatchResponse, status_code=status.HTTP_201_CREATED)
@@ -66,7 +65,7 @@ async def create_batch(
     js: JetStreamContext = Depends(get_jetstream),
     redis: aioredis.Redis = Depends(get_redis),
     fernet: Fernet = Depends(get_fernet),
-    _quota: None = Depends(check_batch_quota),
+    admit: Admit = Depends(check_batch_quota),
 ) -> BatchResponse:
     # SSRF-check all URLs synchronously — sync rejection is better UX than
     # silent per-item failure after rows have been created.
@@ -92,6 +91,7 @@ async def create_batch(
     if body.webhook_url:
         webhook_secret_encrypted = fernet.encrypt(secrets.token_hex(32).encode()).decode()
 
+    await admit()
     batch = Batch(
         user_id=user.id,
         status="queued",

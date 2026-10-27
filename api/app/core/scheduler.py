@@ -27,7 +27,7 @@ from app.core.dispatch import (
     fail_unstarted_run,
     nats_subject,
 )
-from app.core.quota import is_quota_exceeded
+from app.core.quota import is_quota_exceeded, lock_user
 from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -76,6 +76,7 @@ async def _dispatch_due_jobs(
         jobs = (await db.execute(stmt)).scalars().all()
 
         for job in jobs:
+            await lock_user(job.user_id, db)
             if await is_quota_exceeded(job.user_id, db, "monthly_runs"):
                 logger.warning(
                     "scheduler: skipping dispatch — monthly_runs quota exceeded",

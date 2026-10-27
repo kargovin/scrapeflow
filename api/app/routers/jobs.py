@@ -38,7 +38,7 @@ from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
 from app.core.nats import get_jetstream
-from app.core.quota import check_user_quota
+from app.core.quota import Admit, admission
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.job import Job
@@ -66,15 +66,13 @@ logger = structlog.get_logger()
 async def check_job_quota(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> None:
-    """FastAPI dependency — raises 429 if any quota dimension is exceeded.
+) -> Admit:
+    """FastAPI dependency — the admission create_job awaits right before its insert.
 
     Structured as a dependency so tests can override it via dependency_overrides,
     matching the same pattern used for check_rate_limit.
     """
-    await check_user_quota(user.id, db, "monthly_runs")
-    await check_user_quota(user.id, db, "concurrent_jobs")
-    await check_user_quota(user.id, db, "storage_bytes")
+    return admission(user.id, db)
 
 
 def validate_cron_min_interval(cron_expr: str, min_minutes: int) -> None:
@@ -143,7 +141,7 @@ async def create_job(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
-    _quota: None = Depends(check_job_quota),
+    admit: Admit = Depends(check_job_quota),
     js: JetStreamContext = Depends(get_jetstream),
 ) -> JobResponse:
     # Validate for SSRF for
@@ -192,6 +190,7 @@ async def create_job(
             detail="actions require engine: playwright",
         )
 
+    await admit()
     job = Job(
         user_id=user.id,
         url=body.url,

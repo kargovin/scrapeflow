@@ -23,7 +23,7 @@ from app.core.db import get_db
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.minio import get_minio
 from app.core.pipeline_status import notify_run
-from app.core.quota import check_user_quota
+from app.core.quota import admit
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.llm_keys import UserLLMKey
@@ -565,12 +565,8 @@ async def create_run(
         if key.base_url:
             await _ssrf_check(key.base_url)
 
-    await check_user_quota(user.id, db, "monthly_runs")
-    await check_user_quota(user.id, db, "concurrent_jobs")
     # §8d: output size is unknowable up front, so refuse to start near the wall.
-    await check_user_quota(
-        user.id, db, "storage_bytes", headroom_bytes=settings.storage_headroom_bytes
-    )
+    await admit(user.id, db, headroom_bytes=settings.storage_headroom_bytes)
 
     credentials = {
         b.id: c

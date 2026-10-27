@@ -22,7 +22,7 @@ from app.core.dispatch import (
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import release_crawl_objects
 from app.core.minio import get_minio
-from app.core.quota import check_user_quota
+from app.core.quota import Admit, admission
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.crawl import Crawl, CrawlPage
@@ -45,17 +45,15 @@ async def check_crawl_quota(
     body: CrawlCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> None:
-    """FastAPI dependency — raises 429 if any quota dimension is exceeded.
+) -> Admit:
+    """FastAPI dependency — the admission create_crawl awaits right before its insert.
 
     A crawl is pre-checked against its declared ceiling exactly as a batch is against
     len(urls): monthly_runs with batch_count=max_pages, since every page is one attempted
     fetch. Concurrency is one slot for the whole crawl (ADR-009 §8). The meter charges
     actuals — crawl_pages rows as the workflow claims them.
     """
-    await check_user_quota(user.id, db, "monthly_runs", batch_count=body.max_pages)
-    await check_user_quota(user.id, db, "concurrent_jobs")
-    await check_user_quota(user.id, db, "storage_bytes")
+    return admission(user.id, db, runs=body.max_pages)
 
 
 async def owned_crawl(db: AsyncSession, crawl_id: uuid.UUID, user: User) -> Crawl:
@@ -106,7 +104,7 @@ async def create_crawl(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
-    _quota: None = Depends(check_crawl_quota),
+    admit: Admit = Depends(check_crawl_quota),
 ) -> CrawlResponse:
     seed_url = str(body.seed_url)
     loop = get_running_loop()
@@ -114,6 +112,7 @@ async def create_crawl(
     if body.webhook_url:
         await loop.run_in_executor(None, validate_no_ssrf, str(body.webhook_url))
 
+    await admit()
     # One-active-crawl-per-domain: reject if the same user already has a non-terminal
     # crawl whose seed_url shares the same origin.
     parsed = urlparse(seed_url)
