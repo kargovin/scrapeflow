@@ -144,6 +144,35 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-10-27 *(clock)*
 
+🔧 **GROUP F BUILT — F.1–F.7 (2026-10-27, seventh session; nothing pushed, nothing released).** Owner: "i'll be
+afk; pls plan and build f1-f7; wait for me to come back to do the release" — planned and built under that
+delegation, no walkthrough. `develop` = `69fcd7b` (F.1) · `e2cadca` (F.2) · `a46109d` (F.3) · `35ada75` (F.4) ·
+`539114e` (F.5) · `981e0fc` (F.6) · `56a06e6` (F.7) + docs; ~11 ahead of `origin/develop`. **No infra change.**
+Detail and every call: implementation backlog F.1–F.7 *Built* + the **F.6 runbook**.
+- **Calls to know when the questions come** (all reversible): the jobs row is the truth for *armed* and the
+  Schedule only the clock; a tick is `ScheduledJobWorkflow` → `admit_scheduled_run` under `lock_user` → child
+  `JobWorkflow`; concurrency waits 15 s → 5 min doubling, skipped past **24 h**; a storage breach is a failed
+  **run** (costs a monthly unit, as v1's did); v2 `next_run_at` is computed from the cron. **F.4's owner question
+  answered by me, to confirm:** `webhook_deliveries` survives as the delivery record — a workflow per row plus a
+  `webhook-sweep` Schedule (5 min) that adopts any pending row; the API no longer runs `webhook_loop`.
+  `SCHEDULE_LANE` existed F.1–F.5 and went at F.6 with the v1 loop; `migrate_schedule --rollback` likewise.
+- **Verified:** suite **766** (F.6 alone 757), replay corpus **40** (+9: 7 scheduled, 2 webhook), SPA build clean.
+  **Compose:** outage collapse (5 missed ticks → 1 late run, 4 `skipped_overlap` — ADR-013 §5 tested); pause 3 min
+  → no replay; waiting tick then monthly skip, no rows; a v2 job's webhook 503 → retried 30 s → 200, HMAC checked;
+  the sweep delivered an orphan row; the full HTTP flow with `JOB_LANE=v2` (temporary override, `.env` untouched;
+  api back on default after) — create → Schedule armed, pause/resume, `?scheduled=true`, the cap usage endpoint,
+  the 16:20 tick ran (`v2`, `completed`) and its webhook delivered, then `DELETE ?permanent=true` → 204, Schedule gone.
+- **Found and fixed:** **BUG-026** (create with a cron never armed a schedule — 176 dev rows left unarmed on purpose),
+  **BUG-027** (the admin quota form's GET never existed), **BUG-028** (per-user webhook meters counted jobs only).
+- ⚠️ **After the F.6 release the v1 lanes are no working rollback** (no stale-pending recovery, no MaxDeliver
+  advisory); G deletes them. ⚠️ **Not done:** a mutation pass; the F.7 click-through (no browser); a prod check.
+- ⚠️ The machine's clock jumped ~2 h mid-session (sleep?) — the sweep Schedule shows 22 `missed_catchup` for it.
+- **Compose left clean:** test jobs deleted (the e2e one through the API), objects released through the ledger,
+  test users and the ad-hoc webhook receiver container removed. The workflow worker runs the final code.
+- **Next (owner):** read F.1/F.4 (expect questions; confirm the F.4 call), then run **F.6** per the runbook (ff
+  `main`, verify a 5-minute schedule + its webhook, click through F.7). Then G.1. Dependabot's 64 alerts and
+  BUG-024 still wait.
+
 📐 **F.0 DONE — ADR-013 ACCEPTED (2026-10-27, sixth session, docs only).** Owner asked for F.0 and the
 catch-up window in plain terms, then: "go with all three recommendations; update ADR-013 as accepted".
 §5 decided: `default_quota_scheduled_jobs = 20` (per-user override), only `schedule_status = 'active'`

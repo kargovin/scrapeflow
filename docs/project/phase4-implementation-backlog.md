@@ -93,13 +93,13 @@
 | E.10 | Batches + crawls in the SPA (list endpoints, list + detail pages, live status) — after E.7 | ✅ **RELEASED 2026-10-27** with E.7 (`6c1b847`) — owner clicked through in prod (crawl + batch results) |
 | **F** | **Schedule and webhook cutover** | |
 | F.0 | Gate: Schedule overlap policy decided (⚠️ Architect) | ✅ 2026-10-27 — ADR-013 Accepted (owner) |
-| F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ⬜ |
-| F.2 | `schedule_status` interlock guard + `active_recurring_jobs` scoping | ⬜ |
-| F.3 | Per-job migration runbook (pause v1 → verify → create Schedule) | ⬜ |
-| F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ⬜ |
-| F.5 | Three webhook meters scoped to the job lane (15e) | ⬜ |
-| F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | ⬜ |
-| F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ⬜ (filed 2026-10-27, owner) |
+| F.1 | Temporal Schedule per recurring job + quota admission (ADR-010 §1) | ✅ Built 2026-10-27 (local, `69fcd7b`, migration 4.8 `437442ce59b2`, unreleased) — outage collapse + pause/resume verified on compose |
+| F.2 | `schedule_status` interlock guard + `active_recurring_jobs` scoping | ✅ Built 2026-10-27 (local, `e2cadca` + the lane guard in F.1, unreleased) |
+| F.3 | Per-job migration runbook (pause v1 → verify → create Schedule) | ✅ Built 2026-10-27 (local, `a46109d`; rollback mode removed at F.6) |
+| F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ✅ Built 2026-10-27 (local, `35ada75`) — a workflow per row + a sweep Schedule; the table stays (TL call, owner to confirm) |
+| F.5 | Three webhook meters scoped to the job lane (15e) | ✅ Built 2026-10-27 (local, `539114e`; BUG-028 fixed with it) |
+| F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | 🔧 Built 2026-10-27 (local, `981e0fc`); **release owner-run — runbook in F.6** |
+| F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ✅ Built 2026-10-27 (local, `56a06e6`; BUG-027 fixed with it), ships with F.6 — click-through owed |
 | **G** | **Consumer deletion** | |
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ⬜ |
 | **H** | **NATS removal** | |
@@ -2410,6 +2410,38 @@ from F.0. `next_run_at` for v2 comes from the Schedule (`describe`), not the row
 writing a counted row; storage breach fails; N parked runs waking together admit only up to the limit.
 **Depends on:** D.3, F.0, BUG-023 (✅ fixed 2026-10-27, `2983a47` — the activity takes `quota.lock_user`, then the checks, then inserts, in one transaction)
 
+**Built** *(2026-10-27; owner: "pls plan and build f1-f7; wait for me to come back to do the release" —
+built under that delegation, no walkthrough; `69fcd7b`, local, unreleased)*.
+- **Shape:** the Schedule (`job-schedule-{job_id}`, `core/schedules.py`) starts
+  `ScheduledJobWorkflow` (`scheduled-job-{job_id}-<tick>`, `workflows/scheduled_job.py`) per tick. Its
+  one activity `admit_scheduled_run` (`activities/schedules.py`) takes `quota.lock_user`, then: job gone
+  / paused / not v2 → `stopped`; **monthly** → `skipped` (`jobs.schedule_skipped_at` +
+  `schedule_skip_reason`, no row); **storage** → a `failed` `job_runs` row naming the remedy + `job.failed`
+  webhook (a run, as v1's same breach was — it costs a monthly unit); **concurrency** → `waiting`
+  (`jobs.schedule_waiting_since`), re-asked on a 15 s → 5 min doubling timer, skipped
+  (`concurrent_jobs`) past **24 h**; else a `pending` v2 run. The run is a **child `JobWorkflow`**
+  (`job-run-{run_id}`, `ParentClosePolicy.ABANDON`), so the API's cancel works unchanged and the tick
+  stays open while it runs — that is what makes `SKIP` drop an overrunning tick.
+- **Calls made (reversible):** the run id is minted by the workflow (`workflow.uuid4()`), so a retried
+  admission finds its own row. The jobs row is the truth for *armed*; the Schedule is only the clock:
+  a write that disarms commits and tells the engine best effort (admission stops any tick the Schedule
+  still fires); a write that arms is undone with a 503 if the engine refuses. A job created with a cron
+  whose Schedule cannot be put is created **paused**, its first run failed, 503 with the job id.
+  `next_run_at` for v2 is **computed from the cron** on read (Temporal's spec in UTC), and the column
+  stays NULL for v2 — v1's loop selected on it. ADR-013's cap (`user_quotas.scheduled_jobs_limit`,
+  default 20) is checked on create, a cron PATCH that arms, and resume, under the user lock.
+  `schedule_cron: null` removes a schedule; `schedule_status` is now `active | paused` (422 otherwise).
+- **Found:** **BUG-026** — `create_job` never armed a schedule (no status, no `next_run_at`); fixed here.
+  Migration 4.8 backfills `schedule_lane='v1'` only where a status is set — the 176 cron-only dev rows
+  stay unarmed on purpose.
+- **Verified:** 39 new tests (33 DB/API incl. a widened-race "N waking ticks admit only up to the
+  limit" and a held-lock wiring test; 6 time-skipping); corpus +7 (5 harness, 2 compose). **On compose**
+  (1-minute Schedule on a test job, real workers): ticks run end to end; **`temporal` stopped 5 min
+  across 5 ticks → one late run, 4 `skipped_overlap`** (ADR-013 §5's collapse, now tested); **paused
+  3 min → no replay on resume**, next tick normal; concurrency 0 → the tick waited, later ticks dropped,
+  no row; monthly 0 → the waiting tick ended `skipped` (`monthly_runs`), no row. Test job, objects and
+  user removed after.
+
 #### F.2 — `schedule_status` interlock guard + meter scoping
 
 **What (16c, both recorded obligations of this step):** (1) a job whose schedule is on v2 must
@@ -2419,6 +2451,14 @@ D.1 marker's sibling on `jobs`) that the v1 scheduler filters on and the PATCH h
 not features**. `UsageStats.tsx` label updated.
 **Depends on:** F.1
 
+**Built** *(2026-10-27, `e2cadca`; the guard itself landed in F.1)*. `jobs.schedule_lane` is the
+"which engine owns this schedule" half that `schedule_status` was overloaded with (16c): v1's loop
+selected `schedule_lane = 'v1'` only, and a resume keeps the row's lane — so a v2 schedule could not be
+re-armed on v1. The schedule stays `active` on its row when it moves to Temporal, so
+`active_recurring_jobs` is right across lanes without renaming; `active_recurring_jobs_by_lane` is
+added (after F.6 a `v1` count is a stranded schedule) and `next_scheduled_run_at` reads v2's cron. The
+Usage tile shows "N (M on v1)" when any remain. 6 tests (rewritten at F.6 for the post-loop rules).
+
 #### F.3 — Per-job migration runbook
 
 **Order (mechanism 3, counter-intuitive):** pause in v1 → confirm no v1 dispatch in flight →
@@ -2426,6 +2466,14 @@ create the Schedule. **Rollback is the mirror:** pause the Schedule → confirm 
 set `schedule_status` back. Script it (`api/scripts/migrate_schedule.py`, dry-run default). No
 scheduled jobs exist in prod today — the script is still the artefact.
 **Depends on:** F.2
+
+**Built** *(2026-10-27, `a46109d`)*. `api/scripts/migrate_schedule.py`, dry-run default:
+`--all | --job …` moves v1 schedules forward in mechanism 3's order (pause → no v1 run in flight, else
+left paused and reported → put the Schedule → hand the row to v2); `--reconcile` puts every v2 row's
+Schedule and deletes orphan `job-schedule-*` Schedules (the repair for a put the API could not make).
+The `--rollback` mirror was built and **removed at F.6** — with v1's loop gone there is nothing to roll
+back to. 8 tests (ordering asserted: the row is already paused when Temporal is told). No scheduled
+jobs in prod: after the release `--all` should report 0.
 
 #### F.4 — Job-lane delivery as an activity; `webhook_deliveries` fate
 
@@ -2435,11 +2483,33 @@ scheduled jobs exist in prod today — the script is still the artefact.
 mirror (the activity writes the row for the admin endpoints) or retire with the loop? Decide here.
 **Depends on:** C.9, D.3
 
+**Built** *(2026-10-27, `35ada75`)*. **`webhook_deliveries` survives — not as an audit mirror but as
+the delivery record** (TL call, ⚠️ owner to confirm): every writer of a row (job, batch and crawl
+finish activities, the storage-full scheduled tick, the API's unstarted-run paths, an admin retry) then
+starts `WebhookDeliveryWorkflow` (`webhook-delivery-{row_id}`, `USE_EXISTING` + `ALLOW_DUPLICATE`)
+best effort, and a system **`webhook-sweep` Schedule** (every 5 min, `SKIP`, created by the workflow
+worker at startup) starts one for any pending row 60 s past its attempt time — a lost start, an
+unstarted-run row written while Temporal was down, an admin retry, a v1 result-consumer row. The
+activity `attempt_webhook_delivery` is `webhook_loop._attempt_delivery` verbatim (payload bytes, HMAC
+with the job's/batch's secret or `b""`, header, 10 s, `< 300`, SSRF per attempt not counted, backoff
+`[0, 30, 300, 1800, 7200]`, cap `WEBHOOK_MAX_ATTEMPTS`); the workflow sleeps the row's backoff on a
+durable timer. Why the row stays: the admin list/retry endpoints and the three meters read it, and a
+row is what lets the sweep guarantee delivery without a polling loop in the API. **The API no longer
+starts `webhook_loop`** from this commit. Delivery stays separate from the run's workflow, so a
+retrying webhook never holds a Schedule's tick open. 17 tests; corpus +2 (compose). **On compose:** a
+v2 job's `job.completed` → 503, retried 30 s later → 200, row `delivered`/2, signature verified against
+the secret; an orphan pending row delivered by a triggered sweep.
+
 #### F.5 — Three webhook meters (15e)
 
 `webhook_deliveries_pending` / `_exhausted` / `_success_rate_7d` renamed or scoped to the job lane;
 `UsageStats.tsx` updated. The two admin endpoints stay job-lane-only by design.
 **Depends on:** F.4
+
+**Built** *(2026-10-27, `539114e`)*. Renamed to `job_lane_webhooks_pending`,
+`job_lane_webhooks_exhausted`, `job_lane_webhook_success_rate_7d` (jobs, batches, crawls — a pipeline
+delivers through its Webhook block, 15e); Usage label "Webhooks pending (jobs, batches, crawls)".
+**BUG-028** fixed with it: the per-user scope went through `job_id` only. 1 test.
 
 #### F.6 — 🚀 Release; delete three loops
 
@@ -2447,6 +2517,51 @@ mirror (the activity writes the row for the admin endpoints) or retire with the 
 rows for `_recover_stale_pending` to find), `webhook_loop.py` (no `pending` deliveries),
 `advisory.py` (no NATS publishes remain — true after E.7). Remove them from `main.py`'s lifespan.
 **Depends on:** F.1–F.5
+
+**Built** *(2026-10-27, `981e0fc`; not released)*. Deleted `core/scheduler.py` (cron dispatch +
+`_recover_stale_pending`), `core/webhook_loop.py`, `core/advisory.py` and their tests; the lifespan
+starts the result consumer only. `SCHEDULE_LANE`, `STALE_PENDING_THRESHOLD_MINUTES` and the advisory
+subject constant are gone. Every armed schedule is a Temporal Schedule: a v1 row left **paused** moves
+to v2 when resumed (or by `migrate_schedule --all`); a v1 row left **active** fires nothing and shows in
+`active_recurring_jobs_by_lane`. ⚠️ **After this release the v1 lanes are not a working rollback**:
+`JOB_LANE=v1` / `BATCH_LANE=v1` runs lose stale-pending recovery and the MaxDeliver advisory (their
+webhooks still go, via the sweep). G deletes them. Suite **757** at this commit (+ F.7: 766).
+
+**Ships (one release, F.1–F.7):** api image only (also the workflow worker) — `69fcd7b..56a06e6` +
+docs. **One Alembic revision** (4.8 `437442ce59b2`: five `ADD COLUMN`s, one CHECK, the v1 backfill;
+the quota views read none of them). **No infra change, no new env vars** (`DEFAULT_QUOTA_SCHEDULED_JOBS`
+defaults to 20). CI `replay`: 40 histories.
+
+**Runbook** (owner-run):
+0. **Before (read-only, prod):** `SELECT schedule_status, schedule_lane IS NULL, count(*) FROM jobs
+   WHERE schedule_status IS NOT NULL GROUP BY 1, 2` → expect none (prod has never armed a schedule;
+   any would be moved by step 3). `SELECT lane, status, count(*) FROM job_runs WHERE status IN
+   ('pending','running','processing') GROUP BY 1, 2` → expect no `v1` rows (recovery is going).
+   `SELECT status, count(*) FROM webhook_deliveries GROUP BY 1` → note any `pending` (the sweep adopts
+   them within 5 min of the new worker).
+1. **ff `main` to `develop`, push.** Watch CI `replay` (40) + `build-api`; Flux bumps api and
+   workflow-worker. Check: api log `Running upgrade 532e93f0d629 -> 437442ce59b2` and no
+   scheduler/webhook/advisory start lines; workflow-worker started clean. ⚠️ In the minutes both images
+   overlap, the old API's `webhook_loop` and the new worker can both POST one row — at-least-once, as
+   always; webhook receivers must already tolerate a repeat.
+2. **Verify the sweep exists** (api pod, SDK): `get_schedule_handle("webhook-sweep").describe()` →
+   interval 5 min, overlap `SKIP`.
+3. `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -m
+   scripts.migrate_schedule --all` → expect "0 migrated"; same with `--reconcile` → "0 put, 0 orphan(s)".
+4. **Verify a schedule** (your terminal, an API key): `POST /jobs`
+   `{"url":"https://example.com/","schedule_cron":"*/5 * * * *","webhook_url":"<a receiver>"}` → 201;
+   `GET /jobs/{id}` shows `schedule_status: active` and a `next_run_at`; `GET /users/me/scheduled-jobs`
+   → `{"active":1,"limit":20}`; after the next 5-minute mark a second run `completed` (lane `v2`) and
+   its webhook delivered (`GET /admin/webhooks/deliveries`); `PATCH {"schedule_status":"paused"}` →
+   `next_run_at` null, no run at the next mark; `DELETE /jobs/{id}?permanent=true` → 204, the Schedule
+   gone (`describe` → not found). Then click through F.7 (both modes): Jobs → "Recurring only", the
+   Schedule column, JobDetail's panel, pause / resume, the admin quota form's new field.
+
+**Rollback:** an image revert to `261f931`. Delete the Schedules first or every tick fails a workflow
+task on a worker that does not know `ScheduledJobWorkflow` (SDK from the api pod: delete each
+`job-schedule-*` and `webhook-sweep`). Migration 4.8 is additive — the old code ignores the columns, but
+its loop selects `next_run_at`, which v2 rows leave NULL, so those schedules stay silent until set.
+Prefer a forward fix.
 
 #### F.7 — Scheduled jobs in the SPA
 
@@ -2470,6 +2585,19 @@ from a one-off, see when it next fires, or pause it; the only schedule data in t
 **Depends on:** F.6
 
 ---
+
+**Built** *(2026-10-27, `56a06e6`; ships with F.6)*. **API:** `JobResponse` carries `schedule_cron`,
+`schedule_status`, `next_run_at` (computed from the cron — the column is v1's), `schedule_skipped_at`,
+`schedule_skip_reason`, `schedule_waiting_since` on every user and admin job read; `?scheduled=true|false`
+on `GET /jobs` and `GET /admin/jobs`; `GET /users/me/scheduled-jobs` → `{active, limit}`; the admin quota
+PATCH takes `scheduled_jobs_limit` and gains the `GET` the Users page always called (**BUG-027**).
+**SPA:** a Schedule column (recurring/paused pill, plain-words cron via `lib/cron.ts`, next run) and a
+"Recurring only" filter on `Jobs`; `components/SchedulePanel.tsx` on `JobDetail` — schedule, next run,
+the waiting and skipped notes, pause / resume (user mode; the cap's 429 message shown), "N of 20 active
+schedules", and the job's latest 20 runs (user mode — no admin runs endpoint exists). New calls use
+`useApi()` (BUG-018 not ridden). Skipped ticks show as the last-skip note only: they are not rows, and a
+tick `SKIP` drops is counted by Temporal (`num_actions_skipped_overlap`), not shown (ADR-013 §4).
+9 API tests; `npm run build` (tsc) clean. ⚠️ **Click-through not done** — no browser here (Clerk login).
 
 ## Group G — Consumer deletion
 

@@ -2280,6 +2280,52 @@ optional and the response carries `batch_id` and `crawl_id`; one test lists a ba
 
 ---
 
+## BUG-026 — A job created with `schedule_cron` was never armed
+
+**Severity:** Medium by shape, latent — a user who created a recurring job got a one-off: the first run
+went at once and no tick ever followed. **No prod impact known**: production has never had an armed
+schedule. In dev, 176 jobs had a cron and no schedule state.
+**Discovered:** 2026-10-27, building F.1 (code reading, confirmed in the dev DB).
+**Status:** ✅ **FIXED in F.1 (`69fcd7b`), local, unreleased** — ships with Group F's release.
+
+`create_job` stored `schedule_cron` and set neither `schedule_status` nor `next_run_at`, and the v1
+loop selected `schedule_status = 'active' AND next_run_at <= now()`. A PATCH of `schedule_cron` set
+`next_run_at` but not the status, so it armed nothing either; only an explicit
+`PATCH {"schedule_status": "active"}` did. Now create and a cron PATCH arm the schedule (a Temporal
+Schedule since F.6) under ADR-013's cap. Migration 4.8 leaves the old cron-only rows **unarmed** on
+purpose — arming 176 forgotten dev jobs (or any in prod) at deploy would be a surprise; a user resumes
+one with `PATCH {"schedule_status": "active"}`. Also fixed with it: `schedule_status` accepted any
+string (a bad value 500'd on the CHECK; now 422), and `schedule_cron: null` crashed the cron check
+(it now removes the schedule).
+
+---
+
+## BUG-027 — The admin Users page's quota form never loads the user's current limits
+
+**Severity:** Low (admin UI) — the form's placeholders were always blank and "Storage used" never
+showed; saving still worked.
+**Discovered:** 2026-10-27, adding the scheduled-jobs field to the form in F.7.
+**Status:** ✅ **FIXED in F.7 (`56a06e6`), local, unreleased.**
+
+`Users.tsx` reads `GET /admin/users/{id}/quota`, which did not exist (only the `PATCH` did), so the
+query 405'd. The GET is added; it returns the overrides (NULL = the default). ⚠️ Unchanged: saving the
+form sends `null` for every blank field, which **clears** an override — blank means "default".
+
+---
+
+## BUG-028 — A user's webhook meters counted their jobs' deliveries only
+
+**Severity:** Low (admin stats per user) — the same defect class as BUG-005 and P7: a well-formed,
+too-small number.
+**Discovered:** 2026-10-27, scoping the three webhook meters in F.5 (code reading).
+**Status:** ✅ **FIXED in F.5 (`539114e`), local, unreleased.**
+
+`GET /admin/stats/users/{id}` scoped `webhook_deliveries` through `job_id` alone, so that user's batch
+and crawl delivery rows were left out of pending, exhausted and the 7-day success rate (the
+all-users numbers were right). The scope now goes through job, batch or crawl ownership.
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised
