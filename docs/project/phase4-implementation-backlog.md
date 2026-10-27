@@ -99,6 +99,7 @@
 | F.4 | Job-lane webhook delivery as an activity; `webhook_deliveries` fate decided | ⬜ |
 | F.5 | Three webhook meters scoped to the job lane (15e) | ⬜ |
 | F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | ⬜ |
+| F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ⬜ (filed 2026-10-27, owner) |
 | **G** | **Consumer deletion** | |
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ⬜ |
 | **H** | **NATS removal** | |
@@ -2273,6 +2274,27 @@ mirror (the activity writes the row for the admin endpoints) or retire with the 
 rows for `_recover_stale_pending` to find), `webhook_loop.py` (no `pending` deliveries),
 `advisory.py` (no NATS publishes remain — true after E.7). Remove them from `main.py`'s lifespan.
 **Depends on:** F.1–F.5
+
+#### F.7 — Scheduled jobs in the SPA
+
+**Why:** a recurring job is invisible as one. `JobResponse` carries none of `schedule_cron`,
+`schedule_status`, `next_run_at`, so neither the user nor the admin `Jobs` pages can tell a recurring job
+from a one-off, see when it next fires, or pause it; the only schedule data in the SPA is
+`active_recurring_jobs` and `next_scheduled_run_at` on the admin stats page. Filed by the owner
+2026-10-27 to land **after F.6**, when every schedule is a Temporal Schedule.
+**What:**
+- **API:** schedule fields on `JobResponse` (user + admin reads); a `?scheduled=true` filter on
+  `GET /jobs` and `GET /admin/jobs`. ⚠️ After F.1 the next fire time is the Schedule's, not
+  `jobs.next_run_at` (the v1 scheduler's column) — read it from the Schedule (`describe()`'s next action
+  times) or keep the column mirrored; decide at build. Skipped firings (ADR-010 §1 amendment, ADR-013
+  `SKIP`) are not `job_runs` rows — show them only if F.1 records them somewhere readable.
+- **SPA:** a schedule badge + cron (human-readable) + next run on the `Jobs` list and `JobDetail`;
+  pause / resume on `JobDetail` in user mode (`PATCH /jobs/{id}` `{"schedule_status": …}`, which exists);
+  the job's run history (already listed per job) labelled as scheduled runs. Same `mode` component set.
+- ADR-013's per-user cap: show active scheduled jobs against the cap where the 429 can be hit.
+**Tests:** API read tests (fields, filter, cross-tenant 404); SPA build; click-through on compose
+(pause → no new runs, resume → next run shown).
+**Depends on:** F.6
 
 ---
 

@@ -164,6 +164,8 @@ Owner questions at close: batch takes `engine` (http default, playwright allowed
 `playwright_options`/actions/cookies/proxy) and one `llm_config` for every item (scrape → LLM per item;
 **not yet run live on v2 — owner tabled that check until after the crawl cutover**). **Filed E.10**
 (owner): batches + crawls in the SPA, after E.7 — no list endpoints and no pages exist today.
+**Filed F.7** (owner): scheduled jobs in the SPA, after F.6 — `JobResponse` returns no schedule
+fields at all, so a recurring job looks like a one-off everywhere but the admin stats counter.
 
 🔧 **E.1 BUILT; E.2 READY TO RELEASE (2026-10-27, later session).** `develop` `71e43fa` (code) + docs
 closeout. Infra `1e38aaa` (`BATCH_LANE: 'v1'`) on top of `0f71515` (`REDIS_URL`), **both committed
