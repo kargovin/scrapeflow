@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, FailureError
 
 with workflow.unsafe.imports_passed_through():
     from app.workflows.activities.contracts import (
@@ -29,6 +29,14 @@ Engine = Literal["http", "playwright"]
 
 
 SCRAPE_RETRY = RetryPolicy(maximum_attempts=3)
+
+
+def activity_error(exc: ActivityError) -> str:
+    # The worker's own message, as v1 stored it (e.g. "blocked:akamai").
+    cause = exc.cause
+    if isinstance(cause, FailureError):
+        return cause.message
+    return str(cause or exc)
 
 
 def _scrape_timeouts(input: ScrapeInput, engine: Engine) -> dict[str, timedelta]:

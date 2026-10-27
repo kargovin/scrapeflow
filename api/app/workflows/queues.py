@@ -19,6 +19,10 @@ LLM_QUEUE = "llm"
 # Polled by the LLM worker in WORKER_MODE=temporal, beside LLM_QUEUE: Clean and Validate.
 CONTENT_QUEUE = "content"
 
+# Polled by the Playwright worker in WORKER_MODE=temporal, beside its scrape queue: the crawl's
+# target-facing fetches that are not scrapes (robots.txt, sitemaps) and link extraction.
+CRAWL_QUEUE = "crawl"
+
 
 def scrape_queue(engine: str) -> str:
     """The queue whose worker runs ``engine``; both register the same activity name."""

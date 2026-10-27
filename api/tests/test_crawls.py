@@ -1,15 +1,27 @@
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
 
 from app.core.db import AsyncSessionLocal
 from app.models.crawl import Crawl, CrawlPage, CrawlQueueItem
+from app.models.webhook_delivery import WebhookDelivery
 
 
 @pytest.fixture
 def auth_headers(mock_clerk_auth):
     return {"Authorization": "Bearer fake.jwt.token"}
+
+
+@pytest.fixture(autouse=True)
+def engine(monkeypatch):
+    """The workflow engine, mocked: a test must not start a real CrawlWorkflow on compose."""
+    fake = SimpleNamespace(start=AsyncMock(), cancel=AsyncMock())
+    monkeypatch.setattr("app.routers.crawls.start_crawl", fake.start)
+    monkeypatch.setattr("app.routers.crawls.cancel_crawl_workflow", fake.cancel)
+    return fake
 
 
 @pytest.fixture
@@ -23,8 +35,8 @@ def bypass_ssrf(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_crawl_creates_rows(client, auth_headers, bypass_ssrf):
-    """POST /crawls creates a crawl row and seeds crawl_queue with depth=0."""
+async def test_create_crawl_creates_rows(client, auth_headers, bypass_ssrf, engine):
+    """POST /crawls creates the crawl row and starts its workflow; the seed is admitted there."""
     seed = f"https://{uuid.uuid4().hex}.local/"
     response = await client.post(
         "/crawls",
@@ -40,14 +52,39 @@ async def test_create_crawl_creates_rows(client, auth_headers, bypass_ssrf):
     assert data["respect_robots"] is True
     assert "id" in data
 
+    assert data["dropped"] == {}
+
     crawl_id = uuid.UUID(data["id"])
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CrawlQueueItem).where(CrawlQueueItem.crawl_id == crawl_id))
-        items = result.scalars().all()
-    assert len(items) == 1
-    assert items[0].url == seed
-    assert items[0].depth == 0
-    assert items[0].status == "pending"
+        assert result.scalars().all() == []
+    [call] = engine.start.await_args_list
+    assert call.args[0].id == crawl_id
+
+
+async def test_create_crawl_whose_workflow_cannot_start_is_failed(
+    client, auth_headers, bypass_ssrf, engine
+):
+    """No recovery on v2: the crawl is failed at once, with its webhook row, and the call 503s."""
+    engine.start.side_effect = RuntimeError("engine down")
+    response = await client.post(
+        "/crawls",
+        json={
+            "seed_url": f"https://{uuid.uuid4().hex}.local/",
+            "webhook_url": "https://hooks.example.com/x",
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 503
+    crawl_id = uuid.UUID(response.json()["detail"]["crawl_id"])
+    async with AsyncSessionLocal() as db:
+        crawl = await db.get(Crawl, crawl_id)
+        deliveries = (
+            await db.scalars(select(WebhookDelivery).where(WebhookDelivery.crawl_id == crawl_id))
+        ).all()
+    assert (crawl.status, crawl.error) == ("failed", "could not start workflow: engine down")
+    assert crawl.completed_at is not None
+    assert [(d.event, d.payload["status"]) for d in deliveries] == [("crawl.failed", "failed")]
 
 
 async def test_create_crawl_ssrf_rejected(client, auth_headers):
@@ -267,8 +304,8 @@ async def test_list_crawl_pages_filter_rejects_processing(client, auth_headers, 
 # ---------------------------------------------------------------------------
 
 
-async def test_delete_crawl_cancels_and_skips_queue(client, auth_headers, bypass_ssrf):
-    """DELETE /crawls/{id} sets status=cancelled and marks pending queue items skipped."""
+async def test_delete_crawl_cancels_and_skips_queue(client, auth_headers, bypass_ssrf, engine):
+    """DELETE /crawls/{id}: the row and its pending frontier first, then the workflow."""
     create_resp = await client.post(
         "/crawls",
         json={"seed_url": f"https://{uuid.uuid4().hex}.local/"},
@@ -276,9 +313,14 @@ async def test_delete_crawl_cancels_and_skips_queue(client, auth_headers, bypass
     )
     assert create_resp.status_code == 201
     crawl_id = create_resp.json()["id"]
+    async with AsyncSessionLocal() as db:
+        db.add(CrawlQueueItem(crawl_id=uuid.UUID(crawl_id), url="https://x.local/", depth=0))
+        await db.commit()
 
     response = await client.delete(f"/crawls/{crawl_id}", headers=auth_headers)
     assert response.status_code == 204
+    [call] = engine.cancel.await_args_list
+    assert call.args[0] == uuid.UUID(crawl_id)
 
     async with AsyncSessionLocal() as db:
         crawl = await db.get(Crawl, uuid.UUID(crawl_id))
@@ -340,7 +382,6 @@ async def test_delete_crawl_other_user_returns_404(client, auth_headers, db_user
 # DELETE /crawls/{id}?permanent=true — reclaim through the ledger (P7)
 # ---------------------------------------------------------------------------
 
-from unittest.mock import AsyncMock  # noqa: E402
 
 from app.core.minio import get_minio  # noqa: E402
 from app.main import app  # noqa: E402

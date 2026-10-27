@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.diff import DiffResult
 from app.models.batch import Batch
+from app.models.crawl import Crawl
 from app.models.job import Job
 from app.models.webhook_delivery import WebhookDelivery
 
@@ -104,5 +105,37 @@ async def create_batch_webhook_delivery(
         .on_conflict_do_nothing(
             index_elements=["run_id", "event"],
             index_where=WebhookDelivery.run_id.isnot(None),
+        )
+    )
+
+
+async def create_crawl_webhook_delivery(db: AsyncSession, crawl: Crawl, event: str) -> None:
+    """Add a pending WebhookDelivery row for a crawl event. Caller owns the transaction.
+
+    event — "crawl.completed" or "crawl.failed"
+
+    No dedup index covers a crawl row (run_id is null); the caller writes it once, on the
+    crawl's move to a terminal state under the row lock.
+    """
+    payload: dict = {
+        "event": event,
+        "crawl_id": str(crawl.id),
+        "status": crawl.status,
+        "total_queued": crawl.total_queued,
+        "total_completed": crawl.total_completed,
+        "total_failed": crawl.total_failed,
+        "dropped": crawl.dropped,
+        "error": crawl.error,
+        "completed_at": crawl.completed_at.isoformat() if crawl.completed_at else None,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    db.add(
+        WebhookDelivery(
+            crawl_id=crawl.id,
+            event=event,
+            webhook_url=crawl.webhook_url,
+            payload=payload,
+            status="pending",
+            next_attempt_at=datetime.now(UTC),
         )
     )

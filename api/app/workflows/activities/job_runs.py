@@ -99,7 +99,7 @@ async def _owner(db: AsyncSession, run: JobRun) -> tuple[uuid.UUID, dict | None]
     return batch.user_id, batch.llm_config
 
 
-async def _discard_unrecorded(db: AsyncSession, paths: list[str], label: str) -> None:
+async def discard_unrecorded(db: AsyncSession, paths: list[str], label: str) -> None:
     """Deletes the objects no ledger row holds; a recorded one is charged and stays."""
     if not paths:
         return
@@ -179,12 +179,12 @@ async def record_job_objects(input: RecordJobObjectsInput) -> str:
     async with AsyncSessionLocal() as db:
         run = await _lock(db, input.run_id)
         if run is None or run.status not in ACTIVE:
-            await _discard_unrecorded(db, paths, "job object on a stopped run")
+            await discard_unrecorded(db, paths, "job object on a stopped run")
             return GONE if run is None else run.status
         user_id, _ = await _owner(db, run)
         total = sum(o.size for o in input.objects)
         if total > 0 and not await check_storage_quota(user_id, db, total):
-            await _discard_unrecorded(db, paths, "oversized object")
+            await discard_unrecorded(db, paths, "oversized object")
             run.status = "failed"
             run.error = "storage_quota_exceeded"
             run.completed_at = datetime.now(UTC)
@@ -211,7 +211,7 @@ async def finish_job_run(input: FinishJobRunInput) -> str:
     """
     async with AsyncSessionLocal() as db:
         run = await _lock(db, input.run_id)
-        await _discard_unrecorded(db, input.discard, "job object the run will not charge")
+        await discard_unrecorded(db, input.discard, "job object the run will not charge")
         if run is None:
             return GONE
         if run.status not in ACTIVE:

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 import structlog
 
+from app.core.crawl_progress import CHANNEL as CRAWL_STATUS_CHANNEL
 from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
 from app.settings import settings
 
@@ -45,6 +46,7 @@ class JobNotifier:
         self._job_waiters: dict[str, list[asyncio.Queue]] = defaultdict(list)
         self._batch_waiters: dict[str, list[asyncio.Queue]] = defaultdict(list)
         self._pipeline_waiters: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        self._crawl_waiters: dict[str, list[asyncio.Queue]] = defaultdict(list)
         self._user_connection_counts: dict[str, int] = defaultdict(int)
 
     @property
@@ -76,6 +78,7 @@ class JobNotifier:
             _JOB_CHANNEL: self._on_job_notify,
             _BATCH_CHANNEL: self._on_batch_notify,
             PIPELINE_STATUS_CHANNEL: self._on_pipeline_notify,
+            CRAWL_STATUS_CHANNEL: self._on_crawl_notify,
         }
         for channel, callback in listeners.items():
             await conn.add_listener(channel, callback)
@@ -93,7 +96,12 @@ class JobNotifier:
             detail="live status updates stop until the notifier reconnects",
             subscribers=sum(
                 len(q)
-                for w in (self._job_waiters, self._batch_waiters, self._pipeline_waiters)
+                for w in (
+                    self._job_waiters,
+                    self._batch_waiters,
+                    self._pipeline_waiters,
+                    self._crawl_waiters,
+                )
                 for q in w.values()
             ),
         )
@@ -168,6 +176,17 @@ class JobNotifier:
             return
         self._deliver(self._pipeline_waiters, data.get("run_id", ""), data)
 
+    async def _on_crawl_notify(
+        self, conn: asyncpg.Connection, pid: int, channel: str, payload: str
+    ) -> None:
+        # payload: JSON, core/crawl_progress.notify
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("job_notifier: malformed crawl_status payload", payload=payload)
+            return
+        self._deliver(self._crawl_waiters, data.get("crawl_id", ""), data)
+
     @asynccontextmanager
     async def _subscribe(self, waiters: dict[str, list[asyncio.Queue]], key: str, user_id: str):
         limit = settings.ws_max_connections_per_user
@@ -199,3 +218,6 @@ class JobNotifier:
 
     def subscribe_pipeline_run(self, run_id: str, user_id: str):
         return self._subscribe(self._pipeline_waiters, run_id, user_id)
+
+    def subscribe_crawl(self, crawl_id: str, user_id: str):
+        return self._subscribe(self._crawl_waiters, crawl_id, user_id)

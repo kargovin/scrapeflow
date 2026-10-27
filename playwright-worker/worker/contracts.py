@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field, StringConstraints
 NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 SCRAPE_ACTIVITY = "Scrape"
 SCRAPE_PLAYWRIGHT_QUEUE = "scrape-playwright"
+# The crawl's non-scrape fetches (worker/crawl.py) — api/app/workflows/queues.py CRAWL_QUEUE.
+CRAWL_QUEUE = "crawl"
+DISCOVER_SITEMAPS_ACTIVITY = "DiscoverSitemaps"
+FETCH_SITEMAP_ACTIVITY = "FetchSitemap"
+EXTRACT_LINKS_ACTIVITY = "ExtractLinks"
 
 
 class PlaywrightOptions(BaseModel):
@@ -44,3 +49,32 @@ class ScrapeOutput(BaseModel):
     content_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{16}$")]
     warnings: list[str] = []
     screenshots: list[StoredObject] = []
+
+
+class DiscoverSitemapsInput(BaseModel):
+    seed_url: str
+
+
+class DiscoverSitemapsOutput(BaseModel):
+    sitemaps: list[str] = []
+
+
+class FetchSitemapInput(BaseModel):
+    url: str
+    max_entries: Annotated[int, Field(ge=1)]
+
+
+class FetchSitemapOutput(BaseModel):
+    kind: Literal["urlset", "index", "redirect", "unavailable"]
+    locs: list[str] = []
+    location: str | None = None
+    truncated: bool = False
+
+
+class ExtractLinksInput(BaseModel):
+    path: NonEmptyStr
+    base_url: str
+
+
+class ExtractLinksOutput(BaseModel):
+    links: list[str] = []

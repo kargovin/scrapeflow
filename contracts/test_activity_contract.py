@@ -280,6 +280,59 @@ def test_workers_accept_every_input_field_the_api_sends(producer, consumer):
 @pytest.mark.parametrize(
     ("producer", "consumer"),
     [
+        (api.DiscoverSitemapsInput, playwright.DiscoverSitemapsInput),
+        (api.FetchSitemapInput, playwright.FetchSitemapInput),
+        (api.ExtractLinksInput, playwright.ExtractLinksInput),
+    ],
+)
+def test_the_crawl_queue_accepts_every_input_field_the_api_sends(producer, consumer):
+    assert set(producer.model_fields) == set(consumer.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("producer", "consumer"),
+    [
+        (playwright.DiscoverSitemapsOutput, api.DiscoverSitemapsOutput),
+        (playwright.FetchSitemapOutput, api.FetchSitemapOutput),
+        (playwright.ExtractLinksOutput, api.ExtractLinksOutput),
+    ],
+)
+def test_the_api_accepts_every_crawl_output_field(producer, consumer):
+    assert set(producer.model_fields) == set(consumer.model_fields)
+
+
+def test_crawl_payloads_round_trip_between_the_two_sides():
+    for value, model in [
+        (
+            api.FetchSitemapInput(url="https://a.example/s.xml", max_entries=5),
+            playwright.FetchSitemapInput,
+        ),
+        (
+            api.ExtractLinksInput(path="b/history/p/scrape.html", base_url="https://a.example/"),
+            playwright.ExtractLinksInput,
+        ),
+        (
+            api.DiscoverSitemapsInput(seed_url="https://a.example/"),
+            playwright.DiscoverSitemapsInput,
+        ),
+    ]:
+        assert _decode(_encode(value), model).model_dump() == value.model_dump()
+    out = playwright.FetchSitemapOutput(kind="redirect", location="https://a.example/2.xml")
+    assert _decode(_encode(out), api.FetchSitemapOutput).location == "https://a.example/2.xml"
+
+
+def test_the_crawl_queue_registers_the_names_the_api_calls():
+    assert playwright.CRAWL_QUEUE == api_queues.CRAWL_QUEUE
+    assert playwright.DISCOVER_SITEMAPS_ACTIVITY == api.DISCOVER_SITEMAPS_ACTIVITY
+    assert playwright.FETCH_SITEMAP_ACTIVITY == api.FETCH_SITEMAP_ACTIVITY
+    assert playwright.EXTRACT_LINKS_ACTIVITY == api.EXTRACT_LINKS_ACTIVITY
+    # Not the scrape queue: a sitemap fetch must never wait behind a browser slot.
+    assert api_queues.CRAWL_QUEUE != api_queues.SCRAPE_PLAYWRIGHT_QUEUE
+
+
+@pytest.mark.parametrize(
+    ("producer", "consumer"),
+    [
         (playwright.ScrapeOutput, api.ScrapeOutput),
         (playwright.StoredObject, api.StoredObject),
         (llm.LLMOutput, api.LLMOutput),

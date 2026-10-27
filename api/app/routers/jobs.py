@@ -647,16 +647,34 @@ async def load_completed_result(
             status_code=status.HTTP_404_NOT_FOUND, detail="No completed result available"
         )
 
-    bucket, _, key = run.result_path.partition("/")
+    return await read_stored_result(
+        minio_client, run.result_path, job.output_format.value, run.warnings
+    )
+
+
+_FORMAT_BY_EXTENSION = {"md": "markdown", "json": "json", "html": "html"}
+
+
+async def read_stored_result(
+    minio_client: Minio,
+    result_path: str,
+    output_format: str | None = None,
+    warnings: list[str] | None = None,
+) -> JobResultResponse:
+    """One stored object's content. ``output_format`` defaults to the object's extension — a
+    batch item or crawl page with an LLM step stored ``llm.json``, not its scrape format."""
+    bucket, _, key = result_path.partition("/")
     response = await minio_client.get_object(bucket, key)
     content_bytes = await response.read()
     response.close()
 
+    if output_format is None:
+        output_format = _FORMAT_BY_EXTENSION.get(result_path.rsplit(".", 1)[-1], "html")
     return JobResultResponse(
         content=content_bytes.decode("utf-8", errors="replace"),
-        output_format=job.output_format.value,
-        result_path=run.result_path,
-        warnings=run.warnings,
+        output_format=output_format,
+        result_path=result_path,
+        warnings=warnings,
     )
 
 

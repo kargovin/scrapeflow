@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import ARRAY, VARCHAR, Boolean, DateTime, ForeignKey, Index, Integer, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -35,6 +36,10 @@ class Crawl(Base):
     total_queued: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     total_completed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     total_failed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # URLs admission refused, by reason (crawl_queue's dropped rows + refused sitemap files).
+    dropped: Mapped[dict[str, int]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    # Why a crawl failed, or why a completed one stopped early (the storage limit).
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -84,7 +89,9 @@ class CrawlQueueItem(Base):
     )
     url: Mapped[str] = mapped_column(Text, nullable=False)
     depth: Mapped[int] = mapped_column(Integer, nullable=False)
+    # pending → dispatched → completed / failed / skipped; or dropped, refused at admission.
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="pending")
+    drop_reason: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True)
     crawl_page_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("crawl_pages.id"), nullable=True
     )

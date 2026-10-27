@@ -62,6 +62,11 @@ class CrawlResponse(BaseModel):
     total_queued: int
     total_completed: int
     total_failed: int
+    # URLs admission refused, by reason (ADR-010 §2).
+    dropped: dict[str, int] = {}
+    error: str | None = None
     created_at: datetime
     completed_at: datetime | None = None
+    # Admin reads only (GET /admin/crawls).
+    user_email: str | None = None
     model_config = {"from_attributes": True}

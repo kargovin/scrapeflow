@@ -5,7 +5,8 @@ Playwright worker — Temporal entry point (WORKER_MODE=temporal).
   2. Connect to Temporal
   3. Connect to MinIO, verify bucket exists
   4. Launch Chrome via Patchright (headed under Xvfb — same stealth config as main.py)
-  5. Poll the `scrape-playwright` task queue for Scrape activity tasks (no workflows)
+  5. Poll the `scrape-playwright` task queue for Scrape activity tasks (no workflows), and the
+     `crawl` queue for the crawl's robots/sitemap/link activities (no browser)
   6. On SIGTERM, wait up to playwright_graceful_shutdown_seconds for in-flight scrapes
 """
 
@@ -22,7 +23,8 @@ from temporalio.worker import Worker
 
 from .activity import PlayWrightScrapeActivities
 from .config import settings
-from .contracts import SCRAPE_PLAYWRIGHT_QUEUE
+from .contracts import CRAWL_QUEUE, SCRAPE_PLAYWRIGHT_QUEUE
+from .crawl import CrawlActivities, discover_sitemaps, fetch_sitemap
 
 log = structlog.get_logger()
 
@@ -84,8 +86,21 @@ async def run() -> None:
         ),
     )
 
+    crawl_worker = Worker(
+        client,
+        task_queue=CRAWL_QUEUE,
+        activities=[
+            discover_sitemaps,
+            fetch_sitemap,
+            CrawlActivities(minio).extract_links,
+        ],
+        max_concurrent_activities=settings.crawl_max_activities,
+        # Each fetch is bounded by its 10 s client timeout.
+        graceful_shutdown_timeout=timedelta(seconds=30),
+    )
+
     try:
-        async with worker:
+        async with worker, crawl_worker:
             log.info(
                 "temporal_worker_started",
                 address=settings.temporal_address,
@@ -93,6 +108,8 @@ async def run() -> None:
                 task_queue=SCRAPE_PLAYWRIGHT_QUEUE,
                 max_workers=settings.playwright_max_workers,
                 graceful_shutdown_s=settings.playwright_graceful_shutdown_seconds,
+                crawl_queue=CRAWL_QUEUE,
+                crawl_max_activities=settings.crawl_max_activities,
             )
             await stop.wait()
             log.info("temporal_worker_stopping")

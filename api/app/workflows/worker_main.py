@@ -15,6 +15,14 @@ from temporalio.worker import Worker
 
 from app.settings import settings
 from app.workflows.activities.batches import finish_batch
+from app.workflows.activities.crawls import (
+    admit_urls,
+    claim_crawl_pages,
+    crawl_started,
+    finish_crawl,
+    record_crawl_page,
+    vet_urls,
+)
 from app.workflows.activities.db import (
     check_cancelled,
     mirror_block_status,
@@ -32,6 +40,7 @@ from app.workflows.activities.job_runs import (
 from app.workflows.activities.webhook import deliver_webhook
 from app.workflows.batch import BatchWorkflow
 from app.workflows.client import connect
+from app.workflows.crawl import CrawlWorkflow
 from app.workflows.hello import HelloWorkflow, say_hello
 from app.workflows.job import JobWorkflow
 from app.workflows.pipeline import PipelineWorkflow
@@ -59,6 +68,7 @@ async def main() -> None:
             PipelineWorkflow,
             JobWorkflow,
             BatchWorkflow,
+            CrawlWorkflow,
         ],
         activities=[
             say_hello,
@@ -75,6 +85,12 @@ async def main() -> None:
             finish_batch,
             acquire_host_slot,
             release_host_slot,
+            crawl_started,
+            admit_urls,
+            vet_urls,
+            claim_crawl_pages,
+            record_crawl_page,
+            finish_crawl,
         ],
         graceful_shutdown_timeout=timedelta(seconds=20),
     )

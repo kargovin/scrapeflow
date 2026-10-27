@@ -15,6 +15,8 @@ from app.workflows.steps import HostSlot
 from tests.replay.export_history import HISTORIES
 from tests.test_workflows_batch import Harness as BatchHarness
 from tests.test_workflows_batch import _batch_input, _scrape_ok, _scraped
+from tests.test_workflows_crawl import SITE, Frontier, _sitemaps, crawl_input
+from tests.test_workflows_crawl import Harness as CrawlHarness
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
 from tests.test_workflows_pipeline import CLEAN_GUARD, R6, RUN_INPUT, Harness
@@ -130,6 +132,49 @@ BATCH_SCENARIOS = {
 }
 
 
+def _crawl_cancelled_mid_scrape():
+    scraping, release = asyncio.Event(), asyncio.Event()
+    f = Frontier(links=SITE)
+
+    async def scrape(url):
+        if url != "https://site.example/":
+            scraping.set()
+            await release.wait()
+
+    async def during(handle):
+        await scraping.wait()
+        f.state = "cancelled"
+        await handle.cancel()
+        await asyncio.sleep(0.5)
+        release.set()
+
+    return f, {"scrape": scrape}, during
+
+
+# E.5 — name -> () -> (Frontier, harness kwargs, during or None), CrawlInput.
+CRAWL_SCENARIOS = {
+    "harness_crawl_completed": (lambda: (Frontier(links=SITE), {}, None), crawl_input()),
+    "harness_crawl_sitemaps": (
+        lambda: (
+            Frontier(links={"https://site.example/": []}),
+            {"sitemaps": _sitemaps()},
+            None,
+        ),
+        crawl_input(ignore_sitemap=False),
+    ),
+    "harness_crawl_storage_wall": (
+        lambda: (Frontier(links=SITE, storage_full_after=2), {}, None),
+        crawl_input(max_in_flight=1),
+    ),
+    "harness_crawl_cancelled_mid_scrape": (_crawl_cancelled_mid_scrape, crawl_input()),
+    # The first run only: it ends in continue-as-new.
+    "harness_crawl_continued_as_new": (
+        lambda: (Frontier(links=SITE), {}, None),
+        crawl_input(pages_per_run=2, max_in_flight=1),
+    ),
+}
+
+
 async def main() -> None:
     runs = [(name, Harness, kwargs, run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
     runs += [(name, JobHarness, kwargs, None) for name, kwargs in JOB_SCENARIOS.items()]
@@ -143,6 +188,16 @@ async def main() -> None:
         run_kwargs = {"during": during(h)} if during else {}
         await (h.run(run_input, **run_kwargs) if run_input is not None else h.run(**run_kwargs))
         path.write_text(h.history.to_json() + "\n")
+        print(path)
+    for name, (setup, input) in CRAWL_SCENARIOS.items():
+        path = HISTORIES / f"{name}.json"
+        if path.exists():
+            continue
+        frontier, kwargs, during = setup()
+        h = CrawlHarness(frontier, **kwargs)
+        await h.run(input, during=during)
+        history = h.first_history if name.endswith("continued_as_new") else h.history
+        path.write_text(history.to_json() + "\n")
         print(path)
     for name, (setup, batch_input) in BATCH_SCENARIOS.items():
         path = HISTORIES / f"{name}.json"

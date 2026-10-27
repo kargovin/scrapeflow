@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     minio_bucket: str = "scrapeflow-results"
     minio_secure: bool = False
     playwright_max_workers: int = 3
+    # Temporal mode: crawl-queue activities in flight (robots.txt, sitemaps, link extraction);
+    # no browser, so not bounded by playwright_max_workers.
+    crawl_max_activities: int = 10
     playwright_default_timeout_seconds: int = 60
     credentials_encryption_key: str = ""
     # NATS pull-consumer ack window (seconds). The default JetStream ack_wait is 30s,

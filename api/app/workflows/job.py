@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 from temporalio import workflow
-from temporalio.exceptions import ActivityError, ApplicationError, FailureError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from app.workflows import steps
@@ -72,14 +72,6 @@ class FinishJobRunInput(BaseModel):
     discard: list[str] = []
 
 
-def _activity_error(exc: ActivityError) -> str:
-    # The worker's own message, as v1 stored it (e.g. "blocked:akamai").
-    cause = exc.cause
-    if isinstance(cause, FailureError):
-        return cause.message
-    return str(cause or exc)
-
-
 @workflow.defn
 class JobWorkflow:
     """One run of a job on the v2 lane: what ``result_consumer.py`` does for it on v1.
@@ -120,7 +112,7 @@ class JobWorkflow:
         try:
             scraped = await self._scrape(input)
         except ActivityError as exc:
-            return await self._fail(run_id, _activity_error(exc))
+            return await self._fail(run_id, steps.activity_error(exc))
         except asyncio.CancelledError:
             # Cancelled while waiting for the host: nothing was scraped.
             return await self._cancel(run_id)
@@ -162,7 +154,7 @@ class JobWorkflow:
                 )
             )
         except ActivityError as exc:
-            return await self._fail(run_id, _activity_error(exc))
+            return await self._fail(run_id, steps.activity_error(exc))
         if self._cancel_requested:
             return await self._cancel(run_id, discard=[extracted.result.path])
 

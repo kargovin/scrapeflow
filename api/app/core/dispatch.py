@@ -11,7 +11,8 @@ to messages.
 
 ``dispatch_run`` is the one switch between the engines for a job's run (ADR-009 16d): the run's
 ``lane``, written when the row was inserted, picks NATS or ``JobWorkflow``. A batch's runs share
-one lane; on v2 the batch is one ``BatchWorkflow`` (``start_batch``).
+one lane; on v2 the batch is one ``BatchWorkflow`` (``start_batch``). A crawl has no lane: it is
+always one ``CrawlWorkflow`` (``start_crawl``, E.7).
 """
 
 import uuid
@@ -26,16 +27,23 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-from app.core import batch_progress
-from app.core.webhooks import create_batch_webhook_delivery, create_webhook_delivery
+from app.core import batch_progress, crawl_progress
+from app.core.webhooks import (
+    create_batch_webhook_delivery,
+    create_crawl_webhook_delivery,
+    create_webhook_delivery,
+)
 from app.messages import Credentials, MessageOptions, ScrapeMessage
 from app.models.batch import Batch, BatchItem
+from app.models.crawl import Crawl, CrawlQueueItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.settings import settings
 from app.workflows import batch as batch_workflow
+from app.workflows import crawl as crawl_workflow
 from app.workflows.activities import contracts
 from app.workflows.batch import BatchInput, BatchWorkflow
+from app.workflows.crawl import CrawlInput, CrawlWorkflow
 from app.workflows.job import JobRunInput, JobWorkflow, workflow_id
 from app.workflows.queues import WORKFLOW_QUEUE
 
@@ -230,6 +238,73 @@ async def cancel_batch_workflow(
         await client.get_workflow_handle(batch_workflow.workflow_id(batch_id)).cancel()
     except Exception as exc:
         logger.warning("batch_workflow_cancel_not_sent", batch_id=str(batch_id), error=str(exc))
+
+
+def build_crawl_input(crawl: Crawl) -> CrawlInput:
+    return CrawlInput(
+        crawl_id=str(crawl.id),
+        seed_url=crawl.seed_url,
+        engine=crawl.engine,
+        max_depth=crawl.max_depth,
+        max_pages=crawl.max_pages,
+        respect_robots=crawl.respect_robots,
+        ignore_sitemap=crawl.ignore_sitemap,
+        max_in_flight=settings.crawl_max_in_flight,
+        pages_per_run=settings.crawl_pages_per_run,
+    )
+
+
+async def start_crawl(crawl: Crawl, temporal: TemporalClient) -> None:
+    """Starts a committed crawl's workflow. Raises if the engine refused it."""
+    client = await temporal()
+    await client.start_workflow(
+        CrawlWorkflow.run,
+        build_crawl_input(crawl),
+        id=crawl_workflow.workflow_id(crawl.id),
+        task_queue=WORKFLOW_QUEUE,
+        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+    )
+
+
+async def fail_unstarted_crawl(db: AsyncSession, crawl: Crawl, exc: Exception) -> None:
+    """A crawl whose workflow never started: failed, with its webhook row, as the workflow would."""
+    crawl.status = "failed"
+    crawl.error = f"could not start workflow: {exc}"
+    crawl.completed_at = datetime.now(UTC)
+    if crawl.webhook_url:
+        await create_crawl_webhook_delivery(db, crawl, event="crawl.failed")
+    await crawl_progress.notify(db, crawl)
+    await db.commit()
+
+
+async def cancel_crawl(db: AsyncSession, crawl_id: uuid.UUID) -> Crawl | None:
+    """Cancels the crawl and what is left of its frontier; notifies, commits.
+
+    Returns None if the crawl closed while this waited on its lock. A page in flight is left to
+    its workflow, whose record drops what it fetched.
+    """
+    crawl = await crawl_progress.lock(db, crawl_id)
+    if crawl is None or crawl.status in crawl_progress.TERMINAL:
+        await db.rollback()
+        return None
+    crawl.status = "cancelled"
+    await db.execute(
+        update(CrawlQueueItem)
+        .where(CrawlQueueItem.crawl_id == crawl_id, CrawlQueueItem.status == "pending")
+        .values(status="skipped")
+    )
+    await crawl_progress.notify(db, crawl)
+    await db.commit()
+    return crawl
+
+
+async def cancel_crawl_workflow(crawl_id: uuid.UUID, temporal: TemporalClient) -> None:
+    """Best effort, after the row is cancelled: the workflow's next claim or record refuses."""
+    try:
+        client = await temporal()
+        await client.get_workflow_handle(crawl_workflow.workflow_id(crawl_id)).cancel()
+    except Exception as exc:
+        logger.warning("crawl_workflow_cancel_not_sent", crawl_id=str(crawl_id), error=str(exc))
 
 
 def build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> ScrapeMessage:
