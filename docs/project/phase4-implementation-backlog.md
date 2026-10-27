@@ -2539,9 +2539,9 @@ the quota views read none of them). **No infra change, no new env vars** (`DEFAU
 defaults to 20). CI `replay`: 40 histories.
 
 **Runbook** (owner-run):
-0. **Before (read-only, prod):** `SELECT schedule_status, schedule_lane IS NULL, count(*) FROM jobs
-   WHERE schedule_status IS NOT NULL GROUP BY 1, 2` → expect none (prod has never armed a schedule;
-   any would be moved by step 3). `SELECT lane, status, count(*) FROM job_runs WHERE status IN
+0. **Before (read-only, prod):** `SELECT schedule_status, count(*) FROM jobs WHERE schedule_status IS
+   NOT NULL GROUP BY 1` → expect none (prod has never armed a schedule; any would be tagged `v1` by
+   4.8 and moved by step 3). ⚠️ No `schedule_lane` here — 4.8 adds it in this release. `SELECT lane, status, count(*) FROM job_runs WHERE status IN
    ('pending','running','processing') GROUP BY 1, 2` → expect no `v1` rows (recovery is going).
    `SELECT status, count(*) FROM webhook_deliveries GROUP BY 1` → note any `pending` (the sweep adopts
    them within 5 min of the new worker).
