@@ -799,8 +799,8 @@ async def test_admin_get_stats_shape(client, admin_user, admin_headers):
         "jobs_running",
         "jobs_pending",
         "jobs_by_engine",
-        "webhook_deliveries_pending",
-        "webhook_deliveries_exhausted",
+        "job_lane_webhooks_pending",
+        "job_lane_webhooks_exhausted",
         "active_recurring_jobs",
     ):
         assert key in op, f"missing operational key: {key}"
@@ -814,7 +814,7 @@ async def test_admin_get_stats_shape(client, admin_user, admin_headers):
         "jobs_by_engine_7d",
         "top_users_by_jobs",
         "minio_storage_bytes",
-        "webhook_delivery_success_rate_7d",
+        "job_lane_webhook_success_rate_7d",
     ):
         assert key in hist, f"missing historical key: {key}"
 

@@ -59,8 +59,10 @@ class OperationalStats(BaseModel):
     jobs_running: int
     jobs_pending: int
     jobs_by_engine: dict[str, int]
-    webhook_deliveries_pending: int
-    webhook_deliveries_exhausted: int
+    # ADR-009 15e: jobs, batches and crawls only. A pipeline delivers through its Webhook block and
+    # writes no webhook_deliveries row; its failures are on its run.
+    job_lane_webhooks_pending: int
+    job_lane_webhooks_exhausted: int
     # Every lane (ADR-009 16c): a schedule moved to Temporal stays `active` on its row.
     active_recurring_jobs: int
     # Which engine fires them; a `v1` count after the schedule cutover is a stranded schedule.
@@ -79,7 +81,8 @@ class HistoricalStats(BaseModel):
     jobs_by_engine_7d: dict[str, int]
     top_users_by_jobs: list[TopUserByJobs]
     minio_storage_bytes: int
-    webhook_delivery_success_rate_7d: float
+    # Jobs, batches and crawls only (15e), as above.
+    job_lane_webhook_success_rate_7d: float
 
 
 class AdminStatsResponse(BaseModel):

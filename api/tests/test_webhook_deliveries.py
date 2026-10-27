@@ -398,3 +398,46 @@ async def test_an_admin_retry_starts_the_delivery_again(
     assert (row.status, row.attempts) == ("pending", 0)
     [call] = temporal.start_workflow.call_args_list
     assert call.kwargs["id"] == f"webhook-delivery-{d.id}"
+
+
+# ---------------------------------------------------------------------------
+# F.5 — the three meters say what they count, and count a user's batches and crawls too
+# ---------------------------------------------------------------------------
+
+
+async def test_a_users_webhook_meters_count_their_batch_and_crawl_rows(
+    client,
+    admin_headers,  # noqa: F811
+    db_user,
+    job,
+):
+    from app.core.minio import get_minio
+    from app.core.redis import get_redis
+    from tests.test_admin import _make_mock_minio, _make_mock_redis
+
+    async with AsyncSessionLocal() as db:
+        batch = Batch(user_id=db_user.id, total=1, output_format="html")
+        crawl = Crawl(user_id=db_user.id, seed_url="https://example.com")
+        db.add_all([batch, crawl])
+        await db.commit()
+    await _delivery(job)
+    await _delivery(job, batch_id=batch.id, payload={"event": "batch.completed"})
+    await _delivery(
+        job, crawl_id=crawl.id, payload={"event": "crawl.completed"}, status="exhausted"
+    )
+    await _delivery(job, status="delivered")
+
+    app.dependency_overrides[get_redis] = lambda: _make_mock_redis()
+    app.dependency_overrides[get_minio] = lambda: _make_mock_minio()
+    try:
+        resp = await client.get(f"/admin/stats/users/{db_user.id}", headers=admin_headers)
+    finally:
+        app.dependency_overrides.pop(get_redis, None)
+        app.dependency_overrides.pop(get_minio, None)
+
+    data = resp.json()
+    assert data["operational"]["job_lane_webhooks_pending"] == 2
+    assert data["operational"]["job_lane_webhooks_exhausted"] == 1
+    assert data["historical"]["job_lane_webhook_success_rate_7d"] == 0.25
+    # The old names are gone: a reader cannot take them for every lane's.
+    assert "webhook_deliveries_pending" not in data["operational"]

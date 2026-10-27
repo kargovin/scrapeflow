@@ -63,7 +63,7 @@ export default function UsageStats() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Stat label="Running" value={op.jobs_running} />
           <Stat label="Pending" value={op.jobs_pending} />
-          <Stat label="Webhooks pending" value={op.webhook_deliveries_pending} />
+          <Stat label="Webhooks pending (jobs, batches, crawls)" value={op.job_lane_webhooks_pending} />
           <Stat
             label="Recurring jobs"
             value={

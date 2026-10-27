@@ -110,8 +110,9 @@ export interface AdminStats {
     jobs_running: number
     jobs_pending: number
     jobs_by_engine: Record<string, number>
-    webhook_deliveries_pending: number
-    webhook_deliveries_exhausted: number
+    // Jobs, batches and crawls; a pipeline's webhook is a block of its run (ADR-009 15e).
+    job_lane_webhooks_pending: number
+    job_lane_webhooks_exhausted: number
     active_recurring_jobs: number
     active_recurring_jobs_by_lane: Record<string, number>
     next_scheduled_run_at: string | null
@@ -124,7 +125,7 @@ export interface AdminStats {
     jobs_by_engine_7d: Record<string, number>
     top_users_by_jobs: Array<{ user_id: string; email: string; job_count: number }>
     minio_storage_bytes: number
-    webhook_delivery_success_rate_7d: number
+    job_lane_webhook_success_rate_7d: number
   }
 }
 

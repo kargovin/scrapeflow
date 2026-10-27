@@ -6,7 +6,7 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from miniopy_async.api import Minio
-from sqlalchemy import case, func, select, true
+from sqlalchemy import case, func, or_, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -19,6 +19,7 @@ from app.core.ledger import release_run_objects, release_user_objects
 from app.core.minio import get_minio
 from app.core.redis import get_redis
 from app.models.batch import Batch, BatchItem
+from app.models.crawl import Crawl
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.user import User
@@ -430,6 +431,16 @@ async def admin_retry_webhook_delivery(
 # ---------------------------------------------------------------------------
 
 
+def _webhook_owned_by(user_id: uuid.UUID):
+    """A delivery row is the user's through its job, batch or crawl — scoping through the job
+    alone left their batch and crawl webhooks out of their numbers."""
+    return or_(
+        WebhookDelivery.job_id.in_(select(Job.id).where(Job.user_id == user_id)),
+        WebhookDelivery.batch_id.in_(select(Batch.id).where(Batch.user_id == user_id)),
+        WebhookDelivery.crawl_id.in_(select(Crawl.id).where(Crawl.user_id == user_id)),
+    )
+
+
 async def _build_operational_stats(
     db: AsyncSession,
     user_id: uuid.UUID | None = None,
@@ -443,7 +454,7 @@ async def _build_operational_stats(
 
     def _wd_user_scope(stmt):
         if user_id is not None:
-            return stmt.join(Job, WebhookDelivery.job_id == Job.id).where(Job.user_id == user_id)
+            return stmt.where(_webhook_owned_by(user_id))
         return stmt
 
     def _job_user_scope(stmt):
@@ -519,8 +530,8 @@ async def _build_operational_stats(
         jobs_running=jobs_running,
         jobs_pending=jobs_pending,
         jobs_by_engine=jobs_by_engine,
-        webhook_deliveries_pending=wh_pending,
-        webhook_deliveries_exhausted=wh_exhausted,
+        job_lane_webhooks_pending=wh_pending,
+        job_lane_webhooks_exhausted=wh_exhausted,
         active_recurring_jobs=len(active_schedules),
         active_recurring_jobs_by_lane=by_lane,
         next_scheduled_run_at=min(next_runs, default=None),
@@ -640,7 +651,7 @@ async def _build_historical_stats(
         .where(WebhookDelivery.created_at >= week_ago)
     )
     if user_id is not None:
-        wh_stmt = wh_stmt.join(Job, WebhookDelivery.job_id == Job.id).where(Job.user_id == user_id)
+        wh_stmt = wh_stmt.where(_webhook_owned_by(user_id))
     wh_row = (await db.execute(wh_stmt)).one()
     wh_rate = wh_row.delivered / wh_row.total if wh_row.total > 0 else 0.0
 
@@ -678,7 +689,7 @@ async def _build_historical_stats(
         jobs_by_engine_7d=jobs_by_engine_7d,
         top_users_by_jobs=top_users_by_jobs,
         minio_storage_bytes=minio_bytes,
-        webhook_delivery_success_rate_7d=wh_rate,
+        job_lane_webhook_success_rate_7d=wh_rate,
     )
 
 
