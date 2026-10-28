@@ -136,6 +136,15 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-10-28 *(clock)*
 
+🚀 **H.2 RELEASED — GROUP H CLOSED (2026-10-28, tenth session).** Owner ran the runbook in order: `main` ff
+`722f54b..cd5c60e` (api image; Flux bumped api + workflow-worker + cleanup CronJob, infra `1c636fb`), then infra
+**`432e014`** (the rebased `c69b5f9`). Flux pruned the NATS HelmRelease, StatefulSet, `nats-box` and init Job; the
+api restarted without `wait-for-nats`/`NATS_URL`, `1/1`. Owner: an http and a playwright job `completed`; the
+JetStream PVC deleted from k9s (PV gone with it). **No NATS anywhere. Deployed code is `cd5c60e`** (api image;
+workers on `722f54b`). ⚠️ My `kubectl logs`/`exec` were refused by the classifier — `get`/`wait` only.
+**Next: Group I — I.1** (Alembic-on-startup multi-replica safe, plus the `nats_stream_seq` drop). Still waiting:
+Dependabot's 64 alerts, BUG-024, BUG-018/019/021, BUG-029; dev `docker_nats_data` volume.
+
 🔧 **H.2 BUILT (2026-10-28, tenth session; nothing pushed, nothing released).** Owner: "build it". NATS is gone
 from the API (`core/nats.py`, `messages.py`, `constants.py`, the NATS message builders, the `/health` check,
 `nats-py`), compose (`nats`, `nats-init`) and infra **`c69b5f9`** (HelmRelease, init Job, HelmRepository,

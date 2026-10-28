@@ -104,7 +104,7 @@
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ **RELEASED 2026-10-28** (`main` `41a348f..bc30025`, infra `682cc52`) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` gone; owner verified a job + a batch |
 | **H** | **NATS removal** | |
 | H.1 | Delete NATS-bound worker Deployments (obligation 3) | ✅ **RELEASED 2026-10-28** (`main` `bc30025..722f54b`, infra `c92e7dd`, step 4 `51c2d40`) — NATS mode gone from all three workers; owner verified http + playwright jobs and a crawl |
-| H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | 🔧 Built 2026-10-28 (`17c2903`, infra `c69b5f9`; local, not pushed) — the column drop moved to I.1 |
+| H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ✅ **RELEASED 2026-10-28** (`main` `722f54b..cd5c60e`, infra `432e014`) — NATS gone from the API, compose and the cluster; JetStream PVC deleted; owner verified http + playwright jobs. Column drop moved to I.1 |
 | **I** | **API thinning** | |
 | I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | ⬜ |
 | I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ⬜ |
@@ -2872,6 +2872,17 @@ image.** Infra `c69b5f9` **after** the image.
 
 **Rollback:** before step 3, revert the api image to `bc30025`'s tag (NATS still runs). After step 3,
 fix forward — `bc30025` needs NATS to start.
+
+**Released** *(2026-10-28, 18:26–18:31 UTC)*. Step 1: the owner pushed `develop` and ran the `main` ff
+`722f54b..cd5c60e`; CI built the api image; Flux's image automation bumped `api`, `workflow-worker` and the
+cleanup CronJob to `cd5c60e` (infra `1c636fb`, 18:26). Step 3: the owner rebased and pushed the infra commit
+as **`432e014`** (18:30); Flux applied it — the `scrapeflow-nats` HelmRelease, its StatefulSet, `nats-box`
+and `scrapeflow-nats-init` gone; the api restarted without `wait-for-nats` / `NATS_URL` and went `1/1`
+(readiness = the new `db` + `redis` probe); the workflow worker `1/1` on `cd5c60e`. Step 2 (owner, after
+step 3): an http job and a playwright job `completed`. Step 4 (owner, k9s): PVC
+`scrapeflow-nats-js-scrapeflow-nats-0` deleted; its `local-path` PV went with it. ⚠️ My `kubectl logs` /
+`exec` on the api pod were refused by the classifier ("Production Reads") — the api's startup log and
+`/health/ready` body were not read; `get` / `wait` were allowed. **Group H closed.**
 
 ---
 
