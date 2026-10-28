@@ -104,9 +104,9 @@
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ **RELEASED 2026-10-28** (`main` `41a348f..bc30025`, infra `682cc52`) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` gone; owner verified a job + a batch |
 | **H** | **NATS removal** | |
 | H.1 | Delete NATS-bound worker Deployments (obligation 3) | ✅ **RELEASED 2026-10-28** (`main` `bc30025..722f54b`, infra `c92e7dd`, step 4 `51c2d40`) — NATS mode gone from all three workers; owner verified http + playwright jobs and a crawl |
-| H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ⬜ |
+| H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | 🔧 Built 2026-10-28 (`17c2903`, infra `c69b5f9`; local, not pushed) — the column drop moved to I.1 |
 | **I** | **API thinning** | |
-| I.1 | Alembic-on-startup made multi-replica safe | ⬜ |
+| I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | ⬜ |
 | I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ⬜ |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ⬜ |
@@ -2808,11 +2808,73 @@ compose services, `nats_stream_seq` dropped (the views do not read it — no dro
 left is the API side (`app/core/nats.py`, the `/health` NATS check, `messages.py` + the dispatch
 builders, `constants.py` subjects, the API's `nats-py`), the infra, compose and `nats_stream_seq`.
 
+**Built** *(2026-10-28, tenth session; `17c2903`, infra `c69b5f9`; nothing pushed).* Owner: "build it".
+- **API:** `app/core/nats.py`, `app/messages.py`, `app/constants.py` (subjects only) deleted; `main.py`
+  no longer connects; `nats_url` / `nats_max_deliver` out of settings; `nats-py` out of `pyproject.toml`
+  + `uv.lock`. `build_scrape_message` / `build_batch_scrape_message` deleted — `build_scrape_input` /
+  `build_batch_scrape_input` now carry their docstrings. `/health/ready` reports `db`, `redis`;
+  `/health/deps` adds `minio`. Comments that named NATS as the mechanism (ledger, webhooks dedup,
+  credentials) now name a retried activity / the activity input.
+- **Compose:** `nats` + `nats-init` services and the `nats_data` volume declaration removed; the api no
+  longer waits on them. ⚠️ The dev **`docker_nats_data` volume is left on disk** (old backlog only) —
+  `docker volume rm docker_nats_data` when convenient. Root `.env` still sets `NATS_URL`: harmless
+  (`extra="ignore"`). `.env.example` loses `NATS_URL` and G.1's stale `JOB_LANE`.
+- **README:** architecture diagram, stack, design decisions and project tree describe Temporal (the
+  coordinator, deleted at E.7, was still drawn).
+- **Infra (`c69b5f9`):** `infrastructure/nats.yaml` (the HelmRelease) and `app/nats-init-job.yaml`
+  deleted, both out of `kustomization.yaml`; the `nats` HelmRepository out of `infrastructure/sources.yaml`
+  (nothing else used it); `api.yaml` loses `wait-for-nats` and `NATS_URL`. The `create-namespace.sh` copy
+  in `temporal-init-job.yaml` stays byte-identical to the app repo's (both lost the nats-init analogy).
+
+**Call made at build (TL, reversible): `nats_stream_seq` is unmapped now and dropped at I.1, not here.**
+The api runs `alembic upgrade` on startup, and the workflow worker (same image, `RollingUpdate`) keeps
+its old pod until the new one is ready — an old pod's `select(JobRun)` names every mapped column, so a
+drop in this release fails its DB activities for that window. Unmapped, the column is invisible to the
+new code; nothing has written it since G.1. `alembic check` therefore reports the column and
+`idx_job_runs_nats_stream_seq` as removed (with the usual dedup false positive) until I.1's migration.
+
+**Tests:** `test_nats.py` deleted (2). The two parity tests that compared an activity input with the
+NATS message now assert the input's values; a third pins `playwright_options` to the playwright engine
+(the mutation pass found it unpinned — the old parity test shared the gate with the builder it compared
+against). `test_health` asserts the exact key sets. Suite **738** (739 − 2 + 1), contracts **41**, ruff
+clean (the 7 pre-existing `UP042`/`RUF059` unchanged). **Mutation pass 6/6** after the new test (5/6
+before it). **Compose:** api rebuilt without `nats-py`, stack recreated with `--remove-orphans` (the
+NATS containers went); `/health/ready` → `{"status":"ok","db":"ok","redis":"ok"}`; through the HTTP API
+an http job, a playwright job and a 2-URL batch `completed`. ⚠️ Cleanup slip: `DELETE /batch/{id}`
+only cancels (409 on a finished batch — existing behaviour), and I deleted the test user by SQL before
+checking, so the batch's two objects (1,154 B) were removed from MinIO by key by hand. Jobs went through
+`?permanent=true`.
+
+**Ships:** the api image (api + workflow-worker; CI `replay` + `build-api`). **No migration, no worker
+image.** Infra `c69b5f9` **after** the image.
+
+**Runbook** (owner-run):
+0. **Before (read-only, prod):** `kubectl -n scrapeflow get helmrelease,statefulset,job,pvc | grep -i nats`
+   → the HelmRelease, its StatefulSet, `scrapeflow-nats-init` and the JetStream PVC. Note the PVC's name.
+1. **App first: push `develop`, ff `main` to it, push.** Watch `replay` + `build-api`. Flux bumps `api` +
+   `workflow-worker`. The api log has no `NATS connected`; `GET /health/ready` →
+   `{"status":"ok","db":"ok","redis":"ok"}`. ⚠️ **Order matters:** infra first restarts the api (its env changes) on the
+   old image, whose startup dials NATS (now `localhost:4222`, `NATS_URL` gone) and crash-loops.
+2. **Verify** (your terminal, an API key): `POST /jobs` `{"url":"https://example.com/"}` and the same with
+   `"engine":"playwright","playwright_options":{}` → `completed`.
+3. **Infra: `git pull --rebase`** (image automation will have committed the api tag), **push `c69b5f9`**.
+   Flux restarts the api without `wait-for-nats` (`Recreate`), helm-controller uninstalls `scrapeflow-nats`,
+   the init Job is pruned. Check the step 0 command → only the PVC left; the api `1/1`, ready.
+4. **Optional, destructive — your call:** the JetStream PVC survives a Helm uninstall.
+   `kubectl -n scrapeflow delete pvc <name from step 0>` frees its 5Gi; it holds only backlog nothing reads.
+
+**Rollback:** before step 3, revert the api image to `bc30025`'s tag (NATS still runs). After step 3,
+fix forward — `bc30025` needs NATS to start.
+
 ---
 
 ## Group I — API thinning
 
 #### I.1 — Alembic-on-startup made multi-replica safe
+
+**Carries H.2's `nats_stream_seq` drop** — a migration dropping `idx_job_runs_nats_stream_seq` then the
+column (downgrade re-adds both, empty); nothing reads it, and H.2's release unmapped it. Safe here
+because every pod runs code that no longer maps it.
 
 **⚠️ Not in any ADR; found sequencing this group.** `main.py` runs `alembic upgrade head` on every
 startup. Two replicas starting together race the migration. Options: a Postgres advisory lock

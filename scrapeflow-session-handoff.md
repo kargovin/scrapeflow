@@ -136,6 +136,22 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-10-28 *(clock)*
 
+🔧 **H.2 BUILT (2026-10-28, tenth session; nothing pushed, nothing released).** Owner: "build it". NATS is gone
+from the API (`core/nats.py`, `messages.py`, `constants.py`, the NATS message builders, the `/health` check,
+`nats-py`), compose (`nats`, `nats-init`) and infra **`c69b5f9`** (HelmRelease, init Job, HelmRepository,
+`wait-for-nats` + `NATS_URL` on the api). README now draws Temporal. `develop` = **`17c2903`** + docs.
+Detail, calls and the **runbook**: implementation backlog H.2.
+- **Call (TL, reversible):** `job_runs.nats_stream_seq` is **unmapped, not dropped** — the old workflow-worker
+  pod overlaps the new api's startup migration, and its `select(JobRun)` would hit a missing column. **I.1
+  carries the drop.** Until then `alembic check` reports it (plus the dedup false positive).
+- **Verified:** suite **738**, contracts 41, ruff clean (7 pre-existing), mutation **6/6** (one gap closed — a
+  new test pins `playwright_options` to the playwright engine); compose without NATS — `/health/ready`
+  `db`+`redis` only; http + playwright jobs and a 2-URL batch `completed`; cleaned up.
+- ⚠️ Dev `docker_nats_data` volume left on disk — `docker volume rm docker_nats_data` when you like. Root `.env`
+  still has `NATS_URL` (ignored).
+- **Next (owner):** runbook — **app first** (ff `main`; api image only, no migration), verify two jobs, **then infra
+  `c69b5f9`** (`git pull --rebase` first), then optionally delete the JetStream PVC. Then I.1.
+
 🚀 **H.1 RELEASED (2026-10-28, ninth session).** Owner pushed infra `c92e7dd` (Flux pruned the three NATS-mode
 Deployments), then `develop` and the `main` ff `bc30025..722f54b`; CI built the three worker images; all three
 `-temporal` Deployments rolled to `722f54b` and logged their started lines. Owner: an http job, a playwright job
