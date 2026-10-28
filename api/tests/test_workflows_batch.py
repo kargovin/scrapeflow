@@ -1,4 +1,4 @@
-"""E.1 — BatchWorkflow, the batch-aware job-run activities, finish_batch and the batch lane switch."""
+"""E.1 — BatchWorkflow, the batch-aware job-run activities, finish_batch and the batch routes."""
 
 import asyncio
 import io
@@ -633,7 +633,7 @@ async def test_a_batch_runs_end_to_end_on_the_real_activities(db_user, worker_re
 
 
 # ---------------------------------------------------------------------------
-# The batch lane switch (POST /batch, DELETE /batch/{id})
+# The batch routes (POST /batch, DELETE /batch/{id})
 # ---------------------------------------------------------------------------
 
 BATCH = {
@@ -660,14 +660,6 @@ def temporal():
     app.state.temporal = None
 
 
-@pytest.fixture
-def lane(monkeypatch):
-    def set_lane(value):
-        monkeypatch.setattr(settings, "batch_lane", value)
-
-    return set_lane
-
-
 @pytest_asyncio.fixture
 async def created_batches():
     ids: list[str] = []
@@ -677,24 +669,9 @@ async def created_batches():
         await db.commit()
 
 
-async def test_on_v1_a_batch_is_published_to_nats(
-    client, auth_headers, mock_jetstream, temporal, lane, created_batches
+async def test_a_batch_starts_one_workflow(
+    client, auth_headers, temporal, created_batches, monkeypatch
 ):
-    lane("v1")
-    response = await client.post("/batch", json=BATCH, headers=auth_headers)
-    assert response.status_code == 201
-    created_batches.append(response.json()["id"])
-
-    _, _, runs = await _reload(uuid.UUID(response.json()["id"]))
-    assert {r.lane for r in runs.values()} == {"v1"}
-    assert mock_jetstream.publish.call_count == 3
-    temporal.start_workflow.assert_not_called()
-
-
-async def test_on_v2_a_batch_starts_one_workflow_and_skips_nats(
-    client, auth_headers, mock_jetstream, temporal, lane, created_batches, monkeypatch
-):
-    lane("v2")
     monkeypatch.setattr(settings, "batch_max_in_flight", 4)
     response = await client.post("/batch", json=BATCH, headers=auth_headers)
     assert response.status_code == 201
@@ -702,7 +679,6 @@ async def test_on_v2_a_batch_starts_one_workflow_and_skips_nats(
     batch_id = response.json()["id"]
     created_batches.append(batch_id)
 
-    mock_jetstream.publish.assert_not_called()
     [call] = temporal.start_workflow.call_args_list
     workflow, batch_input = call.args
     assert workflow == BatchWorkflow.run
@@ -739,10 +715,9 @@ async def test_on_v2_a_batch_starts_one_workflow_and_skips_nats(
     assert call.kwargs["id_reuse_policy"] == WorkflowIDReusePolicy.REJECT_DUPLICATE
 
 
-async def test_on_v2_a_batch_that_cannot_start_fails_every_item_with_503(
-    client, auth_headers, mock_jetstream, temporal, lane, created_batches
+async def test_a_batch_that_cannot_start_fails_every_item_with_503(
+    client, auth_headers, temporal, created_batches
 ):
-    lane("v2")
     temporal.start_workflow.side_effect = RuntimeError("engine down")
     body = BATCH | {"webhook_url": "https://example.com/hook"}
     response = await client.post("/batch", json=body, headers=auth_headers)
@@ -757,7 +732,6 @@ async def test_on_v2_a_batch_that_cannot_start_fails_every_item_with_503(
     assert {(i.status, i.error) for i in items.values()} == {("failed", error)}
     [delivery] = await _batch_deliveries(batch.id)
     assert delivery.event == "batch.completed"
-    mock_jetstream.publish.assert_not_called()
 
 
 async def _set_status(batch_id: str, status: str) -> None:
@@ -771,10 +745,9 @@ async def _set_status(batch_id: str, status: str) -> None:
         await db.commit()
 
 
-async def test_on_v2_a_cancel_writes_the_rows_then_cancels_the_batch_workflow(
-    client, auth_headers, mock_jetstream, temporal, lane, created_batches
+async def test_a_cancel_writes_the_rows_then_cancels_the_batch_workflow(
+    client, auth_headers, temporal, created_batches
 ):
-    lane("v2")
     response = await client.post("/batch", json=BATCH, headers=auth_headers)
     batch_id = response.json()["id"]
     created_batches.append(batch_id)
@@ -797,25 +770,9 @@ async def test_on_v2_a_cancel_writes_the_rows_then_cancels_the_batch_workflow(
     temporal.get_workflow_handle.return_value.cancel.assert_awaited_once()
 
 
-async def test_on_v1_a_cancel_never_reaches_the_engine(
-    client, auth_headers, mock_jetstream, temporal, lane, created_batches
-):
-    lane("v1")
-    response = await client.post("/batch", json=BATCH, headers=auth_headers)
-    batch_id = response.json()["id"]
-    created_batches.append(batch_id)
-
-    assert (await client.delete(f"/batch/{batch_id}", headers=auth_headers)).status_code == 204
-    batch, _, runs = await _reload(uuid.UUID(batch_id))
-    assert batch.status == "cancelled"
-    assert {r.status for r in runs.values()} == {"cancelled"}
-    temporal.get_workflow_handle.assert_not_called()
-
-
 async def test_a_cancel_leaves_a_finished_run_finished(
-    client, auth_headers, mock_jetstream, temporal, lane, created_batches
+    client, auth_headers, temporal, created_batches
 ):
-    lane("v2")
     response = await client.post("/batch", json=BATCH, headers=auth_headers)
     batch_id = response.json()["id"]
     created_batches.append(batch_id)

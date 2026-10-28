@@ -22,7 +22,7 @@ RECORD_JOB_OBJECTS_ACTIVITY = "record_job_objects"
 JOB_RUN_PROCESSING_ACTIVITY = "job_run_processing"
 FINISH_JOB_RUN_ACTIVITY = "finish_job_run"
 
-# v1's error for the same failure (result_consumer.py).
+# v1's error for the same failure (the result consumer's).
 ACCOUNTING_FAILED = "storage_accounting_failed"
 
 # What the DB activities return: the run's status after the call, or "gone" if its row is.
@@ -74,7 +74,7 @@ class FinishJobRunInput(BaseModel):
 
 @workflow.defn
 class JobWorkflow:
-    """One run of a job on the v2 lane: what ``result_consumer.py`` does for it on v1.
+    """One run of a job: what the v1 result consumer did for it (deleted at G.1).
 
     Scrape → charge → (LLM → charge) → ``completed``, each status mirrored to ``job_runs`` on the
     ``job_status`` channel and the webhook row written for ``WebhookDeliveryWorkflow`` to deliver. The API

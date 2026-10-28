@@ -5,9 +5,8 @@ objects does this user actually hold? The consumer records each stored object as
 row; the delete paths enumerate rows; the counter follows the rows.
 """
 
-import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,7 +15,6 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.db import AsyncSessionLocal
 from app.core.minio import get_minio
-from app.core.result_consumer import _handle_result
 from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -31,17 +29,6 @@ BUCKET = "scrapeflow-results"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _msg(run_id, status, minio_path=None, source="scrape", screenshot_paths=None):
-    msg = MagicMock()
-    body = {"run_id": str(run_id), "status": status, "minio_path": minio_path, "source": source}
-    if screenshot_paths is not None:
-        body["screenshot_paths"] = screenshot_paths
-    msg.data = json.dumps(body).encode()
-    msg.metadata.timestamp = datetime.now(UTC)
-    msg.ack = AsyncMock()
-    return msg
 
 
 def _minio_with_sizes(sizes: dict[str, int], content: bytes = b"<html>page</html>") -> AsyncMock:
@@ -103,44 +90,29 @@ async def _make_llm_job(user_id):
 # ---------------------------------------------------------------------------
 
 
-async def test_llm_job_charges_both_objects(db_user):
-    """Scrape (2000 B) then LLM (50 B): two ledger rows, counter = 2050.
-
-    Before P8 the second charge was skipped because the run was already stamped, so the
-    user paid for the page and the extraction was free — and on delete the page was
-    never found again.
-    """
-    _, run_id = await _make_llm_job(db_user.id)
-    page = f"{BUCKET}/history/{run_id}/scrape.html"
-    llm = f"{BUCKET}/history/{run_id}/llm.json"
-    minio = _minio_with_sizes(
-        {f"history/{run_id}/scrape.html": 2000, f"history/{run_id}/llm.json": 50}
-    )
-
-    await _handle_result(_msg(run_id, "completed", page), AsyncMock(), minio)
-    async with AsyncSessionLocal() as db:
-        assert (await db.get(JobRun, run_id)).status == "processing"
-    assert await _used(db_user.id) == 2000
-
-    await _handle_result(_msg(run_id, "completed", llm, source="llm"), AsyncMock(), minio)
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        assert run.status == "completed"
-        assert run.result_path == llm
-        assert run.storage_accounted_at is None  # the stamp is not written any more
-
-    rows = await _rows_for_run(run_id)
-    assert {(r.object_key, r.bytes) for r in rows} == {(page, 2000), (llm, 50)}
-    assert await _used(db_user.id) == 2050
+# ---------------------------------------------------------------------------
+# Screenshots (BUG-004, facet 2) — stored objects like any other
+# ---------------------------------------------------------------------------
 
 
-async def test_permanent_delete_releases_every_ledger_row(client, db_user, mock_jetstream):
+# ---------------------------------------------------------------------------
+# Release — the only way out, and what happens when the object store says no
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def auth_headers(mock_clerk_auth):
+    return {"Authorization": "Bearer fake.jwt.token"}
+
+
+async def test_permanent_delete_releases_every_ledger_row(client, db_user):
     """Delete an LLM job: both objects removed, both rows gone, counter back to zero.
 
     The delete path used to stat `result_path` — the JSON — and decrement by that,
     leaving the page on disk and the counter inflated by its size, forever.
     """
     from app.auth.api_key import generate_api_key, hash_api_key
+    from app.core.ledger import record_object
     from app.models.api_key import ApiKey
 
     job_id, run_id = await _make_llm_job(db_user.id)
@@ -149,8 +121,14 @@ async def test_permanent_delete_releases_every_ledger_row(client, db_user, mock_
     minio = _minio_with_sizes(
         {f"history/{run_id}/scrape.html": 2000, f"history/{run_id}/llm.json": 50}
     )
-    await _handle_result(_msg(run_id, "completed", page), AsyncMock(), minio)
-    await _handle_result(_msg(run_id, "completed", llm, source="llm"), AsyncMock(), minio)
+    async with AsyncSessionLocal() as db:
+        for key, size in ((page, 2000), (llm, 50)):
+            await record_object(
+                db, user_id=db_user.id, object_key=key, size=size, job_run_id=run_id
+            )
+        run = await db.get(JobRun, run_id)
+        run.status, run.result_path = "completed", llm
+        await db.commit()
     assert await _used(db_user.id) == 2050
 
     raw = generate_api_key()
@@ -171,151 +149,8 @@ async def test_permanent_delete_releases_every_ledger_row(client, db_user, mock_
     assert await _used(db_user.id) == 0
 
 
-# ---------------------------------------------------------------------------
-# Screenshots (BUG-004, facet 2) — stored objects like any other
-# ---------------------------------------------------------------------------
-
-
-async def _make_plain_job(user_id, limit=10_000, used=0):
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=user_id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        db.add(UserQuota(user_id=user_id, storage_bytes_limit=limit, storage_bytes_used=used))
-        await db.commit()
-        return job.id, run.id
-
-
-async def test_screenshots_are_recorded_and_charged(db_user):
-    _, run_id = await _make_plain_job(db_user.id)
-    page = f"{BUCKET}/history/{run_id}/scrape.html"
-    shots = [f"{BUCKET}/screenshots/{run_id}/0.png", f"{BUCKET}/screenshots/{run_id}/1.png"]
-    minio = _minio_with_sizes(
-        {
-            f"history/{run_id}/scrape.html": 100,
-            f"screenshots/{run_id}/0.png": 30,
-            f"screenshots/{run_id}/1.png": 40,
-        }
-    )
-
-    await _handle_result(
-        _msg(run_id, "completed", page, screenshot_paths=shots), AsyncMock(), minio
-    )
-
-    rows = await _rows_for_run(run_id)
-    assert {(r.object_key, r.bytes) for r in rows} == {(page, 100), (shots[0], 30), (shots[1], 40)}
-    assert await _used(db_user.id) == 170
-
-
-async def test_screenshots_count_toward_the_quota_check(db_user):
-    """Page 50 B + screenshot 60 B against a 100 B limit: over. Everything is deleted,
-    nothing is recorded, the run fails — the same posture as an oversized page alone."""
-    _, run_id = await _make_plain_job(db_user.id, limit=100)
-    page = f"{BUCKET}/history/{run_id}/scrape.html"
-    shot = f"{BUCKET}/screenshots/{run_id}/0.png"
-    minio = _minio_with_sizes(
-        {f"history/{run_id}/scrape.html": 50, f"screenshots/{run_id}/0.png": 60}
-    )
-
-    await _handle_result(
-        _msg(run_id, "completed", page, screenshot_paths=[shot]), AsyncMock(), minio
-    )
-
-    removed = {call.args[1] for call in minio.remove_object.call_args_list}
-    assert removed == {f"history/{run_id}/scrape.html", f"screenshots/{run_id}/0.png"}
-    assert await _rows_for_run(run_id) == []
-    assert await _used(db_user.id) == 0
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        assert (run.status, run.error) == ("failed", "storage_quota_exceeded")
-
-
-async def test_dedup_records_screenshots_but_not_the_duplicate_page(db_user):
-    """A dedup'd run points at its predecessor's page and deletes its own copy; the
-    screenshots are its own work and stay charged."""
-    import xxhash
-
-    content = b"same content"
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        prev_path = f"{BUCKET}/history/{uuid.uuid4()}/scrape.html"
-        prev = JobRun(
-            job_id=job.id,
-            status="completed",
-            result_path=prev_path,
-            content_hash=xxhash.xxh64(content).hexdigest()[:16],
-            completed_at=datetime.now(UTC) - timedelta(minutes=5),
-        )
-        run = JobRun(job_id=job.id, status="running")
-        db.add_all([prev, run])
-        db.add(UserQuota(user_id=db_user.id, storage_bytes_limit=10_000, storage_bytes_used=0))
-        await db.commit()
-        run_id = run.id
-
-    page = f"{BUCKET}/history/{run_id}/scrape.html"
-    shot = f"{BUCKET}/screenshots/{run_id}/0.png"
-    minio = _minio_with_sizes(
-        {f"history/{run_id}/scrape.html": 100, f"screenshots/{run_id}/0.png": 30}, content
-    )
-
-    await _handle_result(
-        _msg(run_id, "completed", page, screenshot_paths=[shot]), AsyncMock(), minio
-    )
-
-    async with AsyncSessionLocal() as db:
-        r = await db.get(JobRun, run_id)
-        assert r.status == "completed" and r.diff_detected is False
-        assert r.result_path == prev_path
-    rows = await _rows_for_run(run_id)
-    assert {(x.object_key, x.bytes) for x in rows} == {(shot, 30)}
-    assert await _used(db_user.id) == 30
-    removed = {call.args[1] for call in minio.remove_object.call_args_list}
-    assert removed == {f"history/{run_id}/scrape.html"}
-
-
-async def test_accounting_failure_discards_the_objects(db_user):
-    """If the ledger write fails, the run fails *and* the page and screenshots are
-    removed. Leaving them would hand the reconcile sweep an attributable, unreachable
-    object to charge the user for."""
-    from unittest.mock import patch
-
-    _, run_id = await _make_plain_job(db_user.id)
-    page = f"{BUCKET}/history/{run_id}/scrape.html"
-    shot = f"{BUCKET}/screenshots/{run_id}/0.png"
-    minio = _minio_with_sizes(
-        {f"history/{run_id}/scrape.html": 100, f"screenshots/{run_id}/0.png": 30}
-    )
-
-    with patch("app.core.result_consumer.record_object", side_effect=Exception("db error")):
-        await _handle_result(
-            _msg(run_id, "completed", page, screenshot_paths=[shot]), AsyncMock(), minio
-        )
-
-    removed = {call.args[1] for call in minio.remove_object.call_args_list}
-    assert removed == {f"history/{run_id}/scrape.html", f"screenshots/{run_id}/0.png"}
-    assert await _rows_for_run(run_id) == []
-    assert await _used(db_user.id) == 0
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        assert (run.status, run.error) == ("failed", "storage_accounting_failed")
-
-
-# ---------------------------------------------------------------------------
-# Release — the only way out, and what happens when the object store says no
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def auth_headers(mock_clerk_auth):
-    return {"Authorization": "Bearer fake.jwt.token"}
-
-
 async def test_release_failure_keeps_the_row_and_refuses_the_delete(
-    client, auth_headers, mock_jetstream
+    client, auth_headers, mock_temporal
 ):
     """If an object cannot be removed, its row stays (the bytes are still held), the
     counter does not move for it, and the job is not deleted — a cascade would have
@@ -367,7 +202,7 @@ async def test_release_failure_keeps_the_row_and_refuses_the_delete(
         await db.commit()
 
 
-async def test_pre_ledger_run_falls_back_to_result_path(client, auth_headers, mock_jetstream):
+async def test_pre_ledger_run_falls_back_to_result_path(client, auth_headers, mock_temporal):
     """A run deployed before the ledger has no rows and the old stamp. Its result_path
     object is removed and decremented by its stat size — what the delete did before P8.
     A run with result_path but no stamp (a dedup'd run pointing at another run's object)

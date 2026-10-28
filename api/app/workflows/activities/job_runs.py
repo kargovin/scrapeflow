@@ -1,4 +1,4 @@
-"""Job-lane app-DB activities — the v2 half of ``core/result_consumer.py``'s job path.
+"""Job-lane app-DB activities — the job path the v1 result consumer had (deleted at G.1).
 
 Two writers own ``job_runs.status``: the API's cancel and these mirrors. A mirror never moves a run
 out of a terminal state it did not set; every write notifies ``job_status`` (positional payload,

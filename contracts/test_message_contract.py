@@ -136,7 +136,7 @@ def _scrape_lanes() -> dict[str, str]:
 
 
 def _llm_payload() -> bytes:
-    """core/result_consumer.py — both LLM dispatch sites build this shape."""
+    """The v1 LLM dispatch shape (the result consumer's, deleted at G.1); goes with the arm at H.2."""
     return api.LLMMessage(
         artifact_id=RUN_ID,
         run_id=RUN_ID,

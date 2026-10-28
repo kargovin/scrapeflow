@@ -1,4 +1,4 @@
-"""Batch-lane app-DB activity — what ``result_consumer.py`` does when a batch's last item lands."""
+"""Batch-lane app-DB activity — what the v1 result consumer did when a batch's last item landed."""
 
 import uuid
 from datetime import UTC, datetime

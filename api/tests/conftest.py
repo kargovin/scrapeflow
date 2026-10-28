@@ -12,7 +12,6 @@ from sqlalchemy import delete
 from app.auth.api_key import generate_api_key, hash_api_key
 from app.core import minio, nats
 from app.core.db import AsyncSessionLocal
-from app.core.nats import get_jetstream
 from app.core.rate_limit import check_rate_limit
 from app.core.redis import close_pool, create_pool
 from app.main import app
@@ -141,12 +140,29 @@ async def db_api_key(db_user):
     return raw_key, api_key
 
 
-@pytest.fixture
-def mock_jetstream():
-    mock_js = AsyncMock()
-    app.dependency_overrides[get_jetstream] = lambda: mock_js
-    yield mock_js
-    app.dependency_overrides.pop(get_jetstream, None)
+@pytest.fixture(autouse=True)
+def mock_temporal():
+    """A fake Temporal client where lazy_client finds it: no test starts a real workflow or
+    Schedule on compose. A test's own fake set later replaces it."""
+    client = MagicMock()
+    client.start_workflow = AsyncMock()
+    client.create_schedule = AsyncMock()
+    schedule = MagicMock()
+    for name in ("update", "delete", "pause", "unpause", "describe"):
+        setattr(schedule, name, AsyncMock())
+    client.get_schedule_handle = MagicMock(return_value=schedule)
+    workflow = MagicMock()
+    workflow.cancel = AsyncMock()
+    client.get_workflow_handle = MagicMock(return_value=workflow)
+    app.state.temporal = client
+    yield client
+    app.state.temporal = None
+
+
+def started_scrape(mock_temporal) -> dict:
+    """The ScrapeInput of the one JobWorkflow the test started, as JSON."""
+    [call] = mock_temporal.start_workflow.call_args_list
+    return call.args[1].scrape.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------

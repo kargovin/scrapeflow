@@ -19,7 +19,6 @@ from fastapi import (
     status,
 )
 from miniopy_async import Minio
-from nats.js import JetStreamContext
 from sqlalchemy import delete, func, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +37,6 @@ from app.core.dispatch import (
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
-from app.core.nats import get_jetstream
 from app.core.quota import Admit, admission, check_scheduled_jobs_quota, lock_user
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
@@ -208,7 +206,6 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
     admit: Admit = Depends(check_job_quota),
-    js: JetStreamContext = Depends(get_jetstream),
 ) -> JobResponse:
     # Validate for SSRF for
     # 1) url to scrape
@@ -277,7 +274,7 @@ async def create_job(
     )
     db.add(job)
     await db.flush()
-    job_run = JobRun(job_id=job.id, status="pending", lane=settings.job_lane)
+    job_run = JobRun(job_id=job.id, status="pending", lane="v2")
     db.add(job_run)
     await db.commit()
     await db.refresh(job)
@@ -342,13 +339,11 @@ async def create_job(
     # Resolve credentials: per-job secret > platform default > None (PRD-005)
     credentials = await resolve_credentials(job, db)
 
-    # Dispatch after the DB insert (ADR-001). v1: if NATS is down the run stays pending for
-    # stale-pending recovery. v2 has no recovery: a run whose workflow did not start is failed.
+    # Dispatch after the DB insert (ADR-001). There is no recovery: a run whose workflow did not
+    # start is failed.
     try:
-        await dispatch_run(job, job_run, credentials, js, lambda: lazy_client(request.app.state))
+        await dispatch_run(job, job_run, credentials, lambda: lazy_client(request.app.state))
     except Exception as exc:
-        if job_run.lane == "v1":
-            raise
         logger.exception("job_run_start_failed", job_id=str(job.id), run_id=str(job_run.id))
         await fail_unstarted_run(db, job, job_run, exc)
         raise HTTPException(

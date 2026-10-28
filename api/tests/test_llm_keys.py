@@ -199,7 +199,7 @@ async def test_delete_llm_key_not_found(client, db_api_key):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_llm_key_other_user(client, db_api_key, other_user, mock_jetstream):
+async def test_create_job_llm_key_other_user(client, db_api_key, other_user, mock_temporal):
     """POST /jobs returns 404 when llm_key_id belongs to a different user."""
     raw_key, _ = db_api_key
     # Create an LLM key owned by other_user

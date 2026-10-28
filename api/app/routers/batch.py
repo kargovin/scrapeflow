@@ -8,24 +8,20 @@ import structlog
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, status
 from miniopy_async import Minio
-from nats.js import JetStreamContext
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import auth_from_token, get_current_user
-from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import get_db
+from app.core.dispatch import cancel_batch as cancel_batch_rows
 from app.core.dispatch import (
-    build_batch_scrape_message,
     cancel_batch_workflow,
     fail_unstarted_batch,
     start_batch,
 )
-from app.core.dispatch import cancel_batch as cancel_batch_rows
 from app.core.encryption import get_fernet
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.minio import get_minio
-from app.core.nats import get_jetstream
 from app.core.quota import Admit, admission
 from app.core.rate_limit import check_rate_limit_n
 from app.core.redis import get_redis
@@ -36,8 +32,7 @@ from app.models.llm_keys import UserLLMKey
 from app.models.user import User
 from app.routers.jobs import read_stored_result
 from app.schemas.batch import BatchCreate, BatchItemResponse, BatchResponse
-from app.schemas.jobs import Engine, JobResultResponse
-from app.settings import settings
+from app.schemas.jobs import JobResultResponse
 from app.workflows.client import lazy_client
 
 router = APIRouter(prefix="/batch", tags=["batch"])
@@ -62,7 +57,6 @@ async def create_batch(
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    js: JetStreamContext = Depends(get_jetstream),
     redis: aioredis.Redis = Depends(get_redis),
     fernet: Fernet = Depends(get_fernet),
     admit: Admit = Depends(check_batch_quota),
@@ -112,10 +106,8 @@ async def create_batch(
     db.add_all(items)
     await db.flush()
 
-    # One job_run per item — batch_item_id set, job_id null (ADR-006 §4). Every run of a batch is
-    # on one lane, BATCH_LANE's at insert (E.2) — not JOB_LANE's.
-    lane = settings.batch_lane
-    runs = [JobRun(batch_item_id=item.id, status="pending", lane=lane) for item in items]
+    # One job_run per item — batch_item_id set, job_id null (ADR-006 §4).
+    runs = [JobRun(batch_item_id=item.id, status="pending", lane="v2") for item in items]
     db.add_all(runs)
     await db.commit()
 
@@ -124,30 +116,18 @@ async def create_batch(
         await db.refresh(item)
         await db.refresh(run)
 
-    if lane == "v1":
-        # Dispatch one NATS message per item — identical fat-message schema, no batch_item_id.
-        # Workers are unaware they are running a batch job (ADR-006 §4).
-        subject = (
-            NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-            if body.engine == Engine.playwright
-            else NATS_JOBS_RUN_HTTP_SUBJECT
-        )
-        for item, run in zip(items, runs, strict=True):
-            message = build_batch_scrape_message(batch, item, run)
-            await js.publish(subject, message.to_nats_bytes())
-    else:
-        try:
-            await start_batch(batch, items, runs, lambda: lazy_client(request.app.state))
-        except Exception as exc:
-            # v2 has no stale-pending recovery: a batch whose workflow did not start is failed.
-            logger.exception("batch_start_failed", batch_id=str(batch.id))
-            await fail_unstarted_batch(db, batch, runs, exc)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"batch_id": str(batch.id), "error": runs[0].error},
-            ) from None
+    try:
+        await start_batch(batch, items, runs, lambda: lazy_client(request.app.state))
+    except Exception as exc:
+        # There is no recovery: a batch whose workflow did not start is failed.
+        logger.exception("batch_start_failed", batch_id=str(batch.id))
+        await fail_unstarted_batch(db, batch, runs, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"batch_id": str(batch.id), "error": runs[0].error},
+        ) from None
 
-    # Transition batch to "running" after first dispatch — unless a fast v2 batch has closed.
+    # Transition batch to "running" after dispatch — unless a fast batch has already closed.
     await db.execute(
         update(Batch).where(Batch.id == batch.id, Batch.status == "queued").values(status="running")
     )

@@ -271,6 +271,8 @@ services:
   # ── Python Playwright worker ─────────────────────────────────────────────────
 
   playwright-worker:
+    # NATS mode: nothing reads its results since G.1 (H.1 deletes it). Opt in: --profile v1.
+    profiles: [v1]
     build:
       context: ../playwright-worker
     env_file:
@@ -321,6 +323,8 @@ services:
     networks: [default, crawl-fixture]
 
   llm-worker:
+    # NATS mode: nothing reads its results since G.1 (H.1 deletes it). Opt in: --profile v1.
+    profiles: [v1]
     build:
       context: ../llm-worker
     env_file:
@@ -369,6 +373,8 @@ services:
   # ── Go HTTP scraper worker ───────────────────────────────────────────────────
 
   http-worker:
+    # NATS mode: nothing reads its results since G.1 (H.1 deletes it). Opt in: --profile v1.
+    profiles: [v1]
     build:
       context: ../http-worker
       dockerfile: Dockerfile

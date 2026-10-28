@@ -31,7 +31,8 @@ class JobRun(Base):
         CheckConstraint("lane IN ('v1', 'v2')", name="chk_job_runs_lane"),
         nullable=False,
         server_default="v1",
-        default="v1",
+        # Every new run is v2 since G.1; the server default is the pre-D.1 rows' value.
+        default="v2",
     )
     result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     diff_detected: Mapped[bool | None] = mapped_column(nullable=True)

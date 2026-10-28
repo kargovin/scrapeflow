@@ -39,7 +39,7 @@ MAX_SITEMAP_INDEX_DEPTH = 2
 MAX_SITEMAP_REDIRECTS = 3
 
 STORAGE_LIMIT_NOTE = "storage limit reached: the crawl stopped early"
-# v1's error for the same failure (result_consumer.py).
+# v1's error for the same failure (the result consumer's).
 ACCOUNTING_FAILED = "storage_accounting_failed"
 
 # How a URL reached the frontier; admission's rules depend on it.

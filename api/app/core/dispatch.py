@@ -1,18 +1,11 @@
-"""Dispatch-message builders — the one place a run's NATS message is assembled.
+"""Starting, failing and cancelling a run's workflow, and the builders for its input.
 
-A run is dispatched once (``create_job``, ``create_batch``, ``_dispatch_due_jobs``) and
-may be re-published later by stale-pending recovery. Recovery re-sends the run as-is, so
-every producer for a lane must build the identical message or a recovered run would not
-be the run that was lost. Routing every producer through these two functions is what
-makes that hold, rather than merely being true today.
+A job's run is one ``JobWorkflow`` (``dispatch_run``), a batch one ``BatchWorkflow``
+(``start_batch``), a crawl one ``CrawlWorkflow`` (``start_crawl``). Since G.1 every new run is
+``lane='v2'``; ``v1`` rows are history.
 
-The wire models in ``app.messages`` stay ORM-free; this module is the bridge from rows
-to messages.
-
-``dispatch_run`` is the one switch between the engines for a job's run (ADR-009 16d): the run's
-``lane``, written when the row was inserted, picks NATS or ``JobWorkflow``. A batch's runs share
-one lane; on v2 the batch is one ``BatchWorkflow`` (``start_batch``). A crawl has no lane: it is
-always one ``CrawlWorkflow`` (``start_crawl``, E.7).
+The NATS message builders stay until H.2 for the contract test's NATS arm; nothing dispatches
+with them.
 """
 
 import uuid
@@ -20,13 +13,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import structlog
-from nats.js import JetStreamContext
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
-from app.constants import NATS_JOBS_RUN_HTTP_SUBJECT, NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core import batch_progress, crawl_progress
 from app.core.webhooks import (
     create_batch_webhook_delivery,
@@ -52,28 +43,15 @@ logger = structlog.get_logger()
 TemporalClient = Callable[[], Awaitable[Client]]
 
 
-def nats_subject(engine: str) -> str:
-    return (
-        NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT if engine == "playwright" else NATS_JOBS_RUN_HTTP_SUBJECT
-    )
-
-
 async def dispatch_run(
     job: Job,
     run: JobRun,
     credentials: dict | None,
-    js: JetStreamContext,
     temporal: TemporalClient,
 ) -> None:
-    """Sends a committed run to its lane's engine. Raises if the engine refused it.
-
-    v1: a failed publish leaves the run pending for stale-pending recovery. v2 has no recovery:
-    the caller fails the run (``fail_unstarted_run``).
+    """Starts a committed run's workflow. Raises if the engine refused it; there is no recovery,
+    so the caller fails the run (``fail_unstarted_run``).
     """
-    if run.lane == "v1":
-        message = build_scrape_message(job, run, credentials)
-        await js.publish(nats_subject(job.engine), message.to_nats_bytes())
-        return
     client = await temporal()
     await client.start_workflow(
         JobWorkflow.run,
@@ -90,7 +68,7 @@ async def dispatch_run(
 
 
 async def fail_unstarted_run(db: AsyncSession, job: Job, run: JobRun, exc: Exception) -> None:
-    """A v2 run whose workflow never started: failed, as a worker failure would leave it."""
+    """A run whose workflow never started: failed, as a worker failure would leave it."""
     run.status = "failed"
     run.error = f"could not start workflow: {exc}"
     run.completed_at = datetime.now(UTC)
@@ -144,7 +122,7 @@ async def cancel_workflows(runs: list[JobRun], temporal: TemporalClient) -> None
 async def start_batch(
     batch: Batch, items: list[BatchItem], runs: list[JobRun], temporal: TemporalClient
 ) -> None:
-    """Starts a committed v2 batch's workflow. Raises if the engine refused it."""
+    """Starts a committed batch's workflow. Raises if the engine refused it."""
     client = await temporal()
     await client.start_workflow(
         BatchWorkflow.run,
@@ -169,7 +147,7 @@ async def start_batch(
 async def fail_unstarted_batch(
     db: AsyncSession, batch: Batch, runs: list[JobRun], exc: Exception
 ) -> None:
-    """A v2 batch whose workflow never started: every item failed, closed as v1 closes one."""
+    """A batch whose workflow never started: every item failed, closed as v1 closes one."""
     now = datetime.now(UTC)
     error = f"could not start workflow: {exc}"
     for run in runs:

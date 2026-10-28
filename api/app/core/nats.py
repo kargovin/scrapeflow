@@ -19,7 +19,3 @@ async def disconnect(nc: Client) -> None:
 
 def get_nats(request: Request) -> Client:
     return request.app.state.nats_client
-
-
-def get_jetstream(request: Request) -> JetStreamContext:
-    return request.app.state.nats_js

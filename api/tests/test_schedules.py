@@ -319,11 +319,6 @@ def temporal():
     app.state.temporal = None
 
 
-@pytest.fixture
-def v2(monkeypatch):
-    monkeypatch.setattr(settings, "job_lane", "v2")
-
-
 SCHEDULED = {"url": "https://example.com/s", "schedule_cron": "*/10 * * * *"}
 
 
@@ -341,7 +336,7 @@ def _resolves_public():
 
 
 async def test_a_job_created_with_a_cron_is_armed_on_v2_with_a_schedule(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     resp = await _create(client, headers)
     assert resp.status_code == 201
@@ -358,7 +353,7 @@ async def test_a_job_created_with_a_cron_is_armed_on_v2_with_a_schedule(
 
 
 async def test_a_schedule_that_cannot_be_armed_pauses_it_and_fails_the_first_run(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     temporal.create_schedule.side_effect = RuntimeError("temporal down")
     resp = await _create(client, headers)
@@ -383,7 +378,7 @@ async def test_an_existing_schedule_is_replaced_not_duplicated(temporal):
 
 
 async def test_pause_resume_and_remove_drive_the_schedule(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     job_id = (await _create(client, headers)).json()["id"]
     temporal.create_schedule.reset_mock()
@@ -418,7 +413,7 @@ async def test_pause_resume_and_remove_drive_the_schedule(
 
 
 async def test_a_resume_the_engine_refuses_leaves_the_schedule_paused(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     job_id = (await _create(client, headers)).json()["id"]
     await client.patch(f"/jobs/{job_id}", json={"schedule_status": "paused"}, headers=headers)
@@ -433,7 +428,7 @@ async def test_a_resume_the_engine_refuses_leaves_the_schedule_paused(
 
 
 async def test_a_pause_the_engine_refuses_still_pauses_the_row(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     job_id = (await _create(client, headers)).json()["id"]
     temporal.create_schedule.side_effect = RuntimeError("temporal down")
@@ -451,16 +446,14 @@ async def test_a_pause_the_engine_refuses_still_pauses_the_row(
     "body",
     [{"schedule_status": "sometimes"}, {"schedule_status": None}],
 )
-async def test_a_bad_schedule_status_is_422(
-    client, headers, db_user, temporal, v2, mock_jetstream, body
-):
+async def test_a_bad_schedule_status_is_422(client, headers, db_user, temporal, body):
     job_id = (await _create(client, headers)).json()["id"]
     resp = await client.patch(f"/jobs/{job_id}", json=body, headers=headers)
     assert resp.status_code == 422
 
 
 async def test_pausing_a_job_without_a_schedule_is_422(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     job_id = (await _create(client, headers, {"url": "https://example.com/once"})).json()["id"]
     resp = await client.patch(
@@ -470,7 +463,7 @@ async def test_pausing_a_job_without_a_schedule_is_422(
 
 
 async def test_a_permanent_delete_removes_the_schedule(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     job_id = (await _create(client, headers)).json()["id"]
     resp = await client.delete(f"/jobs/{job_id}?permanent=true", headers=headers)
@@ -499,7 +492,7 @@ async def _at_cap(user_id, limit=1, paused=0):
 
 
 async def test_creating_a_scheduled_job_past_the_cap_is_429(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     await _at_cap(db_user.id, limit=1)
 
@@ -512,9 +505,7 @@ async def test_creating_a_scheduled_job_past_the_cap_is_429(
     assert (await _create(client, headers, {"url": "https://example.com/1"})).status_code == 201
 
 
-async def test_paused_schedules_do_not_count(
-    client, headers, db_user, temporal, v2, mock_jetstream
-):
+async def test_paused_schedules_do_not_count(client, headers, db_user, temporal, mock_temporal):
     user_id = await _at_cap(db_user.id, limit=2, paused=3)
     async with AsyncSessionLocal() as db:
         # One of the two active ones paused: room for one.
@@ -527,7 +518,7 @@ async def test_paused_schedules_do_not_count(
     assert (await _create(client, headers)).status_code == 201
 
 
-async def test_resuming_past_the_cap_is_429(client, headers, db_user, temporal, v2, mock_jetstream):
+async def test_resuming_past_the_cap_is_429(client, headers, db_user, temporal):
     user_id = await _at_cap(db_user.id, limit=1)
     paused = await _with_run(await _job(user_id, schedule_status="paused"))
 
@@ -540,7 +531,7 @@ async def test_resuming_past_the_cap_is_429(client, headers, db_user, temporal, 
 
 
 async def test_resuming_one_below_the_cap_is_allowed(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     # The row is already `active` in the session when the count runs (autoflush): without
     # excluding it, a user one below the cap could never resume.
@@ -556,7 +547,7 @@ async def test_resuming_one_below_the_cap_is_allowed(
 
 
 async def test_adding_a_cron_past_the_cap_is_429_but_changing_one_is_not(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     user_id = await _at_cap(db_user.id, limit=1)
     plain = await _with_run(
@@ -581,7 +572,7 @@ async def test_adding_a_cron_past_the_cap_is_429_but_changing_one_is_not(
 
 
 async def test_the_cap_check_waits_on_the_users_lock(
-    client, headers, db_user, temporal, v2, mock_jetstream
+    client, headers, db_user, temporal, mock_temporal
 ):
     paused = await _with_run(await _job(db_user.id, schedule_status="paused"))
 

@@ -675,6 +675,37 @@ async def test_record_charges_once_and_stores_the_content_hash(db_user):
     assert (await _row(run.id)).content_hash == HASH
 
 
+async def test_record_charges_every_object_of_the_stage(db_user):
+    run = await _job_run(db_user.id, status="running")
+    page, shot = _key(), _key("0.png")
+
+    await record_job_objects(
+        RecordJobObjectsInput(
+            run_id=str(run.id),
+            objects=[StoredObject(path=page, size=300), StoredObject(path=shot, size=40)],
+        )
+    )
+
+    assert sorted(await _ledger([page, shot])) == sorted([page, shot])
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(UserQuota, db_user.id)).storage_bytes_used == 340
+
+
+async def test_objects_that_fill_the_limit_exactly_are_charged(db_user):
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=db_user.id, storage_bytes_limit=100))
+        await db.commit()
+    run = await _job_run(db_user.id, status="running")
+    key = _key()
+
+    state = await record_job_objects(
+        RecordJobObjectsInput(run_id=str(run.id), objects=[StoredObject(path=key, size=100)])
+    )
+
+    assert state == "running"
+    assert await _ledger([key]) == [key]
+
+
 async def test_over_the_storage_limit_the_objects_go_and_the_run_fails(db_user):
     async with AsyncSessionLocal() as db:
         db.add(UserQuota(user_id=db_user.id, storage_bytes_limit=100))

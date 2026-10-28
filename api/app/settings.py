@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import Field, field_validator
@@ -82,11 +81,6 @@ class Settings(BaseSettings):
     # ADR-009 16d: the pipeline lane has no v1 to fall back to — off refuses new pipelines, edits and
     # runs (503); reads and cancel stay on so in-flight runs can be watched and stopped.
     pipelines_enabled: bool = True
-    # ADR-009 16d: the engine new job runs go to — on-demand and scheduled alike. A run keeps the
-    # lane it was created on (job_runs.lane), so flipping this back never strands one.
-    job_lane: Literal["v1", "v2"] = "v1"
-    # The same switch for batches (E.2): every run of a batch is on the lane it was created on.
-    batch_lane: Literal["v1", "v2"] = "v1"
     # E.0: a v2 batch's scrapes in flight at once; the rest wait in its workflow.
     batch_max_in_flight: int = Field(default=3, ge=1)
     # The same bound for a crawl's pages (E.5), and the pages per run before continue-as-new

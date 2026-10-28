@@ -23,12 +23,11 @@ lock_user()         — the lock alone; scheduled-run admission takes it before 
 check_user_quota()  — raises HTTP 429
 check_scheduled_jobs_quota() — ADR-013's cap on active scheduled jobs; 429, under lock_user()
 is_quota_exceeded() — returns bool; for scheduled-run admission (no HTTP context)
-check_storage_quota() — used by result_consumer
+check_storage_quota() — the job lane's storage wall (workflows/activities/job_runs.py)
 increment_storage_bytes() / decrement_storage_bytes()
                     — called by core/ledger.py only; nothing else moves the counter
 """
 
-import json
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -36,14 +35,10 @@ from functools import partial
 
 import structlog
 from fastapi import HTTPException, status
-from miniopy_async import Minio
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.storage import delete_minio_object
-from app.models.batch import Batch, BatchItem
 from app.models.job import Job
-from app.models.job_runs import JobRun
 from app.models.quota_views import quota_active_submissions, quota_run_units
 from app.models.user import User
 from app.models.user_quota import UserQuota
@@ -285,7 +280,7 @@ async def check_storage_quota(user_id: uuid.UUID, db: AsyncSession, additional_b
 async def increment_storage_bytes(user_id: uuid.UUID, db: AsyncSession, size: int) -> None:
     """Upsert user_quotas and increment storage_bytes_used by size.
 
-    Called within the result_consumer session — caller owns the commit.
+    Called by core/ledger.py — caller owns the commit.
     """
     await db.execute(
         text("""
@@ -314,61 +309,3 @@ async def decrement_storage_bytes(user_id: uuid.UUID, db: AsyncSession, size: in
         """),
         {"user_id": str(user_id), "size": size},
     )
-
-
-async def handle_storage_quota_exceeded(
-    db, run: JobRun, minio_path: str, minio: Minio, extra_paths: list[str] | None = None
-) -> None:
-    """Delete the oversized object (and any siblings that rode the same result message —
-    screenshots), mark run failed, and emit the appropriate notify."""
-    await delete_minio_object(minio, minio_path, "oversized object")
-    for path in extra_paths or []:
-        await delete_minio_object(minio, path, "oversized object (sibling)")
-
-    run.status = "failed"
-    run.error = "storage_quota_exceeded"
-    run.completed_at = datetime.now(UTC)
-
-    if run.batch_item_id is not None:
-        item = await db.get(BatchItem, run.batch_item_id)
-        if item:
-            batch = await db.get(Batch, item.batch_id)
-            now = datetime.now(UTC)
-            item.status = "failed"
-            item.error = "storage_quota_exceeded"
-            item.completed_at = now
-            if batch:
-                sq_row = (
-                    await db.execute(
-                        text(
-                            "UPDATE batches SET failed = failed + 1"
-                            " WHERE id = :id RETURNING completed, failed"
-                        ),
-                        {"id": batch.id},
-                    )
-                ).one()
-                sq_completed, sq_failed = sq_row.completed, sq_row.failed
-                if sq_completed + sq_failed == batch.total:
-                    batch.status = "partial_failure"
-                    batch.completed_at = now
-                await db.execute(
-                    text("SELECT pg_notify('batch_status', :p)"),
-                    {
-                        "p": json.dumps(
-                            {
-                                "batch_id": str(batch.id),
-                                "completed": sq_completed,
-                                "failed": sq_failed,
-                                "total": batch.total,
-                                "status": batch.status,
-                                "item_url": item.url,
-                                "item_status": item.status,
-                            }
-                        )
-                    },
-                )
-    elif run.job_id is not None:
-        await db.execute(
-            text("SELECT pg_notify('job_status', :p)"),
-            {"p": f"{run.job_id}:{run.id}:failed"},
-        )

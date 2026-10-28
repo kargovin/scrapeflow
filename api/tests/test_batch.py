@@ -1,19 +1,10 @@
-import json
 import uuid
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
-from app.constants import NATS_JOBS_LLM_SUBJECT
 from app.core.db import AsyncSessionLocal
-from app.core.result_consumer import _handle_result
 from app.models.batch import Batch, BatchItem
-from app.models.job_runs import JobRun
-from app.models.llm_keys import UserLLMKey
-from app.models.user import User
-from app.models.user_quota import UserQuota
 
 
 @pytest.fixture
@@ -26,8 +17,8 @@ def auth_headers(mock_clerk_auth):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_batch_dispatches_per_url(client, auth_headers, mock_jetstream):
-    """POST /batch creates one batch_item and one NATS message per URL."""
+async def test_create_batch_dispatches_per_url(client, auth_headers, mock_temporal):
+    """POST /batch creates one batch_item per URL and starts the batch's workflow."""
     response = await client.post(
         "/batch",
         json={
@@ -48,18 +39,13 @@ async def test_create_batch_dispatches_per_url(client, auth_headers, mock_jetstr
     assert data["output_format"] == "markdown"
     assert "id" in data
 
-    assert mock_jetstream.publish.call_count == 3
-
-    # Verify each NATS payload is a valid fat message with run_id but no batch context.
-    for call in mock_jetstream.publish.call_args_list:
-        subject, payload_bytes = call.args
-        payload = json.loads(payload_bytes.decode())
-        assert payload["schema_version"] == 3
-        # A batch item is not a job (ADR-006), and the message no longer has a field
-        # that wants one. Artifacts key on the item's own run — a row that exists —
-        # rather than on the null that broke all three execution paths (BUG-005).
-        assert "job_id" not in payload
-        assert payload["artifact_id"] == payload["run_id"]
+    # One BatchWorkflow, one child input per URL, carrying no batch context.
+    [call] = mock_temporal.start_workflow.call_args_list
+    runs = call.args[1].runs
+    assert len(runs) == 3
+    for run in runs:
+        # Artifacts key on the item's own run — a row that exists (ADR-011 §1, BUG-005).
+        assert run.scrape.artifact_id == run.run_id
 
     # Verify batch_items exist in DB.
     batch_id = uuid.UUID(data["id"])
@@ -74,7 +60,7 @@ async def test_create_batch_dispatches_per_url(client, auth_headers, mock_jetstr
     }
 
 
-async def test_create_batch_ssrf_rejected_before_rows_created(client, auth_headers, mock_jetstream):
+async def test_create_batch_ssrf_rejected_before_rows_created(client, auth_headers, mock_temporal):
     """POST /batch with an SSRF URL rejects before any DB rows are created."""
     response = await client.post(
         "/batch",
@@ -82,10 +68,10 @@ async def test_create_batch_ssrf_rejected_before_rows_created(client, auth_heade
         headers=auth_headers,
     )
     assert response.status_code in (400, 422)
-    mock_jetstream.publish.assert_not_called()
+    mock_temporal.start_workflow.assert_not_called()
 
 
-async def test_create_batch_empty_urls_rejected(client, auth_headers, mock_jetstream):
+async def test_create_batch_empty_urls_rejected(client, auth_headers, mock_temporal):
     """POST /batch with no URLs is rejected at validation."""
     response = await client.post(
         "/batch",
@@ -109,7 +95,7 @@ async def test_create_batch_unauthenticated(client):
 # ---------------------------------------------------------------------------
 
 
-async def test_get_batch_returns_counters(client, auth_headers, mock_jetstream):
+async def test_get_batch_returns_counters(client, auth_headers, mock_temporal):
     """GET /batch/{id} returns accurate counter fields."""
     create_resp = await client.post(
         "/batch",
@@ -129,7 +115,7 @@ async def test_get_batch_returns_counters(client, auth_headers, mock_jetstream):
     assert data["status"] == "running"
 
 
-async def test_get_batch_other_user_returns_404(client, auth_headers, db_user, mock_jetstream):
+async def test_get_batch_other_user_returns_404(client, auth_headers, db_user, mock_temporal):
     """GET /batch/{id} returns 404 for a batch belonging to another user."""
     batch = Batch(
         user_id=db_user.id,
@@ -162,7 +148,7 @@ async def test_get_batch_other_user_returns_404(client, auth_headers, db_user, m
 # ---------------------------------------------------------------------------
 
 
-async def test_list_batch_items(client, auth_headers, mock_jetstream):
+async def test_list_batch_items(client, auth_headers, mock_temporal):
     """GET /batch/{id}/items returns one entry per URL."""
     create_resp = await client.post(
         "/batch",
@@ -185,7 +171,7 @@ async def test_list_batch_items(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_cancel_batch(client, auth_headers, mock_jetstream):
+async def test_cancel_batch(client, auth_headers, mock_temporal):
     """DELETE /batch/{id} sets batch status to cancelled and cancels pending items."""
     create_resp = await client.post(
         "/batch",
@@ -217,376 +203,9 @@ async def test_cancel_batch(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def _make_batch_run(status="pending"):
-    """Helper: create a Batch, BatchItem, and JobRun in the DB. Returns (batch, item, run)."""
-
-    async with AsyncSessionLocal() as db:
-        user = User(clerk_id=f"user_{uuid.uuid4().hex}", email=f"{uuid.uuid4().hex}@test.com")
-        db.add(user)
-        await db.flush()
-
-        batch = Batch(
-            user_id=user.id,
-            status="running",
-            output_format="markdown",
-            engine="http",
-            respect_robots=False,
-            total=2,
-            completed=0,
-            failed=0,
-        )
-        db.add(batch)
-        await db.flush()
-
-        item = BatchItem(batch_id=batch.id, url="https://example.com", status="pending")
-        db.add(item)
-        await db.flush()
-
-        run = JobRun(batch_item_id=item.id, status=status)
-        db.add(run)
-        await db.commit()
-
-        await db.refresh(batch)
-        await db.refresh(item)
-        await db.refresh(run)
-
-    return batch.id, item.id, run.id, user.id
-
-
-def _make_nats_msg(run_id, status, minio_path=None, error=None, source="scrape"):
-    mock_msg = MagicMock()
-    mock_msg.data = json.dumps(
-        {
-            "job_id": None,
-            "run_id": str(run_id),
-            "status": status,
-            "source": source,
-            "minio_path": minio_path,
-            "error": error,
-        }
-    ).encode()
-    mock_msg.metadata.timestamp = datetime.now(UTC)
-    mock_msg.ack = AsyncMock()
-    return mock_msg
-
-
-async def test_result_consumer_batch_completed_updates_counters():
-    """Worker completing a batch item increments batch.completed."""
-    batch_id, item_id, run_id, user_id = await _make_batch_run()
-
-    mock_msg = _make_nats_msg(run_id, "running")
-    mock_js = AsyncMock()
-    mock_minio = AsyncMock()
-    await _handle_result(mock_msg, mock_js, mock_minio)
-
-    mock_msg = _make_nats_msg(run_id, "completed", minio_path="scrapeflow-results/history/x.md")
-    await _handle_result(mock_msg, mock_js, mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        batch = await db.get(Batch, batch_id)
-        item = await db.get(BatchItem, item_id)
-        run = await db.get(JobRun, run_id)
-    assert batch is not None
-    assert batch.completed == 1
-    assert item is not None
-    assert item.status == "completed"
-    assert item.result_path == "scrapeflow-results/history/x.md"
-    assert run is not None
-    assert run.status == "completed"
-
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(Batch).where(Batch.id == batch_id))
-        await db.execute(delete(User).where(User.id == user_id))
-        await db.commit()
-
-
-async def test_result_consumer_batch_all_complete_sets_batch_completed():
-    """When completed + failed == total, batches.status becomes 'completed'."""
-    batch_id, _, run_id, user_id = await _make_batch_run()
-
-    # The total for this batch is 2 but we only created 1 item — set total to 1 first.
-    async with AsyncSessionLocal() as db:
-        batch = await db.get(Batch, batch_id)
-        assert batch is not None
-        batch.total = 1
-        await db.commit()
-
-    mock_msg = _make_nats_msg(run_id, "running")
-    mock_js = AsyncMock()
-    mock_minio = AsyncMock()
-    await _handle_result(mock_msg, mock_js, mock_minio)
-
-    mock_msg = _make_nats_msg(run_id, "completed", minio_path="scrapeflow-results/history/y.md")
-    await _handle_result(mock_msg, mock_js, mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        batch = await db.get(Batch, batch_id)
-    assert batch is not None
-    assert batch.status == "completed"
-    assert batch.completed_at is not None
-
-    async with AsyncSessionLocal() as db:
-        b = await db.get(Batch, batch_id)
-        if b:
-            await db.execute(delete(Batch).where(Batch.id == batch_id))
-        await db.commit()
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(User).where(User.id == user_id))
-        await db.commit()
-
-
-async def test_result_consumer_batch_partial_failure():
-    """When any item fails and batch is done, status becomes 'partial_failure'."""
-    batch_id, item_id, run_id, user_id = await _make_batch_run()
-
-    async with AsyncSessionLocal() as db:
-        batch = await db.get(Batch, batch_id)
-        assert batch is not None
-        batch.total = 1
-        await db.commit()
-
-    mock_msg = _make_nats_msg(run_id, "running")
-    mock_js = AsyncMock()
-    mock_minio = AsyncMock()
-    await _handle_result(mock_msg, mock_js, mock_minio)
-
-    mock_msg = _make_nats_msg(run_id, "failed", error="timeout")
-    await _handle_result(mock_msg, mock_js, mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        batch = await db.get(Batch, batch_id)
-        item = await db.get(BatchItem, item_id)
-    assert batch is not None
-    assert batch.status == "partial_failure"
-    assert batch.failed == 1
-    assert item is not None
-    assert item.status == "failed"
-    assert item.error == "timeout"
-
-    async with AsyncSessionLocal() as db:
-        b = await db.get(Batch, batch_id)
-        if b:
-            await db.execute(delete(Batch).where(Batch.id == batch_id))
-        await db.commit()
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(User).where(User.id == user_id))
-        await db.commit()
-
-
 # ---------------------------------------------------------------------------
 # Result consumer — batch LLM path
 # ---------------------------------------------------------------------------
-
-
-async def _make_batch_run_with_llm():
-    """Create a Batch with llm_config, one BatchItem, and a pending JobRun."""
-    async with AsyncSessionLocal() as db:
-        user = User(clerk_id=f"user_{uuid.uuid4().hex}", email=f"{uuid.uuid4().hex}@test.com")
-        db.add(user)
-        await db.flush()
-
-        key = UserLLMKey(
-            user_id=user.id,
-            name="test-key",
-            provider="anthropic",
-            encrypted_api_key="enc_key",
-        )
-        db.add(key)
-        await db.flush()
-
-        batch = Batch(
-            user_id=user.id,
-            status="running",
-            output_format="json",
-            engine="http",
-            respect_robots=False,
-            llm_config={"llm_key_id": str(key.id), "model": "claude-3", "output_schema": {}},
-            total=1,
-            completed=0,
-            failed=0,
-        )
-        db.add(batch)
-        await db.flush()
-
-        item = BatchItem(batch_id=batch.id, url="https://example.com", status="pending")
-        db.add(item)
-        await db.flush()
-
-        run = JobRun(batch_item_id=item.id, status="pending")
-        db.add(run)
-        await db.commit()
-
-        await db.refresh(batch)
-        await db.refresh(item)
-        await db.refresh(run)
-
-    return batch.id, item.id, run.id, user.id
-
-
-async def test_result_consumer_batch_scrape_complete_dispatches_to_llm():
-    """When batch.llm_config is set, a scrape-complete message dispatches to the LLM subject
-    and transitions run to 'processing' without incrementing batch counters."""
-    batch_id, item_id, run_id, user_id = await _make_batch_run_with_llm()
-
-    mock_js = AsyncMock()
-    mock_minio = MagicMock()
-
-    msg = _make_nats_msg(run_id, "running")
-    await _handle_result(msg, mock_js, mock_minio)
-
-    msg = _make_nats_msg(run_id, "completed", minio_path="scrapeflow-results/history/x.html")
-    await _handle_result(msg, mock_js, mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        batch = await db.get(Batch, batch_id)
-        item = await db.get(BatchItem, item_id)
-
-    assert run is not None and run.status == "processing"
-    assert batch is not None and batch.completed == 0 and batch.failed == 0
-    assert item is not None and item.status == "pending"
-
-    mock_js.publish.assert_called_once()
-    subject, payload_bytes = mock_js.publish.call_args.args
-    assert subject == NATS_JOBS_LLM_SUBJECT
-    payload = json.loads(payload_bytes.decode())
-    assert payload["run_id"] == str(run_id)
-    assert payload["artifact_id"] == str(run_id)
-    assert "job_id" not in payload
-    assert payload["raw_minio_path"] == "scrapeflow-results/history/x.html"
-
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(Batch).where(Batch.id == batch_id))
-        await db.execute(delete(User).where(User.id == user_id))
-        await db.commit()
-
-
-async def test_result_consumer_batch_llm_complete_finalises_item():
-    """When the LLM result arrives (run.status == 'processing'), the item is finalised
-    and batch.completed is incremented."""
-    batch_id, item_id, run_id, user_id = await _make_batch_run_with_llm()
-
-    mock_js = AsyncMock()
-    mock_minio = MagicMock()
-
-    # running → processing (scrape done, LLM dispatched)
-    for status in ("running", "completed"):
-        msg = _make_nats_msg(
-            run_id,
-            status,
-            minio_path="scrapeflow-results/history/raw.html" if status == "completed" else None,
-        )
-        await _handle_result(msg, mock_js, mock_minio)
-
-    # LLM worker result arrives — run is now "processing" in DB
-    llm_result = _make_nats_msg(
-        run_id, "completed", minio_path="scrapeflow-results/history/out.json", source="llm"
-    )
-    await _handle_result(llm_result, mock_js, mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        batch = await db.get(Batch, batch_id)
-        item = await db.get(BatchItem, item_id)
-
-    assert run is not None and run.status == "completed"
-    assert run.result_path == "scrapeflow-results/history/out.json"
-    assert batch is not None and batch.completed == 1
-    assert batch.status == "completed"
-    assert item is not None and item.status == "completed"
-    assert item.result_path == "scrapeflow-results/history/out.json"
-
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(Batch).where(Batch.id == batch_id))
-        await db.execute(delete(User).where(User.id == user_id))
-        await db.commit()
-
-
-async def test_result_consumer_batch_item_storage_quota_exceeded():
-    """Storage quota exceeded on a batch item fails the run, the item, and increments batch.failed."""
-    batch_id, item_id, run_id, user_id = await _make_batch_run(status="running")
-
-    async with AsyncSessionLocal() as db:
-        # 100-byte limit, 90 already used — a 50-byte object would push to 140.
-        db.add(UserQuota(user_id=user_id, storage_bytes_limit=100, storage_bytes_used=90))
-        await db.commit()
-
-    stat_obj = MagicMock()
-    stat_obj.size = 50
-    mock_minio = AsyncMock()
-    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
-    mock_minio.remove_object = AsyncMock()
-
-    msg = _make_nats_msg(run_id, "completed", minio_path="scrapeflow-results/history/x.html")
-    await _handle_result(msg, AsyncMock(), mock_minio)
-
-    mock_minio.remove_object.assert_called_once()
-
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        item = await db.get(BatchItem, item_id)
-        batch = await db.get(Batch, batch_id)
-
-    assert run is not None
-    assert run.status == "failed"
-    assert run.error == "storage_quota_exceeded"
-
-    assert item is not None
-    assert item.status == "failed"
-    assert item.error == "storage_quota_exceeded"
-
-    assert batch is not None
-    assert batch.failed == 1
-
-    msg.ack.assert_called_once()
-
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(Batch).where(Batch.id == batch_id))
-        await db.execute(delete(User).where(User.id == user_id))
-        await db.commit()
-
-
-async def test_result_consumer_batch_terminal_guard():
-    """Finding 3: a redelivered 'failed' message on an already-completed batch item
-    must not increment batches.failed.
-
-    Simulates NATS redelivery: the item and run are already 'completed',
-    so the second execution is a no-op — batch.failed must stay at 0.
-    """
-    batch_id, item_id, run_id, user_id = await _make_batch_run()
-
-    mock_js = AsyncMock()
-    mock_minio = AsyncMock()
-
-    # First: drive the run to completed via normal messages
-    for status in ("running", "completed"):
-        msg = _make_nats_msg(
-            run_id,
-            status,
-            minio_path="scrapeflow-results/history/x.html" if status == "completed" else None,
-        )
-        await _handle_result(msg, mock_js, mock_minio)
-
-    # Redelivered "failed" message — run is already terminal
-    redelivered = _make_nats_msg(run_id, "failed", error="timeout")
-    await _handle_result(redelivered, mock_js, mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        batch = await db.get(Batch, batch_id)
-        run = await db.get(JobRun, run_id)
-
-    assert (
-        run.status == "completed"
-    ), "terminal guard must not allow 'failed' to overwrite 'completed'"
-    assert (
-        batch.failed == 0
-    ), "batch.failed must not be incremented on a redelivered terminal message"
-    assert batch.completed == 1
-
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(Batch).where(Batch.id == batch_id))
-        await db.execute(delete(User).where(User.id == user_id))
-        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +213,7 @@ async def test_result_consumer_batch_terminal_guard():
 # ---------------------------------------------------------------------------
 
 
-async def test_list_jobs_excludes_batch_runs(client, auth_headers, mock_jetstream):
+async def test_list_jobs_excludes_batch_runs(client, auth_headers, mock_temporal):
     """GET /jobs lists only regular job runs, not batch item runs."""
     # Create a regular job.
     job_resp = await client.post(

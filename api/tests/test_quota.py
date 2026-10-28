@@ -7,7 +7,6 @@ Tests that expect 429 use `quota_client` (real quota checks active).
 Tests that only check admin endpoint behaviour use `client` (quota checks disabled).
 """
 
-import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,7 +16,6 @@ from sqlalchemy import delete
 
 from app.auth.api_key import generate_api_key, hash_api_key
 from app.core.db import AsyncSessionLocal
-from app.core.result_consumer import _handle_result
 from app.models.api_key import ApiKey
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -101,7 +99,7 @@ def admin_headers(admin_api_key):
 
 
 async def test_monthly_runs_quota_allows_exactly_at_limit(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """POST /jobs succeeds when the run count is exactly at the limit."""
     async with AsyncSessionLocal() as db:
@@ -114,7 +112,7 @@ async def test_monthly_runs_quota_allows_exactly_at_limit(
     assert resp.status_code == 201
 
 
-async def test_monthly_runs_quota_exceeded(quota_client, quota_user, quota_headers, mock_jetstream):
+async def test_monthly_runs_quota_exceeded(quota_client, quota_user, quota_headers, mock_temporal):
     """POST /jobs returns 429 when monthly run limit is already reached."""
     async with AsyncSessionLocal() as db:
         # Limit = 1, and create one run this month to fill it.
@@ -136,7 +134,7 @@ async def test_monthly_runs_quota_exceeded(quota_client, quota_user, quota_heade
 
 
 async def test_monthly_runs_quota_correct_format(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """429 response includes all required fields from the spec."""
     async with AsyncSessionLocal() as db:
@@ -164,7 +162,7 @@ async def test_monthly_runs_quota_correct_format(
 
 
 async def test_concurrent_jobs_quota_exceeded(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """POST /jobs returns 429 when concurrent limit is reached."""
     async with AsyncSessionLocal() as db:
@@ -187,7 +185,7 @@ async def test_concurrent_jobs_quota_exceeded(
 
 
 async def test_concurrent_jobs_completed_runs_not_counted(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """Completed runs do not count toward the concurrent limit."""
     async with AsyncSessionLocal() as db:
@@ -275,7 +273,7 @@ async def test_admin_patch_quota_updates_existing_row(client, quota_user, admin_
 
 
 async def test_admin_patch_quota_enforced_on_next_job(
-    quota_client, quota_user, quota_headers, admin_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, admin_headers, mock_temporal
 ):
     """Custom limit set via admin endpoint is enforced on the next job creation."""
     # Set limit to 1 via admin.
@@ -315,112 +313,15 @@ async def test_admin_patch_quota_404_for_missing_user(client, admin_headers):
 # ---------------------------------------------------------------------------
 
 
-async def test_result_consumer_storage_quota_exceeded_fails_run(quota_user):
-    """Result consumer fails a run and removes the MinIO object when over storage quota."""
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=quota_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        # Storage limit = 100 bytes, already used 90 — a 50-byte object would exceed it.
-        db.add(UserQuota(user_id=quota_user.id, storage_bytes_limit=100, storage_bytes_used=90))
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
-
-    # stat_object returns 50 bytes — would push used to 140 > 100.
-    stat_obj = MagicMock()
-    stat_obj.size = 50
-    mock_minio = AsyncMock()
-    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
-    mock_minio.remove_object = AsyncMock()
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), mock_minio)
-
-    # MinIO object must be deleted.
-    mock_minio.remove_object.assert_called_once()
-
-    # Run must be failed with storage_quota_exceeded.
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "failed"
-        assert updated_run.error == "storage_quota_exceeded"
-
-    msg.ack.assert_called_once()
-
-
-async def test_result_consumer_storage_quota_ok_increments_usage(quota_user):
-    """Result consumer increments storage_bytes_used on a successful completion."""
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=quota_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        db.add(UserQuota(user_id=quota_user.id, storage_bytes_limit=1000, storage_bytes_used=0))
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
-
-    stat_obj = MagicMock()
-    stat_obj.size = 200
-    mock_minio = AsyncMock()
-    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        quota_row = await db.get(UserQuota, quota_user.id)
-        assert quota_row is not None
-        assert quota_row.storage_bytes_used == 200
-
-    msg.ack.assert_called_once()
-
-
 # ---------------------------------------------------------------------------
 # DELETE /jobs/{id}?permanent=true — storage quota decrement
 # ---------------------------------------------------------------------------
 
 
 async def test_permanent_delete_decrements_storage_quota(
-    client, quota_user, quota_headers, mock_jetstream
+    client, quota_user, quota_headers, mock_temporal
 ):
     """DELETE /jobs/{id}?permanent=true decrements storage_bytes_used by each ledger row."""
-    from unittest.mock import AsyncMock, MagicMock
 
     from app.core.minio import get_minio
     from app.main import app
@@ -461,7 +362,6 @@ async def test_permanent_delete_decrements_storage_quota(
 
 async def test_admin_hard_delete_decrements_storage_quota(client, quota_user, admin_headers):
     """DELETE /admin/jobs/{id}?hard_delete=true decrements storage_bytes_used and cleans MinIO."""
-    from unittest.mock import AsyncMock, MagicMock
 
     from app.core.minio import get_minio
     from app.main import app
@@ -500,55 +400,6 @@ async def test_admin_hard_delete_decrements_storage_quota(client, quota_user, ad
 # ---------------------------------------------------------------------------
 # Result consumer — storage increment failure (step 9)
 # ---------------------------------------------------------------------------
-
-
-async def test_result_consumer_storage_increment_failure_fails_run(quota_user):
-    """If the ledger write raises, the run is marked failed (not completed)."""
-    from unittest.mock import patch
-
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=quota_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        db.add(UserQuota(user_id=quota_user.id, storage_bytes_limit=10_000, storage_bytes_used=0))
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
-
-    stat_obj = MagicMock()
-    stat_obj.size = 100
-    mock_minio = AsyncMock()
-    mock_minio.stat_object = AsyncMock(return_value=stat_obj)
-    mock_minio.get_object = AsyncMock(side_effect=Exception("minio error"))
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    with patch("app.core.result_consumer.record_object", side_effect=Exception("db error")):
-        await _handle_result(msg, AsyncMock(), mock_minio)
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "failed"
-        assert updated_run.error == "storage_accounting_failed"
-
-    msg.ack.assert_called_once()
 
 
 async def test_record_object_idempotent_on_key(db_user):
@@ -650,7 +501,7 @@ async def test_crawl_admission_prechecks_max_pages_against_monthly_runs(
 
 
 async def test_crawl_pages_count_toward_monthly_runs(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """A crawl's pages are attempted fetches: 5 pages this month fill a limit of 5, and
     the *job* lane is what gets refused — the meter is one number across lanes."""
@@ -670,7 +521,7 @@ async def test_crawl_pages_count_toward_monthly_runs(
 
 
 async def test_active_crawl_holds_one_concurrent_slot(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """A queued crawl with no pages yet still holds its slot — the slot belongs to the
     submission, not to rows the coordinator has not written yet."""
@@ -688,7 +539,7 @@ async def test_active_crawl_holds_one_concurrent_slot(
 
 
 async def test_crawl_with_many_active_pages_is_still_one_slot(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """Contention is per submission: 50 pending pages under one crawl occupy one slot."""
     async with AsyncSessionLocal() as db:
@@ -703,9 +554,7 @@ async def test_crawl_with_many_active_pages_is_still_one_slot(
     await _drop_crawls(quota_user.id)
 
 
-async def test_terminal_crawl_holds_no_slot(
-    quota_client, quota_user, quota_headers, mock_jetstream
-):
+async def test_terminal_crawl_holds_no_slot(quota_client, quota_user, quota_headers, mock_temporal):
     async with AsyncSessionLocal() as db:
         db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
         await db.commit()
@@ -748,7 +597,7 @@ async def test_crawl_admission_refused_at_storage_wall(quota_client, quota_user,
 
 
 async def test_batch_holds_one_concurrent_slot(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """ADR-009 §8, owner's call 2026-08-17: a batch of any size is one submission.
     Before P7 this batch metered as 5 against a limit of 2 and the job was refused."""
@@ -772,7 +621,7 @@ async def test_batch_holds_one_concurrent_slot(
 
 
 async def test_batch_items_each_count_toward_monthly_runs(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """Cost is per fetch even though contention is per submission: the same 5-run batch
     is 5 monthly units."""
@@ -842,7 +691,7 @@ async def _make_pipeline_run(user_id, *, status="running", block_statuses=("runn
 
 
 async def test_pipeline_runs_count_toward_monthly_runs(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """One unit per run, whatever its block count or outcome."""
     async with AsyncSessionLocal() as db:
@@ -863,7 +712,7 @@ async def test_pipeline_runs_count_toward_monthly_runs(
 
 
 async def test_pipeline_run_with_a_running_block_holds_a_slot(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     async with AsyncSessionLocal() as db:
         db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=1))
@@ -878,7 +727,7 @@ async def test_pipeline_run_with_a_running_block_holds_a_slot(
 
 
 async def test_pipeline_run_is_one_slot_however_many_blocks_run(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     async with AsyncSessionLocal() as db:
         db.add(UserQuota(user_id=quota_user.id, concurrent_jobs_limit=2))
@@ -892,7 +741,7 @@ async def test_pipeline_run_is_one_slot_however_many_blocks_run(
 
 
 async def test_waiting_pipeline_run_holds_no_slot(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """ADR-009 15a: a run parked on a timer holds nothing."""
     async with AsyncSessionLocal() as db:
@@ -907,7 +756,7 @@ async def test_waiting_pipeline_run_holds_no_slot(
 
 
 async def test_terminal_pipeline_run_with_a_stale_running_block_holds_no_slot(
-    quota_client, quota_user, quota_headers, mock_jetstream
+    quota_client, quota_user, quota_headers, mock_temporal
 ):
     """A block left `running` by a failed mirror write must not pin the slot."""
     async with AsyncSessionLocal() as db:

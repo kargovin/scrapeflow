@@ -33,9 +33,7 @@ def mock_minio_client():
 # ---------------------------------------------------------------------------
 
 
-async def test_permanent_delete_returns_204(
-    client, auth_headers, mock_jetstream, mock_minio_client
-):
+async def test_permanent_delete_returns_204(client, auth_headers, mock_temporal, mock_minio_client):
     """DELETE /jobs/{id}?permanent=true removes the job and returns 204."""
     response = await client.post(
         "/jobs",
@@ -51,7 +49,7 @@ async def test_permanent_delete_returns_204(
 
 
 async def test_permanent_delete_removes_db_row(
-    client, auth_headers, mock_jetstream, mock_minio_client
+    client, auth_headers, mock_temporal, mock_minio_client
 ):
     """Job row is absent from DB after permanent delete."""
     response = await client.post(
@@ -68,7 +66,7 @@ async def test_permanent_delete_removes_db_row(
 
 
 async def test_permanent_delete_removes_only_the_history_object(
-    client, auth_headers, mock_jetstream, mock_minio_client
+    client, auth_headers, mock_temporal, mock_minio_client
 ):
     """MinIO remove_object is called for the run's history/ object, and nothing else."""
     response = await client.post(
@@ -100,7 +98,7 @@ async def test_permanent_delete_removes_only_the_history_object(
 
 
 async def test_permanent_delete_never_reconstructs_a_key_from_output_format(
-    client, auth_headers, mock_jetstream, mock_minio_client
+    client, auth_headers, mock_temporal, mock_minio_client
 ):
     """
     The delete path used to rebuild `latest/{job_id}.{ext}` from job.output_format,
@@ -125,7 +123,7 @@ async def test_permanent_delete_never_reconstructs_a_key_from_output_format(
 # ---------------------------------------------------------------------------
 
 
-async def test_soft_cancel_returns_200_with_message(client, auth_headers, mock_jetstream):
+async def test_soft_cancel_returns_200_with_message(client, auth_headers, mock_temporal):
     """DELETE /jobs/{id} without permanent param preserves the existing cancel behaviour."""
     response = await client.post(
         "/jobs",
@@ -154,7 +152,7 @@ async def test_permanent_delete_404_for_nonexistent_job(client, auth_headers, mo
 
 
 async def test_permanent_delete_404_for_other_users_job(
-    client, auth_headers, mock_jetstream, mock_minio_client, other_user
+    client, auth_headers, mock_temporal, mock_minio_client, other_user
 ):
     """Permanent delete of another user's job returns 404 (not 403 — avoids resource leak)."""
     async with AsyncSessionLocal() as db:

@@ -123,7 +123,7 @@ async def test_rate_limit_per_user_isolation(redis_client):
 
 
 async def test_create_job_rate_limited(
-    rate_limited_client, mock_clerk_auth, redis_client, mock_jetstream
+    rate_limited_client, mock_clerk_auth, redis_client, mock_temporal
 ):
     """POST /jobs returns 429 once the rate limit is exhausted."""
     headers = {"Authorization": "Bearer fake.jwt.token"}

@@ -1,7 +1,6 @@
-"""D.1 + D.4 — the job lane marker (ADR-009 §7 mechanism 4) and the dispatch switch."""
+"""D.1 + D.4 — the job lane marker (ADR-009 §7 mechanism 4) and dispatch; v2 only since G.1."""
 
 import asyncio
-import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,20 +9,17 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 from temporalio.common import WorkflowIDReusePolicy
 
-from app.constants import NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
 from app.core.db import AsyncSessionLocal
 from app.core.dispatch import build_scrape_input, build_scrape_message
-from app.core.result_consumer import _handle_result
 from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.webhook_delivery import WebhookDelivery
-from app.settings import settings
 from app.workflows.job import JobRunInput, JobWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 
 
-async def test_a_new_run_is_on_v1_unless_told_otherwise(db_user):
+async def test_a_new_run_is_on_v2_unless_told_otherwise(db_user):
     async with AsyncSessionLocal() as db:
         job = Job(user_id=db_user.id, url="https://example.com")
         db.add(job)
@@ -32,36 +28,7 @@ async def test_a_new_run_is_on_v1_unless_told_otherwise(db_user):
         db.add(run)
         await db.commit()
         await db.refresh(run)
-    assert run.lane == "v1"
-
-
-async def test_the_result_consumer_discards_a_result_for_a_v2_run(db_user):
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running", lane="v2")
-        db.add(run)
-        await db.commit()
-        run_id = run.id
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": f"scrapeflow-results/history/{run_id}/scrape.html",
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    msg.ack.assert_called_once()
-    async with AsyncSessionLocal() as db:
-        unchanged = await db.get(JobRun, run_id)
-    assert (unchanged.status, unchanged.result_path) == ("running", None)
+    assert run.lane == "v2"
 
 
 # ---------------------------------------------------------------------------
@@ -98,14 +65,6 @@ def temporal():
     app.state.temporal = None
 
 
-@pytest.fixture
-def lane(monkeypatch):
-    def set_lane(value):
-        monkeypatch.setattr(settings, "job_lane", value)
-
-    return set_lane
-
-
 @pytest_asyncio.fixture
 async def created_jobs():
     ids: list[str] = []
@@ -122,25 +81,7 @@ async def _runs(job_id) -> list[JobRun]:
         )
 
 
-async def test_on_v1_a_new_job_is_published_to_nats(
-    client, auth_headers, mock_jetstream, temporal, lane, created_jobs
-):
-    lane("v1")
-    response = await client.post("/jobs", json=PLAYWRIGHT_JOB, headers=auth_headers)
-    assert response.status_code == 201
-    created_jobs.append(response.json()["id"])
-
-    [run] = await _runs(response.json()["id"])
-    assert run.lane == "v1"
-    [call] = mock_jetstream.publish.call_args_list
-    assert call.args[0] == NATS_JOBS_RUN_PLAYWRIGHT_SUBJECT
-    temporal.start_workflow.assert_not_called()
-
-
-async def test_on_v2_a_new_job_starts_its_workflow_and_skips_nats(
-    client, auth_headers, mock_jetstream, temporal, lane, created_jobs
-):
-    lane("v2")
+async def test_a_new_job_starts_its_workflow(client, auth_headers, temporal, created_jobs):
     response = await client.post("/jobs", json=PLAYWRIGHT_JOB, headers=auth_headers)
     assert response.status_code == 201
     job_id = response.json()["id"]
@@ -148,7 +89,6 @@ async def test_on_v2_a_new_job_starts_its_workflow_and_skips_nats(
 
     [run] = await _runs(job_id)
     assert (run.lane, run.status) == ("v2", "pending")
-    mock_jetstream.publish.assert_not_called()
     [call] = temporal.start_workflow.call_args_list
     workflow, run_input = call.args
     assert workflow == JobWorkflow.run
@@ -162,10 +102,9 @@ async def test_on_v2_a_new_job_starts_its_workflow_and_skips_nats(
     assert call.kwargs["id_reuse_policy"] == WorkflowIDReusePolicy.REJECT_DUPLICATE
 
 
-async def test_on_v2_a_workflow_that_cannot_start_fails_the_run_with_503(
-    client, auth_headers, mock_jetstream, temporal, lane, created_jobs
+async def test_a_workflow_that_cannot_start_fails_the_run_with_503(
+    client, auth_headers, temporal, created_jobs
 ):
-    lane("v2")
     temporal.start_workflow.side_effect = RuntimeError("engine down")
     response = await client.post("/jobs", json=PLAYWRIGHT_JOB, headers=auth_headers)
 
@@ -179,7 +118,6 @@ async def test_on_v2_a_workflow_that_cannot_start_fails_the_run_with_503(
             await db.scalars(select(WebhookDelivery).where(WebhookDelivery.run_id == run.id))
         ).all()
     assert delivery.event == "job.failed"
-    mock_jetstream.publish.assert_not_called()
 
 
 async def test_the_scrape_input_carries_what_the_nats_message_carries(db_user):

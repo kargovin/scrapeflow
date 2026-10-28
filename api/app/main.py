@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core import minio, nats
 from app.core.job_notifier import JobNotifier
 from app.core.redis import close_pool, create_pool
-from app.core.result_consumer import start_result_consumer
 from app.middleware.correlation import CorrelationIdMiddleware
 from app.routers import (
     admin,
@@ -66,19 +65,10 @@ async def lifespan(app: FastAPI):
     app.state.nats_client, app.state.nats_js = await nats.connect()
     logger.info("NATS connected", url=settings.nats_url)
 
-    # Result consumer — background task that processes worker results from NATS (ADR-001)
-    result_consumer_task = await start_result_consumer(app.state.nats_js, app.state.minio)
-    logger.info("NATS result consumer started")
-
-    # Schedules, webhook delivery and stalled runs are Temporal's since F.6: Schedules
-    # (core/schedules.py), a workflow per webhook row (core/webhook_delivery.py), activity timeouts.
+    # No background tasks: run results are Temporal's since G.1 (workflows/), schedules, webhook
+    # delivery and stalled runs since F.6 (core/schedules.py, core/webhook_delivery.py).
 
     yield
-
-    # Shutdown — cancel all background tasks together
-    result_consumer_task.cancel()
-    await asyncio.gather(result_consumer_task, return_exceptions=True)
-    logger.info("Background tasks stopped")
 
     await app.state.job_notifier.stop()
     logger.info("JobNotifier stopped")

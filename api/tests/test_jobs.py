@@ -1,15 +1,12 @@
 import json
 import uuid
-from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import delete, select
 
-from app.constants import NATS_JOBS_LLM_SUBJECT, NATS_JOBS_RUN_HTTP_SUBJECT
 from app.core.db import AsyncSessionLocal
-from app.core.result_consumer import _handle_result
 from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -17,6 +14,7 @@ from app.models.llm_keys import UserLLMKey
 from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
+from tests.conftest import started_scrape
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -44,12 +42,12 @@ async def test_jobs_unauthenticated(client):
 
 
 # ---------------------------------------------------------------------------
-# 6h-2: POST /jobs creates a job and publishes to NATS
+# 6h-2: POST /jobs creates a job and starts its workflow
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job(client, auth_headers, mock_jetstream):
-    """POST /jobs returns 201, correct fields, and publishes a fat NATS message."""
+async def test_create_job(client, auth_headers, mock_temporal):
+    """POST /jobs returns 201, correct fields, and starts the run's JobWorkflow."""
 
     response = await client.post(
         "/jobs",
@@ -65,17 +63,15 @@ async def test_create_job(client, auth_headers, mock_jetstream):
     assert "id" in data
     assert "run_id" in data
 
-    # Assert the NATS publish was called once with the correct subject and fat message
-    mock_jetstream.publish.assert_called_once()
-    call_subject, call_payload = mock_jetstream.publish.call_args.args
-    assert call_subject == NATS_JOBS_RUN_HTTP_SUBJECT
-    published = json.loads(call_payload.decode())
-    # Artifacts key on the run, not the job (ADR-011 §1), and job_id has left the wire.
+    [call] = mock_temporal.start_workflow.call_args_list
+    assert call.kwargs["id"] == f"job-run-{data['run_id']}"
+    assert call.args[1].run_id == data["run_id"]
+    assert call.args[1].engine == "http"
+    published = call.args[1].scrape.model_dump(mode="json")
+    # Artifacts key on the run, not the job (ADR-011 §1).
     assert published["artifact_id"] == data["run_id"]
-    assert "job_id" not in published
     assert published["url"] == "https://example.com/"
     assert published["output_format"] == "markdown"
-    assert published["run_id"] == data["run_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +79,7 @@ async def test_create_job(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_get_job_own(client, auth_headers, mock_jetstream):
+async def test_get_job_own(client, auth_headers, mock_temporal):
     """GET /jobs/{job_id} returns 200 with run_id and status sourced from job_runs."""
     create_resp = await client.post(
         "/jobs",
@@ -102,7 +98,7 @@ async def test_get_job_own(client, auth_headers, mock_jetstream):
     assert body["status"] == "pending"
 
 
-async def test_get_job_status_from_run(client, auth_headers, mock_jetstream):
+async def test_get_job_status_from_run(client, auth_headers, mock_temporal):
     """GET /jobs/{job_id} reflects status from job_runs, not jobs."""
     create_resp = await client.post(
         "/jobs",
@@ -147,7 +143,7 @@ async def test_get_job_other_user(client, auth_headers, db_user):
 # ---------------------------------------------------------------------------
 
 
-async def test_list_jobs_pagination(client, auth_headers, mock_jetstream):
+async def test_list_jobs_pagination(client, auth_headers, mock_temporal):
     """GET /jobs returns only the authenticated user's jobs and respects limit/offset."""
     # Create 3 jobs as the mock user
     for _ in range(3):
@@ -174,7 +170,7 @@ async def test_list_jobs_pagination(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_cancel_job(client, auth_headers, mock_jetstream):
+async def test_cancel_job(client, auth_headers, mock_temporal):
     """DELETE /jobs/{job_id} cancels the active job_run and returns a message."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -192,7 +188,7 @@ async def test_cancel_job(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_cancel_job_noop(client, auth_headers, mock_jetstream):
+async def test_cancel_job_noop(client, auth_headers, mock_temporal):
     """DELETE /jobs/{job_id} with no active run returns 'no active run' message."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -208,7 +204,7 @@ async def test_cancel_job_noop(client, auth_headers, mock_jetstream):
     assert response.json()["message"] == "Job has no active run to cancel"
 
 
-async def test_cancel_job_terminal_run(client, auth_headers, mock_jetstream):
+async def test_cancel_job_terminal_run(client, auth_headers, mock_temporal):
     """DELETE /jobs/{job_id} returns 'no active run' when the run is already completed."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -228,7 +224,7 @@ async def test_cancel_job_terminal_run(client, auth_headers, mock_jetstream):
     assert response.json()["message"] == "Job has no active run to cancel"
 
 
-async def test_cancel_job_emits_pg_notify(client, auth_headers, mock_jetstream):
+async def test_cancel_job_emits_pg_notify(client, auth_headers, mock_temporal):
     """DELETE /jobs/{job_id} emits pg_notify on job_status so WebSocket subscribers close immediately."""
     import asyncpg
 
@@ -267,222 +263,9 @@ async def test_cancel_job_emits_pg_notify(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_result_consumer_running(db_user):
-    """Result consumer sets run.status=running, started_at from NATS timestamp, and nats_stream_seq."""
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="pending")
-        db.add(run)
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    mock_ts = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {"job_id": str(job_id), "run_id": str(run_id), "status": "running", "nats_stream_seq": 42}
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.metadata.timestamp = mock_ts
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "running"
-        assert updated_run.started_at == mock_ts
-        assert updated_run.nats_stream_seq == 42
-
-    msg.ack.assert_called_once()
-
-
-async def test_result_consumer_completed(db_user):
-    """Result consumer marks run completed, sets result_path/completed_at, creates webhook delivery (no LLM, no prior run)."""
-    async with AsyncSessionLocal() as db:
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            webhook_url="https://hook.example.com",
-        )
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "completed"
-        assert updated_run.result_path == minio_path
-        assert updated_run.completed_at is not None
-        assert updated_run.diff_detected is None  # no previous run to diff against
-
-        delivery_result = await db.execute(
-            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
-        )
-        delivery = delivery_result.scalar_one_or_none()
-        assert delivery is not None
-        assert delivery.payload["event"] == "job.completed"
-        assert delivery.status == "pending"
-
-    msg.ack.assert_called_once()
-
-
-async def test_result_consumer_completed_with_llm(db_user):
-    """Result consumer routes to LLM worker when job.llm_config is set (run transitions to processing)."""
-    async with AsyncSessionLocal() as db:
-        key = UserLLMKey(
-            user_id=db_user.id,
-            name="test-key",
-            provider="anthropic",
-            encrypted_api_key="enc_key",
-        )
-        db.add(key)
-        await db.flush()
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            llm_config={"llm_key_id": str(key.id), "model": "claude-3", "output_schema": {}},
-        )
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        await db.commit()
-        await db.refresh(key)
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    mock_js = AsyncMock()
-    await _handle_result(msg, mock_js, MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "processing"
-
-    mock_js.publish.assert_called_once()
-    subject, payload_bytes = mock_js.publish.call_args.args
-    assert subject == NATS_JOBS_LLM_SUBJECT
-    published = json.loads(payload_bytes.decode())
-    # The LLM stage writes history/{artifact_id}/llm.json beside the scrape's
-    # history/{artifact_id}/scrape.{fmt}, so it is keyed on the same run.
-    assert published["artifact_id"] == str(run_id)
-    assert "job_id" not in published
-    assert published["run_id"] == str(run_id)
-    assert published["raw_minio_path"] == minio_path
-
-    msg.ack.assert_called_once()
-
-
 # ---------------------------------------------------------------------------
 # Result consumer — LLM key deleted between dispatch and result (prod review #10)
 # ---------------------------------------------------------------------------
-
-
-async def test_result_consumer_llm_key_deleted_cleans_minio(db_user):
-    """When LLM key is missing at result time, the MinIO object is removed and run is failed."""
-    from sqlalchemy import delete as sa_delete
-
-    async with AsyncSessionLocal() as db:
-        key = UserLLMKey(
-            user_id=db_user.id,
-            name="deleted-key",
-            provider="anthropic",
-            encrypted_api_key="enc_key",
-        )
-        db.add(key)
-        await db.flush()
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            llm_config={"llm_key_id": str(key.id), "model": "claude-3", "output_schema": {}},
-        )
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        key_id = key.id
-        job_id = job.id
-        run_id = run.id
-
-    # Delete the LLM key to simulate mid-schedule removal.
-    async with AsyncSessionLocal() as db:
-        await db.execute(sa_delete(UserLLMKey).where(UserLLMKey.id == key_id))
-        await db.commit()
-
-    minio_path = f"scrapeflow-results/history/{job_id}/1234567890.html"
-    mock_minio = AsyncMock()
-    mock_minio.stat_object = AsyncMock(side_effect=Exception("not found"))
-    mock_minio.remove_object = AsyncMock()
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), mock_minio)
-
-    mock_minio.remove_object.assert_called_once()
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "failed"
-        assert updated_run.error == "LLM key not found or deleted"
-
-    msg.ack.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -490,188 +273,14 @@ async def test_result_consumer_llm_key_deleted_cleans_minio(db_user):
 # ---------------------------------------------------------------------------
 
 
-async def test_result_consumer_cancelled_job_discarded(db_user):
-    """Result consumer discards worker results for cancelled runs (run status stays cancelled)."""
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="cancelled")
-        db.add(run)
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": "some/path",
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "cancelled"  # unchanged
-        assert updated_run.result_path is None  # not written
-
-    msg.ack.assert_called_once()
-
-
 # ---------------------------------------------------------------------------
 # 6h-10: Result consumer failed event → run status + error + webhook delivery
 # ---------------------------------------------------------------------------
 
 
-async def test_result_consumer_failed(db_user):
-    """Result consumer sets run.status=failed, error, completed_at, and creates webhook delivery."""
-    async with AsyncSessionLocal() as db:
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            webhook_url="https://hook.example.com",
-        )
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "failed",
-            "error": "connection timeout",
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "failed"
-        assert updated_run.error == "connection timeout"
-        assert updated_run.completed_at is not None
-
-        delivery_result = await db.execute(
-            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
-        )
-        delivery = delivery_result.scalar_one_or_none()
-        assert delivery is not None
-        assert delivery.payload["event"] == "job.failed"
-        assert delivery.payload["error"] == "connection timeout"
-        assert delivery.status == "pending"
-
-    msg.ack.assert_called_once()
-
-
 # ---------------------------------------------------------------------------
 # Idempotency guards (NATS redelivery safety)
 # ---------------------------------------------------------------------------
-
-
-async def test_result_consumer_terminal_guard_job_failed(db_user):
-    """Finding 2: a redelivered 'failed' message on an already-completed run is a no-op.
-
-    Simulates NATS redelivery after a crash between db.commit() and msg.ack():
-    the run is already 'completed' in the DB, so the second execution must not
-    flip it back to 'failed' or insert a duplicate webhook delivery.
-    """
-    async with AsyncSessionLocal() as db:
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            webhook_url="https://hook.example.com",
-        )
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="completed")
-        db.add(run)
-        await db.commit()
-        await db.refresh(run)
-        run_id = run.id
-        job_id = job.id
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {"job_id": str(job_id), "run_id": str(run_id), "status": "failed", "error": "timeout"}
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        assert (
-            run.status == "completed"
-        ), "terminal guard must not allow redelivered 'failed' to overwrite 'completed'"
-        delivery_count = await db.scalar(
-            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
-        )
-        assert delivery_count is None, "no duplicate webhook delivery should be inserted"
-
-    msg.ack.assert_called_once()
-
-
-async def test_result_consumer_source_discriminator_scrape_not_llm(db_user):
-    """Finding 1: a redelivered scrape 'completed' (source='scrape') on a run that is
-    already in 'processing' state must NOT be routed to _handle_llm_completed.
-
-    The run should stay in 'processing' — the real LLM result has not arrived yet.
-    """
-    async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
-        db.add(job)
-        await db.flush()
-        # Simulate a run already advanced to 'processing' (scrape done, LLM dispatched)
-        run = JobRun(job_id=job.id, status="processing")
-        db.add(run)
-        await db.commit()
-        await db.refresh(run)
-        run_id = run.id
-        job_id = job.id
-
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "source": "scrape",
-            "minio_path": "scrapeflow-results/history/raw.html",
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        run = await db.get(JobRun, run_id)
-        assert (
-            run.status == "processing"
-        ), "source='scrape' on a 'processing' run must not trigger _handle_llm_completed"
-
-    msg.ack.assert_called_once()
 
 
 async def test_result_consumer_webhook_dedup(db_user):
@@ -740,7 +349,7 @@ async def test_create_job_ssrf_unresolvable(client, auth_headers):
     assert "resolved" in response.json()["detail"]
 
 
-async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_jetstream):
+async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_temporal):
     """Public IPs pass SSRF check and proceed to job creation."""
     with patch("app.core.security.socket.getaddrinfo") as mock_gai:
         mock_gai.return_value = [(None, None, None, None, ("93.184.216.34", 0))]  # example.com
@@ -751,18 +360,13 @@ async def test_create_job_ssrf_public_url_allowed(client, auth_headers, mock_jet
 
 
 @pytest.fixture
-def schedule_engine():
-    """A fake Temporal client: a job with a cron puts its Schedule (F.1), never the dev stack's."""
-    client = MagicMock()
-    client.create_schedule = AsyncMock()
-    client.get_schedule_handle = MagicMock(return_value=MagicMock(update=AsyncMock()))
-    app.state.temporal = client
-    yield client
-    app.state.temporal = None
+def schedule_engine(mock_temporal):
+    """A job with a cron puts its Schedule (F.1) on the fake client, never the dev stack's."""
+    return mock_temporal
 
 
 # Cron validation unit test
-async def test_create_job_valid_cron_job(client, auth_headers, mock_jetstream, schedule_engine):
+async def test_create_job_valid_cron_job(client, auth_headers, mock_temporal, schedule_engine):
     response = await client.post(
         "/jobs",
         json={"url": "https://domain.com", "schedule_cron": "0 * * * *"},
@@ -774,7 +378,7 @@ async def test_create_job_valid_cron_job(client, auth_headers, mock_jetstream, s
     await _delete_job(response.json()["id"])
 
 
-async def test_create_job_invalid_cron_job(client, auth_headers, mock_jetstream):
+async def test_create_job_invalid_cron_job(client, auth_headers, mock_temporal):
     response = await client.post(
         "/jobs",
         json={"url": "https://domain.com", "schedule_cron": "65 * * * *"},
@@ -784,7 +388,7 @@ async def test_create_job_invalid_cron_job(client, auth_headers, mock_jetstream)
 
 
 # LLM key unit tests
-async def test_create_job_valid_llm_key(client, auth_headers, mock_jetstream):
+async def test_create_job_valid_llm_key(client, auth_headers, mock_temporal):
     # Create and add a key to llm table
     async with AsyncSessionLocal() as db:
         res = await db.execute(select(User).where(User.clerk_id == "user_test_123"))
@@ -808,7 +412,7 @@ async def test_create_job_valid_llm_key(client, auth_headers, mock_jetstream):
     assert response.status_code == 201
 
 
-async def test_create_job_invalid_llmkey(client, auth_headers, mock_jetstream):
+async def test_create_job_invalid_llmkey(client, auth_headers, mock_temporal):
     response = await client.post(
         "/jobs",
         json={
@@ -825,7 +429,7 @@ async def test_create_job_invalid_llmkey(client, auth_headers, mock_jetstream):
 
 
 # webhook url validation
-async def test_create_job_valid_webhook_returns_secret(client, auth_headers, mock_jetstream):
+async def test_create_job_valid_webhook_returns_secret(client, auth_headers, mock_temporal):
     response = await client.post(
         "/jobs",
         json={"url": "https://domain.com", "webhook_url": "https://anotherdomain.com"},
@@ -836,7 +440,7 @@ async def test_create_job_valid_webhook_returns_secret(client, auth_headers, moc
 
 
 # Job run creation
-async def test_create_job_job_runs_entry_exists(client, auth_headers, mock_jetstream):
+async def test_create_job_job_runs_entry_exists(client, auth_headers, mock_temporal):
     response = await client.post("/jobs", json={"url": "https://domain.com"}, headers=auth_headers)
 
     assert response.status_code == 201
@@ -853,7 +457,7 @@ async def test_create_job_job_runs_entry_exists(client, auth_headers, mock_jetst
 # ---------------------------------------------------------------------------
 
 
-async def test_list_job_runs(client, auth_headers, mock_jetstream):
+async def test_list_job_runs(client, auth_headers, mock_temporal):
     """GET /jobs/{id}/runs returns all runs for a job the user owns."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -886,7 +490,7 @@ async def test_list_job_runs_other_user(client, auth_headers, db_user):
     assert resp.status_code == 404
 
 
-async def test_list_job_runs_empty(client, auth_headers, mock_jetstream):
+async def test_list_job_runs_empty(client, auth_headers, mock_temporal):
     """GET /jobs/{id}/runs returns [] for a job with no runs."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -905,7 +509,7 @@ async def test_list_job_runs_empty(client, auth_headers, mock_jetstream):
     assert resp.json() == []
 
 
-async def test_list_job_runs_pagination(client, auth_headers, mock_jetstream):
+async def test_list_job_runs_pagination(client, auth_headers, mock_temporal):
     """GET /jobs/{id}/runs respects limit and offset."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -933,7 +537,7 @@ async def test_list_job_runs_pagination(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_patch_job_schedule_cron(client, auth_headers, mock_jetstream, schedule_engine):
+async def test_patch_job_schedule_cron(client, auth_headers, mock_temporal, schedule_engine):
     """PATCH /jobs/{id} with schedule_cron arms the job's schedule."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -961,7 +565,7 @@ async def _delete_job(job_id: str) -> None:
         await db.commit()
 
 
-async def test_patch_job_invalid_cron(client, auth_headers, mock_jetstream):
+async def test_patch_job_invalid_cron(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with an invalid cron expression returns 422."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -975,7 +579,7 @@ async def test_patch_job_invalid_cron(client, auth_headers, mock_jetstream):
     assert resp.status_code == 422
 
 
-async def test_patch_job_immutable_fields(client, auth_headers, mock_jetstream):
+async def test_patch_job_immutable_fields(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} rejects immutable fields (url, engine, output_format) with 422."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -992,7 +596,7 @@ async def test_patch_job_immutable_fields(client, auth_headers, mock_jetstream):
         assert resp.status_code == 422, f"Expected 422 for payload {immutable_payload}"
 
 
-async def test_patch_job_webhook_url_set(client, auth_headers, mock_jetstream):
+async def test_patch_job_webhook_url_set(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} setting webhook_url generates and returns the new secret."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -1009,7 +613,7 @@ async def test_patch_job_webhook_url_set(client, auth_headers, mock_jetstream):
     assert resp.json()["webhook_secret"] is not None
 
 
-async def test_patch_job_webhook_url_removed(client, auth_headers, mock_jetstream):
+async def test_patch_job_webhook_url_removed(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with webhook_url=null clears the webhook URL and secret."""
     create_resp = await client.post(
         "/jobs",
@@ -1030,7 +634,7 @@ async def test_patch_job_webhook_url_removed(client, auth_headers, mock_jetstrea
         assert job.webhook_secret is None
 
 
-async def test_patch_job_llm_config_409(client, auth_headers, mock_jetstream):
+async def test_patch_job_llm_config_409(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with llm_config returns 409 if the latest run is processing."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -1062,7 +666,7 @@ async def test_patch_job_llm_config_409(client, auth_headers, mock_jetstream):
     assert resp.status_code == 409
 
 
-async def test_patch_job_llm_config_other_user_key(client, auth_headers, db_user, mock_jetstream):
+async def test_patch_job_llm_config_other_user_key(client, auth_headers, db_user, mock_temporal):
     """PATCH /jobs/{id} with an llm_key_id belonging to another user returns 404."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -1112,7 +716,7 @@ async def test_patch_job_other_user(client, auth_headers, db_user):
 # ---------------------------------------------------------------------------
 
 
-async def test_rotate_webhook_secret(client, auth_headers, mock_jetstream):
+async def test_rotate_webhook_secret(client, auth_headers, mock_temporal):
     """POST .../rotate returns new plaintext secret and updates the encrypted secret in DB."""
     create_resp = await client.post(
         "/jobs",
@@ -1139,7 +743,7 @@ async def test_rotate_webhook_secret(client, auth_headers, mock_jetstream):
         assert job.webhook_secret != original_encrypted
 
 
-async def test_rotate_webhook_secret_no_webhook(client, auth_headers, mock_jetstream):
+async def test_rotate_webhook_secret_no_webhook(client, auth_headers, mock_temporal):
     """POST .../rotate returns 422 for a job that has no webhook URL."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -1164,12 +768,12 @@ async def test_rotate_webhook_secret_other_user(client, auth_headers, db_user):
 
 
 # ---------------------------------------------------------------------------
-# PRD-004: respect_robots wired into v2 NATS message (Step 16)
+# PRD-004: respect_robots wired into the scrape input (Step 16)
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_respect_robots_true(client, auth_headers, mock_jetstream):
-    """POST /jobs with respect_robots=true sends schema_version 3 with options.respect_robots=true."""
+async def test_create_job_respect_robots_true(client, auth_headers, mock_temporal):
+    """POST /jobs with respect_robots=true starts the scrape with options.respect_robots=true."""
     response = await client.post(
         "/jobs",
         json={"url": "https://example.com", "respect_robots": True},
@@ -1177,16 +781,12 @@ async def test_create_job_respect_robots_true(client, auth_headers, mock_jetstre
     )
     assert response.status_code == 201
 
-    mock_jetstream.publish.assert_called_once()
-    _, call_payload = mock_jetstream.publish.call_args.args
-    published = json.loads(call_payload.decode())
+    published = started_scrape(mock_temporal)
 
-    assert published["schema_version"] == 3
-    assert published["engine"] == "http"
     assert published["options"]["respect_robots"] is True
 
 
-async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstream):
+async def test_create_job_v2_payload_defaults(client, auth_headers, mock_temporal):
     """POST /jobs without respect_robots produces a schema_version 3 message with options.respect_robots=false."""
     response = await client.post(
         "/jobs",
@@ -1195,17 +795,10 @@ async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstre
     )
     assert response.status_code == 201
 
-    mock_jetstream.publish.assert_called_once()
-    _, call_payload = mock_jetstream.publish.call_args.args
-    published = json.loads(call_payload.decode())
+    published = started_scrape(mock_temporal)
 
-    assert published["schema_version"] == 3
-    assert published["engine"] == "http"
     assert published["options"]["respect_robots"] is False
-    # Unset optional sub-objects are omitted, not sent as null — the models serialize
-    # with exclude_none, matching the Go worker's omitempty tags.
-    assert "credentials" not in published
-    assert "crawl_context" not in published
+    assert published["credentials"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1213,7 +806,7 @@ async def test_create_job_v2_payload_defaults(client, auth_headers, mock_jetstre
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_with_proxy_url(client, auth_headers, mock_jetstream):
+async def test_create_job_with_proxy_url(client, auth_headers, mock_temporal):
     """POST /jobs with proxy_url stores encrypted secret, sets has_proxy=True,
     omits proxy_url from response body, and injects encrypted credentials into NATS."""
     proxy_url = "http://user:pass@proxy.example.com:8080"
@@ -1227,10 +820,8 @@ async def test_create_job_with_proxy_url(client, auth_headers, mock_jetstream):
     assert data["has_proxy"] is True
     assert "proxy_url" not in data
 
-    # NATS message carries Fernet-encrypted proxy_url — never plaintext in transit
-    mock_jetstream.publish.assert_called_once()
-    _, call_payload = mock_jetstream.publish.call_args.args
-    published = json.loads(call_payload.decode())
+    # The workflow input carries the Fernet-encrypted proxy_url — never plaintext in history
+    published = started_scrape(mock_temporal)
     f = Fernet(settings.credentials_encryption_key)
     decrypted_proxy = f.decrypt(published["credentials"]["encrypted_proxy_url"].encode()).decode()
     assert decrypted_proxy == proxy_url
@@ -1250,7 +841,7 @@ async def test_create_job_with_proxy_url(client, auth_headers, mock_jetstream):
     assert secret.encrypted_value != proxy_url  # stored encrypted, not plaintext
 
 
-async def test_create_job_default_proxy(client, auth_headers, mock_jetstream):
+async def test_create_job_default_proxy(client, auth_headers, mock_temporal):
     """When no per-job proxy_url is given but default_proxy_url is configured,
     the platform default appears encrypted in credentials in the NATS message."""
     default_proxy = "http://platform-proxy.example.com:3128"
@@ -1265,8 +856,7 @@ async def test_create_job_default_proxy(client, auth_headers, mock_jetstream):
         assert response.status_code == 201
         data = response.json()
         assert data["has_proxy"] is False  # no per-job secret, only platform default
-        _, call_payload = mock_jetstream.publish.call_args.args
-        published = json.loads(call_payload.decode())
+        published = started_scrape(mock_temporal)
         f = Fernet(settings.credentials_encryption_key)
         decrypted_proxy = f.decrypt(
             published["credentials"]["encrypted_proxy_url"].encode()
@@ -1276,7 +866,7 @@ async def test_create_job_default_proxy(client, auth_headers, mock_jetstream):
         settings.default_proxy_url = original
 
 
-async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_jetstream):
+async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with proxy_url upserts the job_secrets row and has_proxy becomes True."""
     from app.models.job_secrets import JobSecrets, JobSecretType
 
@@ -1306,7 +896,7 @@ async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_jetstream):
     assert secret is not None
 
 
-async def test_patch_job_remove_proxy(client, auth_headers, mock_jetstream):
+async def test_patch_job_remove_proxy(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with proxy_url=null removes the secret and has_proxy becomes False."""
     from app.models.job_secrets import JobSecrets, JobSecretType
 
@@ -1342,7 +932,7 @@ async def test_patch_job_remove_proxy(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_with_cookies(client, auth_headers, mock_jetstream):
+async def test_create_job_with_cookies(client, auth_headers, mock_temporal):
     """POST /jobs with cookies stores encrypted secret, sets has_cookies=True,
     omits cookies from response body, and injects encrypted credentials into NATS."""
     cookies = [{"name": "session", "value": "abc123", "domain": "example.com"}]
@@ -1356,10 +946,8 @@ async def test_create_job_with_cookies(client, auth_headers, mock_jetstream):
     assert data["has_cookies"] is True
     assert "cookies" not in data
 
-    # NATS message carries Fernet-encrypted cookies — never plaintext in transit
-    mock_jetstream.publish.assert_called_once()
-    _, call_payload = mock_jetstream.publish.call_args.args
-    published = json.loads(call_payload.decode())
+    # The workflow input carries Fernet-encrypted cookies — never plaintext in history
+    published = started_scrape(mock_temporal)
     f = Fernet(settings.credentials_encryption_key)
     decrypted_cookies = json.loads(
         f.decrypt(published["credentials"]["encrypted_cookies"].encode()).decode()
@@ -1381,7 +969,7 @@ async def test_create_job_with_cookies(client, auth_headers, mock_jetstream):
     assert secret.encrypted_value != json.dumps(cookies)  # stored encrypted, not plaintext
 
 
-async def test_create_job_cookies_and_proxy(client, auth_headers, mock_jetstream):
+async def test_create_job_cookies_and_proxy(client, auth_headers, mock_temporal):
     """POST /jobs with both cookies and proxy_url produces a credentials dict containing both."""
     cookies = [{"name": "auth", "value": "tok", "domain": "example.com"}]
     proxy_url = "http://user:pass@proxy.example.com:8080"
@@ -1395,9 +983,7 @@ async def test_create_job_cookies_and_proxy(client, auth_headers, mock_jetstream
     assert data["has_cookies"] is True
     assert data["has_proxy"] is True
 
-    mock_jetstream.publish.assert_called_once()
-    _, call_payload = mock_jetstream.publish.call_args.args
-    published = json.loads(call_payload.decode())
+    published = started_scrape(mock_temporal)
     f = Fernet(settings.credentials_encryption_key)
     decrypted_cookies = json.loads(
         f.decrypt(published["credentials"]["encrypted_cookies"].encode()).decode()
@@ -1407,7 +993,7 @@ async def test_create_job_cookies_and_proxy(client, auth_headers, mock_jetstream
     assert decrypted_proxy == proxy_url
 
 
-async def test_patch_job_cookies_upsert(client, auth_headers, mock_jetstream):
+async def test_patch_job_cookies_upsert(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with cookies upserts the job_secrets row and has_cookies becomes True."""
     from app.models.job_secrets import JobSecrets, JobSecretType
 
@@ -1436,7 +1022,7 @@ async def test_patch_job_cookies_upsert(client, auth_headers, mock_jetstream):
     assert secret is not None
 
 
-async def test_patch_job_remove_cookies(client, auth_headers, mock_jetstream):
+async def test_patch_job_remove_cookies(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with cookies=null removes the secret and has_cookies becomes False."""
     from app.models.job_secrets import JobSecrets, JobSecretType
 
@@ -1473,7 +1059,7 @@ async def test_patch_job_remove_cookies(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_actions_http_engine_422(client, auth_headers, mock_jetstream):
+async def test_create_job_actions_http_engine_422(client, auth_headers, mock_temporal):
     """POST /jobs with actions on an http engine returns 422."""
     response = await client.post(
         "/jobs",
@@ -1483,7 +1069,7 @@ async def test_create_job_actions_http_engine_422(client, auth_headers, mock_jet
     assert response.status_code == 422
 
 
-async def test_create_job_actions_too_many(client, auth_headers, mock_jetstream):
+async def test_create_job_actions_too_many(client, auth_headers, mock_temporal):
     """POST /jobs with more than 20 actions returns 422."""
     actions = [{"type": "screenshot"}] * 21
     response = await client.post(
@@ -1499,7 +1085,7 @@ async def test_create_job_actions_too_many(client, auth_headers, mock_jetstream)
     assert response.status_code == 422
 
 
-async def test_create_job_actions_invalid_wait_ms(client, auth_headers, mock_jetstream):
+async def test_create_job_actions_invalid_wait_ms(client, auth_headers, mock_temporal):
     """wait action with milliseconds=0 (out of range) returns 422."""
     response = await client.post(
         "/jobs",
@@ -1514,7 +1100,7 @@ async def test_create_job_actions_invalid_wait_ms(client, auth_headers, mock_jet
     assert response.status_code == 422
 
 
-async def test_create_job_actions_click_no_selector(client, auth_headers, mock_jetstream):
+async def test_create_job_actions_click_no_selector(client, auth_headers, mock_temporal):
     """click action missing selector returns 422."""
     response = await client.post(
         "/jobs",
@@ -1529,7 +1115,7 @@ async def test_create_job_actions_click_no_selector(client, auth_headers, mock_j
     assert response.status_code == 422
 
 
-async def test_create_job_with_actions(client, auth_headers, mock_jetstream):
+async def test_create_job_with_actions(client, auth_headers, mock_temporal):
     """POST /jobs with valid actions stores them in DB and includes them in the NATS message."""
     actions = [
         {"type": "click", "selector": "#submit"},
@@ -1550,9 +1136,7 @@ async def test_create_job_with_actions(client, auth_headers, mock_jetstream):
     data = response.json()
     assert data["actions"] == actions
 
-    mock_jetstream.publish.assert_called_once()
-    _, call_payload = mock_jetstream.publish.call_args.args
-    published = json.loads(call_payload.decode())
+    published = started_scrape(mock_temporal)
     assert published["options"]["actions"] == actions
 
     async with AsyncSessionLocal() as db:
@@ -1561,7 +1145,7 @@ async def test_create_job_with_actions(client, auth_headers, mock_jetstream):
         assert job.playwright_actions == actions
 
 
-async def test_get_result_no_completed_run(client, auth_headers, mock_jetstream):
+async def test_get_result_no_completed_run(client, auth_headers, mock_temporal):
     """GET /jobs/{id}/result returns 404 when no completed run exists."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -1573,12 +1157,10 @@ async def test_get_result_no_completed_run(client, auth_headers, mock_jetstream)
     assert resp.status_code == 404
 
 
-async def test_get_result_with_warnings(client, auth_headers, mock_jetstream):
+async def test_get_result_with_warnings(client, auth_headers, mock_temporal):
     """GET /jobs/{id}/result surfaces warnings stored on the completed run."""
-    from unittest.mock import AsyncMock, MagicMock
 
     from app.core.minio import get_minio
-    from app.main import app
 
     create_resp = await client.post(
         "/jobs",
@@ -1625,7 +1207,7 @@ async def test_get_result_with_warnings(client, auth_headers, mock_jetstream):
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_webhook_events_stored(client, auth_headers, mock_jetstream):
+async def test_create_job_webhook_events_stored(client, auth_headers, mock_temporal):
     """POST /jobs with webhook_events stores the list and returns it in the response."""
     response = await client.post(
         "/jobs",
@@ -1646,7 +1228,7 @@ async def test_create_job_webhook_events_stored(client, auth_headers, mock_jetst
         assert set(job.webhook_events) == {"job.completed", "job.failed"}
 
 
-async def test_create_job_webhook_events_invalid(client, auth_headers, mock_jetstream):
+async def test_create_job_webhook_events_invalid(client, auth_headers, mock_temporal):
     """POST /jobs with an unknown webhook event name returns 422."""
     response = await client.post(
         "/jobs",
@@ -1659,7 +1241,7 @@ async def test_create_job_webhook_events_invalid(client, auth_headers, mock_jets
     assert response.status_code == 422
 
 
-async def test_patch_job_webhook_events(client, auth_headers, mock_jetstream):
+async def test_patch_job_webhook_events(client, auth_headers, mock_temporal):
     """PATCH /jobs/{id} with webhook_events updates the stored list."""
     create_resp = await client.post(
         "/jobs", json={"url": "https://example.com"}, headers=auth_headers
@@ -1675,96 +1257,3 @@ async def test_patch_job_webhook_events(client, auth_headers, mock_jetstream):
     )
     assert patch_resp.status_code == 200
     assert patch_resp.json()["webhook_events"] == ["job.failed"]
-
-
-async def test_result_consumer_webhook_event_filtered(db_user):
-    """Webhook delivery is skipped when the event is not in webhook_events."""
-    async with AsyncSessionLocal() as db:
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            webhook_url="https://hook.example.com",
-            webhook_events=["job.failed"],  # only failed events
-        )
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    minio_path = f"scrapeflow-results/history/{job_id}/123.html"
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        updated_run = await db.get(JobRun, run_id)
-        assert updated_run is not None
-        assert updated_run.status == "completed"
-
-        delivery_result = await db.execute(
-            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
-        )
-        # job.completed is filtered out — no delivery created
-        assert delivery_result.scalar_one_or_none() is None
-
-    msg.ack.assert_called_once()
-
-
-async def test_result_consumer_webhook_event_allowed(db_user):
-    """Webhook delivery is created when the event matches webhook_events."""
-    async with AsyncSessionLocal() as db:
-        job = Job(
-            user_id=db_user.id,
-            url="https://example.com",
-            webhook_url="https://hook.example.com",
-            webhook_events=["job.completed"],
-        )
-        db.add(job)
-        await db.flush()
-        run = JobRun(job_id=job.id, status="running")
-        db.add(run)
-        await db.commit()
-        await db.refresh(job)
-        await db.refresh(run)
-        job_id = job.id
-        run_id = run.id
-
-    minio_path = f"scrapeflow-results/history/{job_id}/123.html"
-    msg = MagicMock()
-    msg.data = json.dumps(
-        {
-            "job_id": str(job_id),
-            "run_id": str(run_id),
-            "status": "completed",
-            "minio_path": minio_path,
-        }
-    ).encode()
-    msg.metadata = MagicMock()
-    msg.ack = AsyncMock()
-
-    await _handle_result(msg, AsyncMock(), MagicMock())
-
-    async with AsyncSessionLocal() as db:
-        delivery_result = await db.execute(
-            select(WebhookDelivery).where(WebhookDelivery.run_id == run_id)
-        )
-        delivery = delivery_result.scalar_one_or_none()
-        assert delivery is not None
-        assert delivery.payload["event"] == "job.completed"
-
-    msg.ack.assert_called_once()
