@@ -2326,6 +2326,30 @@ all-users numbers were right). The scope now goes through job, batch or crawl ow
 
 ---
 
+## BUG-029 — The three list pages' "Engine" column shows three different things
+
+**Severity:** Low (SPA display) — the Jobs list mislabels a field.
+**Discovered:** 2026-10-28, by the owner, verifying the H.1 release in prod.
+**Status:** 🟡 **OPEN — owner's call: fix later.**
+
+All three lists head a column "Engine", and each renders something different:
+
+| Page | Renders | Code |
+|---|---|---|
+| Jobs | the **output format** (`html` / `markdown`) | `frontend/src/pages/Jobs.tsx:142` — `{job.output_format}` |
+| Batches | both, `http → html` | `frontend/src/pages/Batches.tsx:105` (and `BatchDetail.tsx:69`) |
+| Crawls | the **engine** only (`http` / `playwright`) | `frontend/src/pages/Crawls.tsx:105` — `{c.engine}` |
+
+**Cause:** `JobResponse` (`api/app/schemas/jobs.py`) has **no `engine` field** — `jobs.engine` is stored but never
+returned — so the Jobs page had nothing to show and fell back to `output_format`. `BatchResponse` and
+`CrawlResponse` carry both fields.
+
+**Fix sketch:** add `engine` to `JobResponse` (every user and admin job read; the MCP server reads the
+same schema), then pick one rendering for all three pages — `engine → format` as Batches does, or two
+columns — and apply it to the three lists (and `JobDetail`, which should show both).
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised

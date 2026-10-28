@@ -103,7 +103,7 @@
 | **G** | **Consumer deletion** | |
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ **RELEASED 2026-10-28** (`main` `41a348f..bc30025`, infra `682cc52`) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` gone; owner verified a job + a batch |
 | **H** | **NATS removal** | |
-| H.1 | Delete NATS-bound worker Deployments (obligation 3) | 🔧 Built 2026-10-28 (`8a62da8`, infra `c92e7dd` local) — not released; runbook in H.1 |
+| H.1 | Delete NATS-bound worker Deployments (obligation 3) | ✅ **RELEASED 2026-10-28** (`main` `bc30025..722f54b`, infra `c92e7dd`; step 4 `51c2d40` prepared) — NATS mode gone from all three workers; owner verified http + playwright jobs and a crawl |
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ⬜ |
 | **I** | **API thinning** | |
 | I.1 | Alembic-on-startup made multi-replica safe | ⬜ |
@@ -2776,7 +2776,8 @@ Deployments, as at E.7); the `ImagePolicy`s stay — the `-temporal` Deployments
    'content']`; `temporal_worker_started … task_queue=scrape-playwright … crawl_queue=crawl`. The
    playwright and LLM pods drain up to 630 s / 400 s if a call is in flight.
 3. **Verify** (your terminal, an API key): `POST /jobs` `{"url":"https://example.com/"}` and the same
-   with `"engine":"playwright"` → `completed`; optionally `POST /crawls` `{"seed_url":"https://example.com/",
+   with `"engine":"playwright","playwright_options":{}` (the API 422s a playwright job without the
+   object) → `completed`; optionally `POST /crawls` `{"seed_url":"https://example.com/",
    "max_pages":1,"engine":"playwright"}` → `completed`.
 4. **After step 2 has rolled out** (infra, tidy-up, optional): drop `WORKER_MODE` from the three
    `-temporal` manifests, their "Needs an image with `WORKER_MODE`" comments and the README's three
@@ -2785,6 +2786,15 @@ Deployments, as at E.7); the `ImagePolicy`s stay — the `-temporal` Deployments
 **Rollback:** revert the three `-temporal` images to their previous tags — safe while step 4 is undone
 (`WORKER_MODE=temporal` still set). The NATS-mode Deployments are not needed for it. After step 4, fix
 forward.
+
+**Released** *(2026-10-28)*. Step 1: the owner pushed infra `c92e7dd`; Flux pruned the three NATS-mode
+Deployments, the `-temporal` three unchanged on their old images. Step 2: the owner pushed `develop` and ran
+the `main` ff `bc30025..722f54b`; CI built the three worker images (api + replay skipped); Flux rolled all three
+to `722f54b` — each logged its started line on its queues, no errors. Step 3 (owner): an http job, a playwright
+job and a crawl `completed` — ⚠️ the playwright job needs `"playwright_options":{}` (runbook corrected).
+The owner found **BUG-029** while checking (the lists' "Engine" column; filed, fix later). Step 4: infra
+**`51c2d40`** prepared locally (all three Deployments were on `722f54b` first), not pushed. ⚠️ **After step 4
+the rollback above no longer applies** — an older image defaults to NATS mode.
 
 #### H.2 — 🚀 Remove NATS
 

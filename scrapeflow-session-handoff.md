@@ -30,7 +30,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Accepted 2026-10-27**; cap 20, paused not counted, catch-up 365 d) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-022) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-029) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
@@ -135,6 +135,14 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 ---
 
 ## Current state — as of 2026-10-28 *(clock)*
+
+🚀 **H.1 RELEASED (2026-10-28, ninth session).** Owner pushed infra `c92e7dd` (Flux pruned the three NATS-mode
+Deployments), then `develop` and the `main` ff `bc30025..722f54b`; CI built the three worker images; all three
+`-temporal` Deployments rolled to `722f54b` and logged their started lines. Owner: an http job, a playwright job
+(needs `"playwright_options":{}` — runbook corrected) and a crawl `completed`. **Deployed code is `722f54b`.**
+Owner found **BUG-029** (the three lists' "Engine" column shows format / both / engine; `JobResponse` has no
+`engine`) — filed, fix later. Step 4 (`WORKER_MODE` dropped from the manifests + README) is infra **`51c2d40`,
+local, not pushed** — safe now, all three run `722f54b`. **Next: H.2.**
 
 🔧 **H.1 BUILT (2026-10-28, ninth session; nothing pushed, nothing released).** Owner: "build it". The NATS mode
 is gone from all three workers — Go `internal/worker/` deleted, `WORKER_MODE`/NATS config out, each Python
@@ -1570,6 +1578,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-28 (H.1 release):** `main` = `origin/main` = `origin/develop` = `722f54b` (deployed; worker images only); `develop` = docs closeout on top. Infra `origin/main` = `c92e7dd` + Flux bumps; local `main` = `51c2d40` (step 4), **1 ahead, not pushed**.
 - **2026-10-28 (H.1 build close):** `develop` = `8a62da8` (H.1) + docs, **not pushed**; `main` = `origin/main` = `bc30025` (deployed). Infra `main` = `c92e7dd`, **1 ahead** of `origin/main` (`682cc52`), not pushed. Compose: the NATS-mode worker services are gone from the file; the three `-temporal` workers run the H.1 images. `tmp/` untracked, pre-existing.
 - **2026-10-28 (G.1 release close):** `main` = `origin/main` = `bc30025` (deployed); `develop` = docs closeout on top, pushed. Infra `main` = `origin/main` = `682cc52` (lane env vars dropped). Compose: NATS-mode workers stopped and behind `profiles: [v1]`; the rest up. `tmp/` untracked, pre-existing.
 - **2026-10-27 (F.0 + BUG-023 close):** `develop` = `2eba735` (ADR-013) · `2983a47` (BUG-023) + docs, not pushed; `main` = `origin/main` = `261f931` (deployed). Infra unchanged.
@@ -1728,7 +1737,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
-| 2026-10-28 *(clock, ninth)* | **🔧 H.1 BUILT.** NATS mode removed from the three workers (Go `internal/worker`, Python `worker.py`/`models.py`, `temporal_main` → `main`, NATS settings + deps), compose v1 services and the contracts NATS arm deleted; render tests ported to `test_scrape.py` (BUG-015/016/017 coverage), two Go tests to the activity; mutation 12/12; compose e2e on all three workers + a crawl; infra Deployments removed locally | `8a62da8` + docs; infra `c92e7dd` (local) |
+| 2026-10-28 *(clock, ninth)* | **🚀 H.1 RELEASED** (owner: infra push, `main` ff `bc30025..722f54b`; jobs + crawl verified; BUG-029 filed; step 4 `51c2d40` local). **🔧 H.1 BUILT.** NATS mode removed from the three workers (Go `internal/worker`, Python `worker.py`/`models.py`, `temporal_main` → `main`, NATS settings + deps), compose v1 services and the contracts NATS arm deleted; render tests ported to `test_scrape.py` (BUG-015/016/017 coverage), two Go tests to the activity; mutation 12/12; compose e2e on all three workers + a crawl; infra Deployments removed locally | `8a62da8` + docs; infra `c92e7dd` (local) |
 | 2026-10-28 *(clock, eighth)* | **🚀 G.1 RELEASED.** `result_consumer.py`, the v1 dispatch arms and `JOB_LANE`/`BATCH_LANE` deleted; autouse `mock_temporal`; suite 739; mutation 20/20 (two gaps closed); compose e2e; dev drain hazard found (NATS workers behind `profiles: [v1]`); owner ran the runbook + `main` ff; infra step 3 pushed; env verified gone | `65fc93f`, `bc30025`, `fad0e7d` + closeout; infra `682cc52` |
 | 2026-10-27 *(clock, sixth)* | **📐 F.0 done — ADR-013 Accepted; 🔧 BUG-023 fixed.** Plain walkthrough of F.0 and the catch-up window; owner took §5 as recommended (cap 20, paused not counted, catch-up 365 d). Then BUG-023 explained and built (per-user lock, 8 tests, 7/7 mutations). `2eba735`; BUG-023 `2983a47` |
 | 2026-10-27 *(clock, fifth)* | **🚀 E.7 RELEASED, Group E closed.** Infra push (coordinator pruned), owner's `main` ff `faa1f83..261f931`, rollouts + migration 4.7 watched; owner verified a crawl and the SPA pages. Bugs closed in the docs. | docs closeout; infra `bf591bc` pushed |
