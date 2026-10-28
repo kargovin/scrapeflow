@@ -16,7 +16,7 @@ async def test_readiness(client):
     assert data["status"] == "ok"
     assert data["db"] == "ok"
     assert data["redis"] == "ok"
-    assert data["nats"] == "ok"
+    assert set(data) == {"status", "db", "redis"}
 
 
 async def test_readiness_excludes_minio(client):
@@ -32,8 +32,8 @@ async def test_dependencies(client):
     assert data["status"] == "ok"
     assert data["db"] == "ok"
     assert data["redis"] == "ok"
-    assert data["nats"] == "ok"
     assert data["minio"] == "ok"
+    assert set(data) == {"status", "db", "redis", "minio"}
 
 
 async def test_dependencies_minio_down(client, monkeypatch):

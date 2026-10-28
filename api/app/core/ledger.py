@@ -5,8 +5,8 @@ Every MinIO object held on a user's behalf is one `storage_objects` row, and
 same transaction as every insert and delete here. Two entry points do all the work:
 
 record_object()          — the accountant: one row per stored object, charged once.
-                           Keyed on the object key, so a NATS redelivery of the same
-                           result is a no-op while a genuinely second artifact for the
+                           Keyed on the object key, so a retried activity recording
+                           the same result is a no-op while a genuinely second artifact for the
                            same run (an LLM job's extraction, a screenshot) is charged.
                            That distinction is what BUG-007 was missing.
 release_*()              — the only way objects leave: enumerate rows, remove each

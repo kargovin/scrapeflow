@@ -3,9 +3,6 @@
 A job's run is one ``JobWorkflow`` (``dispatch_run``), a batch one ``BatchWorkflow``
 (``start_batch``), a crawl one ``CrawlWorkflow`` (``start_crawl``). Since G.1 every new run is
 ``lane='v2'``; ``v1`` rows are history.
-
-The NATS message builders stay until H.2 for the contract test's NATS arm; nothing dispatches
-with them.
 """
 
 import uuid
@@ -24,7 +21,6 @@ from app.core.webhooks import (
     create_crawl_webhook_delivery,
     create_webhook_delivery,
 )
-from app.messages import Credentials, MessageOptions, ScrapeMessage
 from app.models.batch import Batch, BatchItem
 from app.models.crawl import Crawl, CrawlQueueItem
 from app.models.job import Job
@@ -285,30 +281,12 @@ async def cancel_crawl_workflow(crawl_id: uuid.UUID, temporal: TemporalClient) -
         logger.warning("crawl_workflow_cancel_not_sent", crawl_id=str(crawl_id), error=str(exc))
 
 
-def build_scrape_message(job: Job, run: JobRun, credentials: dict | None) -> ScrapeMessage:
-    """Build the dispatch message for one run of a job, manual or scheduled.
-
-    ``artifact_id`` is the run's id, not the job's (ADR-011 §1): artifacts are keyed on
-    the row that produced them, so each run of a recurring job owns its objects outright
-    instead of sharing a job-keyed prefix disambiguated by a timestamp.
-    ``playwright_options`` ride only on the playwright engine.
-    """
-    return ScrapeMessage(
-        artifact_id=str(run.id),
-        run_id=str(run.id),
-        url=job.url,
-        output_format=job.output_format.value,
-        engine=job.engine,
-        credentials=Credentials(**credentials) if credentials else None,
-        options=MessageOptions(respect_robots=job.respect_robots, actions=job.playwright_actions),
-        playwright_options=job.playwright_options if job.engine == "playwright" else None,
-    )
-
-
 def build_scrape_input(job: Job, run: JobRun, credentials: dict | None) -> contracts.ScrapeInput:
-    """The v2 twin of ``build_scrape_message``: the same values, the activity's shape (B.1).
+    """The scrape activity's input for one run of a job, manual or scheduled.
 
-    The engine is not in it — it picks the task queue (``queues.scrape_queue``).
+    ``artifact_id`` is the run's id, not the job's (ADR-011 §1). The engine is not in it — it
+    picks the task queue (``queues.scrape_queue``). ``playwright_options`` ride only on the
+    playwright engine.
     """
     return contracts.ScrapeInput(
         artifact_id=str(run.id),
@@ -322,26 +300,9 @@ def build_scrape_input(job: Job, run: JobRun, credentials: dict | None) -> contr
     )
 
 
-def build_batch_scrape_message(batch: Batch, item: BatchItem, run: JobRun) -> ScrapeMessage:
-    """Build the dispatch message for one batch item's run.
-
-    A batch item is not a job (ADR-006): the lane sends no credentials, actions or
-    playwright_options, and the message carries no batch id — workers are unaware they
-    are running a batch. Artifacts key on the item's own run, the row that exists,
-    rather than on a null job id (ADR-011 §1).
-    """
-    return ScrapeMessage(
-        artifact_id=str(run.id),
-        run_id=str(run.id),
-        url=item.url,
-        output_format=batch.output_format,
-        engine=batch.engine,
-        options=MessageOptions(respect_robots=batch.respect_robots),
-    )
-
-
 def build_batch_scrape_input(batch: Batch, item: BatchItem, run: JobRun) -> contracts.ScrapeInput:
-    """The v2 twin of ``build_batch_scrape_message``: the same values, the activity's shape."""
+    """The scrape activity's input for one batch item's run. A batch item is not a job
+    (ADR-006): no credentials, actions or playwright_options."""
     return contracts.ScrapeInput(
         artifact_id=str(run.id),
         url=item.url,

@@ -29,24 +29,19 @@ graph TD
     API --> PG[(PostgreSQL\nmetadata)]
     API --> Redis[(Redis\nrate limits)]
     API --> MinIO[(MinIO\ncontent)]
-    API -->|publish| NATS[NATS JetStream]
-    NATS -->|consume| API
+    API -->|start · signal · cancel| Temporal[Temporal\nserver]
 
-    NATS -->|run.http| HTTPWorker[HTTP Worker\nGo]
-    NATS -->|run.playwright| PWWorker[Playwright Worker\nPython]
-    NATS -->|llm| LLMWorker[LLM Worker\nPython]
+    WorkflowWorker[Workflow Worker\nPython · api image] <-->|workflow| Temporal
+    WorkflowWorker --> PG
+    WorkflowWorker --> Redis
 
-    HTTPWorker -->|result| NATS
-    PWWorker -->|result| NATS
-    LLMWorker -->|result| NATS
+    Temporal <-->|scrape-http| HTTPWorker[HTTP Worker\nGo]
+    Temporal <-->|scrape-playwright · crawl| PWWorker[Playwright Worker\nPython]
+    Temporal <-->|llm · content| LLMWorker[LLM Worker\nPython]
 
     HTTPWorker --> MinIO
     PWWorker --> MinIO
     LLMWorker --> MinIO
-
-    Coordinator[BFS Coordinator\nPython] --> PG
-    PG --> Coordinator
-    Coordinator -->|dispatch| NATS
 ```
 
 ---
@@ -61,8 +56,8 @@ graph TD
 | **Scheduling** | Cron-based recurring jobs; configurable intervals |
 | **Change detection** | Per-run content hashing (xxh64); diff detection; webhook on change |
 | **Batch scraping** | Submit hundreds of URLs in one request; per-item results + completion webhook |
-| **Site crawl** | BFS coordinator; respects `max_depth` + `max_pages`; domain-scoped; dedup by URL |
-| **Proxy rotation** | Per-job proxy credentials; `DEFAULT_PROXY_URL` fallback; Fernet-encrypted in NATS |
+| **Site crawl** | `CrawlWorkflow`; respects `max_depth` + `max_pages`; scoped to the seed's registrable domain; dedup by URL |
+| **Proxy rotation** | Per-job proxy credentials; `DEFAULT_PROXY_URL` fallback; Fernet-encrypted in workflow history |
 | **robots.txt** | Per-job `respect_robots` toggle; custom parsers in both Go + Python workers |
 | **Authenticated scraping** | Per-job cookie injection; encrypted at rest in `job_secrets` table |
 | **Page actions** | Click, type, wait, scroll, screenshot, `wait_for_selector`, `execute_js`, `set_viewport` |
@@ -83,9 +78,8 @@ graph TD
 | API | FastAPI + SQLAlchemy (async) + Alembic |
 | HTTP worker | Go |
 | Playwright / LLM worker | Python + Playwright |
-| BFS coordinator | Python |
 | MCP server | Python (`mcp` SDK, stdio transport) |
-| Queue | NATS JetStream |
+| Durable execution | Temporal |
 | Database | PostgreSQL 16 |
 | Object storage | MinIO |
 | Cache / rate limiting | Redis 7 |
@@ -120,7 +114,7 @@ The API is available at `http://localhost:8000`. Auto-migration runs on startup 
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Set the output as `CREDENTIALS_ENCRYPTION_KEY` in your `.env`. This key encrypts proxy URLs and cookies before they enter the NATS message queue.
+Set the output as `CREDENTIALS_ENCRYPTION_KEY` in your `.env`. This key encrypts proxy URLs and cookies before they enter a workflow's input.
 
 ---
 
@@ -152,24 +146,23 @@ scrapeflow/
 ├── api/                  # FastAPI application
 │   └── app/
 │       ├── routers/      # jobs, batch, crawls, users, admin, health
-│       ├── core/         # scheduler, result consumer, webhooks, quota, storage
+│       ├── core/         # dispatch, schedules, webhooks, quota, storage ledger
+│       ├── workflows/    # Temporal workflows + the DB activities (workflow worker)
 │       ├── models/       # SQLAlchemy ORM models
 │       └── schemas/      # Pydantic request/response schemas
 ├── http-worker/          # Go scrape worker
 │   └── internal/
-│       ├── worker/       # NATS consumer, message handler
+│       ├── activity/     # Temporal Scrape activity
 │       ├── fetcher/      # HTTP client + proxy transport
 │       └── robots/       # robots.txt parser
 ├── playwright-worker/    # Python Playwright worker
 │   └── worker/
-│       ├── worker.py     # NATS consumer + message handler
+│       ├── activity.py   # Temporal Scrape activity
+│       ├── crawl.py      # crawl activities (sitemaps, link extraction)
+│       ├── scrape.py     # render pipeline
 │       ├── actions.py    # 8-action executor with MinIO screenshots
 │       └── robots.py     # robots.txt client (httpx, never proxy)
 ├── llm-worker/           # Python LLM extraction worker
-├── coordinator/          # Python BFS crawl coordinator
-│   └── coordinator/
-│       ├── bfs.py        # dispatch loop + link extraction
-│       └── result_handler.py
 ├── mcp/                  # MCP server (stdio)
 │   └── tools/            # scrape_url, get_result, get_job_status, list_jobs
 ├── frontend/             # React + TypeScript admin SPA
@@ -218,15 +211,15 @@ PATCH  /admin/users/{id}/quota     Override per-user limits
 
 ## Key design decisions
 
-**Workers are DB-ignorant.** The API sends a fat NATS message containing everything the worker needs (URL, engine options, credentials, crawl context). Workers write output to MinIO, publish a result message, and never touch Postgres. All business logic — quota enforcement, dedup, diff detection, webhook dispatch — lives in the API's result consumer.
+**Workers are DB-ignorant.** Each run is a Temporal workflow; the scrape and LLM workers run its activities with an input carrying everything they need (URL, engine options, credentials). Workers write output to MinIO, return the object's path, and never touch Postgres. All business logic — quota enforcement, run status, webhook dispatch — lives in the workflow worker's DB activities.
 
-**Cancellation is API-enforced.** Workers are unaware of cancellations. When a job is cancelled, the result consumer checks `run.status` on receipt and discards the result silently. Workers can safely complete their work.
+**Cancellation is API-enforced.** The API cancels the run's row first and tells the workflow second, best effort. The workflow's next status write refuses a cancelled run, so a scrape already in flight finishes harmlessly and its output is deleted.
 
-**Secrets are encrypted at the NATS boundary.** Proxy URLs and cookies are encrypted with Fernet before entering the message queue and decrypted only inside the worker process. Plaintext never touches NATS.
+**Secrets are encrypted at the workflow boundary.** Proxy URLs and cookies are encrypted with Fernet before entering a workflow's input and decrypted only inside the worker process. Plaintext never reaches Temporal's history.
 
-**Idempotent result processing.** Every result handler checks for terminal status before applying state transitions, so NATS redeliveries are safe. Storage quota increments, webhook delivery rows, and batch counters each have their own idempotency guard.
+**Idempotent activities.** Every status write checks for terminal status before applying a transition, so a retried activity is safe. Storage ledger rows, webhook delivery rows and batch counters each have their own idempotency guard.
 
-**BFS crawls survive API restarts.** The crawl coordinator is a separate Python process with its own NATS consumer and database session. The BFS queue is persisted in Postgres (`crawl_queue`), so a coordinator restart re-enqueues any stalled dispatched items automatically.
+**Runs survive restarts.** Jobs, batches, crawls, schedules and webhook deliveries are Temporal workflows, so an API or worker restart resumes them where they stopped. A crawl's frontier is persisted in Postgres (`crawl_queue`).
 
 See [`docs/adr/`](docs/adr/) for the full Architecture Decision Record index.
 
@@ -242,7 +235,7 @@ ScrapeFlow runs in a k3s homelab cluster at `scrapeflow.govindappa.com`.
 - **GitOps:** FluxCD — manifests live in a separate infra repo
 - **Migrations:** Alembic auto-runs on API pod startup
 
-Workers are deployed as separate k3s Deployments. The HTTP worker uses `strategy: Recreate` to prevent the rolling-update window from deleting the durable NATS consumer before the new pod creates it.
+Workers are deployed as separate k3s Deployments, each polling its own Temporal task queues.
 
 ---
 

@@ -36,8 +36,8 @@ async def create_webhook_delivery(
     diff       — DiffResult from compute_text_diff / compute_json_diff; None on first run
     error      — error message; only included in the payload when event="job.failed"
 
-    Uses ON CONFLICT DO NOTHING against idx_webhook_deliveries_dedup so a redelivered
-    NATS message that reaches this call site cannot insert a duplicate delivery row.
+    Uses ON CONFLICT DO NOTHING against idx_webhook_deliveries_dedup so a retried
+    activity that reaches this call site cannot insert a duplicate delivery row.
     """
     payload: dict = {
         "event": event,

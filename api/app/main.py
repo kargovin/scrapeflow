@@ -8,7 +8,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core import minio, nats
+from app.core import minio
 from app.core.job_notifier import JobNotifier
 from app.core.redis import close_pool, create_pool
 from app.middleware.correlation import CorrelationIdMiddleware
@@ -61,10 +61,6 @@ async def lifespan(app: FastAPI):
     app.state.minio = await minio.create_client()
     logger.info("MinIO client ready", bucket=settings.minio_bucket)
 
-    # NATS
-    app.state.nats_client, app.state.nats_js = await nats.connect()
-    logger.info("NATS connected", url=settings.nats_url)
-
     # No background tasks: run results are Temporal's since G.1 (workflows/), schedules, webhook
     # delivery and stalled runs since F.6 (core/schedules.py, core/webhook_delivery.py).
 
@@ -72,9 +68,6 @@ async def lifespan(app: FastAPI):
 
     await app.state.job_notifier.stop()
     logger.info("JobNotifier stopped")
-
-    await nats.disconnect(app.state.nats_client)
-    logger.info("NATS disconnected")
 
     await minio.close_client(app.state.minio)
     logger.info("MinIO client closed")

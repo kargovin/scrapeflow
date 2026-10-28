@@ -1,11 +1,10 @@
 #!/bin/sh
 # Temporal namespace registration — ADR-009 §2 (one namespace, §12) and §2c (retention). Runs
 # after the server is up (compose: the `temporal-namespace` one-shot; k8s: the
-# scrapeflow-temporal-init Job). Converges rather than only creates, like nats-init-job.yaml's
-# `stream add` / `stream edit`: a missing namespace is created, an existing one has its retention
-# set to the value here — so this file, not a past `temporal operator` command, is the source of
-# truth for retention. Safe to re-run; re-running it is also the recovery after the Temporal
-# database is wiped.
+# scrapeflow-temporal-init Job). Converges rather than only creates: a missing namespace is
+# created, an existing one has its retention set to the value here — so this file, not a past
+# `temporal operator` command, is the source of truth for retention. Safe to re-run; re-running
+# it is also the recovery after the Temporal database is wiped.
 #
 # Written for this project, not copied from temporalio/samples-server's create-namespace.sh:
 # that one sets no retention (the CLI default is 72h, not 30d), and its retry branch references

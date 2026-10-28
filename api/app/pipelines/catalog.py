@@ -125,7 +125,7 @@ class Timing:
 
 
 def _worker_retry(start_to_close: int, heartbeat: int | None = None, **extra: int) -> Timing:
-    # The NATS workers' transient-retry numbers, on all three: 5 s, x2, 60 s cap, 3 attempts.
+    # The v1 workers' transient-retry numbers, on all three: 5 s, x2, 60 s cap, 3 attempts.
     return Timing(
         start_to_close=start_to_close,
         maximum_attempts=3,

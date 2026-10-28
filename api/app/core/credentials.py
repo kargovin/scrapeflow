@@ -13,7 +13,7 @@ async def resolve_credentials(job: Job, db: AsyncSession) -> dict | None:
     Values are returned as Fernet ciphertext under CREDENTIALS_ENCRYPTION_KEY.
     Per-job secrets are forwarded as-is from job_secrets (already encrypted at rest
     with the same key). The platform default_proxy_url is plaintext in env — encrypted
-    here before being placed in the NATS message.
+    here before being placed in the scrape activity's input.
     """
     result: dict = {}
 

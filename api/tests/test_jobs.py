@@ -279,7 +279,7 @@ async def test_cancel_job_emits_pg_notify(client, auth_headers, mock_temporal):
 
 
 # ---------------------------------------------------------------------------
-# Idempotency guards (NATS redelivery safety)
+# Idempotency guards (activity retry safety)
 # ---------------------------------------------------------------------------
 
 
@@ -808,7 +808,7 @@ async def test_create_job_v2_payload_defaults(client, auth_headers, mock_tempora
 
 async def test_create_job_with_proxy_url(client, auth_headers, mock_temporal):
     """POST /jobs with proxy_url stores encrypted secret, sets has_proxy=True,
-    omits proxy_url from response body, and injects encrypted credentials into NATS."""
+    omits proxy_url from response body, and injects encrypted credentials into the scrape input."""
     proxy_url = "http://user:pass@proxy.example.com:8080"
     response = await client.post(
         "/jobs",
@@ -843,7 +843,7 @@ async def test_create_job_with_proxy_url(client, auth_headers, mock_temporal):
 
 async def test_create_job_default_proxy(client, auth_headers, mock_temporal):
     """When no per-job proxy_url is given but default_proxy_url is configured,
-    the platform default appears encrypted in credentials in the NATS message."""
+    the platform default appears encrypted in credentials in the scrape input."""
     default_proxy = "http://platform-proxy.example.com:3128"
     original = settings.default_proxy_url
     settings.default_proxy_url = default_proxy
@@ -934,7 +934,7 @@ async def test_patch_job_remove_proxy(client, auth_headers, mock_temporal):
 
 async def test_create_job_with_cookies(client, auth_headers, mock_temporal):
     """POST /jobs with cookies stores encrypted secret, sets has_cookies=True,
-    omits cookies from response body, and injects encrypted credentials into NATS."""
+    omits cookies from response body, and injects encrypted credentials into the scrape input."""
     cookies = [{"name": "session", "value": "abc123", "domain": "example.com"}]
     response = await client.post(
         "/jobs",
@@ -1116,7 +1116,7 @@ async def test_create_job_actions_click_no_selector(client, auth_headers, mock_t
 
 
 async def test_create_job_with_actions(client, auth_headers, mock_temporal):
-    """POST /jobs with valid actions stores them in DB and includes them in the NATS message."""
+    """POST /jobs with valid actions stores them in DB and includes them in the scrape input."""
     actions = [
         {"type": "click", "selector": "#submit"},
         {"type": "wait", "milliseconds": 500},

@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import VARCHAR, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Text, text
+from sqlalchemy import VARCHAR, CheckConstraint, DateTime, ForeignKey, Index, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,7 +38,6 @@ class JobRun(Base):
     diff_detected: Mapped[bool | None] = mapped_column(nullable=True)
     diff_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    nats_stream_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(VARCHAR(16), nullable=True)
     warnings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     # Pre-ledger marker (migration 3.18 → P8). Not written since P8; read only by the
@@ -62,11 +61,6 @@ class JobRun(Base):
             "idx_job_runs_batch_item_id",
             "batch_item_id",
             postgresql_where=text("batch_item_id IS NOT NULL"),
-        ),
-        Index(
-            "idx_job_runs_nats_stream_seq",
-            "nats_stream_seq",
-            postgresql_where=text("nats_stream_seq IS NOT NULL"),
         ),
     )
 

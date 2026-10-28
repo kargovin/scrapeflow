@@ -22,10 +22,6 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int = 20
 
-    # NATS
-    nats_url: str = "nats://localhost:4222"
-    nats_max_deliver: int = 3  # max delivery attempts before NATS stops redelivering (ADR-001)
-
     # Temporal
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "scrapeflow"
@@ -60,7 +56,7 @@ class Settings(BaseSettings):
     # Credentials
     credentials_encryption_key: str = Field(
         default="", alias="CREDENTIALS_ENCRYPTION_KEY"
-    )  # symmetric key for encrypting proxy URLs + cookies in NATS messages
+    )  # symmetric key for encrypting proxy URLs + cookies in activity inputs
 
     # Cron Scheduler
     schedule_min_interval_minutes: int = 5

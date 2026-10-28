@@ -38,7 +38,6 @@ class ReadinessResponse(BaseModel):
     status: str
     db: str
     redis: str
-    nats: str
 
 
 class DependencyResponse(ReadinessResponse):
@@ -61,15 +60,6 @@ async def _check_redis(request: Request) -> str:
         async with aioredis.Redis(connection_pool=request.app.state.redis_pool) as client:
             await client.ping()
         return "ok"
-    except Exception as e:
-        return f"error: {e!s}"
-
-
-async def _check_nats(request: Request) -> str:
-    try:
-        if request.app.state.nats_client.is_connected:
-            return "ok"
-        return "error: not connected"
     except Exception as e:
         return f"error: {e!s}"
 
@@ -102,10 +92,9 @@ async def readiness(request: Request, response: Response):
         status="ok",
         db=await _check_db(),
         redis=await _check_redis(request),
-        nats=await _check_nats(request),
     )
 
-    if any(v != "ok" for v in [output.db, output.redis, output.nats]):
+    if any(v != "ok" for v in [output.db, output.redis]):
         output.status = "degraded"
         response.status_code = 503
 
@@ -118,11 +107,10 @@ async def dependencies(request: Request, response: Response):
         status="ok",
         db=await _check_db(),
         redis=await _check_redis(request),
-        nats=await _check_nats(request),
         minio=await _check_minio(request),
     )
 
-    if any(v != "ok" for v in [output.db, output.redis, output.nats, output.minio]):
+    if any(v != "ok" for v in [output.db, output.redis, output.minio]):
         output.status = "degraded"
         response.status_code = 503
 

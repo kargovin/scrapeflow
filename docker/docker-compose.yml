@@ -142,20 +142,6 @@ services:
       timeout: 5s
       retries: 5
 
-  nats:
-    image: nats:2.10-alpine
-    command: ['-js', '-sd', '/data']
-    volumes:
-      - nats_data:/data
-    ports:
-      - '4222:4222' # client
-      - '8222:8222' # monitoring
-    healthcheck:
-      test: ['CMD-SHELL', 'nc -z localhost 4222 || exit 1']
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -177,23 +163,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── NATS stream init (creates SCRAPEFLOW stream before API starts) ──────────
-
-  nats-init:
-    image: natsio/nats-box:latest
-    restart: 'no'
-    depends_on:
-      nats:
-        condition: service_healthy
-    command: >
-      sh -c "
-        if nats stream info SCRAPEFLOW --server nats://nats:4222 >/dev/null 2>&1; then
-          nats stream edit SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --server nats://nats:4222 --force;
-        else
-          nats stream add SCRAPEFLOW --subjects 'scrapeflow.jobs.>' --retention work --storage file --replicas 1 --server nats://nats:4222 --defaults;
-        fi
-      "
-
   # ── API ─────────────────────────────────────────────────────────────────────
 
   api:
@@ -207,7 +176,6 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scrapeflow}:${POSTGRES_PASSWORD:-scrapeflow}@postgres:5432/${POSTGRES_DB:-scrapeflow}
       REDIS_URL: redis://redis:6379/0
-      NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
@@ -224,12 +192,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      nats:
-        condition: service_healthy
       minio:
         condition: service_healthy
-      nats-init:
-        condition: service_completed_successfully
     develop:
       watch:
         - action: sync
@@ -373,5 +337,4 @@ volumes:
   postgres_data:
   temporal_postgres_data:
   redis_data:
-  nats_data:
   minio_data:

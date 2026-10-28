@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
 from app.auth.api_key import generate_api_key, hash_api_key
-from app.core import minio, nats
+from app.core import minio
 from app.core.db import AsyncSessionLocal
 from app.core.rate_limit import check_rate_limit
 from app.core.redis import close_pool, create_pool
@@ -31,9 +31,7 @@ async def init_clients():
     """Initialize all clients once for the entire test session."""
     app.state.redis_pool = create_pool()
     app.state.minio = await minio.create_client()
-    app.state.nats_client, app.state.nats_js = await nats.connect()
     yield
-    await nats.disconnect(app.state.nats_client)
     await minio.close_client(app.state.minio)
     await close_pool(app.state.redis_pool)
 
@@ -180,7 +178,7 @@ async def _noop_lifespan(app):
 def patched_ws_app():
     """Replace the FastAPI lifespan with a no-op for WebSocket tests.
 
-    TestClient(app) triggers the lifespan (re-initialises Redis/NATS/MinIO and
+    TestClient(app) triggers the lifespan (re-initialises Redis/MinIO and
     starts background tasks) which conflicts with the session-scoped init_clients
     fixture. Patching the lifespan to a no-op lets TestClient run the WebSocket
     handshake against the fully-initialised app.state without double-setup.

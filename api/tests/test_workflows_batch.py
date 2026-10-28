@@ -21,7 +21,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from app.core.db import AsyncSessionLocal
-from app.core.dispatch import build_batch_scrape_input, build_batch_scrape_message
+from app.core.dispatch import build_batch_scrape_input
 from app.main import app
 from app.models.batch import Batch, BatchItem
 from app.models.job_runs import JobRun
@@ -783,12 +783,18 @@ async def test_a_cancel_leaves_a_finished_run_finished(
     assert sorted(r.status for r in runs.values()) == ["cancelled", "cancelled", "completed"]
 
 
-async def test_the_batch_scrape_input_carries_what_the_nats_message_carries(db_user):
+async def test_the_batch_scrape_input_carries_the_batchs_settings(db_user):
     batch, [item], [run] = await _batch(
         db_user.id, ["pending"], output_format="json", engine="playwright", respect_robots=True
     )
-    message = build_batch_scrape_message(batch, item, run).model_dump(mode="json")
     scrape_input = build_batch_scrape_input(batch, item, run).model_dump(mode="json")
-    for field in ("run_id", "engine", "crawl_context", "schema_version"):
-        message.pop(field, None)
-    assert scrape_input == message
+
+    # A batch item is not a job (ADR-006): no credentials, actions or playwright_options.
+    assert scrape_input == {
+        "artifact_id": str(run.id),
+        "url": item.url,
+        "output_format": "json",
+        "credentials": None,
+        "options": {"respect_robots": True, "actions": None},
+        "playwright_options": None,
+    }

@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.core.db import AsyncSessionLocal
-from app.core.dispatch import build_scrape_input, build_scrape_message
+from app.core.dispatch import build_scrape_input
 from app.main import app
 from app.models.job import Job
 from app.models.job_runs import JobRun
@@ -120,7 +120,7 @@ async def test_a_workflow_that_cannot_start_fails_the_run_with_503(
     assert delivery.event == "job.failed"
 
 
-async def test_the_scrape_input_carries_what_the_nats_message_carries(db_user):
+async def test_the_scrape_input_carries_the_jobs_settings(db_user):
     async with AsyncSessionLocal() as db:
         job = Job(
             user_id=db_user.id,
@@ -138,13 +138,34 @@ async def test_the_scrape_input_carries_what_the_nats_message_carries(db_user):
         await db.refresh(job)
     credentials = {"encrypted_proxy_url": "p", "encrypted_cookies": "c"}
 
-    message = build_scrape_message(job, run, credentials).model_dump(mode="json")
     scrape_input = build_scrape_input(job, run, credentials).model_dump(mode="json")
 
-    # The activity contract drops the NATS-only fields (B.1); everything else is equal.
-    for field in ("run_id", "engine", "crawl_context", "schema_version"):
-        message.pop(field, None)
-    assert scrape_input == message
+    assert scrape_input == {
+        "artifact_id": str(run.id),
+        "url": "https://example.com/x",
+        "output_format": "html",
+        "credentials": credentials,
+        "options": {"respect_robots": True, "actions": [{"type": "wait", "milliseconds": 5}]},
+        "playwright_options": {"wait_strategy": "load"},
+    }
+
+
+async def test_playwright_options_ride_only_on_the_playwright_engine(db_user):
+    async with AsyncSessionLocal() as db:
+        job = Job(
+            user_id=db_user.id,
+            url="https://example.com/x",
+            engine="http",
+            playwright_options={"wait_strategy": "load"},
+        )
+        db.add(job)
+        await db.flush()
+        run = JobRun(job_id=job.id, status="pending", lane="v2")
+        db.add(run)
+        await db.commit()
+        await db.refresh(job)
+
+    assert build_scrape_input(job, run, None).playwright_options is None
 
 
 async def _job_with_run(user_id, run_lane) -> tuple[Job, JobRun]:
