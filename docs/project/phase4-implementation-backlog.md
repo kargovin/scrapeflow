@@ -2838,7 +2838,14 @@ NATS message now assert the input's values; a third pins `playwright_options` to
 (the mutation pass found it unpinned — the old parity test shared the gate with the builder it compared
 against). `test_health` asserts the exact key sets. Suite **738** (739 − 2 + 1), contracts **41**, ruff
 clean (the 7 pre-existing `UP042`/`RUF059` unchanged). **Mutation pass 6/6** after the new test (5/6
-before it). **Compose:** api rebuilt without `nats-py`, stack recreated with `--remove-orphans` (the
+before it). **Pre-release mutation pass (owner: "do a mutation test before we release"): 17/17** over
+everything H.2 touched — nine on the two input builders (artifact key, format, actions, robots,
+credentials, engine gate), seven on `/health` (each dependency dropped from each endpoint's verdict, a
+`nats` key back, `minio` gone from `/deps`), and `import nats` in `main.py` (fails: `ModuleNotFoundError`
+— the image is NATS-free). First run 12/17; the five survivors were two real gaps, closed: the job-input
+test used the default `html` (now `markdown`), and **no test ever took db or redis down** on either
+endpoint (pre-existing; H.2 rewrote those lines) — `test_a_serving_dependency_down_is_degraded`, four
+cases. Suite **742**. **Compose:** api rebuilt without `nats-py`, stack recreated with `--remove-orphans` (the
 NATS containers went); `/health/ready` → `{"status":"ok","db":"ok","redis":"ok"}`; through the HTTP API
 an http job, a playwright job and a 2-URL batch `completed`. ⚠️ Cleanup slip: `DELETE /batch/{id}`
 only cancels (409 on a finished batch — existing behaviour), and I deleted the test user by SQL before

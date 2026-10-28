@@ -1,6 +1,9 @@
 import asyncio
 
+import pytest
+
 from app.main import app
+from app.routers import health
 
 
 async def test_health(client):
@@ -63,8 +66,6 @@ async def test_dependencies_minio_missing_bucket(client, monkeypatch):
 
 
 async def test_dependencies_minio_timeout(client, monkeypatch):
-    from app.routers import health
-
     monkeypatch.setattr(health, "_MINIO_CHECK_TIMEOUT_SECONDS", 0.01)
 
     async def hang(*args, **kwargs):
@@ -89,3 +90,17 @@ async def test_readiness_unaffected_by_minio(client, monkeypatch):
     response = await client.get("/health/ready")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+@pytest.mark.parametrize("path", ["/health/ready", "/health/deps"])
+@pytest.mark.parametrize(("check", "key"), [("_check_db", "db"), ("_check_redis", "redis")])
+async def test_a_serving_dependency_down_is_degraded(client, monkeypatch, path, check, key):
+    async def down(*args, **kwargs):
+        return "error: connection refused"
+
+    monkeypatch.setattr(health, check, down)
+
+    response = await client.get(path)
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()[key] == "error: connection refused"

@@ -12,7 +12,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from app.core.db import AsyncSessionLocal
 from app.core.dispatch import build_scrape_input
 from app.main import app
-from app.models.job import Job
+from app.models.job import Job, OutputFormat
 from app.models.job_runs import JobRun
 from app.models.webhook_delivery import WebhookDelivery
 from app.workflows.job import JobRunInput, JobWorkflow
@@ -125,6 +125,7 @@ async def test_the_scrape_input_carries_the_jobs_settings(db_user):
         job = Job(
             user_id=db_user.id,
             url="https://example.com/x",
+            output_format=OutputFormat.markdown,
             engine="playwright",
             respect_robots=True,
             playwright_options={"wait_strategy": "load"},
@@ -143,7 +144,7 @@ async def test_the_scrape_input_carries_the_jobs_settings(db_user):
     assert scrape_input == {
         "artifact_id": str(run.id),
         "url": "https://example.com/x",
-        "output_format": "html",
+        "output_format": "markdown",
         "credentials": credentials,
         "options": {"respect_robots": True, "actions": [{"type": "wait", "milliseconds": 5}]},
         "playwright_options": {"wait_strategy": "load"},

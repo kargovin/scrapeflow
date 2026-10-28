@@ -144,8 +144,9 @@ Detail, calls and the **runbook**: implementation backlog H.2.
 - **Call (TL, reversible):** `job_runs.nats_stream_seq` is **unmapped, not dropped** — the old workflow-worker
   pod overlaps the new api's startup migration, and its `select(JobRun)` would hit a missing column. **I.1
   carries the drop.** Until then `alembic check` reports it (plus the dedup false positive).
-- **Verified:** suite **738**, contracts 41, ruff clean (7 pre-existing), mutation **6/6** (one gap closed — a
-  new test pins `playwright_options` to the playwright engine); compose without NATS — `/health/ready`
+- **Verified:** suite **742**, contracts 41, ruff clean (7 pre-existing), mutation **6/6** at build, then the
+  owner's pre-release pass **17/17** (first run 12/17 — two gaps closed: a non-default job format, and
+  db/redis down on `/health/ready` + `/deps`, never tested before); compose without NATS — `/health/ready`
   `db`+`redis` only; http + playwright jobs and a 2-URL batch `completed`; cleaned up.
 - ⚠️ Dev `docker_nats_data` volume left on disk — `docker volume rm docker_nats_data` when you like. Root `.env`
   still has `NATS_URL` (ignored).
