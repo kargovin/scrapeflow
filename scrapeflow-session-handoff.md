@@ -144,6 +144,20 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-10-28 *(clock)*
 
+🔧 **G.1 BUILT (2026-10-28, eighth session; not pushed, not released).** Owner: "do g1", then "do a mutation test
+before we release". `result_consumer.py` deleted — the API runs **no background task** — and with it the v1
+dispatch arms and `JOB_LANE`/`BATCH_LANE` (every new run is `lane='v2'`; a `v1` run would now never finish).
+Dedup goes with the file (owner's D.2 call; D.2's spec keeps the algorithm, `diff.py` stays); NATS connection,
+message models and builders stay for H.2. Detail, calls and the **runbook**: implementation backlog G.1.
+- **Verified:** suite **739** (770 − 33 deleted + 2 new), contracts 69, mutation **20/20** (two gaps found and
+  closed), compose job + batch end to end on the real engine.
+- ⚠️ **Found in dev:** the NATS-mode workers chewing an 8.37M-message dev backlog with no consumer — 180 unrecorded
+  objects in an hour. They now sit behind `profiles: [v1]`. Dev bucket ~2,130 unrecorded objects and the stream left
+  alone (owner's call). Dev also holds ~3,000 non-terminal `v1` runs — test residue since 2026-07-03, not real work.
+- `conftest.mock_temporal` is **autouse** now — no test reaches the compose Temporal through `app.state`.
+- **Next (owner):** G.1 runbook step 0 (prod read-only: no non-terminal `v1` runs; four durables 0/0), ff `main`,
+  steps 1–2; then step 3's infra tidy. Then H.1 — soon, the prod NATS Deployments keep running until it.
+
 🚀 **GROUP F RELEASED + CLOSED (2026-10-28, seventh session).** Owner: "pushed; see both the changes; close out this
 session and sec F". **Deployed code is `41a348f`** (api + workflow-worker; CI green). Releases: `261f931..3b9cf9c`
 (F.1–F.7 + BUG-023, 2026-10-27 — owner ran the runbook, steps 2–4 in their own terminal) and `41a348f` (the

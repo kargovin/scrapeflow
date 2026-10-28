@@ -101,7 +101,7 @@
 | F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | ✅ **RELEASED 2026-10-27** (`main` `261f931..3b9cf9c`; no infra change) — schedules + webhooks on Temporal in prod; owner verified a 5-min schedule, its webhooks, pause, delete |
 | F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ✅ **RELEASED** with F.6 (`56a06e6`) + run-history fix **`41a348f` 2026-10-28** — owner clicked through in prod |
 | **G** | **Consumer deletion** | |
-| G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ⬜ |
+| G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ Built 2026-10-28 (not released) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` removed; mutation 20/20; runbook in G.1 |
 | **H** | **NATS removal** | |
 | H.1 | Delete NATS-bound worker Deployments (obligation 3) | ⬜ |
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ⬜ |
@@ -2629,9 +2629,77 @@ with view / hide per run as on a batch's items. 3 tests, 4 mutants caught; suite
 #### G.1 — 🚀 Delete `result_consumer.py`
 
 **Drain gate at deletion:** `api-result-consumer` zero/zero; no `lane='v1'` rows non-terminal.
-D.2 already rescued the homeless pair; verify nothing else in the file is unported (the `quota.py`
+~~D.2 already rescued the homeless pair~~ (D.2 was dropped by the owner 2026-10-12 — see below); verify nothing else in the file is unported (the `quota.py`
 wall branch is job-lane behaviour D.3 kept). `JobNotifier` stays (BUG-009 survives).
 **Depends on:** F.6
+
+**Built** *(2026-10-28; not released)*. Deleted `core/result_consumer.py` and its lifespan task — the API
+runs **no background task** now. Audit of the file against the v2 lane:
+- **Ported:** the job and batch status paths, LLM dispatch, ledger accounting, the storage wall
+  (`activities/job_runs.py`, D.3), the cancel-wins rule, the batch close (`activities/batches.py`, E.1).
+- **Not ported, by the owner's D.2 call:** content-hash dedup and the reporting diff — they go with the
+  file. D.2's spec above records the algorithm for Monitors; **`core/diff.py` stays** (no caller now) per
+  the *Do not delete* list. `JobWorkflow` still writes `content_hash`, so the baseline exists.
+- **Dead with it, deleted:** `quota.handle_storage_quota_exceeded` (its only caller).
+
+**Calls made at build (TL, reversible):** the **v1 dispatch arms go too** — `JOB_LANE` / `BATCH_LANE` are
+removed and every new job and batch run is `lane='v2'` (constructors explicit; the ORM default is now
+`v2`, the server default stays `v1` for the pre-D.1 rows — no migration). Without the consumer a `v1`
+run would sit `pending` forever, and both settings defaulted to `v1` (compose sets neither — **dev ran jobs
+and batches on v1 until this commit**). Same move as F.6's `SCHEDULE_LANE`. `dispatch_run` loses its
+`JetStreamContext`; `get_jetstream` is gone. **Left for H.2:** the API's NATS connection (`/health` reads
+it), `ScrapeMessage`/`LLMMessage` and their builders (the contract test's NATS arm), the NATS subjects.
+The cancel paths still filter `lane='v2'` before telling the engine — harmless with no `v1` row active.
+
+**Tests:** 30 consumer tests deleted with the file (`test_deduplication.py` entirely) and 3 v1-lane tests;
+`test_permanent_delete_releases_every_ledger_row` kept, its setup now writes the ledger rows directly.
+`conftest.mock_jetstream` → **`mock_temporal`, autouse**: a fake client on `app.state.temporal`, so no
+test starts a real workflow or Schedule on compose (a test's own fake, set later, wins);
+`started_scrape()` reads the one started `JobWorkflow`'s input. Assertions on the NATS payload now read the
+`ScrapeInput`. Suite **737** (770 − 33), then **739** with the two below.
+
+**Mutation pass (2026-10-28, owner: "do a mutation test before we release"): 20/20 caught.** Six on what G.1
+changed (both run constructors' lane, the ORM default, both start-failure paths, the workflow id) and
+fourteen on the v2 code that now carries the 30 deleted tests' behaviour (the storage wall, its boundary
+and its deletes, every object of a stage charged, `content_hash`, a stopped run's objects, cancel wins, the
+webhook event filter, a failed run's error, a deleted LLM key, an unstarted run's webhook, a batch's
+`partial_failure`, the ledger release on permanent delete). First run 18/20: **two gaps opened by the
+deletions**, closed by new tests in `test_workflows_job.py` — a stage's second object charged (v1's
+`test_screenshots_are_recorded_and_charged` had it) and objects filling the limit exactly (`<=` vs `<`).
+
+**Compose (2026-10-28):** a job (`completed`, v2, one ledger row) and a two-URL batch (`partial_failure` —
+example.com's genuine 404 on `/a`) through the HTTP API against the real engine; cleaned up through the
+ledger. ⚠️ **Found: the drain hazard, live in dev.** `docker compose up -d` started the three NATS-mode
+workers, whose dev stream holds a months-old backlog (8.37M messages; `go-worker` 7.4M pending,
+`python-playwright-worker` 716k): they kept scraping and uploading, and with no consumer **180 objects
+landed unrecorded** in an hour. Stopped; the three services now sit behind **`profiles: [v1]`** in
+`docker-compose.yml` (opt in with `--profile v1`; H.1 deletes them). The dev bucket's ~2,130 unrecorded
+objects and the stream are left as they are (`reconcile_storage_ledger --apply` and a stream purge are
+the owner's call). Prod is guarded by step 0's durables check — and H.1 should follow soon, since the prod
+NATS Deployments keep running after this release.
+
+**Ships:** api image only (also the workflow worker). **No migration, no infra change needed** — the
+infra repo's `JOB_LANE` / `BATCH_LANE` env vars are ignored by the new image (`extra="ignore"`).
+
+**Runbook** (owner-run):
+0. **Before (read-only, prod):** `SELECT lane, status, count(*) FROM job_runs WHERE status IN
+   ('pending','running','processing') GROUP BY 1, 2` → expect **no `v1` rows**. Any there are already
+   stranded since F.6 unless a NATS worker still holds them: cancel them (`DELETE /jobs/{id}`, `DELETE
+   /batch/{id}`) — a result arriving after the release is read by nothing. NATS (nats-box pod):
+   `nats --server nats://scrapeflow-nats:4222 consumer ls SCRAPEFLOW`, then `consumer info SCRAPEFLOW
+   <durable> --json` for each → `num_pending` 0 and `num_ack_pending` 0 (`api-result-consumer` and the
+   three worker durables — a scrape in flight would publish a result nothing reads).
+1. **ff `main` to `develop`, push.** Watch CI `replay` (41) + `build-api`; Flux bumps api and
+   workflow-worker. Check: api log has `NATS connected` and **no** `NATS result consumer started`;
+   workflow-worker started clean.
+2. **Verify** (your terminal, an API key): `POST /jobs` `{"url":"https://example.com/"}` → `completed`;
+   `POST /batch` with two URLs → `completed`. Both lanes were already v2 in prod; this proves nothing
+   regressed.
+3. **After step 1 has rolled out** (infra, tidy-up, optional): drop the `JOB_LANE` / `BATCH_LANE` entries
+   from `app/api.yaml`. ⚠️ **Never before** — the old image defaults both to `v1`.
+
+**Rollback:** an image revert to `41a348f` — safe while step 3 is undone (the env still says `v2`).
+Prefer a forward fix.
 
 ---
 
