@@ -103,7 +103,7 @@
 | **G** | **Consumer deletion** | |
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ **RELEASED 2026-10-28** (`main` `41a348f..bc30025`, infra `682cc52`) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` gone; owner verified a job + a batch |
 | **H** | **NATS removal** | |
-| H.1 | Delete NATS-bound worker Deployments (obligation 3) | ⬜ |
+| H.1 | Delete NATS-bound worker Deployments (obligation 3) | 🔧 Built 2026-10-28 (`8a62da8`, infra `c92e7dd` local) — not released; runbook in H.1 |
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ⬜ |
 | **I** | **API thinning** | |
 | I.1 | Alembic-on-startup made multi-replica safe | ⬜ |
@@ -2721,12 +2721,81 @@ ones); the Temporal-bound ones become the only ones. `WORKER_MODE` flag and the 
 removed from all three workers.
 **Depends on:** G.1
 
+**Built** *(2026-10-28; `8a62da8`, infra `c92e7dd`; nothing pushed)*. Owner: "build it".
+- **Go:** `internal/worker/` deleted whole (it was the NATS transport only — `internal/scrape` and
+  `internal/activity` never imported it); `main.go` serves the activity, no mode branch; `config.go` loses
+  `WORKER_MODE`, `NATS_URL`, `NATS_MAX_DELIVER`; `nats.go` out of `go.mod`.
+- **LLM + Playwright:** `worker.py` (the NATS handler) and `models.py` (the NATS message schemas) deleted;
+  `temporal_main.py` **became `main.py`** — the Dockerfile `CMD` and `entrypoint.sh` still run
+  `python -m worker.main`, so the Xvfb/PID-1 contract is untouched; the early-SIGTERM guard before the slow
+  imports is kept. Settings removed: `worker_mode`, `nats_url`, `*_ack_wait_seconds`,
+  `*_max_delivery_attempts`, `*_retry_{base,max}_delay_seconds`; `errors.retry_delay` (the `nak` backoff)
+  went too — the classifier itself is unchanged. `nats-py` out of both `pyproject.toml` + `uv.lock`.
+- **Compose:** the three `profiles: [v1]` services deleted; `WORKER_MODE` dropped from the `-temporal` ones.
+  Service and Deployment names keep `-temporal` (a rename is a delete + create in prod for no gain).
+- **Pulled forward from H.2 (TL call, reversible):** the **contracts NATS arm** (`test_message_contract.py`
+  + its five fixtures and the Go `contract_test.go`) — it fed API messages into the worker parsers this
+  task deletes, so it could not outlive them. The API side (`messages.py`, the builders, subjects, the
+  API's `nats-py`) stays for H.2. The workers' NATS deps went here for the same reason: nothing imports them.
+
+**Tests:** ⚠️ **`playwright-worker/tests/test_main.py` was the only coverage of the render pipeline's
+options** — BUG-015 (wait shares goto's budget), BUG-016 (CSS never blocked), BUG-017 (proxy userinfo
+decoded), cookies before goto, the CSP route, actions after goto — reached through the NATS handler. Ported
+to **`tests/test_scrape.py`** against `scrape.render()` directly (15 tests). Found porting: the old ordering
+tests passed only because the NATS handler swallowed a `BlockedPage` — a `goto` stub returning `None` on the
+75-byte default page trips Tier 1's `empty_body`; the new file renders a real-sized page. Go: two
+`worker_robots_test.go` cases had no activity equivalent — `respect_robots=false` skips the check and a
+malformed proxy URL is non-retryable — ported to `internal/activity/scrape_test.go`. Deleted: the NATS
+handler, message-model and `retry_delay` tests. **Counts:** llm-worker 166, playwright-worker 202, Go all
+green (`vet` incl. `-tags integration`, golangci-lint 0), contracts **41** (69 − 28 NATS-arm tests).
+**Mutation pass: 12/12 caught** — ten on `scrape.render()` (CSS back in the glob, wait without timeout, no
+`unquote`, no proxy, no cookie domain, no CSP route, CSP never fulfils, context never closed, actions before
+goto, cookies after goto), two on the Go activity (robots checked regardless, proxy parse error ignored);
+each by the test named for it. One Go mutant did not compile on the first try — rerun, not counted.
+**Compose (2026-10-28):** the three workers rebuilt and recreated — each logs its started line on its
+queues (`scrape-http`; `llm` + `content`; `scrape-playwright` + `crawl`). Through the HTTP API: an http job
+and a playwright job (`block_images`) `completed`; an LLM job on a fake Anthropic key `failed` with the
+provider's 401 (the activity ran); a one-page playwright crawl `completed`. Cleaned up through the API
+(permanent deletes → ledger 0, counter 0, objects gone) and the test user deleted.
+
+**Ships:** the three worker images (CI's path filter; **no api image, no replay job, no migration**).
+Infra: `c92e7dd` deletes `app/{http,playwright,llm}-worker.yaml` (Flux `prune: true` removes the
+Deployments, as at E.7); the `ImagePolicy`s stay — the `-temporal` Deployments use them.
+
+**Runbook** (owner-run):
+0. **Before (read-only, prod):** `kubectl -n scrapeflow get deploy` → the three NATS-mode and the three
+   `-temporal` worker Deployments. Nothing publishes to NATS since G.1, so a worker durable's pending count
+   is old backlog only and a result from it is read by nothing — not a gate.
+1. **Infra first: push `c92e7dd`.** Check `kubectl -n scrapeflow get deploy scrapeflow-http-worker
+   scrapeflow-playwright-worker scrapeflow-llm-worker` → NotFound ×3; the `-temporal` three unchanged.
+   ⚠️ **Order matters:** a new image on a NATS-mode Deployment has no NATS mode, dials Temporal at the
+   default `localhost:7233` and crash-loops.
+2. **ff `main` to `develop`, push.** Watch `build-http-worker`, `build-playwright-worker`,
+   `build-llm-worker` (api and replay skip). Flux bumps the three `-temporal` Deployments. Logs:
+   `Temporal worker started … task_queue=scrape-http`; `temporal_worker_started … task_queues=['llm',
+   'content']`; `temporal_worker_started … task_queue=scrape-playwright … crawl_queue=crawl`. The
+   playwright and LLM pods drain up to 630 s / 400 s if a call is in flight.
+3. **Verify** (your terminal, an API key): `POST /jobs` `{"url":"https://example.com/"}` and the same
+   with `"engine":"playwright"` → `completed`; optionally `POST /crawls` `{"seed_url":"https://example.com/",
+   "max_pages":1,"engine":"playwright"}` → `completed`.
+4. **After step 2 has rolled out** (infra, tidy-up, optional): drop `WORKER_MODE` from the three
+   `-temporal` manifests, their "Needs an image with `WORKER_MODE`" comments and the README's three
+   matching warnings. ⚠️ **Never before** — an older image defaults to NATS mode.
+
+**Rollback:** revert the three `-temporal` images to their previous tags — safe while step 4 is undone
+(`WORKER_MODE=temporal` still set). The NATS-mode Deployments are not needed for it. After step 4, fix
+forward.
+
 #### H.2 — 🚀 Remove NATS
 
 `nats-init-job.yaml`, `infrastructure/nats.yaml`, `nats-py`/`nats.go` deps, `messages.py`'s
 `to_nats_bytes`, `constants.py` subjects, the `contracts/` NATS arm (the activity arm stays),
 compose services, `nats_stream_seq` dropped (the views do not read it — no drop/recreate).
 **Depends on:** H.1
+
+⚠️ **Already done at H.1:** the `contracts/` NATS arm and the **workers'** `nats-py`/`nats.go` — what is
+left is the API side (`app/core/nats.py`, the `/health` NATS check, `messages.py` + the dispatch
+builders, `constants.py` subjects, the API's `nats-py`), the infra, compose and `nats_stream_seq`.
 
 ---
 

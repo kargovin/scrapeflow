@@ -70,43 +70,35 @@ container predates the mount, `docker compose up -d api` once.
 **Worker tests** — not wired into compose; mount the source over the built image:
 ```bash
 # from repo root
-docker run --rm -v "$PWD/llm-worker:/app" -w /app docker-llm-worker python -m pytest -q
+# images from `docker compose build llm-worker-temporal playwright-worker-temporal`
+docker run --rm -v "$PWD/llm-worker:/app" -w /app --entrypoint python \
+  docker-llm-worker-temporal -m pytest -q -p no:cacheprovider
 
 docker run --rm -v "$PWD/playwright-worker/worker:/app/worker:ro" \
   -v "$PWD/playwright-worker/tests:/app/tests:ro" -w /app \
-  --entrypoint python scrapeflow-playwright:ackfix -m pytest tests/ -q -p no:cacheprovider
-# ⚠️ the docker-playwright-worker image on disk is stale (predates credentials —
-#    no cryptography, so test_main.py fails to import). Use a newer tag.
+  --entrypoint python docker-playwright-worker-temporal -m pytest tests/ -q -p no:cacheprovider
+# ⚠️ since H.1 there are no NATS-mode images; docker-llm-worker / docker-playwright-worker on
+#    disk are stale v1 builds.
 
 cd http-worker && go test ./...          # non-integration
 go vet -tags integration ./...           # compile the integration-tagged tests
-
-# ⚠️ the coordinator needs env vars even for pure-unit tests — coordinator/config.py
-#    instantiates Settings() at import time, so collection fails without them.
-docker run --rm -e DATABASE_URL="postgresql+asyncpg://u:p@localhost/db" \
-  -e NATS_URL="nats://localhost:4222" \
-  -v "$PWD/coordinator:/app" -w /app docker-coordinator python -m pytest -q
 ```
 
-**Cross-service contract test** (ADR-011 §6) — the only test that feeds an API-produced
-message into each worker's *real* parser. Needs the repo root mounted, because the four
-message modules live in four build contexts:
+**Cross-service contract test** — `contracts/test_activity_contract.py` (B.1): API activity
+inputs through each worker's real parser, and each worker's outputs back through the API's models,
+via the Temporal Pydantic converter. Needs the repo root mounted (the modules live in separate build
+contexts). The NATS message arm (ADR-011 §6) was deleted at H.1 with the worker parsers it fed.
 ```bash
 # from repo root
 docker run --rm -v "$PWD:/repo" -w /repo docker-api \
   /app/.venv/bin/python -m pytest contracts -q
 
-# after an intentional contract change, to refresh the Go fixtures
+# after an intentional contract change, to refresh the Python-written fixtures
 docker run --rm -v "$PWD:/repo" -w /repo -e UPDATE_CONTRACT_FIXTURES=1 docker-api \
   /app/.venv/bin/python -m pytest contracts -q
 ```
-⚠️ The Go arm reads `contracts/fixtures/*.json` and is **not optional**: the silent half of
-BUG-005 (a JSON `null` unmarshalled to `""` with no error) exists *only* on the Python→Go
-wire, so a Python-only contract test would not reach the failure that actually shipped.
-
-The activity arm (B.1) is `contracts/test_activity_contract.py` — same command. Its fixtures run
-both ways; the Go-written one regenerates from the Go side, and **needs `-count=1`** (a cached
-pass skips the write):
+The Go-written fixture regenerates from the Go side, and **needs `-count=1`** (a cached pass skips
+the write):
 ```bash
 cd http-worker && UPDATE_CONTRACT_FIXTURES=1 go test -count=1 ./internal/activity/
 ```
@@ -143,6 +135,20 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 ---
 
 ## Current state — as of 2026-10-28 *(clock)*
+
+🔧 **H.1 BUILT (2026-10-28, ninth session; nothing pushed, nothing released).** Owner: "build it". The NATS mode
+is gone from all three workers — Go `internal/worker/` deleted, `WORKER_MODE`/NATS config out, each Python
+`temporal_main.py` became `main.py` (the Docker `CMD` and `entrypoint.sh` unchanged), `nats-py`/`nats.go` dropped;
+compose's three `profiles: [v1]` services deleted; the contracts NATS arm pulled forward from H.2 (its parsers are
+gone). `develop` = `8a62da8` + docs, **not pushed**. Infra **`c92e7dd`** (the three NATS-mode Deployments
+deleted) **local, not pushed**. Detail, calls and the **runbook**: implementation backlog H.1.
+- **Verified:** llm-worker 166, playwright-worker 202, Go green (vet incl. integration tag, golangci-lint 0),
+  contracts 41; mutation **12/12**; compose — http + playwright jobs `completed`, an LLM job's fake key → the
+  provider's 401, a one-page playwright crawl `completed`; cleaned up through the API, test user deleted.
+- ⚠️ **Found:** `test_main.py` held the only coverage of BUG-015/016/017 and the render options — ported to
+  `tests/test_scrape.py` against `render()` (and it hid a `BlockedPage` the NATS handler swallowed).
+- **Next (owner):** runbook — **infra `c92e7dd` first**, then ff `main` (three worker images; no api, no replay, no
+  migration), then step 4's `WORKER_MODE` tidy only after the rollout. Then H.2.
 
 🚀 **G.1 RELEASED (2026-10-28, eighth session).** Owner ran the runbook (step 0 themselves) and the `main` ff
 `41a348f..bc30025`; CI `replay` 41 + `build-api` green; api + workflow-worker on `bc30025`, `NATS connected`, no
@@ -1564,6 +1570,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-28 (H.1 build close):** `develop` = `8a62da8` (H.1) + docs, **not pushed**; `main` = `origin/main` = `bc30025` (deployed). Infra `main` = `c92e7dd`, **1 ahead** of `origin/main` (`682cc52`), not pushed. Compose: the NATS-mode worker services are gone from the file; the three `-temporal` workers run the H.1 images. `tmp/` untracked, pre-existing.
 - **2026-10-28 (G.1 release close):** `main` = `origin/main` = `bc30025` (deployed); `develop` = docs closeout on top, pushed. Infra `main` = `origin/main` = `682cc52` (lane env vars dropped). Compose: NATS-mode workers stopped and behind `profiles: [v1]`; the rest up. `tmp/` untracked, pre-existing.
 - **2026-10-27 (F.0 + BUG-023 close):** `develop` = `2eba735` (ADR-013) · `2983a47` (BUG-023) + docs, not pushed; `main` = `origin/main` = `261f931` (deployed). Infra unchanged.
 - **2026-10-27 (E.7 release close):** `main` = `origin/main` = `develop` = `origin/develop` = `261f931` (deployed) before this docs closeout, which sits on `develop`. Infra `main` = `origin/main` = `bf591bc` (+ Flux's tag bumps). `tmp/` untracked, pre-existing.
@@ -1721,6 +1728,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-28 *(clock, ninth)* | **🔧 H.1 BUILT.** NATS mode removed from the three workers (Go `internal/worker`, Python `worker.py`/`models.py`, `temporal_main` → `main`, NATS settings + deps), compose v1 services and the contracts NATS arm deleted; render tests ported to `test_scrape.py` (BUG-015/016/017 coverage), two Go tests to the activity; mutation 12/12; compose e2e on all three workers + a crawl; infra Deployments removed locally | `8a62da8` + docs; infra `c92e7dd` (local) |
 | 2026-10-28 *(clock, eighth)* | **🚀 G.1 RELEASED.** `result_consumer.py`, the v1 dispatch arms and `JOB_LANE`/`BATCH_LANE` deleted; autouse `mock_temporal`; suite 739; mutation 20/20 (two gaps closed); compose e2e; dev drain hazard found (NATS workers behind `profiles: [v1]`); owner ran the runbook + `main` ff; infra step 3 pushed; env verified gone | `65fc93f`, `bc30025`, `fad0e7d` + closeout; infra `682cc52` |
 | 2026-10-27 *(clock, sixth)* | **📐 F.0 done — ADR-013 Accepted; 🔧 BUG-023 fixed.** Plain walkthrough of F.0 and the catch-up window; owner took §5 as recommended (cap 20, paused not counted, catch-up 365 d). Then BUG-023 explained and built (per-user lock, 8 tests, 7/7 mutations). `2eba735`; BUG-023 `2983a47` |
 | 2026-10-27 *(clock, fifth)* | **🚀 E.7 RELEASED, Group E closed.** Infra push (coordinator pruned), owner's `main` ff `faa1f83..261f931`, rollouts + migration 4.7 watched; owner verified a crawl and the SPA pages. Bugs closed in the docs. | docs closeout; infra `bf591bc` pushed |
