@@ -56,8 +56,8 @@ async def upload_screenshot(
     """
     Upload a screenshot PNG; return the bucket-qualified path.
 
-    The key carries no timestamp: artifact_id is unique per execution, so a NATS
-    redelivery overwrites the previous attempt's screenshots in place instead of
+    The key carries no timestamp: artifact_id is unique per execution, so a
+    retried attempt overwrites the previous attempt's screenshots in place instead of
     leaving a fresh orphaned set behind on every retry.
     """
     bucket = settings.minio_bucket

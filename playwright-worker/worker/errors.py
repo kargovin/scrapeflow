@@ -1,11 +1,7 @@
 """
 Transient vs terminal failure classification for the Playwright worker (UF-003 3a).
 
-Ported from ``llm-worker/worker/errors.py``. Same failure mode: the worker used to
-ack on *every* exception, so a momentary infra blip failed a job permanently — the
-ack preempts JetStream's redelivery, so the queue never gets the chance to retry.
-The Q5 fix built this classifier for the LLM worker only; this brings the Playwright
-worker to the same bar.
+Ported from ``llm-worker/worker/errors.py``.
 
   * terminal  — bad/undecryptable credentials, a genuine site failure, a bug.
                 Retrying cannot help and just burns a headed-Chrome render.
@@ -35,7 +31,7 @@ from miniopy_async.error import S3Error
 TRANSIENT = "transient"
 TERMINAL = "terminal"
 
-# Infra-level failures that recover on their own — worth a bounded redelivery.
+# Infra-level failures that recover on their own — worth a bounded retry.
 _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # MinIO unreachable (connection refused) or the connection dropped mid-request.
     # This is the literal "MinIO down" case, and it is NOT an S3Error — matching only
@@ -81,19 +77,8 @@ def classify(exc: BaseException) -> str:
     return TERMINAL
 
 
-def retry_delay(attempt: int, base: float, cap: float) -> float:
-    """Exponential backoff for the nak delay, in seconds.
-
-    ``attempt`` is ``msg.metadata.num_delivered`` — 1 on first delivery — so the first
-    retry waits ``base``, the second ``2*base``, and so on up to ``cap``.
-    """
-    if attempt < 1:
-        attempt = 1
-    return float(min(base * (2 ** (attempt - 1)), cap))
-
-
 def describe(exc: BaseException) -> str:
-    """Human-readable error string for the ResultMessage.error field."""
+    """Human-readable error string for the ApplicationError message."""
     name = type(exc).__name__
     detail = str(exc).strip()
     return f"{name}: {detail}" if detail else name

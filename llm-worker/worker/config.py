@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import field_validator
@@ -12,13 +11,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
     )
-    # nats = the NATS consumer (main.py); temporal = the LLMExtract activity worker
-    # (temporal_main.py). One image, two Deployments.
-    worker_mode: Literal["nats", "temporal"] = "nats"
-    nats_url: str = "nats://localhost:4222"
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "scrapeflow"
-    # Temporal mode: how long SIGTERM waits for in-flight activities before
+    # How long SIGTERM waits for in-flight activities before
     # cancelling them. Covers one full warm-up + request (~360s in prod), so a
     # rollout does not cancel a call and re-bill the user's key on the retry.
     # The pod's terminationGracePeriodSeconds must exceed it.
@@ -37,39 +32,16 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = 4096
     llm_max_content_chars: int = 50_000
     llm_max_workers: int = 3
-    # Temporal mode: concurrent Clean/Validate activities on the content queue.
+    # Concurrent Clean/Validate activities on the content queue.
     content_max_workers: int = 4
     # Provider-SDK retry count. Both the anthropic and openai clients default to
     # max_retries=2, so one call_llm() could make three billable attempts — invisible
     # in our logs and multiplying the wall-clock ceiling to ~3x. Pinned to 0 so retry
-    # lives in exactly one visible layer (today: NATS redelivery; Phase 4: Temporal
-    # RetryPolicy). Raising this re-hides retries *underneath* whatever retries above it.
+    # lives in exactly one visible layer (the caller's Temporal RetryPolicy). Raising this re-hides retries *underneath* whatever retries above it.
     llm_max_retries: int = 0
-    # NATS pull-consumer ack window (seconds). The JetStream default is 30s — shorter
-    # than llm_request_timeout_seconds (60), so a slow LLM call was redelivered mid-flight,
-    # the late ack was a no-op, and with max_deliver unlimited the job re-billed the user's
-    # own API key in a loop. Unlike the playwright worker, this value is NOT sized to cover
-    # a whole job: the heartbeat below does that. This is the orphan-recovery window — how
-    # long a message sits before redelivery when a worker dies mid-job.
-    llm_ack_wait_seconds: int = 120
-    # How often to heartbeat while a job runs — msg.in_progress() in NATS mode
-    # (must be < ack_wait), activity.heartbeat() in Temporal mode (must be < the
-    # caller's heartbeat_timeout). This, not ack_wait, is what keeps a long LLM
-    # call from being redelivered.
+    # How often activity.heartbeat() fires while a call runs; must be < the caller's
+    # heartbeat_timeout.
     llm_heartbeat_seconds: float = 30
-
-    # ── Q5 option B — transient-failure redelivery ────────────────────────────
-    # Total deliveries of one message before the worker gives up and publishes a
-    # terminal "failed". The worker enforces this itself via metadata.num_delivered
-    # (so the API always gets exactly one failed event); max_deliver on the consumer
-    # is the matching backstop for the case where the worker dies before acking.
-    # NOTE: like ack_wait, max_deliver does not apply to an existing durable —
-    # changing this needs the same out-of-band consumer recreate.
-    llm_max_delivery_attempts: int = 3
-    # Backoff applied to msg.nak(delay=...) between redeliveries: base * 2^(n-1),
-    # capped. Keeps a struggling provider from being hammered.
-    llm_retry_base_delay_seconds: float = 5.0
-    llm_retry_max_delay_seconds: float = 60.0
 
     # ── Q5 option C — cold-start warm-up probe ────────────────────────────────
     # Scale-to-zero endpoints (Modal, vLLM, RunPod…) take 90-110s to answer the

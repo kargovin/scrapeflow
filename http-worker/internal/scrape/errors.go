@@ -1,11 +1,8 @@
 // Transient vs terminal failure classification for the Go HTTP worker (UF-003 3a).
 //
 // Ported from playwright-worker/worker/errors.py (itself ported from the LLM worker).
-// Same failure mode on all three workers: handleMessage used to Ack on *every*
-// error, so a momentary infra blip failed a job permanently — the Ack preempts
-// JetStream's redelivery, so the queue never gets the chance to retry. The expensive
-// work (fetch + format) has already succeeded by the time we upload, so failing the
-// job over a transient object-store fault throws that work away.
+// The expensive work (fetch + format) has already succeeded by the time we upload,
+// so failing the job over a transient object-store fault throws that work away.
 //
 //   - terminal  — a dead target site, a bad proxy key, a format bug. Retrying cannot
 //                 help and just re-fetches; a dead site is its own answer.

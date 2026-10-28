@@ -2,13 +2,12 @@
 Shared test fixtures for playwright-worker unit tests.
 
 No live connections here — everything is mocked. The fixtures below
-provide reusable mock objects; helper functions (make_nats_msg,
-make_browser) live here since they need per-test tuning.
+provide reusable mock objects; make_browser lives here since it needs
+per-test tuning.
 """
 
-import json
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from cryptography.fernet import Fernet
@@ -27,54 +26,6 @@ def encrypt_credential(plaintext: str) -> str:
 def mock_minio():
     """AsyncMock MinIO client — put_object is awaitable and records calls."""
     return AsyncMock()
-
-
-def make_nats_msg(
-    artifact_id: str = "artifact-aaa",
-    run_id: str | None = "run-bbb",
-    schema_version: int = 3,
-    url: str = "https://example.com",
-    output_format: str = "html",
-    playwright_options: dict | None = None,
-    stream_seq: int = 42,
-    num_delivered: int = 1,
-    # Schema version 2 sub-objects (omitted from payload when None)
-    credentials: dict | None = None,
-    options: dict | None = None,
-    crawl_context: dict | None = None,
-) -> MagicMock:
-    """
-    Build a mock NATS message whose .data is a valid JobMessage JSON payload.
-    msg.ack and msg.nak are AsyncMocks so tests can assert which was called.
-    num_delivered drives the transient-retry attempt cap (UF-003 3a).
-    """
-    payload: dict = {
-        "schema_version": schema_version,
-        "artifact_id": artifact_id,
-        "url": url,
-        "output_format": output_format,
-    }
-    # Omitted rather than nulled when absent — that is how the crawl lane sends it.
-    if run_id is not None:
-        payload["run_id"] = run_id
-    if playwright_options is not None:
-        payload["playwright_options"] = playwright_options
-    if credentials is not None:
-        payload["credentials"] = credentials
-    if options is not None:
-        payload["options"] = options
-    if crawl_context is not None:
-        payload["crawl_context"] = crawl_context
-
-    msg = MagicMock()
-    msg.data = json.dumps(payload).encode()
-    msg.metadata = MagicMock()
-    msg.metadata.sequence = MagicMock()
-    msg.metadata.sequence.stream = stream_seq
-    msg.metadata.num_delivered = num_delivered
-    msg.ack = AsyncMock()
-    msg.nak = AsyncMock()
-    return msg
 
 
 def make_browser(

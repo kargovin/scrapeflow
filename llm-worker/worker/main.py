@@ -1,14 +1,12 @@
 """
-LLM worker — entry point (Python/asyncio, user-provided Anthropic/OpenAI key).
+LLM worker — entry point.
 
-WORKER_MODE=temporal runs temporal_main.run instead; the sequence below is the NATS mode.
-
-Startup sequence (spec §4.3):
   1. Load config from env vars (requires LLM_KEY_ENCRYPTION_KEY)
-  2. Connect to NATS, verify SCRAPEFLOW stream exists
+  2. Connect to Temporal
   3. Connect to MinIO, verify bucket exists
-  4. Pull subscribe to scrapeflow.jobs.llm (durable: python-llm-worker)
-  5. Run worker loop (concurrency capped by LLM_MAX_WORKERS)
+  4. Poll the `llm` task queue for LLMExtract and the `content` queue for Clean and
+     Validate (no workflows)
+  5. On SIGTERM, wait up to llm_graceful_shutdown_seconds for in-flight calls
 """
 
 import signal
@@ -16,55 +14,42 @@ import sys
 
 if __name__ == "__main__":
     # As PID 1 the process ignores a SIGTERM it has no handler for, and the imports below
-    # take ~4 s (anthropic, openai, nats). Nothing is in flight yet, so exit at once; run()
+    # take ~4 s (anthropic, openai). Nothing is in flight yet, so exit at once; run()
     # replaces this with its graceful handler.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 import asyncio  # noqa: E402
+from datetime import timedelta  # noqa: E402
 
-import nats  # noqa: E402
-import nats.errors  # noqa: E402
 import structlog  # noqa: E402
 from miniopy_async import Minio  # noqa: E402
-from nats.js.api import ConsumerConfig  # noqa: E402
+from temporalio.client import Client  # noqa: E402
+from temporalio.contrib.pydantic import pydantic_data_converter  # noqa: E402
+from temporalio.worker import Worker  # noqa: E402
 
+from .activity import LLMActivities  # noqa: E402
 from .config import settings  # noqa: E402
-from .worker import handle_message  # noqa: E402
+from .content import ContentActivities  # noqa: E402
+from .contracts import CONTENT_QUEUE, LLM_QUEUE  # noqa: E402
 
 log = structlog.get_logger()
 
-LLM_SUBJECT = "scrapeflow.jobs.llm"
-DURABLE_NAME = "python-llm-worker"
-STREAM_NAME = "SCRAPEFLOW"
-
 
 async def run() -> None:
-    # ── NATS ─────────────────────────────────────────────────────────────────────
-    async def _on_disconnect():
-        log.warning("nats_disconnected")
+    # Installed before anything slow: as PID 1 the process ignores a SIGTERM it has no
+    # handler for, so one arriving during startup would stall until the pod's grace
+    # period (~420 s) ends in a SIGKILL.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
 
-    async def _on_reconnect():
-        log.info("nats_reconnected")
-
-    nc = await nats.connect(
-        settings.nats_url,
-        max_reconnect_attempts=-1,
-        reconnect_time_wait=2,
-        disconnected_cb=_on_disconnect,
-        reconnected_cb=_on_reconnect,
+    client = await Client.connect(
+        settings.temporal_address,
+        namespace=settings.temporal_namespace,
+        data_converter=pydantic_data_converter,
     )
-    js = nc.jetstream()
 
-    try:
-        await js.stream_info(STREAM_NAME)
-    except Exception as exc:
-        log.error("stream_not_found", stream=STREAM_NAME, error=str(exc))
-        await nc.drain()
-        return
-
-    log.info("nats_connected", url=settings.nats_url)
-
-    # ── MinIO ─────────────────────────────────────────────────────────────────────
     minio = Minio(
         settings.minio_endpoint,
         access_key=settings.minio_access_key,
@@ -75,105 +60,43 @@ async def run() -> None:
         await minio.make_bucket(settings.minio_bucket)
     log.info("minio_connected", bucket=settings.minio_bucket)
 
-    # ── Pull subscription ─────────────────────────────────────────────────────────
-    # Explicit ack_wait: the JetStream default (30s) is shorter than a single LLM
-    # request timeout (60s), so slow calls were redelivered mid-flight, the late ack
-    # was a no-op, and with max_deliver unlimited the job re-billed the user's own API
-    # key in a loop. ack_wait is the orphan-recovery window, not a job-duration budget —
-    # the in-progress heartbeat below is what covers long calls (see config.py).
-    # NOTE: JetStream does not update ack_wait on an already-existing durable consumer,
-    # so changing this value requires updating/recreating the consumer out-of-band.
-    psub = await js.pull_subscribe(
-        LLM_SUBJECT,
-        durable=DURABLE_NAME,
-        stream=STREAM_NAME,
-        config=ConsumerConfig(
-            ack_wait=settings.llm_ack_wait_seconds,
-            # Backstop for the worker-side attempt cap (Q5 option B). worker.py
-            # normally stops retrying itself and publishes a terminal "failed" on
-            # attempt N, so this limit is only reached when the worker dies before
-            # acking. Without it, max_deliver defaults to unlimited and such a
-            # message is redelivered forever.
-            max_deliver=settings.llm_max_delivery_attempts,
+    activities = LLMActivities(minio)
+    worker = Worker(
+        client,
+        task_queue=LLM_QUEUE,
+        activities=[activities.llm_extract],
+        max_concurrent_activities=settings.llm_max_workers,
+        graceful_shutdown_timeout=timedelta(
+            seconds=settings.llm_graceful_shutdown_seconds
         ),
     )
-    log.info(
-        "subscribed",
-        subject=LLM_SUBJECT,
-        durable=DURABLE_NAME,
-        max_workers=settings.llm_max_workers,
-        ack_wait=settings.llm_ack_wait_seconds,
-        max_deliver=settings.llm_max_delivery_attempts,
-        warmup=settings.llm_warmup_enabled,
+
+    content = ContentActivities(minio)
+    content_worker = Worker(
+        client,
+        task_queue=CONTENT_QUEUE,
+        activities=[content.clean, content.validate],
+        max_concurrent_activities=settings.content_max_workers,
+        graceful_shutdown_timeout=timedelta(
+            seconds=settings.llm_graceful_shutdown_seconds
+        ),
     )
 
-    # ── Worker loop ───────────────────────────────────────────────────────────────
-    sem = asyncio.Semaphore(settings.llm_max_workers)
-
-    async def _heartbeat(msg):
-        # Reset the NATS ack timer while the job runs so an LLM call longer than
-        # ack_wait never triggers redelivery — which would bill the user's API key
-        # a second time. Errors (e.g. msg already acked) are ignored; the task is
-        # cancelled when the job finishes.
-        try:
-            while True:
-                await asyncio.sleep(settings.llm_heartbeat_seconds)
-                try:
-                    await msg.in_progress()
-                except Exception:
-                    pass
-        except asyncio.CancelledError:
-            pass
-
-    async def handle_with_sem(msg):
-        async with sem:
-            hb = asyncio.create_task(_heartbeat(msg))
-            try:
-                await handle_message(msg, js, minio)
-            finally:
-                hb.cancel()
-                try:
-                    await hb
-                except asyncio.CancelledError:
-                    pass
-
-    stop = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-
-    fetch_backoff = (
-        2  # seconds; doubles on consecutive non-timeout errors, capped at 60
-    )
-    while not stop.is_set():
-        available = sem._value
-        if available == 0:
-            await asyncio.sleep(0.1)
-            continue
-
-        try:
-            msgs = await psub.fetch(batch=available, timeout=5)
-            fetch_backoff = 2  # reset on success
-        except nats.errors.TimeoutError:
-            continue
-        except Exception as exc:
-            log.error("fetch_error", error=str(exc), backoff=fetch_backoff)
-            await asyncio.sleep(fetch_backoff)
-            fetch_backoff = min(fetch_backoff * 2, 60)
-            continue
-
-        for msg in msgs:
-            asyncio.create_task(handle_with_sem(msg))
-
-    # ── Graceful shutdown ─────────────────────────────────────────────────────────
-    log.info("shutting_down")
-    await nc.drain()
+    async with worker, content_worker:
+        log.info(
+            "temporal_worker_started",
+            address=settings.temporal_address,
+            namespace=settings.temporal_namespace,
+            task_queues=[LLM_QUEUE, CONTENT_QUEUE],
+            max_workers=settings.llm_max_workers,
+            content_max_workers=settings.content_max_workers,
+            graceful_shutdown_s=settings.llm_graceful_shutdown_seconds,
+            warmup=settings.llm_warmup_enabled,
+        )
+        await stop.wait()
+        log.info("temporal_worker_stopping")
+    log.info("temporal_worker_stopped")
 
 
 if __name__ == "__main__":
-    if settings.worker_mode == "temporal":
-        from .temporal_main import run as run_temporal
-
-        asyncio.run(run_temporal())
-    else:
-        asyncio.run(run())
+    asyncio.run(run())

@@ -270,38 +270,12 @@ services:
 
   # ── Python Playwright worker ─────────────────────────────────────────────────
 
-  playwright-worker:
-    # NATS mode: nothing reads its results since G.1 (H.1 deletes it). Opt in: --profile v1.
-    profiles: [v1]
-    build:
-      context: ../playwright-worker
-    env_file:
-      - ../.env
-    environment:
-      NATS_URL: nats://nats:4222
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
-      MINIO_BUCKET: scrapeflow-results
-      MINIO_SECURE: 'false'
-      PLAYWRIGHT_MAX_WORKERS: '3'
-      PLAYWRIGHT_DEFAULT_TIMEOUT_SECONDS: '60'
-    depends_on:
-      nats:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      nats-init:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
   playwright-worker-temporal:
     build:
       context: ../playwright-worker
     env_file:
       - ../.env
     environment:
-      WORKER_MODE: temporal
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: scrapeflow
       MINIO_ENDPOINT: minio:9000
@@ -322,37 +296,12 @@ services:
     # The crawl gate fixture (E.6).
     networks: [default, crawl-fixture]
 
-  llm-worker:
-    # NATS mode: nothing reads its results since G.1 (H.1 deletes it). Opt in: --profile v1.
-    profiles: [v1]
-    build:
-      context: ../llm-worker
-    env_file:
-      - ../.env
-    environment:
-      NATS_URL: nats://nats:4222
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
-      MINIO_BUCKET: scrapeflow-results
-      MINIO_SECURE: 'false'
-      LLM_MAX_WORKERS: '3'
-    depends_on:
-      nats:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      nats-init:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
   llm-worker-temporal:
     build:
       context: ../llm-worker
     env_file:
       - ../.env
     environment:
-      WORKER_MODE: temporal
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: scrapeflow
       MINIO_ENDPOINT: minio:9000
@@ -372,33 +321,7 @@ services:
 
   # ── Go HTTP scraper worker ───────────────────────────────────────────────────
 
-  http-worker:
-    # NATS mode: nothing reads its results since G.1 (H.1 deletes it). Opt in: --profile v1.
-    profiles: [v1]
-    build:
-      context: ../http-worker
-      dockerfile: Dockerfile
-    env_file:
-      - ../.env
-    environment:
-      NATS_URL: nats://nats:4222
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-scrapeflow}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
-      MINIO_BUCKET: scrapeflow-results
-      MINIO_SECURE: 'false'
-      FETCH_TIMEOUT_SECS: '30'
-      NATS_MAX_DELIVER: '3'
-    depends_on:
-      nats:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      nats-init:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
-  # Same image in Temporal mode: serves the Scrape activity on the scrape-http task queue.
+  # Serves the Scrape activity on the scrape-http task queue.
   http-worker-temporal:
     build:
       context: ../http-worker
@@ -406,7 +329,6 @@ services:
     env_file:
       - ../.env
     environment:
-      WORKER_MODE: temporal
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: scrapeflow
       MINIO_ENDPOINT: minio:9000

@@ -2,9 +2,17 @@
 worker's outputs back through the API's models, all via the Temporal Pydantic converter.
 
 The Go worker is covered through contracts/fixtures/activity/ — see
-http-worker/internal/activity/contract_test.go. Same command and UPDATE_CONTRACT_FIXTURES switch as
-test_message_contract.py; go_scrape_output.json is
-regenerated from the Go side (command in that file).
+http-worker/internal/activity/contract_test.go. go_scrape_output.json is regenerated from the Go
+side (command in that file).
+
+Run it with the repo root mounted into an image that has pydantic and temporalio:
+
+    docker run --rm -v "$PWD:/repo" -w /repo docker-api \
+        /app/.venv/bin/python -m pytest contracts -q
+
+Regenerate the Python-written fixtures after an intentional contract change:
+
+    ... -e UPDATE_CONTRACT_FIXTURES=1 ...
 """
 
 import importlib.util

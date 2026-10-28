@@ -11,7 +11,6 @@ const testCredentialsKey = "Ke0tYTJtBsP8_QaQfF7WgCcIveEQlcyH8SgGaSVmMuk="
 // which automatically restores the original values after the test.
 func setRequiredVars(t *testing.T) {
 	t.Helper()
-	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
 	t.Setenv("MINIO_ACCESS_KEY", "testkey")
 	t.Setenv("MINIO_SECRET_KEY", "testsecret")
@@ -26,21 +25,8 @@ func TestLoad_RequiredVars(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.NATSUrl != "nats://localhost:4222" {
-			t.Errorf("NATSUrl: got %q", cfg.NATSUrl)
-		}
 		if cfg.MinIOEndpoint != "localhost:9000" {
 			t.Errorf("MinIOEndpoint: got %q", cfg.MinIOEndpoint)
-		}
-	})
-
-	t.Run("NATS_URL missing returns error", func(t *testing.T) {
-		setRequiredVars(t)
-		t.Setenv("NATS_URL", "") // override to empty
-
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error when NATS_URL is missing")
 		}
 	})
 
@@ -92,7 +78,6 @@ func TestLoad_Defaults(t *testing.T) {
 		t.Setenv("MINIO_BUCKET", "")
 		t.Setenv("MINIO_SECURE", "")
 		t.Setenv("FETCH_TIMEOUT_SECS", "")
-		t.Setenv("NATS_MAX_DELIVER", "")
 
 		cfg, err := Load()
 		if err != nil {
@@ -106,9 +91,6 @@ func TestLoad_Defaults(t *testing.T) {
 		}
 		if cfg.FetchTimeoutSecs != 30 {
 			t.Errorf("FetchTimeoutSecs default: got %d, want 30", cfg.FetchTimeoutSecs)
-		}
-		if cfg.NATSMaxDeliver != 3 {
-			t.Errorf("NATSMaxDeliver default: got %d, want 3", cfg.NATSMaxDeliver)
 		}
 	})
 
@@ -152,40 +134,31 @@ func TestLoad_Defaults(t *testing.T) {
 	})
 }
 
-func TestLoad_WorkerMode(t *testing.T) {
-	t.Run("defaults to nats", func(t *testing.T) {
+func TestLoad_Temporal(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
 		setRequiredVars(t)
+		t.Setenv("TEMPORAL_ADDRESS", "")
+		t.Setenv("TEMPORAL_NAMESPACE", "")
 
 		cfg, err := Load()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.WorkerMode != ModeNATS {
-			t.Errorf("WorkerMode: got %q", cfg.WorkerMode)
+		if cfg.TemporalAddress != "localhost:7233" || cfg.TemporalNamespace != "scrapeflow" {
+			t.Errorf("temporal config: %q %q", cfg.TemporalAddress, cfg.TemporalNamespace)
 		}
 	})
 
-	t.Run("temporal mode does not need NATS_URL", func(t *testing.T) {
+	t.Run("TEMPORAL_ADDRESS read from env", func(t *testing.T) {
 		setRequiredVars(t)
-		t.Setenv("NATS_URL", "")
-		t.Setenv("WORKER_MODE", "temporal")
 		t.Setenv("TEMPORAL_ADDRESS", "temporal:7233")
 
 		cfg, err := Load()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.TemporalAddress != "temporal:7233" || cfg.TemporalNamespace != "scrapeflow" {
-			t.Errorf("temporal config: %q %q", cfg.TemporalAddress, cfg.TemporalNamespace)
-		}
-	})
-
-	t.Run("unknown mode returns error", func(t *testing.T) {
-		setRequiredVars(t)
-		t.Setenv("WORKER_MODE", "kafka")
-
-		if _, err := Load(); err == nil {
-			t.Fatal("expected error for an unknown WORKER_MODE")
+		if cfg.TemporalAddress != "temporal:7233" {
+			t.Errorf("TemporalAddress: got %q", cfg.TemporalAddress)
 		}
 	})
 }

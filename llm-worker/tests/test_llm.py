@@ -258,8 +258,8 @@ async def test_call_openai_compatible_passes_base_url():
 # ---------------------------------------------------------------------------
 # SDK retry pin (Q6) — both provider clients default to max_retries=2, which
 # would make one call_llm() up to three *billable* attempts against the user's
-# own API key, invisibly, and triple the wall-clock ceiling the NATS ack_wait
-# is sized against. Retry must live in exactly one visible layer.
+# own API key, invisibly, and triple the wall-clock ceiling the activity's
+# timeouts are sized against. Retry must live in exactly one visible layer.
 # ---------------------------------------------------------------------------
 
 

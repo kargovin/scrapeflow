@@ -9,9 +9,8 @@ different kinds of failure:
   * transient — a cold-start timeout, a 5xx, a rate limit, a dropped socket.
                 Retrying is very likely to succeed.
 
-Acking both meant NATS never redelivered, so a momentary blip failed a job
-permanently. This module decides which is which; worker.py naks the transient
-ones so JetStream redelivers them.
+This module decides which is which; the activity raises the transient ones
+as retryable and the rest as non-retryable.
 
 Default is TERMINAL. An error we do not recognise is not retried — the failure
 mode of a wrong "transient" guess is an unbounded spend loop against the user's
@@ -91,7 +90,7 @@ class WarmupTimeout(Exception):
 
     Treated as transient: the most likely cause is a scale-to-zero endpoint that
     is slower than the warm-up budget, or a provider outage. Both can recover, so
-    this is worth a bounded redelivery rather than an immediate permanent fail.
+    this is worth a bounded retry rather than an immediate permanent fail.
     """
 
 
@@ -124,19 +123,8 @@ def classify(exc: BaseException) -> str:
     return TERMINAL
 
 
-def retry_delay(attempt: int, base: float, cap: float) -> float:
-    """Exponential backoff for the nak delay, in seconds.
-
-    attempt is msg.metadata.num_delivered — 1 on first delivery — so the first
-    retry waits `base`, the second 2*base, and so on up to `cap`.
-    """
-    if attempt < 1:
-        attempt = 1
-    return float(min(base * (2 ** (attempt - 1)), cap))
-
-
 def describe(exc: BaseException) -> str:
-    """Human-readable error string for the ResultMessage.error field."""
+    """Human-readable error string for the ApplicationError message."""
     name = type(exc).__name__
     detail = str(exc).strip()
     return f"{name}: {detail}" if detail else name

@@ -1,6 +1,5 @@
 """
-The container start contract (CLAUDE.md → Playwright container start) — one entrypoint
-for both WORKER_MODEs. Xvfb → wait for the socket → exec python as pid 1, so a worker
+The container start contract (CLAUDE.md → Playwright container start). Xvfb → wait for the socket → exec python as pid 1, so a worker
 crash surfaces as CrashLoopBackOff instead of a healthy-looking container.
 """
 

@@ -7,7 +7,6 @@ dependencies = [
     # patched and navigator.webdriver removed — see docs/adr for the stealth
     # rationale. It vendors a compatible Playwright, so we no longer pin it here.
     "patchright>=1.44.0",
-    "nats-py>=2.7.0",
     "miniopy-async>=1.21.0",
     # aiohttp is miniopy-async's HTTP backend; declared explicitly because
     # worker/errors.py matches its connection-error types (UF-003 3a).

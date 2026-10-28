@@ -20,7 +20,6 @@ from worker.errors import (
     TRANSIENT,
     classify,
     describe,
-    retry_delay,
 )
 
 
@@ -94,26 +93,7 @@ def test_unknown_exception_defaults_terminal():
 
 
 # ---------------------------------------------------------------------------
-# retry_delay — exponential backoff
-# ---------------------------------------------------------------------------
-
-
-def test_retry_delay_grows_exponentially():
-    assert retry_delay(1, base=5.0, cap=60.0) == 5.0
-    assert retry_delay(2, base=5.0, cap=60.0) == 10.0
-    assert retry_delay(3, base=5.0, cap=60.0) == 20.0
-
-
-def test_retry_delay_is_capped():
-    assert retry_delay(10, base=5.0, cap=60.0) == 60.0
-
-
-def test_retry_delay_floors_attempt_at_one():
-    assert retry_delay(0, base=5.0, cap=60.0) == 5.0
-
-
-# ---------------------------------------------------------------------------
-# describe — error string for the ResultMessage
+# describe — error string for the ApplicationError
 # ---------------------------------------------------------------------------
 
 

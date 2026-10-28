@@ -986,15 +986,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nats-py"
-version = "2.16.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2c/c8/739b72c9201081e48000884d476231873ac82f7247c43b33823eaf3c0bfb/nats_py-2.16.0.tar.gz", hash = "sha256:1d137ed7afc9b59033b3199324c6237df2016a5091935871344a787eba6b72fc", size = 79731, upload-time = "2026-09-16T07:47:21.843Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/a3/16cec37172144d3362d7551bb823a098b2b2903281fc095dfe4480b8c2fd/nats_py-2.16.0-py3-none-any.whl", hash = "sha256:aeb1ff123966c05833d26c7df7e1d54c1c6d32b612428b21677a2e921f1fecae", size = 93578, upload-time = "2026-09-16T07:47:20.799Z" },
-]
-
-[[package]]
 name = "nexus-rpc"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1045,7 +1036,6 @@ dependencies = [
     { name = "httpx" },
     { name = "markdownify" },
     { name = "miniopy-async" },
-    { name = "nats-py" },
     { name = "patchright" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1064,7 +1054,6 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "markdownify", specifier = ">=0.12.0" },
     { name = "miniopy-async", specifier = ">=1.21.0" },
-    { name = "nats-py", specifier = ">=2.7.0" },
     { name = "patchright", specifier = ">=1.44.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.3.0" },
@@ -1491,7 +1480,7 @@ name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "six" },
+    { name = "six", marker = "python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
 wheels = [

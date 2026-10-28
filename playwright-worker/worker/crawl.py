@@ -1,5 +1,5 @@
 """
-The crawl queue's activities (WORKER_MODE=temporal, E.4): robots.txt and sitemap fetches, and link
+The crawl queue's activities (E.4): robots.txt and sitemap fetches, and link
 extraction from a stored page. No browser, no DB.
 
 Replaces coordinator/sitemap.py, which fetched with aiohttp (BUG-006) and followed whatever the

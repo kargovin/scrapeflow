@@ -39,7 +39,7 @@ func New(f *fetcher.Fetcher, s scrape.Uploader, credKey *fernet.Key) *Activities
 	return &Activities{fetcher: f, storage: s, credentialsKey: credKey}
 }
 
-// Scrape is the Temporal counterpart of worker.handleMessage — the same job lifecycle, one attempt:
+// Scrape runs one attempt of the job lifecycle:
 //  1. Validate the input (ADR-011)
 //  2. Resolve per-job fetcher (proxy transport if credentials.encrypted_proxy_url is set)
 //  3. Enforce robots.txt if options.respect_robots is true
@@ -47,10 +47,8 @@ func New(f *fetcher.Fetcher, s scrape.Uploader, credKey *fernet.Key) *Activities
 //     heartbeating at each stage
 //  5. Return the stored object, or classify the failure
 //
-// handleMessage's other steps have no equivalent here: the workflow mirrors "running" (its step 4),
-// and the return value replaces the result publish and the ack/nak (steps 8–9). Retries belong to
-// the caller's RetryPolicy: a transient MinIO fault is returned as a retryable error, everything
-// else as non-retryable. Error messages match what the NATS path reports.
+// Retries belong to the caller's RetryPolicy: a transient MinIO fault is returned as a retryable
+// error, everything else as non-retryable.
 func (a *Activities) Scrape(ctx context.Context, in ScrapeInput) (ScrapeOutput, error) {
 	logger := activity.GetLogger(ctx)
 

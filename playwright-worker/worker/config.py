@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Literal
 
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import field_validator
@@ -12,13 +11,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
     )
-    # nats = the NATS consumer (main.py); temporal = the Scrape activity worker
-    # (temporal_main.py). One image, two Deployments.
-    worker_mode: Literal["nats", "temporal"] = "nats"
-    nats_url: str = "nats://localhost:4222"
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "scrapeflow"
-    # Temporal mode: how long SIGTERM waits for in-flight scrapes before cancelling
+    # How long SIGTERM waits for in-flight scrapes before cancelling
     # them; a cancelled scrape is re-rendered on the retry. Covers the 300 s
     # timeout_seconds maximum (goto + wait_for_load_state at 300 s each) + 30 s for
     # upload; page actions are uncapped, so a long action list can still be cut.
@@ -30,33 +25,14 @@ class Settings(BaseSettings):
     minio_bucket: str = "scrapeflow-results"
     minio_secure: bool = False
     playwright_max_workers: int = 3
-    # Temporal mode: crawl-queue activities in flight (robots.txt, sitemaps, link extraction);
+    # Crawl-queue activities in flight (robots.txt, sitemaps, link extraction);
     # no browser, so not bounded by playwright_max_workers.
     crawl_max_activities: int = 10
     playwright_default_timeout_seconds: int = 60
     credentials_encryption_key: str = ""
-    # NATS pull-consumer ack window (seconds). The default JetStream ack_wait is 30s,
-    # which is *shorter than a headed-Chrome scrape of a heavy page* — so NATS redelivered
-    # the message mid-scrape, the late ack was a no-op, and the job looped forever
-    # (max_deliver is unlimited). This sets an explicit floor; the in-progress heartbeat
-    # below additionally resets the timer mid-job so even jobs longer than this never expire.
-    playwright_ack_wait_seconds: int = 120
-    # How often to heartbeat while a job runs — msg.in_progress() in NATS mode
-    # (must be < ack_wait), activity.heartbeat() in Temporal mode (must be < the
-    # caller's heartbeat_timeout).
+    # How often activity.heartbeat() fires while a scrape runs; must be < the caller's
+    # heartbeat_timeout.
     playwright_heartbeat_seconds: int = 30
-    # ── UF-003 3a — transient-failure redelivery (ported from the LLM worker) ──
-    # Total deliveries of one message before the worker gives up and publishes a
-    # terminal "failed". The worker enforces this itself via metadata.num_delivered
-    # (so the API always gets exactly one failed event); max_deliver on the consumer
-    # is the matching backstop for the case where the worker dies before acking.
-    # NOTE: like ack_wait, max_deliver does not apply to an existing durable —
-    # changing this needs the same out-of-band consumer recreate.
-    playwright_max_delivery_attempts: int = 3
-    # Backoff applied to msg.nak(delay=...) between redeliveries: base * 2^(n-1),
-    # capped. Keeps a struggling MinIO from being hammered while it recovers.
-    playwright_retry_base_delay_seconds: float = 5.0
-    playwright_retry_max_delay_seconds: float = 60.0
     # Stealth launch config (Patchright). Verified against BrowserScan bot-detection.
     # channel="chrome" uses real Google Chrome (installed in the image via
     # `patchright install chrome`) so the UA reports a genuine "Chrome". Set to ""

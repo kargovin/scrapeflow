@@ -1,9 +1,8 @@
 """
-LLMExtract — the Temporal activity for the LLM stage (WORKER_MODE=temporal).
+LLMExtract — the Temporal activity for the LLM stage.
 
-Same steps as worker.handle_message minus the transport: no "running" publish, no
-result publish, no ack/nak. Success is the return value; failure is a raised
-ApplicationError, and the caller's RetryPolicy decides when to stop.
+Success is the return value; failure is a raised ApplicationError, and the caller's
+RetryPolicy decides when to stop.
 """
 
 import asyncio

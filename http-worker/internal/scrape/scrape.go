@@ -1,5 +1,4 @@
-// Package scrape is the fetch → format → upload pipeline, shared by the NATS worker and the
-// Temporal activity.
+// Package scrape is the fetch → format → upload pipeline the Scrape activity runs.
 package scrape
 
 import (

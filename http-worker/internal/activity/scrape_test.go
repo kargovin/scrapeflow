@@ -188,6 +188,45 @@ func TestScrape_UndecryptableProxyIsNonRetryable(t *testing.T) {
 	}
 }
 
+func TestScrape_MalformedProxyURLIsNonRetryable(t *testing.T) {
+	srv := site(t)
+	key := testKey(t)
+	token, err := fernet.EncryptAndSign([]byte("://not-a-url"), key)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	up := &fakeUploader{}
+
+	_, _, err = run(t, New(fetcher.New(5), up, key), ScrapeInput{
+		ArtifactID: "art-1", URL: srv.URL, OutputFormat: "html",
+		Credentials: &Credentials{EncryptedProxyURL: string(token)},
+	})
+
+	if appError(t, err, ErrProxy) {
+		t.Error("a malformed proxy URL must not be retried")
+	}
+	if up.data != nil {
+		t.Error("nothing should be uploaded with a malformed proxy URL")
+	}
+}
+
+func TestScrape_RespectRobotsFalseSkipsTheCheck(t *testing.T) {
+	srv := site(t)
+	up := &fakeUploader{}
+
+	_, _, err := run(t, New(fetcher.New(5), up, testKey(t)), ScrapeInput{
+		ArtifactID: "art-1", URL: srv.URL + "/private/page", OutputFormat: "html",
+		Options: &ScrapeOptions{RespectRobots: false},
+	})
+
+	if err != nil {
+		t.Fatalf("robots.txt must be ignored when respect_robots is false: %v", err)
+	}
+	if up.data == nil {
+		t.Error("the page should be uploaded")
+	}
+}
+
 func TestScrape_RobotsDisallowedIsNonRetryable(t *testing.T) {
 	srv := site(t)
 	up := &fakeUploader{}

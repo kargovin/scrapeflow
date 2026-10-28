@@ -264,7 +264,7 @@ class BlockDetection:
 
     @property
     def error(self) -> str:
-        """The `error` value published on the failed ResultMessage."""
+        """The `error` value a blocked run fails with."""
         return f"blocked:{self.vendor or VENDOR_UNKNOWN}"
 
 

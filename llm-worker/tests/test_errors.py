@@ -27,7 +27,6 @@ from worker.errors import (
     WarmupTimeout,
     classify,
     describe,
-    retry_delay,
 )
 
 _REQ = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
@@ -170,20 +169,8 @@ def test_terminal_types_win_over_status_fallback():
 
 
 # ---------------------------------------------------------------------------
-# Backoff + formatting
+# Formatting
 # ---------------------------------------------------------------------------
-
-
-def test_retry_delay_doubles_and_caps():
-    assert retry_delay(1, base=5.0, cap=60.0) == 5.0
-    assert retry_delay(2, base=5.0, cap=60.0) == 10.0
-    assert retry_delay(3, base=5.0, cap=60.0) == 20.0
-    assert retry_delay(10, base=5.0, cap=60.0) == 60.0
-
-
-def test_retry_delay_handles_zero_attempt():
-    """num_delivered should never be < 1, but don't return a negative delay."""
-    assert retry_delay(0, base=5.0, cap=60.0) == 5.0
 
 
 def test_describe_includes_type_for_empty_message():

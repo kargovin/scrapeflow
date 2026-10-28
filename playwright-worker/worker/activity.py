@@ -1,8 +1,7 @@
 """
-Scrape on scrape-playwright — the Temporal activity for the Playwright engine (WORKER_MODE=temporal).
+Scrape on scrape-playwright — the Temporal activity for the Playwright engine.
 
-The render pipeline is scrape.render, shared with worker.handle_message; this module
-adds the Temporal half: no "running" publish, no result publish, no ack/nak. Success is the return value; failure is a raised
+The render pipeline is scrape.render. Success is the return value; failure is a raised
 ApplicationError, and the caller's RetryPolicy decides when to stop.
 """
 
@@ -69,7 +68,7 @@ class PlayWrightScrapeActivities:
             "job_received", artifact_id=job.artifact_id, url=job.url, attempt=attempt
         )
 
-        # Step 2: robots.txt. Fetch failure → proceed, as the NATS path and Go do.
+        # Step 2: robots.txt. Fetch failure → proceed, as Go does.
         if job.options and job.options.respect_robots:
             try:
                 blocked = await is_disallowed(job.url)

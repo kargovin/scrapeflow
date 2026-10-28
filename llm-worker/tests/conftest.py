@@ -9,9 +9,8 @@ os.environ.setdefault is used so that a real key already present in the
 environment (e.g. inside Docker with the mounted .env) is never clobbered.
 """
 
-import json
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from cryptography.fernet import Fernet
@@ -24,53 +23,3 @@ os.environ.setdefault("LLM_KEY_ENCRYPTION_KEY", Fernet.generate_key().decode())
 def mock_minio():
     """AsyncMock MinIO client — put_object and get_object are awaitable."""
     return AsyncMock()
-
-
-def make_nats_msg(
-    artifact_id: str = "artifact-aaa",
-    run_id: str = "run-bbb",
-    schema_version: int = 3,
-    raw_minio_path: str = "scrapeflow-results/history/artifact-aaa/scrape.html",
-    provider: str = "anthropic",
-    encrypted_api_key: str = "gAAAAAB_placeholder_encrypted_key",
-    base_url: str | None = None,
-    model: str = "claude-3-5-sonnet-20241022",
-    output_schema: dict | None = None,
-    stream_seq: int = 42,
-    num_delivered: int = 1,
-) -> MagicMock:
-    """
-    Build a mock NATS message whose .data is a valid LLM JobMessage JSON payload.
-    msg.ack and msg.nak are AsyncMocks so tests can assert which one was called.
-
-    num_delivered mirrors JetStream's delivery counter (1 on first delivery) and
-    drives the Q5 option-B retry cap in worker.handle_message.
-
-    encrypted_api_key is a placeholder string — tests that exercise actual
-    decryption (test_llm.py) generate a real Fernet key+ciphertext pair inline.
-    """
-    if output_schema is None:
-        output_schema = {"type": "object", "properties": {"name": {"type": "string"}}}
-
-    payload: dict = {
-        "schema_version": schema_version,
-        "artifact_id": artifact_id,
-        "run_id": run_id,
-        "raw_minio_path": raw_minio_path,
-        "provider": provider,
-        "encrypted_api_key": encrypted_api_key,
-        "model": model,
-        "output_schema": output_schema,
-    }
-    if base_url is not None:
-        payload["base_url"] = base_url
-
-    msg = MagicMock()
-    msg.data = json.dumps(payload).encode()
-    msg.metadata = MagicMock()
-    msg.metadata.sequence = MagicMock()
-    msg.metadata.sequence.stream = stream_seq
-    msg.metadata.num_delivered = num_delivered
-    msg.ack = AsyncMock()
-    msg.nak = AsyncMock()
-    return msg

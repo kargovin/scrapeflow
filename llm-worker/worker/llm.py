@@ -86,8 +86,8 @@ async def ensure_ready(base_url: str, api_key: str) -> None:
     problems are the real call's business, and are terminal there — swallowing
     them here would retry something that can never succeed.
 
-    Caller must ensure the NATS in-progress heartbeat is running: this loop can
-    outlast ack_wait, and without the heartbeat that means duplicate delivery.
+    Caller must keep heartbeating: this loop can outlast the activity's
+    heartbeat_timeout.
     """
     now = time.monotonic()
     warm_until = _warm_until.get(base_url)

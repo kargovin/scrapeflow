@@ -13,13 +13,6 @@ import (
 // Config holds all runtime configuration for the worker.
 // Fields map directly to environment variables set in Docker Compose.
 type Config struct {
-	// WorkerMode selects the entry point: ModeNATS (default) or ModeTemporal.
-	WorkerMode string // WORKER_MODE
-
-	// NATS — required in nats mode only
-	NATSUrl        string // NATS_URL — e.g. nats://nats:4222
-	NATSMaxDeliver int    // NATS_MAX_DELIVER — max redelivery attempts before giving up
-
 	// MinIO
 	MinIOEndpoint  string // MINIO_ENDPOINT — e.g. minio:9000
 	MinIOAccessKey string // MINIO_ACCESS_KEY
@@ -28,12 +21,12 @@ type Config struct {
 	MinIOSecure    bool   // MINIO_SECURE — false for local dev (no TLS)
 
 	// Credentials
-	CredentialsEncryptionKey string // CREDENTIALS_ENCRYPTION_KEY — Fernet key for proxy/cookies in NATS messages
+	CredentialsEncryptionKey string // CREDENTIALS_ENCRYPTION_KEY — Fernet key for the proxy URL in activity inputs
 
 	// HTTP fetcher
 	FetchTimeoutSecs int // FETCH_TIMEOUT_SECS — per-URL HTTP timeout
 
-	// Temporal — used in temporal mode only
+	// Temporal
 	TemporalAddress   string // TEMPORAL_ADDRESS — e.g. temporal:7233
 	TemporalNamespace string // TEMPORAL_NAMESPACE
 
@@ -41,24 +34,9 @@ type Config struct {
 	WorkerPoolSize int // WORKER_POOL_SIZE — number of concurrent jobs to process
 }
 
-const (
-	ModeNATS     = "nats"
-	ModeTemporal = "temporal"
-)
-
 // Load reads configuration from environment variables.
 // It returns an error if any required variable is missing.
 func Load() (*Config, error) {
-	mode := envStr("WORKER_MODE", ModeNATS)
-	if mode != ModeNATS && mode != ModeTemporal {
-		return nil, fmt.Errorf("WORKER_MODE must be %q or %q, got %q", ModeNATS, ModeTemporal, mode)
-	}
-
-	natsURL := os.Getenv("NATS_URL")
-	if mode == ModeNATS && natsURL == "" {
-		return nil, fmt.Errorf("NATS_URL is required")
-	}
-
 	minioEndpoint := os.Getenv("MINIO_ENDPOINT")
 	if minioEndpoint == "" {
 		return nil, fmt.Errorf("MINIO_ENDPOINT is required")
@@ -80,11 +58,6 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		WorkerMode: mode,
-
-		NATSUrl:        natsURL,
-		NATSMaxDeliver: envInt("NATS_MAX_DELIVER", 3),
-
 		MinIOEndpoint:  minioEndpoint,
 		MinIOAccessKey: minioAccessKey,
 		MinIOSecretKey: minioSecretKey,

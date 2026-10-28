@@ -1,10 +1,10 @@
 """
-The render pipeline shared by both transports — worker.handle_message (NATS) and
-activity.PlayWrightScrapeActivities (Temporal). Counterpart of the Go worker's internal/scrape.
+The render pipeline activity.PlayWrightScrapeActivities runs. Counterpart of the Go
+worker's internal/scrape.
 
 render() owns one browser context end to end: cookies, routes, navigation, actions,
-bot-wall detection, formatting and the upload. The callers keep what differs per
-transport: the robots.txt check, the result publish or return, and failure handling.
+bot-wall detection, formatting and the upload. The activity keeps the robots.txt check
+and failure handling.
 """
 
 import contextlib

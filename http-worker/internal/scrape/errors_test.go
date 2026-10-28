@@ -1,5 +1,5 @@
 // Unit tests for the transient/terminal classifier (UF-003 3a).
-// Pure logic — no NATS, MinIO, or network required.
+// Pure logic — no MinIO or network required.
 package scrape
 
 import (
