@@ -1578,6 +1578,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-28 (H.1 session close, verified after fetch):** `main` = `origin/main` = `722f54b` (deployed — the three worker images; api still `bc30025`'s build, same code); `develop` = `origin/develop` = this closeout. Infra `main` = `origin/main` = `51c2d40`. Compose: api, workflow-worker, the three `-temporal` workers on the H.1 images, Temporal, Postgres ×2, Redis, MinIO, NATS (H.2 removes it). `tmp/` untracked, pre-existing.
 - **2026-10-28 (H.1 release):** `main` = `origin/main` = `origin/develop` = `722f54b` (deployed; worker images only); `develop` = docs closeout on top. Infra `origin/main` = `c92e7dd` + Flux bumps; `origin/main` = `51c2d40` (step 4, owner-pushed; pods restarted clean).
 - **2026-10-28 (H.1 build close):** `develop` = `8a62da8` (H.1) + docs, **not pushed**; `main` = `origin/main` = `bc30025` (deployed). Infra `main` = `c92e7dd`, **1 ahead** of `origin/main` (`682cc52`), not pushed. Compose: the NATS-mode worker services are gone from the file; the three `-temporal` workers run the H.1 images. `tmp/` untracked, pre-existing.
 - **2026-10-28 (G.1 release close):** `main` = `origin/main` = `bc30025` (deployed); `develop` = docs closeout on top, pushed. Infra `main` = `origin/main` = `682cc52` (lane env vars dropped). Compose: NATS-mode workers stopped and behind `profiles: [v1]`; the rest up. `tmp/` untracked, pre-existing.
