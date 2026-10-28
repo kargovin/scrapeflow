@@ -101,7 +101,7 @@
 | F.6 | 🚀 Release; delete `scheduler.py`, `webhook_loop.py`, `advisory.py` (drain gate) | ✅ **RELEASED 2026-10-27** (`main` `261f931..3b9cf9c`; no infra change) — schedules + webhooks on Temporal in prod; owner verified a 5-min schedule, its webhooks, pause, delete |
 | F.7 | Scheduled jobs in the SPA (schedule fields on job reads, schedule view, pause/resume, next run) — after F.6 | ✅ **RELEASED** with F.6 (`56a06e6`) + run-history fix **`41a348f` 2026-10-28** — owner clicked through in prod |
 | **G** | **Consumer deletion** | |
-| G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ Built 2026-10-28 (not released) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` removed; mutation 20/20; runbook in G.1 |
+| G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ **RELEASED 2026-10-28** (`main` `41a348f..bc30025`, infra `682cc52`) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` gone; owner verified a job + a batch |
 | **H** | **NATS removal** | |
 | H.1 | Delete NATS-bound worker Deployments (obligation 3) | ⬜ |
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ⬜ |
@@ -2700,6 +2700,15 @@ infra repo's `JOB_LANE` / `BATCH_LANE` env vars are ignored by the new image (`e
 
 **Rollback:** an image revert to `41a348f` — safe while step 3 is undone (the env still says `v2`).
 Prefer a forward fix.
+
+**Released** *(2026-10-28; owner: "doing g1 runbook; skip step 0; i did that")*. Step 0 run by the owner. `develop`
+pushed (`843909e..bc30025`); **the owner ran the `main` ff `41a348f..bc30025`**. CI `replay` 41 passed,
+`build-api` green, the worker builds skipped. Flux rolled api + workflow-worker to `bc30025`; owner: api and
+worker started, `NATS connected`, no consumer line. Step 2 (owner): a job and a two-URL batch both
+`completed`. Step 3: infra **`682cc52`** (`JOB_LANE` / `BATCH_LANE` dropped from `app/api.yaml`, after
+checking both manifests were on `bc30025`) — the api pod restarted once for the env change; owner: neither variable in its env. ⚠️ **The rollback
+above no longer applies after step 3**: `41a348f` without the env vars sends new runs to `v1`, which
+nothing finishes. Fix forward.
 
 ---
 

@@ -144,6 +144,14 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-10-28 *(clock)*
 
+🚀 **G.1 RELEASED (2026-10-28, eighth session).** Owner ran the runbook (step 0 themselves) and the `main` ff
+`41a348f..bc30025`; CI `replay` 41 + `build-api` green; api + workflow-worker on `bc30025`, `NATS connected`, no
+consumer; a job and a two-URL batch `completed` (owner). Step 3: infra **`682cc52`** pushed by me on the owner's
+"lets do step 3" — `JOB_LANE`/`BATCH_LANE` dropped (both manifests checked on `bc30025` first); the api pod
+restarted for it and the owner confirmed neither variable is in its env. ⚠️ From here a revert to `41a348f` sends new runs to `v1` — fix forward. **Deployed code is
+`bc30025`.** **Next: H.1** (the NATS worker Deployments still run, reading a stream nothing consumes the results
+of). Still waiting: Dependabot's 64 alerts, BUG-024, BUG-018/019/021, the dev bucket's unrecorded objects.
+
 🔧 **G.1 BUILT (2026-10-28, eighth session; not pushed, not released).** Owner: "do g1", then "do a mutation test
 before we release". `result_consumer.py` deleted — the API runs **no background task** — and with it the v1
 dispatch arms and `JOB_LANE`/`BATCH_LANE` (every new run is `lane='v2'`; a `v1` run would now never finish).
