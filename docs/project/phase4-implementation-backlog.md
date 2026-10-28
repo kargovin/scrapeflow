@@ -103,7 +103,7 @@
 | **G** | **Consumer deletion** | |
 | G.1 | 🚀 Delete `result_consumer.py` (drain gate at deletion) | ✅ **RELEASED 2026-10-28** (`main` `41a348f..bc30025`, infra `682cc52`) — consumer + v1 dispatch arms + `JOB_LANE`/`BATCH_LANE` gone; owner verified a job + a batch |
 | **H** | **NATS removal** | |
-| H.1 | Delete NATS-bound worker Deployments (obligation 3) | ✅ **RELEASED 2026-10-28** (`main` `bc30025..722f54b`, infra `c92e7dd`; step 4 `51c2d40` prepared) — NATS mode gone from all three workers; owner verified http + playwright jobs and a crawl |
+| H.1 | Delete NATS-bound worker Deployments (obligation 3) | ✅ **RELEASED 2026-10-28** (`main` `bc30025..722f54b`, infra `c92e7dd`, step 4 `51c2d40`) — NATS mode gone from all three workers; owner verified http + playwright jobs and a crawl |
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ⬜ |
 | **I** | **API thinning** | |
 | I.1 | Alembic-on-startup made multi-replica safe | ⬜ |
@@ -2793,7 +2793,8 @@ the `main` ff `bc30025..722f54b`; CI built the three worker images (api + replay
 to `722f54b` — each logged its started line on its queues, no errors. Step 3 (owner): an http job, a playwright
 job and a crawl `completed` — ⚠️ the playwright job needs `"playwright_options":{}` (runbook corrected).
 The owner found **BUG-029** while checking (the lists' "Engine" column; filed, fix later). Step 4: infra
-**`51c2d40`** prepared locally (all three Deployments were on `722f54b` first), not pushed. ⚠️ **After step 4
+**`51c2d40`** (all three Deployments were on `722f54b` first), pushed by the owner; the three pods restarted
+without `WORKER_MODE` and logged their started lines. ⚠️ **After step 4
 the rollback above no longer applies** — an older image defaults to NATS mode.
 
 #### H.2 — 🚀 Remove NATS
