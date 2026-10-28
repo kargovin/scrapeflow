@@ -1564,6 +1564,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-28 (G.1 release close):** `main` = `origin/main` = `bc30025` (deployed); `develop` = docs closeout on top, pushed. Infra `main` = `origin/main` = `682cc52` (lane env vars dropped). Compose: NATS-mode workers stopped and behind `profiles: [v1]`; the rest up. `tmp/` untracked, pre-existing.
 - **2026-10-27 (F.0 + BUG-023 close):** `develop` = `2eba735` (ADR-013) · `2983a47` (BUG-023) + docs, not pushed; `main` = `origin/main` = `261f931` (deployed). Infra unchanged.
 - **2026-10-27 (E.7 release close):** `main` = `origin/main` = `develop` = `origin/develop` = `261f931` (deployed) before this docs closeout, which sits on `develop`. Infra `main` = `origin/main` = `bf591bc` (+ Flux's tag bumps). `tmp/` untracked, pre-existing.
 - **2026-10-27 (E.3–E.7 prep session close):** `develop` = `f66ec0b` + docs closeout, **not pushed** (6+ ahead of `origin/develop`); `main` = `origin/main` = `faa1f83` (deployed). Infra `main` = `bf591bc`, **1 ahead** of `origin/main` (`538ea8c`), not pushed. Compose: `crawl-fixture` (profile `gate`) up; api, workflow-worker and both Temporal scrape workers on the `crawl-fixture` network. `tmp/` untracked, pre-existing.
@@ -1720,6 +1721,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-28 *(clock, eighth)* | **🚀 G.1 RELEASED.** `result_consumer.py`, the v1 dispatch arms and `JOB_LANE`/`BATCH_LANE` deleted; autouse `mock_temporal`; suite 739; mutation 20/20 (two gaps closed); compose e2e; dev drain hazard found (NATS workers behind `profiles: [v1]`); owner ran the runbook + `main` ff; infra step 3 pushed; env verified gone | `65fc93f`, `bc30025`, `fad0e7d` + closeout; infra `682cc52` |
 | 2026-10-27 *(clock, sixth)* | **📐 F.0 done — ADR-013 Accepted; 🔧 BUG-023 fixed.** Plain walkthrough of F.0 and the catch-up window; owner took §5 as recommended (cap 20, paused not counted, catch-up 365 d). Then BUG-023 explained and built (per-user lock, 8 tests, 7/7 mutations). `2eba735`; BUG-023 `2983a47` |
 | 2026-10-27 *(clock, fifth)* | **🚀 E.7 RELEASED, Group E closed.** Infra push (coordinator pruned), owner's `main` ff `faa1f83..261f931`, rollouts + migration 4.7 watched; owner verified a crawl and the SPA pages. Bugs closed in the docs. | docs closeout; infra `bf591bc` pushed |
 | 2026-10-27 *(clock, fourth)* | **🔧 E.3–E.6 + E.10 BUILT, E.7 READY.** Owner: "plan and build from e3-e6 … get ready to deploy at e7; if possible also build e10". Crawl frontier + admission, crawl-queue activities on the Playwright worker, `CrawlWorkflow`, E.6 fixture gate (passed on compose, both engines), `coordinator/` deleted (+ infra local), SPA batches/crawls pages; BUG-024 filed, BUG-025 fixed. 695 API tests, corpus 31. | `c36bf95`, `aefc1d4`, `56cff93`, `6c1b847`, `f66ec0b`; infra `bf591bc` |
