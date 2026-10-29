@@ -136,6 +136,20 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-10-29 *(clock)*
 
+🔧 **I.2 BUILT (2026-10-29, eleventh session; nothing pushed, nothing released).** Owner: "build it".
+Infra **`5e9087e`** (local, not pushed): `scrapeflow-api` `replicas: 2`, `RollingUpdate` (`maxSurge: 1`,
+`maxUnavailable: 0`), `preStop` sleep 5 s, README *API* section. App **`d1eedcf`**: no runtime change — the
+WebSocket limit's per-process trap note + two tests (two notifiers each hear all four channels; the limit is
+per instance). Workflow worker stays at 1. Detail, calls and the **runbook**: implementation backlog I.2 *Built*.
+- **Verified:** suite **746**, mutation **2/2**; compose cross-process — a job created on one uvicorn, watched
+  live over a WebSocket on a second (:8001): `running` → `completed`. Cleaned up.
+- ⚠️ **Untested:** an old pod's stop time under `uv run` as PID 1 (BUG-021) with an open WebSocket — may sit out
+  the 30 s grace; slows a rollout, drops nothing.
+- **Before/after:** not measured yet — runbook step 0's probe loop records it during the release.
+- **Git:** `develop` = `d1eedcf` + docs, ~7 ahead of `origin/develop`, not pushed. Infra 1 ahead.
+- **Next (owner):** the I.2 release — infra `5e9087e` first, then ff `main` (api image; migration 4.9 under
+  I.1's lock). That closes Group I.
+
 🔧 **I.1 BUILT (2026-10-29, eleventh session; nothing pushed, nothing released).** Owner: "build it".
 `migrations/env.py` takes a transaction-scoped advisory lock (`MIGRATION_LOCK_KEY`, `app/core/db.py`) before
 `run_migrations()`; migration **4.9 `47a8f9f3f4e2`** drops `job_runs.nats_stream_seq` + its index. Detail:

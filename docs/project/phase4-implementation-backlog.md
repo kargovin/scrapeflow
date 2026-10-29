@@ -107,7 +107,7 @@
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ✅ **RELEASED 2026-10-28** (`main` `722f54b..cd5c60e`, infra `432e014`) — NATS gone from the API, compose and the cluster; JetStream PVC deleted; owner verified http + playwright jobs. Column drop moved to I.1 |
 | **I** | **API thinning** | |
 | I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | 🔧 **Built 2026-10-29** (local, unreleased) — advisory lock in `migrations/env.py`, migration 4.9 `47a8f9f3f4e2`; ships with I.2 |
-| I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ⬜ |
+| I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | 🔧 **Built 2026-10-29** (local, unreleased) — app `d1eedcf`, infra `5e9087e`; release carries I.1 |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ⬜ |
 | X.2 | Promote ADR-010 — needed by E.0 | ✅ 2026-10-13 — Accepted after review; §1 monthly skips, §2 sitemap files gated + submitted-seed scope + drops counted |
@@ -2925,6 +2925,56 @@ advisory lock** — keeps the auto-run contract every handoff relies on.
 fans out to every listener); `ws_max_connections_per_user` is per-process — note it. The
 migration's stated payoff; record the before/after in the handoff.
 **Depends on:** I.1
+
+**Built 2026-10-29 (owner: "build it"; local, unreleased).**
+- **Infra `5e9087e`** (`app/api.yaml` + README *API* section): `replicas: 2`; `RollingUpdate` with
+  `maxSurge: 1`, `maxUnavailable: 0` (two serving pods throughout a rollout; one surge pod — the node has
+  room: 30 % CPU / 13 % memory requested); `lifecycle.preStop.sleep: 5` so Traefik stops routing to a pod
+  before it gets SIGTERM. Server-side dry run accepted (k3s v1.33.6 — the native `sleep` action).
+  **Workflow worker stays at 1** — not in this task; Temporal workers compete on a queue, so scaling it is
+  config only, and `ensure_sweep` already handles `ScheduleAlreadyRunningError`.
+- **App `d1eedcf`:** no runtime change. `ws_max_connections_per_user` gained its trap note (per process —
+  N replicas admit N times it). Two tests in `test_job_notifier.py` against the dev Postgres: two notifiers
+  on separate connections each receive every channel (`job_status`, `batch_status`, `pipeline_status`,
+  `crawl_status`); the connection limit is per instance.
+- **Audit of per-process state in the API** (what two replicas could split): the WebSocket count (above) is
+  the only one. Rate limiting and the host limiter are Redis; quota admission is a Postgres row lock
+  (BUG-023); the Temporal client is a per-process connection; no background task since G.1.
+- **Verified:** suite **746**; mutation **2/2** (crawl listener dropped; counts shared across instances).
+  **Compose, cross-process:** a second uvicorn on :8001 in the api container; a playwright job created on
+  :8000 and watched over a WebSocket on :8001 — `running` then `completed` relayed live; job deleted (204),
+  test user removed (scratchpad script, not committed).
+- ⚠️ **Not verified:** whether `uv run` (PID 1, BUG-021) forwards SIGTERM to uvicorn once started, and how
+  long an old pod with an open WebSocket takes to stop — a watch loop waits up to 300 s on its queue, so it
+  may sit out the 30 s grace and be SIGKILLed. With `maxUnavailable: 0` that slows a rollout; it does not
+  drop requests. The SPA reconnects (C.12).
+
+**Runbook (owner).** Infra first: it changes only the replica count and strategy, on code already running.
+0. *(Optional, the "before")* in a spare terminal, a probe loop — leave it running through steps 1 and 3:
+   ```bash
+   while true; do printf '%s %s\n' "$(date +%T)" \
+     "$(curl -s -o /dev/null -m 5 -w '%{http_code}' https://scrapeflow.govindappa.com/health)"; sleep 0.5
+   done | tee i2-rollout.log
+   ```
+   Today's `Recreate` gap is not recorded anywhere; to measure it before the change, `kubectl -n scrapeflow
+   rollout restart deploy/scrapeflow-api` with the loop running (a real outage of a few seconds), then
+   `grep -vc ' 200$' i2-rollout.log`.
+1. **Infra:** `git pull --rebase` (Flux image commits), push `5e9087e`. Flux applies it; the template change
+   (`preStop`) rolls the api under the new strategy on `cd5c60e`.
+   `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → `2/2`; `kubectl -n scrapeflow get pods
+   -l app=scrapeflow-api` → two `Running`, `1/1`. Probe loop: no non-200.
+2. **App:** push `develop`, ff `main` to it (api image; replay job gates the build). Flux bumps api,
+   workflow-worker and the cleanup CronJob. The api rolls one pod at a time; the first new pod runs
+   **migration 4.9** (`437442ce59b2 -> 47a8f9f3f4e2`) under I.1's lock while an old `cd5c60e` pod still
+   serves — safe, H.2 unmapped `nats_stream_seq`.
+3. **Verify:** `rollout status` `2/2` on the new tag; probe loop: no non-200 through the rollout (this is
+   the "after"); `kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/alembic current`
+   → `47a8f9f3f4e2 (head)`; in the SPA, run a job and watch its status go live (the socket lands on either
+   pod). If a pod hangs at startup, look for `Another process holds the migration lock` in its log.
+4. Record the before/after in the handoff.
+
+**Rollback:** revert infra `5e9087e` (back to one pod, `Recreate`); the app needs none — 4.9 is applied
+and nothing reads the column. Do not revert `main` past `bc30025` (G.1).
 
 ---
 
