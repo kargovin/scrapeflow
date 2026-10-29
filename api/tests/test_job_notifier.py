@@ -1,4 +1,4 @@
-"""JobNotifier against the dev Postgres: the pipeline channel and BUG-009's reconnect."""
+"""JobNotifier against the dev Postgres: the pipeline channel, BUG-009's reconnect, two replicas."""
 
 import asyncio
 import json
@@ -8,6 +8,7 @@ import asyncpg
 import pytest
 
 from app.core import job_notifier as notifier_module
+from app.core.crawl_progress import CHANNEL as CRAWL_STATUS_CHANNEL
 from app.core.job_notifier import JobNotifier, WebSocketConnectionLimitExceeded
 from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
 from app.settings import settings
@@ -20,6 +21,14 @@ async def notifier(monkeypatch):
     monkeypatch.setattr(notifier_module, "RECONNECT_BACKOFF", (0.05,))
     monkeypatch.setattr(notifier_module, "HEALTH_CHECK_SECONDS", 0.05)
     monkeypatch.setattr(notifier_module, "HEALTH_CHECK_TIMEOUT", 0.2)
+    n = JobNotifier()
+    await n.start(DSN)
+    yield n
+    await n.stop()
+
+
+@pytest.fixture
+async def second_replica():
     n = JobNotifier()
     await n.start(DSN)
     yield n
@@ -108,3 +117,37 @@ async def test_the_connection_limit_spans_every_channel(notifier, monkeypatch):
                 pass
     async with notifier.subscribe_pipeline_run("r", "u1"):
         pass
+
+
+async def test_every_replica_hears_every_channel(notifier, second_replica):
+    job_id, batch_id, run_id, crawl_id = (str(uuid.uuid4()) for _ in range(4))
+    async with (
+        notifier.subscribe_job(job_id, "u1") as a_job,
+        notifier.subscribe_batch(batch_id, "u1") as a_batch,
+        notifier.subscribe_pipeline_run(run_id, "u1") as a_run,
+        notifier.subscribe_crawl(crawl_id, "u1") as a_crawl,
+        second_replica.subscribe_job(job_id, "u2") as b_job,
+        second_replica.subscribe_batch(batch_id, "u2") as b_batch,
+        second_replica.subscribe_pipeline_run(run_id, "u2") as b_run,
+        second_replica.subscribe_crawl(crawl_id, "u2") as b_crawl,
+    ):
+        await _notify("job_status", f"{job_id}:{uuid.uuid4()}:completed")
+        await _notify("batch_status", json.dumps({"batch_id": batch_id, "status": "running"}))
+        await _notify(PIPELINE_STATUS_CHANNEL, _pipeline_update(run_id))
+        await _notify(CRAWL_STATUS_CHANNEL, json.dumps({"crawl_id": crawl_id, "status": "running"}))
+        for queue in (a_job, b_job):
+            assert (await asyncio.wait_for(queue.get(), 5))["status"] == "completed"
+        for queue in (a_batch, b_batch):
+            assert (await asyncio.wait_for(queue.get(), 5))["batch_id"] == batch_id
+        for queue in (a_run, b_run):
+            assert (await asyncio.wait_for(queue.get(), 5))["run_id"] == run_id
+        for queue in (a_crawl, b_crawl):
+            assert (await asyncio.wait_for(queue.get(), 5))["crawl_id"] == crawl_id
+
+
+async def test_the_connection_limit_is_per_replica(notifier, second_replica, monkeypatch):
+    monkeypatch.setattr(settings, "ws_max_connections_per_user", 1)
+    async with notifier.subscribe_job("j", "u1"), second_replica.subscribe_job("j", "u1"):
+        with pytest.raises(WebSocketConnectionLimitExceeded):
+            async with notifier.subscribe_job("j", "u1"):
+                pass

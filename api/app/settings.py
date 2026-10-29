@@ -42,7 +42,8 @@ class Settings(BaseSettings):
     # Rate limiting — per-user sliding window (Redis sorted set + Lua)
     rate_limit_requests: int = 60  # max requests allowed per window
     rate_limit_window_seconds: int = 60  # window size in seconds
-    ws_max_connections_per_user: int = 25  # max concurrent WebSocket connections per user
+    # Per user, per API process — N replicas admit N times this.
+    ws_max_connections_per_user: int = 25
 
     # Per-host limiter on scrape targets, per registrable domain (core/host_limiter.py)
     host_limit_in_flight: int = 2  # scrapes in flight at once
