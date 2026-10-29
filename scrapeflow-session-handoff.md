@@ -145,8 +145,8 @@ done.** Before/after, from a `curl` probe loop on `/health` (~0.9 s):
   created — 49 failed, ~46 s. Cause not confirmed; runbook step 1 says so now.
 - **After** — the `main` release under `RollingUpdate`: **0 of 359 failed**; rollout 1 min 43 s, first new pod
   ready in ~64 s (migration 4.9 inside that).
-- ⚠️ **Owner to read** (my `exec` refused — "Production Reads"): `alembic current` → `47a8f9f3f4e2 (head)`; a job's
-  live status in the SPA. The pods went ready, which a failed `upgrade head` would prevent.
+- ✅ Owner read `alembic current` → **`47a8f9f3f4e2 (head)`** (bare `alembic` is not on the pod's `PATH` — use
+  `/app/.venv/bin/alembic`; my `exec` was refused). Not yet checked: a job's live status in the SPA.
 - The probe loop was a background task of this session (log in the session scratchpad); stopped at close.
 - Still waiting: Dependabot's 64 alerts, BUG-024, BUG-018/019/021, BUG-029. BUG-021 now costs rollout time
   (an old pod may sit out its 30 s grace), not uptime.

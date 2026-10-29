@@ -2990,9 +2990,9 @@ on `https://scrapeflow.govindappa.com/health` every ~0.9 s from the dev machine.
 - Step 2's rollout (events, UTC): new pod 1 at 12:45:19, ready and old pod 1 scaled down at 12:46:23
   (~64 s — init containers, migration 4.9, readiness); new pod 2 at 12:46:23, old pod 2 gone 12:47:02. Whole
   rollout 1 min 43 s. Two serving pods throughout. Workflow worker on `eea8344`.
-- ⚠️ My `kubectl exec … alembic current` was refused by the classifier ("Production Reads") — **migration
-  4.9 in prod and the migration-lock log line are the owner's to read**, as is the SPA's live status.
-  The new pods went ready, which they cannot do if `upgrade head` failed (startup raises).
+- ✅ **Migration 4.9 in prod:** owner ran `alembic current` on the api pod → `47a8f9f3f4e2 (head)` (my `exec`
+  was refused by the classifier, "Production Reads"). ⚠️ The pod's `PATH` has no `.venv/bin` — use
+  `/app/.venv/bin/alembic`. The SPA's live status under two pods: not yet checked.
 
 ---
 
