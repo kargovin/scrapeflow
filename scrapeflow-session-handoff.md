@@ -134,7 +134,20 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-28 *(clock)*
+## Current state — as of 2026-10-29 *(clock)*
+
+🔧 **I.1 BUILT (2026-10-29, eleventh session; nothing pushed, nothing released).** Owner: "build it".
+`migrations/env.py` takes a transaction-scoped advisory lock (`MIGRATION_LOCK_KEY`, `app/core/db.py`) before
+`run_migrations()`; migration **4.9 `47a8f9f3f4e2`** drops `job_runs.nats_stream_seq` + its index. Detail:
+implementation backlog I.1 *Built*.
+- **Verified:** suite **744**, `test_migration_lock.py` 2, mutation **3/3**; compose round trip; two concurrent
+  upgrades from 4.8 behind a held lock — both waited, one migrated, the other exited clean at head.
+  ⚠️ Lock-before-version-read ordering is not test-covered.
+- **Release:** none alone — ships with **I.2** (api image, migration 4.9 on startup). Dev DB is at `47a8f9f3f4e2`.
+- **Also this session:** dev `docker_nats_data` volume deleted. GitGuardian emailed about a "Generic Password" — the
+  dashboard showed 4 hits, all `docker/docker-compose.yml`'s dev defaults (`scrapeflow`, `temporal`,
+  `scrapeflow_secret`); **owner confirmed the prod Secrets use different passwords** → false positives. Repo is public.
+- **Next:** I.2 — `replicas: 2`, drop `Recreate`, note `ws_max_connections_per_user` is per-process.
 
 🚀 **H.2 RELEASED — GROUP H CLOSED (2026-10-28, tenth session).** Owner ran the runbook in order: `main` ff
 `722f54b..cd5c60e` (api image; Flux bumped api + workflow-worker + cleanup CronJob, infra `1c636fb`), then infra

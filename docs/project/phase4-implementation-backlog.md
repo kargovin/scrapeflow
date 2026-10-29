@@ -106,7 +106,7 @@
 | H.1 | Delete NATS-bound worker Deployments (obligation 3) | ✅ **RELEASED 2026-10-28** (`main` `bc30025..722f54b`, infra `c92e7dd`, step 4 `51c2d40`) — NATS mode gone from all three workers; owner verified http + playwright jobs and a crawl |
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ✅ **RELEASED 2026-10-28** (`main` `722f54b..cd5c60e`, infra `432e014`) — NATS gone from the API, compose and the cluster; JetStream PVC deleted; owner verified http + playwright jobs. Column drop moved to I.1 |
 | **I** | **API thinning** | |
-| I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | ⬜ |
+| I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | 🔧 **Built 2026-10-29** (local, unreleased) — advisory lock in `migrations/env.py`, migration 4.9 `47a8f9f3f4e2`; ships with I.2 |
 | I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ⬜ |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ⬜ |
@@ -2899,6 +2899,25 @@ startup. Two replicas starting together race the migration. Options: a Postgres 
 around the upgrade (smallest change), or an init container / Job that runs it once. **TL call:
 advisory lock** — keeps the auto-run contract every handoff relies on.
 **Depends on:** H.2
+
+**Built 2026-10-29 (owner: "build it"; local, unreleased).**
+- **Lock:** `migrations/env.py` takes `pg_advisory_xact_lock(MIGRATION_LOCK_KEY)` (`app/core/db.py`) on the
+  migration connection before `run_migrations()` — so it covers the startup upgrade *and* any hand-run
+  `alembic` command. Transaction-scoped: every migration already runs in the one `engine.begin()`
+  transaction, so the lock is released at commit/rollback, or when a dead pod's connection drops — no
+  unlock path to forget. A `pg_try_` first, so a waiter logs `Another process holds the migration lock;
+  waiting for it` (`alembic.env`) — the line to look for if a pod hangs at startup. The waiter blocks
+  unbounded (no `lock_timeout`); a probe killing a slow waiter is safe, it retries on restart.
+  ⚠️ The lock must precede the read of `alembic_version` (READ COMMITTED: the waiter's next statement
+  sees the winner's commit). **That ordering is not covered by a test** — only the code order and its comment.
+- **Migration 4.9 `47a8f9f3f4e2`:** drops `idx_job_runs_nats_stream_seq` then the column; downgrade re-adds
+  both, empty (index identical to `655b7e9b461b`'s). Autogenerate under `pause api`; the dedup false positive
+  deleted. `alembic check` now reports only that false positive. Safe against `cd5c60e` — H.2 unmapped it.
+- **Verified:** `tests/test_migration_lock.py` (2: an upgrade waits on a held lock then completes; an
+  uncontended one doesn't wait — 0.27 s vs a 2 s hold); suite **744**; mutation **3/3** (no lock call,
+  try-lock only, wrong key). Compose: round trip up/down/up; **two concurrent `alembic upgrade head` from 4.8
+  behind a 30 s `psql`-held lock** — both logged the wait, one ran 4.9, the other found head and exited clean.
+- **Release:** none of its own — ships with I.2 (api image; migration 4.9 on startup).
 
 #### I.2 — 🚀 `replicas: 2`, `RollingUpdate`
 
