@@ -147,7 +147,11 @@ implementation backlog I.1 *Built*.
 - **Also this session:** dev `docker_nats_data` volume deleted. GitGuardian emailed about a "Generic Password" — the
   dashboard showed 4 hits, all `docker/docker-compose.yml`'s dev defaults (`scrapeflow`, `temporal`,
   `scrapeflow_secret`); **owner confirmed the prod Secrets use different passwords** → false positives. Repo is public.
-- **Next:** I.2 — `replicas: 2`, drop `Recreate`, note `ws_max_connections_per_user` is per-process.
+- **Git:** `develop` = `26c8fbc` (I.1) + `bd20bb1` (docs) + this close — **4–5 ahead of `origin/develop`, not
+  pushed** (includes H.2's two closeout docs commits). `tmp/` untracked, not mine. Compose left running, api on
+  the I.1 code.
+- **Next:** I.2 — `replicas: 2`, drop `Recreate`, note `ws_max_connections_per_user` is per-process; its release
+  carries I.1's lock + migration 4.9. Owner to choose walkthrough or "build it".
 
 🚀 **H.2 RELEASED — GROUP H CLOSED (2026-10-28, tenth session).** Owner ran the runbook in order: `main` ff
 `722f54b..cd5c60e` (api image; Flux bumped api + workflow-worker + cleanup CronJob, infra `1c636fb`), then infra
