@@ -150,6 +150,14 @@ done.** Before/after, from a `curl` probe loop on `/health` (~0.9 s):
 - The probe loop was a background task of this session (log in the session scratchpad); stopped at close.
 - Still waiting: Dependabot's 64 alerts, BUG-024, BUG-018/019/021, BUG-029. BUG-021 now costs rollout time
   (an old pod may sit out its 30 s grace), not uptime.
+- **Git at close:** `develop` = `f8df9d7`, 2 docs commits ahead of `origin/develop`, not pushed; `main` = `eea8344`.
+  Infra clean at `5e9087e`. Compose left running (api on the I.2 code). `tmp/` untracked, not mine.
+- **Next session (owner): the PRDs** — the Product Manager persona (`docs/process/`). Order per
+  `phase4-backlog.md` §2: **PRD-019** (conditional execution, layer A; implementation backlog X.1) owes four
+  things — the Validate-block precedent, the replay-determinism limit on conditions, the halt-early block, run-level
+  failure notification — and must precede **PRD-018** (Monitors, which needs the halt-early block and re-homes
+  dedup + diff); **PRD-017** (Delivery sinks: multi-sink fan-out with rollback) is unblocked, parallel to 019.
+  Not yet checked from I.2: a job's live status in the SPA under two pods.
 
 🔧 **I.2 BUILT (2026-10-29, eleventh session; nothing pushed, nothing released).** Owner: "build it".
 Infra **`5e9087e`** (local, not pushed): `scrapeflow-api` `replicas: 2`, `RollingUpdate` (`maxSurge: 1`,
