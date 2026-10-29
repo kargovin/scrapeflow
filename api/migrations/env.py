@@ -1,10 +1,12 @@
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from alembic import context
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.core.db import Base
+from app.core.db import MIGRATION_LOCK_KEY, Base
 from app.settings import settings
 
 # Alembic Config object — provides access to alembic.ini values
@@ -20,6 +22,8 @@ import app.models  # noqa: F401, E402
 
 target_metadata = Base.metadata
 
+logger = logging.getLogger("alembic.env")
+
 
 def run_migrations_offline() -> None:
     """Run migrations without a live DB connection (generates SQL only)."""
@@ -33,7 +37,19 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _take_migration_lock(connection) -> None:
+    # Transaction-scoped: released at commit or rollback, or when a dead process's connection drops.
+    # Must be taken before run_migrations() reads alembic_version, so a waiter sees the winner's head.
+    params = {"key": MIGRATION_LOCK_KEY}
+    if connection.execute(text("SELECT pg_try_advisory_xact_lock(:key)"), params).scalar():
+        return
+    logger.info("Another process holds the migration lock; waiting for it")
+    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), params)
+    logger.info("Migration lock acquired")
+
+
 def do_run_migrations(connection) -> None:
+    _take_migration_lock(connection)
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
         context.run_migrations()
