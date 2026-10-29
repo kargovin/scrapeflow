@@ -2992,7 +2992,7 @@ on `https://scrapeflow.govindappa.com/health` every ~0.9 s from the dev machine.
   rollout 1 min 43 s. Two serving pods throughout. Workflow worker on `eea8344`.
 - ✅ **Migration 4.9 in prod:** owner ran `alembic current` on the api pod → `47a8f9f3f4e2 (head)` (my `exec`
   was refused by the classifier, "Production Reads"). ⚠️ The pod's `PATH` has no `.venv/bin` — use
-  `/app/.venv/bin/alembic`. The SPA's live status under two pods: not yet checked.
+  `/app/.venv/bin/alembic`. ✅ Owner verified the SPA under two pods (live status works).
 
 ---
 

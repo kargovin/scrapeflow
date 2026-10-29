@@ -146,7 +146,7 @@ done.** Before/after, from a `curl` probe loop on `/health` (~0.9 s):
 - **After** — the `main` release under `RollingUpdate`: **0 of 359 failed**; rollout 1 min 43 s, first new pod
   ready in ~64 s (migration 4.9 inside that).
 - ✅ Owner read `alembic current` → **`47a8f9f3f4e2 (head)`** (bare `alembic` is not on the pod's `PATH` — use
-  `/app/.venv/bin/alembic`; my `exec` was refused). Not yet checked: a job's live status in the SPA.
+  `/app/.venv/bin/alembic`; my `exec` was refused). ✅ Owner verified the SPA under two pods.
 - The probe loop was a background task of this session (log in the session scratchpad); stopped at close.
 - Still waiting: Dependabot's 64 alerts, BUG-024, BUG-018/019/021, BUG-029. BUG-021 now costs rollout time
   (an old pod may sit out its 30 s grace), not uptime.
@@ -157,7 +157,6 @@ done.** Before/after, from a `curl` probe loop on `/health` (~0.9 s):
   things — the Validate-block precedent, the replay-determinism limit on conditions, the halt-early block, run-level
   failure notification — and must precede **PRD-018** (Monitors, which needs the halt-early block and re-homes
   dedup + diff); **PRD-017** (Delivery sinks: multi-sink fan-out with rollback) is unblocked, parallel to 019.
-  Not yet checked from I.2: a job's live status in the SPA under two pods.
 
 🔧 **I.2 BUILT (2026-10-29, eleventh session; nothing pushed, nothing released).** Owner: "build it".
 Infra **`5e9087e`** (local, not pushed): `scrapeflow-api` `replicas: 2`, `RollingUpdate` (`maxSurge: 1`,
