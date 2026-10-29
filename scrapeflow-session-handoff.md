@@ -136,6 +136,21 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-10-29 *(clock)*
 
+🚀 **I.2 RELEASED — GROUP I CLOSED (2026-10-29, eleventh session).** Owner pushed infra `5e9087e`, then
+`develop` + the `main` ff `cd5c60e..eea8344` (carries I.1: migration lock + 4.9). **Deployed code is `eea8344`**
+(api + workflow-worker). The api runs **2 pods, `RollingUpdate`**. **Every implementation-backlog group A–I is
+done.** Before/after, from a `curl` probe loop on `/health` (~0.9 s):
+- **Before** — `rollout restart` under `Recreate`: **43 failed probes, ~40 s of 503s**.
+- Step 1 (the strategy switch itself, infra) still ran as a `Recreate`: old pod to 0 before the new ones were
+  created — 49 failed, ~46 s. Cause not confirmed; runbook step 1 says so now.
+- **After** — the `main` release under `RollingUpdate`: **0 of 359 failed**; rollout 1 min 43 s, first new pod
+  ready in ~64 s (migration 4.9 inside that).
+- ⚠️ **Owner to read** (my `exec` refused — "Production Reads"): `alembic current` → `47a8f9f3f4e2 (head)`; a job's
+  live status in the SPA. The pods went ready, which a failed `upgrade head` would prevent.
+- The probe loop was a background task of this session (log in the session scratchpad); stopped at close.
+- Still waiting: Dependabot's 64 alerts, BUG-024, BUG-018/019/021, BUG-029. BUG-021 now costs rollout time
+  (an old pod may sit out its 30 s grace), not uptime.
+
 🔧 **I.2 BUILT (2026-10-29, eleventh session; nothing pushed, nothing released).** Owner: "build it".
 Infra **`5e9087e`** (local, not pushed): `scrapeflow-api` `replicas: 2`, `RollingUpdate` (`maxSurge: 1`,
 `maxUnavailable: 0`), `preStop` sleep 5 s, README *API* section. App **`d1eedcf`**: no runtime change — the

@@ -107,7 +107,7 @@
 | H.2 | 🚀 Remove NATS: stream init, StatefulSet, client deps, `nats_stream_seq`, contracts NATS arm | ✅ **RELEASED 2026-10-28** (`main` `722f54b..cd5c60e`, infra `432e014`) — NATS gone from the API, compose and the cluster; JetStream PVC deleted; owner verified http + playwright jobs. Column drop moved to I.1 |
 | **I** | **API thinning** | |
 | I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | 🔧 **Built 2026-10-29** (local, unreleased) — advisory lock in `migrations/env.py`, migration 4.9 `47a8f9f3f4e2`; ships with I.2 |
-| I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | 🔧 **Built 2026-10-29** (local, unreleased) — app `d1eedcf`, infra `5e9087e`; release carries I.1 |
+| I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ✅ **RELEASED 2026-10-29** — infra `5e9087e`, `main` `cd5c60e..eea8344` (carries I.1); rolling deploy 0/359 failed probes vs ~40 s down before. **Group I closed** |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ⬜ |
 | X.2 | Promote ADR-010 — needed by E.0 | ✅ 2026-10-13 — Accepted after review; §1 monthly skips, §2 sitemap files gated + submitted-seed scope + drops counted |
@@ -2962,7 +2962,9 @@ migration's stated payoff; record the before/after in the handoff.
 1. **Infra:** `git pull --rebase` (Flux image commits), push `5e9087e`. Flux applies it; the template change
    (`preStop`) rolls the api under the new strategy on `cd5c60e`.
    `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → `2/2`; `kubectl -n scrapeflow get pods
-   -l app=scrapeflow-api` → two `Running`, `1/1`. Probe loop: no non-200.
+   -l app=scrapeflow-api` → two `Running`, `1/1`. ⚠️ **This rollout is still an outage** — in the
+   2026-10-29 release the old pod was scaled to 0 before the two new ones were created (events 12:40:09 /
+   12:40:11 UTC; ~46 s of 503s), so the strategy switch itself ran as a `Recreate`. Cause not confirmed.
 2. **App:** push `develop`, ff `main` to it (api image; replay job gates the build). Flux bumps api,
    workflow-worker and the cleanup CronJob. The api rolls one pod at a time; the first new pod runs
    **migration 4.9** (`437442ce59b2 -> 47a8f9f3f4e2`) under I.1's lock while an old `cd5c60e` pod still
@@ -2975,6 +2977,22 @@ migration's stated payoff; record the before/after in the handoff.
 
 **Rollback:** revert infra `5e9087e` (back to one pod, `Recreate`); the app needs none — 4.9 is applied
 and nothing reads the column. Do not revert `main` past `bc30025` (G.1).
+
+**Released 2026-10-29 (owner ran steps 1–2; I watched with `get`/`wait` and the probe loop).** Probe: `curl`
+on `https://scrapeflow.govindappa.com/health` every ~0.9 s from the dev machine.
+
+| Rollout | Strategy in effect | Failed probes | Outage |
+|---|---|---|---|
+| Step 0 — `rollout restart` on `cd5c60e`, one pod | `Recreate` | 43 (all `503`) | **~40 s** (18:08:01 → 18:08:41 IST) |
+| Step 1 — infra `5e9087e` (1 → 2 pods, strategy switch) | ran as `Recreate` (see step 1's ⚠️) | 49 (all `503`) | ~46 s |
+| Step 2 — `main` `cd5c60e..eea8344` (api image, migration 4.9) | `RollingUpdate` | **0 of 359** | **none** |
+
+- Step 2's rollout (events, UTC): new pod 1 at 12:45:19, ready and old pod 1 scaled down at 12:46:23
+  (~64 s — init containers, migration 4.9, readiness); new pod 2 at 12:46:23, old pod 2 gone 12:47:02. Whole
+  rollout 1 min 43 s. Two serving pods throughout. Workflow worker on `eea8344`.
+- ⚠️ My `kubectl exec … alembic current` was refused by the classifier ("Production Reads") — **migration
+  4.9 in prod and the migration-lock log line are the owner's to read**, as is the SPA's live status.
+  The new pods went ready, which they cannot do if `upgrade head` failed (startup raises).
 
 ---
 
