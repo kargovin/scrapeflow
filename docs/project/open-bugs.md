@@ -2392,6 +2392,46 @@ validated address. One helper used by both senders. Fold in BUG-024's `is_global
 - **PRD-017 OQ-4** — every new network sink (bucket, database, email) needs the pinned-address connection from day one.
 ---
 
+## BUG-031 — Nothing ever frees a pipeline run's stored outputs
+
+**Severity:** Medium — storage only grows on the pipeline lane, and a user at the storage limit has no self-service way to free pipeline results.
+**Discovered:** 2026-10-30, in the owner's PRD-017 review (code reading).
+**Status:** 🔴 **OPEN — filed 2026-10-30; not fixed.**
+
+Every object a pipeline run's blocks store is charged to the user through the ledger (`pipeline_run_block_id`),
+and nothing on the lane ever releases one:
+
+| Path | What it does to a pipeline run's objects |
+|---|---|
+| `DELETE /pipelines/{id}` (`api/app/routers/pipelines.py:398`) | no runs → hard delete; **runs → soft delete only** (`deleted_at`) — "runs and their artifacts stay". No `?permanent=true` mode |
+| deleting one run | **no endpoint** |
+| ADR-009 §8c intermediate collection | **not built** — `pipeline_run_blocks.collected_at` and the `collected` output state exist; nothing sets the column |
+| nightly cleanup (`scripts/cleanup_old_runs.py`) | scheduled **job** runs only — and has never succeeded in prod (BUG-019) |
+| `DELETE /admin/users/{id}` | ✅ frees them — `release_user_objects` reads the ledger by owner, every lane |
+
+`ledger.release_pipeline_run_objects` (`api/app/core/ledger.py:206`) exists and is tested
+(`test_storage_ledger.py:453`), but **no route or script calls it**.
+
+**What the user sees:** at the limit, both refusals tell them to delete results — the trigger's
+`"Storage limit reached (…). Delete old results to continue."` (`core/quota.py:175`) and the run's storage-wall
+note `"… Delete results to start new runs"` (`workflows/pipeline.py:283`). For pipeline results there is nothing
+to delete them with; the only remedies are job permanent deletes or an admin. ADR-009 §8c says a run's result "is
+removed only when the user removes the run" — there is no way to remove one.
+
+Pipelines are on in prod (`pipelines_enabled` defaults to `True`; the infra repo does not override it).
+
+**Fix sketch:** mirror the job lane's permanent delete (`routers/jobs.py` `cancel_job`, `permanent=true`):
+`DELETE /pipelines/{id}?permanent=true` → cancel active runs, `release_pipeline_run_objects` per run with the
+**503-on-any-failure** rule, then hard-delete the pipeline (runs and blocks cascade). Consider a per-run delete
+(`DELETE /pipelines/{id}/runs/{run_id}`) on the same helper. The §8c collection window is related but separate —
+it frees intermediates, never the result.
+
+**Not in scope:** what sinks delivered (PRD-017) — deleting in ScrapeFlow never reaches into a user's destination.
+
+**Related:** BUG-019 (the cleanup that never ran); ADR-009 §8c (the retention promise this leaves unkept);
+P8 / the ledger (the 503 rule the fix must keep).
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised
