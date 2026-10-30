@@ -2348,6 +2348,48 @@ returned — so the Jobs page had nothing to show and fell back to `output_forma
 same schema), then pick one rendering for all three pages — `engine → format` as Batches does, or two
 columns — and apply it to the three lists (and `JobDetail`, which should show both).
 
+
+---
+
+## BUG-030 — The webhook address check and the connection resolve the host separately (DNS rebinding)
+
+**Severity:** Medium (security) — a blind SSRF from inside the cluster, for a signed-in user who controls a DNS name.
+**Discovered:** 2026-10-29, by the PRD-017 drafting subagent (code reading); confirmed against the code the same day.
+**Status:** 🔴 **OPEN — filed 2026-10-30; not fixed.**
+
+Both webhook senders check the URL, then send it, and the two steps **look the host up separately**:
+
+| Sender | Check | Send |
+|---|---|---|
+| pipeline Webhook block | `api/app/workflows/activities/webhook.py:90` — `validate_no_ssrf_core(input.url)` | `:102` — `httpx.AsyncClient().post(input.url, …)` |
+| job / batch / crawl deliveries | `api/app/workflows/activities/webhook_deliveries.py:89` | `:47` — `httpx.AsyncClient().post(…)` |
+
+`validate_no_ssrf_core` (`api/app/core/security.py`) calls `socket.getaddrinfo`, checks every address, and returns
+nothing; httpx then resolves the name again to connect. A name that answers differently the second time passes:
+
+```
+check:    evil.example → 93.184.x.x  (public)   ✔ allowed
+connect:  evil.example → 10.0.0.5    (internal) — the POST lands inside the cluster
+```
+
+A name with a very low TTL, or a DNS server that alternates answers, is enough. The attacker gets a POST with a
+JSON body to an internal address, and the outcome back as the block's or delivery's error (`HTTP 404`,
+`ConnectError`) — a usable port-scan signal. Redirects are not a second route: httpx does not follow them by
+default.
+
+⚠️ **The docs overstate the protection.** CLAUDE.md's *SSRF re-validation* row and both code comments give
+re-checking on every attempt as the defence against DNS rebinding. Re-checking narrows the window; it does not close
+it, because each attempt still checks and connects through two lookups.
+
+**Fix sketch:** resolve **once**, validate every returned address, then connect to **that** IP, keeping the original
+host name for the `Host` header and TLS (SNI / certificate check) — for example an httpx transport that pins the
+validated address. One helper used by both senders. Fold in BUG-024's `is_global` change in the same place.
+
+**Related:**
+- **BUG-024** — the same check's address list is incomplete (`100.64/10`). Different hole, same function; fix together.
+- **BUG-010 part 2** — the same lookup-twice gap for **scrape fetches** by the workers (recommended, not scheduled).
+  This bug is the webhook half, which runs on the API's own workflow worker.
+- **PRD-017 OQ-4** — every new network sink (bucket, database, email) needs the pinned-address connection from day one.
 ---
 
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
