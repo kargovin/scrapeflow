@@ -36,6 +36,8 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-011](ADR-011-artifact-identity-and-paths.md) | Artifact Identity — Run-keyed Paths, Stage-named Objects, and the Removal of `latest/` | **Accepted** | 2026-09-03 | ADR-002 §4 | — |
 | [ADR-012](ADR-012-workflow-code-versioning.md) | Workflow-Code Versioning — `patched()` Plus a Replay Test That Gates the Build | **Draft** (decision: owner, 2026-10-12; text pending review) | 2026-10-12 | — | — |
 | [ADR-013](ADR-013-schedule-policy.md) | Schedule Policy — `SKIP` on Overlap, and a Per-User Cap on Scheduled Jobs | **Accepted** (2026-10-27; overlap + cap 2026-10-13, §5 parameters 2026-10-27) | 2026-10-13 | — | — |
+| [ADR-014](ADR-014-block-outcomes-stop-rollback-alerts.md) | Block Outcomes — Stopping Early, Rollback, and Failure Alerts | **Draft** (Architect pass 2026-10-30; awaits owner review) | 2026-10-30 | — | — |
+| [ADR-015](ADR-015-delivery-sinks.md) | Delivery Sinks — Destinations, Egress, and the Delivery Worker | **Draft** (Architect pass 2026-10-30; awaits owner review) | 2026-10-30 | — | — |
 
 **ADR-009 is Accepted as of 2026-09-08.** Its section-by-section review completed 2026-09-05 —
 **§1–§17 and both closing blocks**, several reversed in the process — and the owner took the
