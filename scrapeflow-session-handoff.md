@@ -30,10 +30,10 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Accepted 2026-10-27**; cap 20, paused not counted, catch-up 365 d) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-029) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-031) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
-| PRDs | `docs/project/phase4-prd/` (PRD-016 only, so far) |
+| PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30, next the Architect pass); PRD-018 unwritten |
 | Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
 | **Phase 4 implementation backlog — the ordered task list (Tech Lead, 2026-09-20)** | `docs/project/phase4-implementation-backlog.md` — groups A–I are ADR-009 §16's named steps; one task per session; 🚀 marks the release points; its status table is the tracker. **Eight open items at the bottom need Architect/owner answers before the tasks that cite them** |
@@ -134,7 +134,48 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-10-29 *(clock)*
+## Current state — as of 2026-10-30 *(clock)*
+
+📝 **PRD-017 REVIEWED (2026-10-30, twelfth session; docs only, nothing released).** Owner reviewed
+`PRD-017-delivery-sinks.md` section by section in **17 rounds** (plain-words walkthrough of each section, then
+D1–D11) — **Draft, owner review complete; next the Architect pass.** Committed `afbc1e2` with BUG-031.
+- **What the review changed** (each round is a `Review round N` note at the top of the PRD):
+  - **D12** — on a failed run ScrapeFlow's own copies are always kept; rollback touches only the user's destinations
+    (PRD-019 D10's keep/delete stays on the stop alone).
+  - **D13** — the first webhook or email makes every delivery before it final; rollback runs only while nothing has
+    been announced. The reader's contract: **only `completed` is final** (rollback guarantees cleanup, not that
+    nobody saw the file).
+  - Failed pipeline Webhook block fails the run; a failed job webhook does not — stated as deliberate (R4).
+  - Webhook payload gains additive **`block_id`** + **`deliveries`** (where earlier sinks wrote); a duplicate is
+    **run id + block id**; email Message-ID fixed by both.
+  - Postgres sink = the **user's own** database, never ScrapeFlow's; table needs a unique (run id, block id) key,
+    checked by the destination test. Deleting in ScrapeFlow never reaches into a destination.
+  - Undo: a waiting undo holds no slot; already gone (0 rows) = undone; undo uses the **recorded** location.
+    The failure alert **keeps waiting** for rollback (owner chose (b)) — up to ~3 h late, stated as accepted.
+  - **Correction:** the pipeline Webhook block's retry window is **~3 h** (`catalog.py`: 5 attempts, waits
+    30 s/5 min/50 min/2 h), not the job lane's 2.6 h. Each Webhook block gets its **own** window; ~7 fit the 24 h
+    run limit. Bucket/Postgres sinks retry on the same order; the rollback reserve (every undo at full horizon) sits
+    inside the run budget and the save-time message names it.
+  - Webhook blocks may use a **saved webhook destination** (URL = credential, shown host-only after save); deleting
+    a destination in use is refused, naming the pipelines (PM preference). Goal 8 (no private addresses) added; D9
+    agreed as drafted — a homelab LAN destination needs a public hostname.
+  - Re-delivery from stored outputs → **non-goal**, its cost stated. 13 success checks added; OQ-1/2/3/5/6 updated.
+  - Hands forward: PRD-019 gets the alert-delay knock-on (recorded in PRD-017 only — PRD-019's review is closed);
+    PRD-018 gets the D12 + BUG-031 storage warning.
+- 🐛 **BUG-031 filed** (owner's ask): nothing ever frees a pipeline run's stored outputs — `DELETE /pipelines/{id}`
+  with runs is soft only, no run delete, ADR-009 §8c collection unbuilt (`collected_at` never set), nightly cleanup is
+  job-only (and BUG-019). `ledger.release_pipeline_run_objects` exists, tested, uncalled. Storage-limit messages tell
+  users to delete results they cannot. Admin user delete does free them. Fix sketch: `?permanent=true` mirroring the
+  job lane. **Not fixed.**
+- **From git, before this session (2026-10-29 → 10-30, not recorded here until now):** PRD-019 drafted and its
+  owner review completed in 12 rounds (`c877c5f`); PRD-017 drafted (by a PM subagent); **BUG-030** filed (`a563192`
+  — webhook SSRF check and connection resolve the host separately; CLAUDE.md's SSRF row corrected).
+- **Git at close:** `develop` = `afbc1e2` + this closeout, **2 ahead of `origin/develop` (`a563192`), not pushed**;
+  `main` = `origin/main` = `eea8344` (deployed, unchanged). Infra untouched. `tmp/` untracked, not mine.
+- **Next:** the **Architect pass** on PRD-019 and PRD-017 — one joint design for block end states (PRD-017 OQ-1 ↔
+  PRD-019 OQ-2, one migration; the quota views read `pipeline_run_blocks.status`). Then write PRD-018 (Monitors).
+  Consider fixing **BUG-031** before Monitors ship. Still waiting: Dependabot, BUG-018/019/021/024/029/030.
+
 
 🚀 **I.2 RELEASED — GROUP I CLOSED (2026-10-29, eleventh session).** Owner pushed infra `5e9087e`, then
 `develop` + the `main` ff `cd5c60e..eea8344` (carries I.1: migration lock + 4.9). **Deployed code is `eea8344`**
@@ -1619,8 +1660,9 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
    app, `e8f32e1` infra). ~~A.1~~ ✅ both halves 2026-09-21 (`f8e99bf` app, `de903a2` infra). The
    eight open items at the backlog's foot are owner/Architect calls; none blocks Group A.
-1. **Write PRD-019 — conditional execution (layer A).** ✅ Numbered 2026-09-08 (owner's call) and given
-   its `phase4-backlog.md` §2 row; **the document itself is unwritten.** It owes **four** things,
+1. ~~**Write PRD-019 — conditional execution (layer A).**~~ ✅ **Written 2026-10-29, owner review complete
+   2026-10-30 (`c877c5f`); PRD-017 likewise (`afbc1e2`). Both await the Architect pass.** Numbered 2026-09-08 (owner's call) and given
+   its `phase4-backlog.md` §2 row. It owes **four** things,
    all on that row: the Validate-precedent brief and the replay constraint (14c), the halt-early
    block B cannot build for itself (§4), and run-level failure notification (15f). ⚠️ **It sorts
    last and is required first** — before PRD-018, which cannot ship without its primitive. The
@@ -1657,6 +1699,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-30 (PRD-017 review close):** `develop` = `afbc1e2` + docs closeout, 2 ahead of `origin/develop` (`a563192`), **not pushed**; `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-10-28 (H.2 session close, verified after fetch):** `main` = `origin/main` = `cd5c60e` (deployed — api image; workers still `722f54b`); `develop` = this closeout, **1–2 ahead of `origin/develop` (docs only) — owner pushes**. Infra `main` = `origin/main` = `432e014`. Compose: api, workflow-worker, the three `-temporal` workers, Temporal, Postgres ×2, Redis, MinIO — no NATS; the `docker_nats_data` volume is still on disk. `tmp/` untracked, pre-existing.
 - **2026-10-28 (H.1 session close, verified after fetch):** `main` = `origin/main` = `722f54b` (deployed — the three worker images; api still `bc30025`'s build, same code); `develop` = `origin/develop` = this closeout. Infra `main` = `origin/main` = `51c2d40`. Compose: api, workflow-worker, the three `-temporal` workers on the H.1 images, Temporal, Postgres ×2, Redis, MinIO, NATS (H.2 removes it). `tmp/` untracked, pre-existing.
 - **2026-10-28 (H.1 release):** `main` = `origin/main` = `origin/develop` = `722f54b` (deployed; worker images only); `develop` = docs closeout on top. Infra `origin/main` = `c92e7dd` + Flux bumps; `origin/main` = `51c2d40` (step 4, owner-pushed; pods restarted clean).
@@ -1818,6 +1861,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-30 *(clock, twelfth)* | **📝 PRD-017 owner review — 17 rounds, complete.** Read-in (handoff a day stale; caught up from git). Plain-words walkthrough per section with code checks (`webhook.py` payload, `catalog.py` timings computed in the api container, `validator.py` linear-chain rule, pipeline delete path). Added D12, D13, the reader's contract, `block_id` + `deliveries`, webhook destinations, rollback reserve, 13 success checks; corrected 2.6 h → ~3 h and the fan-out non-goal; D1–D11 agreed. **BUG-031 filed** (pipeline outputs never freed). CLAUDE.md banner + PRD bullets updated | `afbc1e2` + this closeout |
 | 2026-10-28 *(clock, ninth)* | **🚀 H.1 RELEASED** (owner: infra push, `main` ff `bc30025..722f54b`; jobs + crawl verified; BUG-029 filed; step 4 `51c2d40` pushed). **🔧 H.1 BUILT.** NATS mode removed from the three workers (Go `internal/worker`, Python `worker.py`/`models.py`, `temporal_main` → `main`, NATS settings + deps), compose v1 services and the contracts NATS arm deleted; render tests ported to `test_scrape.py` (BUG-015/016/017 coverage), two Go tests to the activity; mutation 12/12; compose e2e on all three workers + a crawl; infra Deployments removed locally | `8a62da8` + docs; infra `c92e7dd` (local) |
 | 2026-10-28 *(clock, eighth)* | **🚀 G.1 RELEASED.** `result_consumer.py`, the v1 dispatch arms and `JOB_LANE`/`BATCH_LANE` deleted; autouse `mock_temporal`; suite 739; mutation 20/20 (two gaps closed); compose e2e; dev drain hazard found (NATS workers behind `profiles: [v1]`); owner ran the runbook + `main` ff; infra step 3 pushed; env verified gone | `65fc93f`, `bc30025`, `fad0e7d` + closeout; infra `682cc52` |
 | 2026-10-27 *(clock, sixth)* | **📐 F.0 done — ADR-013 Accepted; 🔧 BUG-023 fixed.** Plain walkthrough of F.0 and the catch-up window; owner took §5 as recommended (cap 20, paused not counted, catch-up 365 d). Then BUG-023 explained and built (per-user lock, 8 tests, 7/7 mutations). `2eba735`; BUG-023 `2983a47` |
