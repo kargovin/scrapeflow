@@ -33,7 +33,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Open bugs (BUG-004 → BUG-031) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
-| PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30, next the Architect pass); PRD-018 unwritten |
+| PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass drafted 2026-10-30 as **ADR-014** + **ADR-015**, Draft); **PRD-018** (Draft, not reviewed, 2026-10-30) |
 | Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
 | **Phase 4 implementation backlog — the ordered task list (Tech Lead, 2026-09-20)** | `docs/project/phase4-implementation-backlog.md` — groups A–I are ADR-009 §16's named steps; one task per session; 🚀 marks the release points; its status table is the tracker. **Eight open items at the bottom need Architect/owner answers before the tasks that cite them** |
@@ -135,6 +135,41 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 ---
 
 ## Current state — as of 2026-10-30 *(clock)*
+
+📐 **ARCHITECT PASS DRAFTED + PRD-018 DRAFTED (2026-10-30, thirteenth session; docs only, nothing released).**
+Owner: "assume the arch persona … and a PM subagent for prd18". Answered first: the pass ends in ADRs (PRD-016's
+pass produced ADR-009); write them now as Draft and **hold acceptance until PRD-018 is drafted**; PRDs are not
+"Accepted" here — their status flips to "Architect pass complete — ADR-0xx Accepted" when the ADR is accepted.
+Committed `a5a4d84`.
+- **ADR-014 — Block outcomes** (`docs/adr/ADR-014-block-outcomes-stop-rollback-alerts.md`, Draft): PRD-019 OQ-1–8 +
+  PRD-017 OQ-1/2. No new status values; reason columns beside them (`status_reason`, `reason_block_id`, `verdict`,
+  `delivery`, `undo_status`, `undo_error` on blocks; `stopped_at_block_id`, `stop_reason`, `failed_block_id`,
+  `rollback_deadline` on runs) in one migration 4.10 — **quota views untouched**. Validate returns a verdict in stop
+  mode (fail mode unchanged); `negate` flag for reverse rules; typed run inputs (`url`/`number`/`text`) substituted
+  by the workflow; stop with delete calls `release_pipeline_run_objects` (BUG-031's function, first caller); rollback
+  in the failure path, no slot, cancel ignored; **failure alerts = `webhook_deliveries` rows** written with the
+  `failed` write (API trigger covers "could not start"); three admin `job_lane_webhook*` meters need
+  `pipeline_run_id IS NULL`. Patches `validate-stop`, `webhook-events`, `rollback`. **Escalations E1–E6 (§11) open.**
+- **ADR-015 — Delivery sinks** (`docs/adr/ADR-015-delivery-sinks.md`, Draft): PRD-017 OQ-3–8. `destinations` table
+  with its own Fernet key; delete-in-use refused (409, names pipelines); test leaves no debris; **resolve once,
+  connect to the checked IP** (fixes **BUG-030** in slice 1, both webhook senders); new isolated
+  **`delivery-worker/`** (no DB, destinations key only, first NetworkPolicy in the namespace — **none exists today**;
+  k3s enforcement untested → release gate); workflow-driven retry loop for sinks; per-sink keys, ~3 h budgets,
+  rollback reserve; size caps. **Escalations F1–F5 (§9) open.** Per-client "connect to IP, verify the name" is
+  marked *to verify at build*.
+- **PRD-018 — Monitors** (`docs/project/phase4-prd/PRD-018-monitors.md`, Draft, not reviewed; PM subagent): a
+  monitor = pinned pipeline version + fixed inputs + schedule; baseline = latest earlier `completed` check; cost gate
+  = Validate-stop + new rule kind "content same as baseline"; approval block in slice 2; self-pause after 5 failures;
+  **BUG-031 is slice 0**; scheduled jobs recommended to run as monitors (slice 3); crawls not absorbed. **Owner
+  questions Q1–Q12, Architect OQ-1–OQ-13.** Its endings list (Appendix A) fits ADR-014 §5 unchanged. Two touch
+  points for PRD-018's own Architect pass: a carried value absent on the first check vs ADR-014 §4's "missing input
+  refused"; a 7-day approval wait vs the 24 h run ceiling.
+- **Git at close:** `develop` = `a5a4d84` + this closeout, 4 ahead of `origin/develop` (`a563192`), **not pushed**;
+  `main` = `origin/main` = `eea8344` (deployed, unchanged). Infra untouched. `tmp/` untracked, not mine.
+- **Next (owner):** review **ADR-014** (first — PRD-018's endings depend on its §5), **PRD-018**, **ADR-015**,
+  section by section; answer E1–E6, F1–F5, Q1–Q12. **Then the Architect pass on PRD-018 → a new ADR (ADR-016)**
+  answering its OQ-1–13. Accept ADR-014/015 once PRD-018 is reviewed. Consider BUG-031 early — PRD-018 makes it
+  slice 0.
 
 📝 **PRD-017 REVIEWED (2026-10-30, twelfth session; docs only, nothing released).** Owner reviewed
 `PRD-017-delivery-sinks.md` section by section in **17 rounds** (plain-words walkthrough of each section, then
@@ -1699,6 +1734,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-10-30 (Architect pass + PRD-018 draft close):** `develop` = `a5a4d84` + docs closeout, 4 ahead of `origin/develop` (`a563192`), **not pushed**; `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-10-30 (PRD-017 review close):** `develop` = `afbc1e2` + docs closeout, 2 ahead of `origin/develop` (`a563192`), **not pushed**; `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-10-28 (H.2 session close, verified after fetch):** `main` = `origin/main` = `cd5c60e` (deployed — api image; workers still `722f54b`); `develop` = this closeout, **1–2 ahead of `origin/develop` (docs only) — owner pushes**. Infra `main` = `origin/main` = `432e014`. Compose: api, workflow-worker, the three `-temporal` workers, Temporal, Postgres ×2, Redis, MinIO — no NATS; the `docker_nats_data` volume is still on disk. `tmp/` untracked, pre-existing.
 - **2026-10-28 (H.1 session close, verified after fetch):** `main` = `origin/main` = `722f54b` (deployed — the three worker images; api still `bc30025`'s build, same code); `develop` = `origin/develop` = this closeout. Infra `main` = `origin/main` = `51c2d40`. Compose: api, workflow-worker, the three `-temporal` workers on the H.1 images, Temporal, Postgres ×2, Redis, MinIO, NATS (H.2 removes it). `tmp/` untracked, pre-existing.
@@ -1861,6 +1897,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-10-30 *(clock, thirteenth)* | **📐 Architect pass drafted (ADR-014, ADR-015) + PRD-018 drafted by a PM subagent.** Owner asked whether the pass is a review or ADRs, and whether to wait for PRD-018 → ADRs now, Draft, acceptance held until PRD-018 is drafted; no PRD acceptance step. Read both PRDs, ADR-009 §4/§14/§15, ADR-012, `pipeline.py`, `db.py`, `webhook.py`, `catalog.py`, the Validate activity, the trigger, the views, `webhook_deliveries`, admin meters, infra (no NetworkPolicies). PM handshake (new endings) folded into ADR-014 §5. | `a5a4d84`, docs closeout |
 | 2026-10-30 *(clock, twelfth)* | **📝 PRD-017 owner review — 17 rounds, complete.** Read-in (handoff a day stale; caught up from git). Plain-words walkthrough per section with code checks (`webhook.py` payload, `catalog.py` timings computed in the api container, `validator.py` linear-chain rule, pipeline delete path). Added D12, D13, the reader's contract, `block_id` + `deliveries`, webhook destinations, rollback reserve, 13 success checks; corrected 2.6 h → ~3 h and the fan-out non-goal; D1–D11 agreed. **BUG-031 filed** (pipeline outputs never freed). CLAUDE.md banner + PRD bullets updated | `afbc1e2` + this closeout |
 | 2026-10-28 *(clock, ninth)* | **🚀 H.1 RELEASED** (owner: infra push, `main` ff `bc30025..722f54b`; jobs + crawl verified; BUG-029 filed; step 4 `51c2d40` pushed). **🔧 H.1 BUILT.** NATS mode removed from the three workers (Go `internal/worker`, Python `worker.py`/`models.py`, `temporal_main` → `main`, NATS settings + deps), compose v1 services and the contracts NATS arm deleted; render tests ported to `test_scrape.py` (BUG-015/016/017 coverage), two Go tests to the activity; mutation 12/12; compose e2e on all three workers + a crawl; infra Deployments removed locally | `8a62da8` + docs; infra `c92e7dd` (local) |
 | 2026-10-28 *(clock, eighth)* | **🚀 G.1 RELEASED.** `result_consumer.py`, the v1 dispatch arms and `JOB_LANE`/`BATCH_LANE` deleted; autouse `mock_temporal`; suite 739; mutation 20/20 (two gaps closed); compose e2e; dev drain hazard found (NATS workers behind `profiles: [v1]`); owner ran the runbook + `main` ff; infra step 3 pushed; env verified gone | `65fc93f`, `bc30025`, `fad0e7d` + closeout; infra `682cc52` |
