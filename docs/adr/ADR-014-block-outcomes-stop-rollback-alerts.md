@@ -1,9 +1,59 @@
 # ADR-014: Block Outcomes — Stopping Early, Rollback, and Failure Alerts
 
-**Status:** **Draft** — Architect pass, 2026-10-30. Not reviewed; awaits the owner's section-by-section review.
-Hold acceptance until PRD-018 (Monitors) is drafted (owner, 2026-10-30), so Monitors' new endings can be
-checked against §5 while this is still editable.
+**Status:** **Draft — owner's section-by-section review complete (2026-11-03, 10 rounds).** Acceptance held until
+PRD-018 (Monitors) is reviewed (owner, 2026-10-30), so Monitors' new endings can be checked against §5 while this
+is still editable.
 **Date:** 2026-10-30
+**Last updated:** 2026-11-03 (review round 10: §11–§13 — owner review complete)
+
+> **Review round 1 (owner, 2026-11-03): §1 The problem.** Agreed as drafted.
+>
+> **Review round 2 (owner, 2026-11-03): §2 The stop decision.** Decision agreed. The release-order warning was
+> wrong about the mechanism: the worker's contract models ignore unknown fields (Pydantic's default), so an old
+> worker does not fail to parse — it silently drops `when_unmet` (stop becomes fail) and `negate` (§3; the rule is
+> checked un-reversed). Text corrected; *workers first* stands as a note. `extra="forbid"` on the worker's Validate
+> models was offered and **not taken** (owner: no pipelines run before Phase 4 completes, so a wrong-order window
+> has nothing to hit). "Cannot be checked" reworded: fail mode keeps listing it with the other problems.
+>
+> **Review round 3 (owner, 2026-11-03): §3 Reverse rules.** Agreed. Added the closed list of "cannot be checked"
+> cases — the evaluator gives three answers, not two, so a reversed rule on a non-JSON page fails instead of
+> reading as met. Kept as drafted: `negate` on `compare` (a second spelling of the reverse operator), and a
+> reversed `type` on a missing path reading as met.
+>
+> **Review round 4 (owner, 2026-11-03): §4 Typed run inputs.** Agreed, with two additions. The inputs are
+> text-only in **four** places, not one (request body, workflow input, run read response; the JSONB column takes
+> anything) — all named. Number inputs are **strict** at the trigger: a JSON number only, `"100"` and `true` refused
+> with a 422 (tested: a plain `str | int | float` keeps `"100"` as text and turns `true` into `1`).
+>
+> **Review round 5 (owner, 2026-11-03): §5 How a run and a block record how they ended.** Agreed as drafted.
+> Checked on the dev database in a rolled-back transaction: all ten columns and three CHECKs apply, and both quota
+> views still read. `alert_only` (E1) is taken at §8d.
+>
+> **Review round 6 (owner, 2026-11-03): §6 The stop path.** Agreed, with one correction: as drafted the delete
+> could never retry — `delete_minio_object` swallows every failure and returns `False`, so the activity would
+> succeed on its first attempt with objects left. It now commits what it released and raises a retryable error
+> when anything is left; each attempt re-reads the ledger. **E3 taken as recommended** (a failed delete still ends
+> `completed` and stopped, with the note).
+>
+> **Review round 7 (owner, 2026-11-03): §7 Rollback.** Agreed, with one correction: the API's cancel does not
+> only set `cancel_requested_at` — it also sends a Temporal cancel (`handle.cancel()`), which lands on whatever the
+> workflow is awaiting. Rollback survives it only because every await goes through `_finish(...,
+> interruptible=False)`; a bare await would leave the run `running` and half undone. Added to the traps. **E2
+> taken as recommended** (an undo holds no concurrency slot).
+>
+> **Review round 8 (owner, 2026-11-03): §8 The failure alert.** Agreed. `pipeline.failed` **keeps** `diff_detected:
+> false` / `diff_summary: null`, so it has `pipeline.result`'s shape (§8c corrected — it said they were dropped).
+> Three build notes added: the delivery activity's secret lookup gets an explicit pipeline arm and refuses an
+> unknown owner rather than signing with `b""`; `webhook_delivery.pending()` gains a `pipeline_run_id` filter;
+> `destination_id` and a nullable `webhook_url` are ADR-015's migration. **E1, E5, E6 taken as recommended**; the
+> two retry windows (≈2.6 h alert, ≈2.9 h block) are stated in §8c. The two senders share only the SSRF check — a shared send
+> is carried to ADR-015's review (note at its head).
+>
+> **Review round 9 (owner, 2026-11-03): §9 Config shape, §10 Changing the workflow code.** Agreed as drafted.
+>
+> **Review round 10 (owner, 2026-11-03): §11–§13.** **E4 taken as recommended** (`not_started`); E1–E6 all
+> answered. §12 agreed. §13's trap list gains the four build traps this review found (§3, §4, §6, §8b). E5's
+> window corrected to ≈2.9 h. **Owner review complete.**
 **Deciders:** @karthik
 **Resolves:** PRD-019's eight open questions (OQ-1 to OQ-8) and PRD-017's first two (OQ-1 recording
 "delivered, then undone", OQ-2 where rollback runs). PRD-017's other six (destinations, egress, duplicate-safe
@@ -62,17 +112,17 @@ Validate activity (content queue, LLM worker)          PipelineWorkflow (replaye
 - **Stop mode returns the verdict as the activity's result.** It is not raised. So "rule not met" makes exactly
   one attempt with nothing to retry, which is PRD-019's "never retried" check. A replay reads the verdict back from
   the history and never re-reads the page.
-- **"Cannot be checked" is raised, non-retryable, in both modes** (D4): a path that is not there, or a value of
-  the wrong type, for any rule except `present`, `type` and their reverses. Its error names the Validate, the rule
-  and what was found.
+- **"Cannot be checked" fails the run in both modes** (D4): a path that is not there, or a value of the wrong
+  type, for any rule except `present`, `type` and their reverses. In fail mode it stays one entry in the problem
+  list, as today. In stop mode it is raised as `ValidationUnverifiable`, non-retryable, naming the Validate, the
+  rule and what was found.
 - **The contract change is additive** (ADR-012 §2.4). `ValidateInput` gains `when_unmet: "fail" | "stop"`, default
   `"fail"`. The result type becomes `ValidateVerdict | None`: `None` in fail mode, as recorded in every existing
   history. Both copies of the contract (`api/app/workflows/activities/contracts.py`, `llm-worker/worker/contracts.py`)
   and `contracts/test_activity_contract.py` gain the field and the verdict.
-- ⚠️ **Release order: the LLM worker before the api image.** Today's worker parses `ValidateInput` with no
-  `when_unmet` field. If the api ships first, a stop-mode Validate reaches an old worker and fails to parse. That
-  error is retryable, so the block retries three times and the run then fails. It is the same order as H.1:
-  workers first.
+- **Release order: the LLM worker before the api image** (as H.1: workers first). The worker's contract models
+  ignore unknown fields, so an old worker does not refuse a new input: it drops `when_unmet` (a stop-mode Validate
+  fails the run instead of stopping it) and `negate` (§3 — the rule is checked as if not reversed).
 
 **Why not evaluate rules in the workflow body:** it would save one activity per Validate, but the workflow worker
 has no storage reads by design, and rules need the page. PRD-019 D5 keeps the option open for rules that read only
@@ -92,6 +142,14 @@ met ↔ not met. "Cannot be checked" is never flipped.**
 | `compare /price lt 100` | not below 100 | **cannot be checked → fails** |
 | `json_schema {…}` | does not match the schema | — |
 
+- **The evaluator gives three answers: met, not met, cannot be checked.** Today's `rules.py` gives two (no problem,
+  or a problem string), which cannot be flipped safely. "Cannot be checked" is exactly:
+  - the input is not JSON, for any JSON rule (`json_schema`, `present`, `type`, `compare`);
+  - a missing path, for `compare` (`present` and `type` answer it: absent, or not that type);
+  - a non-number value, on either side, for `lt` / `le` / `gt` / `ge`;
+  - an invalid schema (the save-time check already refuses one; the worker does not rely on it).
+
+  Without the first, `present /price, negate: true` on an HTML error page would read as "absent → met".
 - **"A reverse and its original always disagree" (PRD-019's check) holds by construction.** One evaluator flips one
   answer. A set of new rule kinds would need that property proved separately for each one.
 - **Saved Validate blocks keep their meaning:** the flag defaults to false and the config version does not move.
@@ -115,8 +173,15 @@ met ↔ not met. "Cannot be checked" is never flipped.**
   exists.
 - **The trigger checks each value against its declared type.** A missing or wrongly typed input gets a `422` before
   any row is written, so nothing is charged. This is the path an unbound `url` already takes.
-- **The workflow substitutes; the LLM worker never sees a binding.** `PipelineRunInput.inputs` widens from
-  `dict[str, str]` to `dict[str, str | int | float]`. Every recorded history holds strings, so the change is additive.
+- **A `number` input is a JSON number, strictly.** `"100"` and `true` are refused with a `422` naming the input and
+  what was sent. A plain `str | int | float` field would keep `"100"` as text (a `compare` that cannot be checked,
+  or an `eq` that is never met) and turn `true` into `1` (every run stops, `completed`). The check is per declared
+  type at the trigger, not left to the field's union. The SPA's run form sends a number, not the typed text.
+- **The workflow substitutes; the LLM worker never sees a binding.** The inputs widen from `dict[str, str]` to
+  `dict[str, str | int | float]` in all three models that carry them: `PipelineRunCreate.inputs` (the trigger's
+  body — left text-only, it refuses every number before any check runs), `PipelineRunInput.inputs` (the workflow's
+  input) and the run read response's `inputs`. `pipeline_runs.inputs` is JSONB and needs no migration. Every
+  recorded history holds strings, so the change is additive.
   The workflow replaces each `{"$input": name}` in a rule with the value before it dumps the rules into
   `ValidateInput`. The substitution is deterministic: run inputs are part of the workflow's input. The worker
   contract does not change for bindings.
@@ -240,6 +305,11 @@ In `PipelineWorkflow`, when a stop-mode Validate returns `not_met`:
     counter and deletes the row, in that order, and commits at the end. Deleting an object that is already missing
     is a success. So a retry after a lost commit finds the object gone, releases the row and decrements once. No
     row is ever left for a removed object once the activity has succeeded.
+  - ⚠️ **The activity must raise to be retried.** `delete_minio_object` catches every failure and returns `False`,
+    and `release_objects` counts it and moves on, so a bare call succeeds on its first attempt with objects left.
+    The activity commits what it released, then raises a **retryable** error when `outcome.failed > 0`. Each
+    attempt re-reads the run's ledger rows, so a retry touches only what is left. It sets `collected_at` per block
+    from the rows that remain, not from `ReleaseOutcome.failed_run_ids` (job-lane runs only).
   - **If the activity gives up** (storage unreachable past its retries — the workers' transient policy, three
     attempts), the objects it could not remove keep their rows: they are still on disk and still charged. The run
     still ends `completed` and stopped, carrying a note in `pipeline_runs.error`, the way the storage-wall note
@@ -287,10 +357,13 @@ failure (a block failed / time budget spent / storage accounting failed):
   `undo_status`. ⚠️ **This is a deliberate deviation from ADR-009 15a's "holding capacity at this instant",
   which would count each few-second undo attempt.** It is accepted so that the views are not touched. The capacity
   involved is a short HTTP or SQL delete. (§11, escalation E2.)
-- **A cancel during rollback is acknowledged and does not stop it** (PRD-017 R3). The API's cancel only sets
-  `cancel_requested_at` (today's code). The workflow's `_finish` already shields running work from a Temporal
-  cancel. The rollback loop ignores `_cancel_requested`, and the run ends `failed`, not `cancelled`: the failure was
-  decided before the cancel arrived. ⚠️ The precedence rule "a cancel written by the API wins" (ADR-009 §11a) does
+- **A cancel during rollback is acknowledged and does not stop it** (PRD-017 R3). The API's cancel sets
+  `cancel_requested_at` **and** sends a best-effort Temporal cancel (`handle.cancel()`), which raises at whatever
+  the workflow is awaiting. ⚠️ **Every await in the rollback loop goes through `_finish(..., interruptible=False)`**:
+  `_finish` absorbs the cancel and waits the undo out; `interruptible=True` would also end an undo's retry wait. A
+  bare `await` would raise out of the loop, skip the remaining undos and `mirror_run_status(failed)`, and leave the
+  run `running` with blocks `undoing` and no alert. The rollback loop also ignores `_cancel_requested`, and the run
+  ends `failed`, not `cancelled`: the failure was decided before the cancel arrived. ⚠️ The precedence rule "a cancel written by the API wins" (ADR-009 §11a) does
   not apply here. The API never writes `cancelled` itself, only the request.
 - **Cancel and stop never roll back** (D4), by construction: neither goes through the failure path.
 - **A webhook that gave up counts as not delivered**, so the rollback still runs. This covers a receiver that
@@ -328,9 +401,13 @@ change and not by an extra workflow step.
   have `run_id` NULL.
 - **The delivery activity's secret lookup gains a pipeline arm.** It reads the encrypted secret of `block_id` from
   the run's pinned version (`parse_definition`'s stored secrets). With PRD-017's saved webhook destinations
-  (ADR-015), it reads the destination's current secret.
+  (ADR-015), it reads the destination's current secret. ⚠️ Today's lookup (`_secret`) falls through to `b""` for
+  any owner that is not a job or a batch — the crawl case. The arms become explicit (crawl → `b""`, pipeline → the
+  block's secret) and an unknown owner raises; otherwise a missed arm signs every alert with an empty key, silently.
+- `webhook_delivery.pending()` gains a `pipeline_run_id` filter, for the writers' best-effort start.
 - `webhook_url` holds the pinned version's URL for an inline Webhook block. For a block using a saved
-  destination, the row stores the destination id and the URL is resolved at each attempt. That keeps "current
+  destination, the row stores the destination id and the URL is resolved at each attempt (`destination_id` and a
+  nullable `webhook_url` are ADR-015's migration, not 4.10's). That keeps "current
   credentials per attempt" and keeps a credential-bearing URL out of the row (ADR-015).
 
 ### 8c. The payload — `pipeline.failed`
@@ -349,11 +426,14 @@ change and not by an extra workflow step.
 ```
 
 It carries `job.failed`'s fields, adapted the way PRD-016 R6 adapted the result payload: no `job_id`;
-`pipeline_id` and `pipeline_run_id`; `run_id` kept; `diff_*` dropped, since a pipeline has no diff. To those it adds
+`pipeline_id` and `pipeline_run_id`; `run_id` kept; `diff_detected: false` and `diff_summary: null` kept as
+constants, as `pipeline.result` does today (`workflows/activities/webhook.py`), so both pipeline events have one shape. To those it adds
 `block_id` (PRD-017 R4, which block sent it), `failed_block_id`, and `rollback`: each entry is `{block_id, kind,
 location}` from the blocks' `delivery` and `undo_status`, and every list is empty in layer A. Signed like every
 other ScrapeFlow webhook. It is retried on the job lane's schedule (≈2.6 h, PRD-019 R5), with SSRF checked on
-every attempt, which the job lane's delivery activity already does.
+every attempt, which the job lane's delivery activity already does. **One block, two windows:** the same block's
+`pipeline.result` is retried by its own activity (C.9) over ≈2.9 h (waits 30 s / 5 min / 50 min / 2 h, against the
+alert's 30 s / 5 min / 30 min / 2 h). Accepted (E5); they become one if ADR-015 F5 moves both onto one sender.
 
 ### 8d. The Webhook block's `events`, and a block that is alert-only
 
@@ -418,16 +498,17 @@ written inside activities (`mirror_*`, `queue_failure_alerts`), and activity cod
 
 ## 11. Escalations to the PM (owner)
 
-Product-visible consequences of the design. Each is my recommendation and stays open until you answer.
+Product-visible consequences of the design. **All six answered by the owner, 2026-11-03: each taken as
+recommended.**
 
-| # | Question | Recommendation |
+| # | Question | Recommendation (✅ = owner's answer) |
 |---|---|---|
-| **E1** | A Webhook block set to *breaks only*, on a run that succeeds: what does the run page show for it? | **"skipped — alert only"** (`alert_only`). Calling it "completed" would read as "a message was sent". |
-| **E2** | Undo attempts never hold a concurrency slot, not even during the few seconds of each delete (§7). | **Accept.** The alternative changes both quota views for seconds of capacity. |
-| **E3** | A stop set to *delete* whose delete fails after retries (storage down): the run ends `completed` and stopped, with a note, and the objects are kept and charged. | **Accept**, rather than failing a run whose verdict was a success, or retrying for hours. |
-| **E4** | A run that could not start: its blocks read **"skipped — run could not start"** (`not_started`), a fourth reason PRD-019 R4 does not list. | **Accept**; it is the API's existing failure path, now labelled. |
-| **E5** | Failure alerts retry on the job lane's ≈2.6 h schedule (PRD-019 R5); a Webhook block's own delivery on ≈3 h (PRD-017 R4). Two windows on one pipeline. | **Keep both.** The alert reuses the job lane's delivery machinery, and PRD-019 R5 chose that window. |
-| **E6** | Users cannot see webhook deliveries today. PRD-019 R5 needs an undeliverable alert to be visible to the user. | **The run page lists that run's alert deliveries.** No new deliveries page. |
+| **E1** | A Webhook block set to *breaks only*, on a run that succeeds: what does the run page show for it? | ✅ **"skipped — alert only"** (`alert_only`). Calling it "completed" would read as "a message was sent". |
+| **E2** | Undo attempts never hold a concurrency slot, not even during the few seconds of each delete (§7). | ✅ **Accept.** The alternative changes both quota views for seconds of capacity. |
+| **E3** | A stop set to *delete* whose delete fails after retries (storage down): the run ends `completed` and stopped, with a note, and the objects are kept and charged. | ✅ **Accept**, rather than failing a run whose verdict was a success, or retrying for hours. |
+| **E4** | A run that could not start: its blocks read **"skipped — run could not start"** (`not_started`), a fourth reason PRD-019 R4 does not list. | ✅ **Accept**; it is the API's existing failure path, now labelled. |
+| **E5** | Failure alerts retry on the job lane's ≈2.6 h schedule (PRD-019 R5); a Webhook block's own delivery on ≈2.9 h (PRD-017 R4). Two windows on one pipeline. | ✅ **Keep both.** The alert reuses the job lane's delivery machinery, and PRD-019 R5 chose that window. |
+| **E6** | Users cannot see webhook deliveries today. PRD-019 R5 needs an undeliverable alert to be visible to the user. | ✅ **The run page lists that run's alert deliveries.** No new deliveries page. |
 
 ## 12. Alternatives rejected
 
@@ -453,8 +534,17 @@ Product-visible consequences of the design. Each is my recommendation and stays 
   permanent pipeline delete, no run delete, no §8c collection) stays open. PRD-018 is where it bites.
 - **Admin meters** gain a lane filter (§8e). The admin run reads return the new columns.
 - **Traps to carry into the build:**
-  - release the LLM worker before the api image (§2);
-  - the rollback loop must ignore `_cancel_requested` (§7);
+  - release the LLM worker before the api image (§2) — an old worker ignores unknown fields, so a wrong order
+    gives silent wrong answers, not a parse error;
+  - the evaluator gives three answers; a non-JSON input is "cannot be checked" for every JSON rule and is never
+    flipped by `negate` (§3);
+  - number inputs are strict at the trigger (`"100"` and `true` refused), and all three input models widen (§4);
+  - `release_run_outputs` commits what it released, then raises a retryable error when objects are left —
+    `delete_minio_object` never raises, so a bare call never retries (§6);
+  - the rollback loop must ignore `_cancel_requested`, and await every activity through `_finish(...,
+    interruptible=False)` — the API's cancel also sends a Temporal cancel (§7);
   - `queue_failure_alerts` must run in the same transaction as the `failed` write, on both writers (§8a);
+  - the delivery activity's secret lookup gets an explicit pipeline arm and refuses an unknown owner — today's
+    fall-through to `b""` would sign every alert with an empty key (§8b);
   - `undo_status` only on `completed` rows (CHECK);
   - a new reason value is a CHECK widening, never a free-text write.

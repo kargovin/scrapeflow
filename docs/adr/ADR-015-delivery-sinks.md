@@ -12,6 +12,13 @@ rollback reserve. Also fixes **BUG-030** (the webhook check and connection resol
 slice 1.
 Not a supersession.
 
+> **Carried from ADR-014's review (owner, 2026-11-03) — raise at this ADR's review.** The two webhook senders
+> (`activities/webhook_deliveries.py`, the job lane; `activities/webhook.py`, the pipeline Webhook block) share only
+> `validate_no_ssrf_core`: signing, the signature header, the 10 s POST and the `< 300` rule are written twice, and
+> "byte for byte" is held by docstrings. Proposal: keep both drivers (who owns the outcome differs — ADR-009 15e),
+> and extract **one** `send_signed_post(url, body, secret)` that both call, with BUG-030's resolve-once,
+> connect-to-that-IP fix inside it, plus one test pinning identical bytes and headers from both senders.
+
 ---
 
 ## 1. The problem
