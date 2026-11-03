@@ -7,7 +7,7 @@
 > that answer, not on a guess.
 >
 > **Scope source of truth:** `phase4-backlog.md` (§2 the migration · §3 **do NOT fix** · §4 survives).
-> **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Accepted 2026-10-13), ADR-012 (Draft), ADR-013 (Accepted 2026-10-27).
+> **Decisions:** ADR-009 (Accepted), ADR-011 (Accepted), ADR-010 (Accepted 2026-10-13), ADR-012 (Accepted 2026-11-03), ADR-013 (Accepted 2026-10-27).
 > **Inventory + shapes:** `temporal-full-migration.md`. **Product spec:** PRD-016.
 > **Last updated:** 2026-10-12 (D.1, D.3, D.4 built; D.2 deferred by the owner; D.5 runbook ready) · **Tracking:** the status table below is the tracker.
 
@@ -71,7 +71,7 @@
 | C.10 | Cancellation: API cancel + workflow cancel + boundary re-check | ✅ Built 2026-10-11 (local, `66abdeb`, unreleased) |
 | C.11 | Run/result read API + `pipeline_status` notify channel + WS route | ✅ Built 2026-10-11 (local, `88e8024`, unreleased); **BUG-009 pulled in and fixed** (open item 7) |
 | C.12 | Frontend: Pipelines pages + WS reconnect (11b, both lanes) | ✅ Built 2026-10-11 (local, `c2590af`, unreleased); BUG-018 not ridden — click-through after release |
-| C.13 | Workflow-code versioning: decide + build (⚠️ Architect) | ✅ Built 2026-10-12 — owner chose **`patched()` + a replay test that gates the build** (ADR-012, Draft); Worker Versioning not taken |
+| C.13 | Workflow-code versioning: decide + build (⚠️ Architect) | ✅ Built 2026-10-12 — owner chose **`patched()` + a replay test that gates the build** (ADR-012, Accepted 2026-11-03); Worker Versioning not taken |
 | C.14 | 🚀 Pipeline-lane release + **R6 acceptance gate** | ✅ **RELEASED 2026-10-12** (`6675f17..1793c60`, api + llm-worker; no infra change) — **R6 PASS 2026-10-12** (on `03f72f8`, BUG-022's fix) |
 | **D** | **Job cutover** | |
 | D.1 | Lane marker on `job_runs` (mechanism 4) + v1 dispatcher filters | ✅ Built 2026-10-12 (local, `db774d0`, migration 4.6 `56ab6118641d`, unreleased) |

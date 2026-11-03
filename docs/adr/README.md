@@ -34,7 +34,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-009](ADR-009-workflow-engine-temporal.md) | Workflow Engine — Temporal + v1/v2 Coexistence Contract | **Accepted** | 2026-08-04 | — | — |
 | [ADR-010](ADR-010-crawl-admission-and-scheduled-quota.md) | Scheduled-run Quota Admission, and Sitemap Origin Scope | **Accepted** (2026-10-13, amended in review) | 2026-09-08 | — | — |
 | [ADR-011](ADR-011-artifact-identity-and-paths.md) | Artifact Identity — Run-keyed Paths, Stage-named Objects, and the Removal of `latest/` | **Accepted** | 2026-09-03 | ADR-002 §4 | — |
-| [ADR-012](ADR-012-workflow-code-versioning.md) | Workflow-Code Versioning — `patched()` Plus a Replay Test That Gates the Build | **Draft** (decision: owner, 2026-10-12; text pending review) | 2026-10-12 | — | — |
+| [ADR-012](ADR-012-workflow-code-versioning.md) | Workflow-Code Versioning — `patched()` Plus a Replay Test That Gates the Build | **Accepted** 2026-11-03 (decision: owner, 2026-10-12; text reviewed 2026-11-03) | 2026-10-12 | — | — |
 | [ADR-013](ADR-013-schedule-policy.md) | Schedule Policy — `SKIP` on Overlap, and a Per-User Cap on Scheduled Jobs | **Accepted** (2026-10-27; overlap + cap 2026-10-13, §5 parameters 2026-10-27) | 2026-10-13 | — | — |
 | [ADR-014](ADR-014-block-outcomes-stop-rollback-alerts.md) | Block Outcomes — Stopping Early, Rollback, and Failure Alerts | **Draft** (Architect pass 2026-10-30; owner review complete 2026-11-03, 10 rounds; acceptance held until PRD-018 is reviewed) | 2026-10-30 | — | — |
 | [ADR-015](ADR-015-delivery-sinks.md) | Delivery Sinks — Destinations, Egress, and the Delivery Worker | **Draft** (Architect pass 2026-10-30; awaits owner review) | 2026-10-30 | — | — |

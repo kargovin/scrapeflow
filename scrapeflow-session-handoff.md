@@ -155,14 +155,20 @@ rollout-window risks are noted, not engineered around (round 2 declined `extra="
     `_finish(..., interruptible=False)` — a bare await leaves the run `running`, half undone, no alert.
   - §8: `pipeline.failed` keeps `diff_*` constants (same shape as `pipeline.result`); the secret lookup's
     fall-through to `b""` gets an explicit pipeline arm; `pending()` gains a pipeline filter.
+- **ADR-012 reviewed and Accepted** (owner, same session): four text corrections (≈2.9 h window; the test replays
+  seven workflows; drain window per workflow — a scheduled tick parks up to 24 h; Scrape's `schedule_to_start`), and
+  one new rule — **retiring a patch retires its histories** (`deprecate_patch` moves marker-less histories to
+  `histories/retired/<patch-id>/`; ~15 job/pipeline histories predate `host-slot`). Owner asked whether a patch's
+  `if/else` can go after 1–2 weeks: yes, as `deprecate_patch` then removal, once each window has drained.
 - **Carried to ADR-015's review** (note at its head): the two webhook senders share only the SSRF check — proposal
   is one `send_signed_post` both call, with BUG-030's fix inside it.
-- **Git at close:** `develop` = this session's commit, even with `origin/develop` before it (`b8c3900`), **not
-  pushed**; `main` = `origin/main` = `eea8344` (deployed, unchanged). Infra untouched. `tmp/` untracked, not mine.
+- **Git at close:** `develop` = `94c2396` (ADR-014 review) + the ADR-012 acceptance commit after it, 2 ahead of
+  `origin/develop` (`b8c3900`), **not pushed**; `main` = `origin/main` = `eea8344` (deployed, unchanged). Infra untouched. `tmp/` untracked, not mine.
 - **Next (owner):** review **PRD-018** section by section (Q1–Q12) — check its endings against ADR-014 §5 while
   ADR-014 is still Draft; then **ADR-015** (F1–F5, plus the shared-send note). Then the Architect pass on PRD-018 →
-  ADR-016. Accept ADR-014/015 once PRD-018 is reviewed. Deferred code reviews (C.4–C.12, E.3–E.10, F.1–F.7) and
-  ADR-012's text review are still owed — listed at this session's start.
+  ADR-016. Accept ADR-014/015 once PRD-018 is reviewed. Deferred code reviews (C.4–C.12, E.3–E.10, F.1–F.7) are
+  still owed — listed at this session's start. Optional housekeeping: `host-slot` has drained in prod (E.9,
+  2026-10-27) and can be deprecated under ADR-012's new retirement rule.
 
 
 📐 **ARCHITECT PASS DRAFTED + PRD-018 DRAFTED (2026-10-30, thirteenth session; docs only, nothing released).**
@@ -1926,7 +1932,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
-| 2026-11-03 *(clock, fourteenth)* | **📝 ADR-014 owner review — 10 rounds, complete.** Owner asked for a todo list of owed reviews (design docs, ADR-012's text, four delegated code builds), then "adr 14 sec by sec". Each section checked against code: contracts' unknown-field handling, `rules.py`, the trigger and its input models (Pydantic coercion tested in the api container), the views (migration tested in a rolled-back transaction), `ledger.release_objects` / `delete_minio_object`, `_finish` and the cancel route, `webhook_deliveries` + both senders. Seven corrections, four new traps, E1–E6 answered; shared webhook send carried to ADR-015 | this closeout |
+| 2026-11-03 *(clock, fourteenth)* | **📝 ADR-014 owner review — 10 rounds, complete.** Owner asked for a todo list of owed reviews (design docs, ADR-012's text, four delegated code builds), then "adr 14 sec by sec". Each section checked against code: contracts' unknown-field handling, `rules.py`, the trigger and its input models (Pydantic coercion tested in the api container), the views (migration tested in a rolled-back transaction), `ledger.release_objects` / `delete_minio_object`, `_finish` and the cancel route, `webhook_deliveries` + both senders. Seven corrections, four new traps, E1–E6 answered; shared webhook send carried to ADR-015. **Then ADR-012 read in plain words, corrected ×4, retirement rule added, Accepted** | `94c2396` + this closeout |
 | 2026-10-30 *(clock, thirteenth)* | **📐 Architect pass drafted (ADR-014, ADR-015) + PRD-018 drafted by a PM subagent.** Owner asked whether the pass is a review or ADRs, and whether to wait for PRD-018 → ADRs now, Draft, acceptance held until PRD-018 is drafted; no PRD acceptance step. Read both PRDs, ADR-009 §4/§14/§15, ADR-012, `pipeline.py`, `db.py`, `webhook.py`, `catalog.py`, the Validate activity, the trigger, the views, `webhook_deliveries`, admin meters, infra (no NetworkPolicies). PM handshake (new endings) folded into ADR-014 §5. | `a5a4d84`, docs closeout |
 | 2026-10-30 *(clock, twelfth)* | **📝 PRD-017 owner review — 17 rounds, complete.** Read-in (handoff a day stale; caught up from git). Plain-words walkthrough per section with code checks (`webhook.py` payload, `catalog.py` timings computed in the api container, `validator.py` linear-chain rule, pipeline delete path). Added D12, D13, the reader's contract, `block_id` + `deliveries`, webhook destinations, rollback reserve, 13 success checks; corrected 2.6 h → ~3 h and the fan-out non-goal; D1–D11 agreed. **BUG-031 filed** (pipeline outputs never freed). CLAUDE.md banner + PRD bullets updated | `afbc1e2` + this closeout |
 | 2026-10-28 *(clock, ninth)* | **🚀 H.1 RELEASED** (owner: infra push, `main` ff `bc30025..722f54b`; jobs + crawl verified; BUG-029 filed; step 4 `51c2d40` pushed). **🔧 H.1 BUILT.** NATS mode removed from the three workers (Go `internal/worker`, Python `worker.py`/`models.py`, `temporal_main` → `main`, NATS settings + deps), compose v1 services and the contracts NATS arm deleted; render tests ported to `test_scrape.py` (BUG-015/016/017 coverage), two Go tests to the activity; mutation 12/12; compose e2e on all three workers + a crawl; infra Deployments removed locally | `8a62da8` + docs; infra `c92e7dd` (local) |
