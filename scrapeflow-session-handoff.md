@@ -134,7 +134,51 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-03 *(clock)*
+## Current state — as of 2026-11-05 *(clock)*
+
+📝 **PRD-018 REVIEWED (2026-11-03 → 2026-11-05, fifteenth session; docs only, nothing released).** Owner reviewed
+`PRD-018-monitors.md` section by section in **16 rounds** (Problem → R11, then the decisions table) — **Draft,
+owner review complete; every D1–D18 and Q1–Q12 answered.** Plain-words walkthrough per section with examples;
+each round is a `Review round N` note at the top of the PRD. Owner's steer throughout: **keep it simple — move
+polish to "not yet"** (cost warning at save, admin pause, live monitor page, OR rules, retention all moved there).
+- **What the review changed** (checked against code — deleted `result_consumer` at `65fc93f^`, `diff.py`,
+  `cleaner.py`, `pipeline.py`, `routers/jobs.py` permanent delete, `activities/schedules.py`, the kill switch):
+  - **Baseline** = newest *completed* check that did not stop at or before the **first change gate**, never
+    expired or superseded (only approved/rejected content under an Approval block); a fresh lookup each firing.
+    The draft made an *unchanged* check the baseline — it holds no extraction and no copy, so carried values
+    and the diff broke on almost every change.
+  - **A monitor's version and inputs are fixed for its life** (D15 rewritten); only name, schedule, notice
+    destination editable. A different version/input = a new monitor.
+  - The gate is renamed **change gate** ("check" = one firing only); its fingerprint is **attached by the
+    monitor, not a run input** (a hand-run would otherwise 422). D4: required before any LLM block, **no
+    opt-out**. D5's delete only at the first gate. Clean is not an LLM call.
+  - Diff: **actual changed lines**, shown in the SPA like a GitHub diff; extraction diff at any depth; a failed
+    diff never reads as "no change". **Carried values need a start value** (resolves ADR-014 §4's missing-input
+    refusal on a first check).
+  - Approval: while one waits, later checks also compare with the **waiting check** (no hourly LLM call or
+    re-request); any different content **supersedes** it, even if that check then stops at a Validate. The
+    request is **not an announcement** (rollback after approval still undoes). Expiry `completed`, not the
+    baseline, re-asked once per deadline.
+  - Notices sent **once per situation**; approval messages go to the Approval block's destination; notices
+    recorded-then-delivered like failure alerts (new **OQ-14**); webhook-only until PRD-017's email ships.
+  - `PIPELINES_ENABLED` is checked in each firing's start step (today it guards only API routes).
+  - **Q1 = (e): jobs keep no change detection — no slice 3, OQ-12 removed**; (d) all of `/jobs` over pipelines
+    is the long-term direction. **Scheduled crawls not planned** — refuse `schedule_cron` (can ship on its own).
+  - Monitors **do not wait for PRD-017** (Q9): notices and approval requests SPA-only until saved destinations.
+- **Carried out of the review (not yet done):**
+  1. **ADR-015 review:** raise *what sends a failure alert (or a notice) by email?* — ADR-014's alerts are
+     `webhook_deliveries` rows only, ADR-015's email is a pipeline block only. Proposal: a `kind` on the delivery
+     record, email sent by an activity on the delivery worker's queue. Beside the `send_signed_post` note.
+  2. **ADR-014 at acceptance:** one line — an approval request does not set §7's `announced` flag (PRD-018 D9).
+  3. **Backlog:** record open item 10's answer (e) and §3's crawl row ("refused; not planned"); a cleanup item —
+     stop writing `job_runs.content_hash`, then drop it and `diff_detected`/`diff_summary` (two releases; keep
+     the payload fields, always `null`, the Scrape activity's hash and `diff.py`); D16's crawl refusal is a small
+     standalone fix.
+- **Git at close:** `develop` = `74aa2d9` (PRD-018 review) + this closeout, **4 ahead of `origin/develop`
+  (`b8c3900`), not pushed**; `main` = `eea8344` (deployed, unchanged). Infra untouched. `tmp/` untracked, not mine.
+- **Next (owner):** review **ADR-015** (F1–F5, the shared-send note, item 1 above); then accept ADR-014 and
+  ADR-015; then the **Architect pass on PRD-018 → ADR-016** (OQ-1–14). Deferred code reviews (C.4–C.12,
+  E.3–E.10, F.1–F.7) still owed. BUG-031 is Monitors' slice 0 — worth building early.
 
 📝 **ADR-014 REVIEWED (2026-11-03, fourteenth session; docs only, nothing released).** Owner reviewed
 `ADR-014-block-outcomes-stop-rollback-alerts.md` section by section in **10 rounds** — **Draft, owner review
@@ -1932,6 +1976,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-11-03 → 11-05 *(clock, fifteenth)* | **📝 PRD-018 owner review — 16 rounds, complete.** Read-in from the handoff; plain-words walkthrough per section with examples and illustrations, each claim checked against code (deleted result consumer, `diff.py`, `cleaner.py`, `pipeline.py`, `PipelineEditor.tsx`, job permanent delete, schedule admission, kill switch, settings). Baseline rule rebuilt (unchanged / pre-gate / expired / superseded never baseline), version+inputs fixed, change gate renamed, fingerprint not an input, start values, waiting-check comparison, notices once per situation, OQ-14 added; Q1 = (e) drops slice 3 and OQ-12; scheduled crawls not planned. Owner steer: simplify, move polish to "not yet" | `74aa2d9` + this closeout |
 | 2026-11-03 *(clock, fourteenth)* | **📝 ADR-014 owner review — 10 rounds, complete.** Owner asked for a todo list of owed reviews (design docs, ADR-012's text, four delegated code builds), then "adr 14 sec by sec". Each section checked against code: contracts' unknown-field handling, `rules.py`, the trigger and its input models (Pydantic coercion tested in the api container), the views (migration tested in a rolled-back transaction), `ledger.release_objects` / `delete_minio_object`, `_finish` and the cancel route, `webhook_deliveries` + both senders. Seven corrections, four new traps, E1–E6 answered; shared webhook send carried to ADR-015. **Then ADR-012 read in plain words, corrected ×4, retirement rule added, Accepted** | `94c2396` + this closeout |
 | 2026-10-30 *(clock, thirteenth)* | **📐 Architect pass drafted (ADR-014, ADR-015) + PRD-018 drafted by a PM subagent.** Owner asked whether the pass is a review or ADRs, and whether to wait for PRD-018 → ADRs now, Draft, acceptance held until PRD-018 is drafted; no PRD acceptance step. Read both PRDs, ADR-009 §4/§14/§15, ADR-012, `pipeline.py`, `db.py`, `webhook.py`, `catalog.py`, the Validate activity, the trigger, the views, `webhook_deliveries`, admin meters, infra (no NetworkPolicies). PM handshake (new endings) folded into ADR-014 §5. | `a5a4d84`, docs closeout |
 | 2026-10-30 *(clock, twelfth)* | **📝 PRD-017 owner review — 17 rounds, complete.** Read-in (handoff a day stale; caught up from git). Plain-words walkthrough per section with code checks (`webhook.py` payload, `catalog.py` timings computed in the api container, `validator.py` linear-chain rule, pipeline delete path). Added D12, D13, the reader's contract, `block_id` + `deliveries`, webhook destinations, rollback reserve, 13 success checks; corrected 2.6 h → ~3 h and the fan-out non-goal; D1–D11 agreed. **BUG-031 filed** (pipeline outputs never freed). CLAUDE.md banner + PRD bullets updated | `afbc1e2` + this closeout |
