@@ -13,6 +13,7 @@ from app.routers.pipelines import (
     latest_version_select,
     load_run_result,
     pipeline_response,
+    run_alerts,
     run_blocks,
     run_response,
     run_summary,
@@ -109,7 +110,9 @@ async def admin_get_run(
     db: AsyncSession = Depends(get_db),
 ) -> AdminPipelineRunResponse:
     run, version = await _admin_run(db, pipeline_id, run_id)
-    response = run_response(run, version, await run_blocks(db, run.id))
+    response = run_response(
+        run, version, await run_blocks(db, run.id), await run_alerts(db, run.id)
+    )
     return AdminPipelineRunResponse(**response.model_dump(), user_id=run.user_id)
 
 

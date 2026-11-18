@@ -489,11 +489,13 @@ def _pipeline_db(run):
     return db
 
 
-def _pipeline_run(status: str, cancel_requested=False):
+def _pipeline_run(status: str, cancel_requested=False, stopped_at=None):
     return SimpleNamespace(
         id=uuid.uuid4(),
         status=status,
         cancel_requested_at=MagicMock() if cancel_requested else None,
+        stopped_at_block_id=stopped_at,
+        rollback_deadline=None,
     )
 
 
@@ -542,7 +544,7 @@ async def test_pipeline_watch_other_users_run_is_not_found():
 
 
 async def test_pipeline_watch_already_terminal():
-    run = _pipeline_run("completed")
+    run = _pipeline_run("completed", stopped_at="guard")
     pipeline_id, messages, _ = await _watch_pipeline(
         _user(), run, MockJobNotifier(), _pipeline_db(run), 1
     )
@@ -552,11 +554,36 @@ async def test_pipeline_watch_already_terminal():
             "run_id": str(run.id),
             "status": "completed",
             "cancel_requested": False,
+            "stopped_at_block_id": "guard",
+            "rolling_back": False,
             "block_id": None,
             "block_status": None,
+            "block_status_reason": None,
+            "block_undo_status": None,
             "result_url": f"/pipelines/{pipeline_id}/runs/{run.id}/result",
         }
     ]
+
+
+async def test_pipeline_watch_passes_on_a_blocks_skip_reason():
+    run = _pipeline_run("running")
+    base = {"run_id": str(run.id), "pipeline_id": "p"}
+    notifier = MockJobNotifier(
+        pipeline_updates=[
+            {
+                **base,
+                "status": "running",
+                "block_id": "notify",
+                "block_status": "skipped",
+                "block_status_reason": "alert_only",
+            },
+            {**base, "status": "completed", "stopped_at_block_id": "guard"},
+        ]
+    )
+    _, messages, _ = await _watch_pipeline(_user(), run, notifier, _pipeline_db(run), 3)
+    assert [
+        (m["block_status_reason"], m["stopped_at_block_id"], m["rolling_back"]) for m in messages
+    ] == [(None, None, False), ("alert_only", None, False), (None, "guard", False)]
 
 
 async def test_pipeline_watch_streams_blocks_until_terminal_without_holding_the_db():

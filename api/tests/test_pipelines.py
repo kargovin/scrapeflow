@@ -1376,3 +1376,136 @@ async def test_a_bound_contains_text_keeps_the_literal_length_limit(
 
     resp = await client.post(runs_url, json={"inputs": {"phrase": "x" * 1000}}, headers=headers)
     assert resp.status_code == 202, resp.text
+
+
+# ---------------------------------------------------------------------------
+# J.9 — how a run ended, in the reads (ADR-014 §5b-§5d, §8e)
+# ---------------------------------------------------------------------------
+
+
+async def _ended(run_id: str, **run_fields) -> None:
+    """Writes an ending onto a started run's rows: run fields, then per-block fields."""
+    from app.models.webhook_delivery import WebhookDelivery
+
+    blocks = run_fields.pop("blocks", {})
+    alerts = run_fields.pop("alerts", [])
+    async with AsyncSessionLocal() as db:
+        run = await db.get(PipelineRun, uuid.UUID(run_id))
+        for field, value in run_fields.items():
+            setattr(run, field, value)
+        for block in await db.scalars(
+            select(PipelineRunBlock).where(PipelineRunBlock.pipeline_run_id == run.id)
+        ):
+            for field, value in blocks.get(block.block_id, {}).items():
+                setattr(block, field, value)
+        for block_id, status in alerts:
+            db.add(
+                WebhookDelivery(
+                    pipeline_run_id=run.id,
+                    block_id=block_id,
+                    event="pipeline.failed",
+                    webhook_url="https://example.com/hook",
+                    payload={},
+                    status=status,
+                    attempts=5 if status == "exhausted" else 0,
+                    last_error="HTTP 503" if status == "exhausted" else None,
+                )
+            )
+        await db.commit()
+
+
+VERDICT = {
+    "rule_index": 0,
+    "rule": {"kind": "contains", "text": "Out of stock", "negate": True},
+    "found": None,
+    "expected": "Out of stock",
+}
+
+
+async def test_a_stopped_run_reads_where_why_and_what_each_block_did(
+    client, headers, key, temporal, resolves_to
+):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    await _ended(
+        run_id,
+        status="completed",
+        stopped_at_block_id="fetch",
+        stop_reason="rule_not_met",
+        blocks={
+            "fetch": {"status": "completed", "verdict": VERDICT},
+            "extract": {
+                "status": "skipped",
+                "status_reason": "stopped",
+                "reason_block_id": "fetch",
+            },
+            "notify": {"status": "skipped", "status_reason": "alert_only"},
+        },
+    )
+    run = (await client.get(url, headers=headers)).json()
+    assert (run["status"], run["stopped_at_block_id"], run["stop_reason"]) == (
+        "completed",
+        "fetch",
+        "rule_not_met",
+    )
+    assert run["failed_block_id"] is None and run["alerts"] == []
+    fetch, extract, notify = run["blocks"]
+    assert fetch["verdict"] == VERDICT
+    assert (extract["status_reason"], extract["reason_block_id"]) == ("stopped", "fetch")
+    assert (notify["status_reason"], notify["reason_block_id"]) == ("alert_only", None)
+
+    # The list carries the stop label's two fields, with no join to the blocks.
+    [listed] = (await client.get(url.split(f"/{run_id}")[0], headers=headers)).json()
+    assert (listed["stopped_at_block_id"], listed["stop_reason"]) == ("fetch", "rule_not_met")
+
+
+async def test_a_skipped_block_from_before_reasons_reads_as_not_recorded(
+    client, headers, key, temporal, resolves_to
+):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    await _ended(
+        run_id,
+        status="failed",
+        error="fetch: x",
+        blocks={
+            "fetch": {"status": "failed"},
+            "extract": {"status": "skipped"},
+            "notify": {"status": "pending"},
+        },
+    )
+    run = (await client.get(url, headers=headers)).json()
+    assert [(b["status"], b["status_reason"]) for b in run["blocks"]] == [
+        ("failed", None),
+        ("skipped", "not_recorded"),
+        ("pending", None),
+    ]
+    assert run["failed_block_id"] is None  # the page falls back to the error's prefix
+
+
+async def test_a_failed_run_lists_its_alerts_for_its_owner_and_the_admin(
+    client, headers, key, temporal, resolves_to, db_user
+):
+    url, run_id = await _started_run(client, headers, key, temporal)
+    await _ended(
+        run_id,
+        status="failed",
+        error="fetch: x",
+        failed_block_id="fetch",
+        alerts=[("extract", "exhausted")],
+    )
+    run = (await client.get(url, headers=headers)).json()
+    assert run["failed_block_id"] == "fetch"
+    [alert] = run["alerts"]
+    assert {k: alert[k] for k in ("block_id", "status", "attempts", "last_error")} == {
+        "block_id": "extract",
+        "status": "exhausted",
+        "attempts": 5,
+        "last_error": "HTTP 503",
+    }
+
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, db_user.id)
+        user.is_admin = True
+        await db.commit()
+    admin = (await client.get(f"/admin{url}", headers=headers)).json()
+    assert admin["alerts"] == run["alerts"]
+    assert admin["failed_block_id"] == "fetch"

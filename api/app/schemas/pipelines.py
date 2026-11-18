@@ -62,6 +62,12 @@ class PipelineRunCreate(BaseModel):
 OutputState = Literal["none", "passed_through", "stored", "collected"]
 
 
+# ADR-014 §5a's skip reasons, plus "not_recorded" for a skipped block from before them (§5c).
+BlockStatusReason = Literal[
+    "stopped", "upstream_failed", "cancelled", "not_started", "alert_only", "not_recorded"
+]
+
+
 class PipelineRunBlockResponse(BaseModel):
     block_id: str
     position: int
@@ -74,6 +80,15 @@ class PipelineRunBlockResponse(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     collected_at: datetime | None
+    # Why a skipped block never ran, and the block that reason points at.
+    status_reason: BlockStatusReason | None = None
+    reason_block_id: str | None = None
+    # A stop-mode Validate that stopped the run: {rule_index, rule (as saved), found, expected}.
+    verdict: dict[str, Any] | None = None
+    # A sink's delivery and its undo (PRD-017); null until then.
+    delivery: dict[str, Any] | None = None
+    undo_status: str | None = None
+    undo_error: str | None = None
 
 
 class PipelineRunSummary(BaseModel):
@@ -89,10 +104,29 @@ class PipelineRunSummary(BaseModel):
     error: str | None
     created_at: datetime
     finished_at: datetime | None
+    # How it ended (ADR-014 §5a): a stop is completed + these two; the list's label reads them.
+    stopped_at_block_id: str | None = None
+    stop_reason: Literal["rule_not_met"] | None = None
+    failed_block_id: str | None = None
+    # Non-null while running = undoing deliveries (PRD-017).
+    rollback_deadline: datetime | None = None
+
+
+class PipelineRunAlert(BaseModel):
+    """One failure alert this run queued (ADR-014 §8e): users see an undeliverable alert here."""
+
+    block_id: str
+    status: Literal["pending", "delivered", "exhausted"]
+    attempts: int
+    last_error: str | None
+    next_attempt_at: datetime
+    delivered_at: datetime | None
+    created_at: datetime
 
 
 class PipelineRunResponse(PipelineRunSummary):
     blocks: list[PipelineRunBlockResponse]
+    alerts: list[PipelineRunAlert] = []
 
 
 class AdminPipelineRunSummary(PipelineRunSummary):

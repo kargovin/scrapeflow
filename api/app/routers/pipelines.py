@@ -31,6 +31,7 @@ from app.core.security import validate_no_ssrf
 from app.models.llm_keys import UserLLMKey
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.user import User
+from app.models.webhook_delivery import WebhookDelivery
 from app.pipelines.catalog import (
     CATALOG,
     InputBinding,
@@ -56,6 +57,7 @@ from app.schemas.pipelines import (
     OutputState,
     PipelineCreate,
     PipelineResponse,
+    PipelineRunAlert,
     PipelineRunBlockResponse,
     PipelineRunCancelResponse,
     PipelineRunCreate,
@@ -441,6 +443,12 @@ def output_state(block: PipelineRunBlock) -> OutputState:
     return "passed_through" if block_type and block_type.kind == "effect" else "stored"
 
 
+def block_status_reason(block: PipelineRunBlock) -> str | None:
+    if block.status == "skipped" and block.status_reason is None:
+        return "not_recorded"
+    return block.status_reason
+
+
 def run_summary(run: PipelineRun, version: int) -> PipelineRunSummary:
     return PipelineRunSummary(
         id=run.id,
@@ -454,14 +462,33 @@ def run_summary(run: PipelineRun, version: int) -> PipelineRunSummary:
         error=run.error,
         created_at=run.created_at,
         finished_at=run.finished_at,
+        stopped_at_block_id=run.stopped_at_block_id,
+        stop_reason=run.stop_reason,
+        failed_block_id=run.failed_block_id,
+        rollback_deadline=run.rollback_deadline,
     )
 
 
 def run_response(
-    run: PipelineRun, version: int, blocks: list[PipelineRunBlock]
+    run: PipelineRun,
+    version: int,
+    blocks: list[PipelineRunBlock],
+    alerts: list[WebhookDelivery] = (),
 ) -> PipelineRunResponse:
     return PipelineRunResponse(
         **run_summary(run, version).model_dump(),
+        alerts=[
+            PipelineRunAlert(
+                block_id=a.block_id,
+                status=a.status,
+                attempts=a.attempts,
+                last_error=a.last_error,
+                next_attempt_at=a.next_attempt_at,
+                delivered_at=a.delivered_at,
+                created_at=a.created_at,
+            )
+            for a in alerts
+        ],
         blocks=[
             PipelineRunBlockResponse(
                 block_id=b.block_id,
@@ -475,9 +502,27 @@ def run_response(
                 started_at=b.started_at,
                 finished_at=b.finished_at,
                 collected_at=b.collected_at,
+                status_reason=block_status_reason(b),
+                reason_block_id=b.reason_block_id,
+                verdict=b.verdict,
+                delivery=b.delivery,
+                undo_status=b.undo_status,
+                undo_error=b.undo_error,
             )
             for b in blocks
         ],
+    )
+
+
+async def run_alerts(db: AsyncSession, run_id: uuid.UUID) -> list[WebhookDelivery]:
+    return list(
+        (
+            await db.scalars(
+                select(WebhookDelivery)
+                .where(WebhookDelivery.pipeline_run_id == run_id)
+                .order_by(WebhookDelivery.created_at, WebhookDelivery.block_id)
+            )
+        ).all()
     )
 
 
@@ -700,7 +745,12 @@ async def get_run(
     run = await db.scalar(_owned_run(pipeline_id, run_id, user.id))
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    return run_response(run, await version_number(db, run), await run_blocks(db, run.id))
+    return run_response(
+        run,
+        await version_number(db, run),
+        await run_blocks(db, run.id),
+        await run_alerts(db, run.id),
+    )
 
 
 async def _budget_left(
@@ -893,8 +943,12 @@ def _watch_message(pipeline_id: str, update: dict) -> dict:
         "run_id": update["run_id"],
         "status": run_status,
         "cancel_requested": update.get("cancel_requested", False),
+        "stopped_at_block_id": update.get("stopped_at_block_id"),
+        "rolling_back": update.get("rolling_back", False),
         "block_id": update.get("block_id"),
         "block_status": update.get("block_status"),
+        "block_status_reason": update.get("block_status_reason"),
+        "block_undo_status": update.get("block_undo_status"),
     }
     if run_status == "completed":
         message["result_url"] = f"/pipelines/{pipeline_id}/runs/{update['run_id']}/result"
@@ -934,6 +988,8 @@ async def run_status_stream(
                 "run_id": str(run.id),
                 "status": run.status,
                 "cancel_requested": run.cancel_requested_at is not None,
+                "stopped_at_block_id": run.stopped_at_block_id,
+                "rolling_back": run.status == "running" and run.rollback_deadline is not None,
             }
             # Hours-long watches must not hold a pooled connection.
             await db.close()
