@@ -112,8 +112,8 @@
 | I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | 🔧 **Built 2026-10-29** (local, unreleased) — advisory lock in `migrations/env.py`, migration 4.9 `47a8f9f3f4e2`; ships with I.2 |
 | I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ✅ **RELEASED 2026-10-29** — infra `5e9087e`, `main` `cd5c60e..eea8344` (carries I.1); rolling deploy 0/359 failed probes vs ~40 s down before. **Group I closed** |
 | **J** | **Conditional execution** (PRD-019 · ADR-014 except §7) | |
-| J.1 | LLM worker: Validate stop mode, reverse rules (`negate`), three answers | 🔧 **Built 2026-11-18** (`045f598`, local, unreleased) — ships with J.2 |
-| J.2 | 🚀 Release J-a — workers first (J.1 + BUG-024 + Y.1) | ⬜ |
+| J.1 | LLM worker: Validate stop mode, reverse rules (`negate`), three answers | ✅ Built 2026-11-18 (`045f598`; **released 2026-11-18** with J.2) |
+| J.2 | 🚀 Release J-a — workers first (J.1 + BUG-024 + Y.1) | ✅ **RELEASED 2026-11-18** (`main` `eea8344..036870c`; no infra change, no migration) — owner verified a job, a crawl, a fail-mode Validate run, the 422 and the 400 |
 | J.3 | Migration 4.10: block/run reason columns, `webhook_deliveries` widened for pipeline runs | ⬜ |
 | J.4 | Save-time config (`when_unmet`, `on_stop_outputs`, `negate`, `events`) + typed run inputs | ⬜ |
 | J.5 | Mirrors record skip reasons, verdict, stop, failed block; `notify_run` fields | ⬜ |
@@ -168,7 +168,7 @@
 | P.1 | The Email block (its sending, test and alert rows shipped in M.14) | ⬜ |
 | P.2 | 🚀 Release P | ⬜ |
 | **Y** | **Job-lane leftovers** (ADR-016 §14) | |
-| Y.1 | Release A — stop using: crawl `schedule_cron` refused, `content_hash` unwritten, four columns unmapped (rides J-a) | 🔧 **Built 2026-11-18** (`8774907`, local, unreleased) — ships with J.2 |
+| Y.1 | Release A — stop using: crawl `schedule_cron` refused, `content_hash` unwritten, four columns unmapped (rides J-a) | ✅ Built 2026-11-18 (`8774907`; **released 2026-11-18** with J.2) — prod count of crawls with `schedule_cron`: **0** |
 | Y.2 | Release B — drop the four columns, delete `core/diff.py` (rides K) | ⬜ |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ✅ written 2026-10-29, owner review 2026-10-30; Architect pass ADR-014 Accepted 2026-11-18 |
@@ -3260,6 +3260,16 @@ still reads and writes Y.1's four columns. That is safe: they stay in the table 
 to step 0's tag. Safe in either half: no migration, the old api image maps columns that still exist, and no
 caller sends J.1's new fields. Prefer a forward fix. **Do not run Y.2 (the column drop, rides K) until this
 release has fully rolled out.**
+
+**Released** *(2026-11-18)*. Step 0 (owner): **0** crawls with a `schedule_cron`; `llm-worker-temporal` was on
+`main-1793207138-722f54b297ab471ebbc660d7739235c0c8c3e1db` (the rollback target). Step 1: the owner pushed `develop`
+and ran the `main` ff `eea8344..036870c`. CI run `44346041934`: `replay`, `build-api`, `build-llm-worker` green;
+http and playwright builds skipped. Flux bumped `api`, `workflow-worker` and `llm-worker-temporal` to `036870c`;
+`rollout status` clean on all three, the api rolling one pod at a time (two serving throughout). Steps 2–3
+(owner): http job `completed`, `diff_detected: null`; a 2-page crawl `completed`; the `j2-validate` run `failed`
+with `… rules[1] (contains): 'Sold out' not found` (fail mode unchanged on the new LLM worker), pipeline then
+soft-deleted; `POST /crawls` with `schedule_cron` → `422`; a job for `http://100.64.0.1/` → `400`. **Deployed code
+is `036870c`.**
 
 #### J.3 — Migration 4.10: how runs and blocks end
 

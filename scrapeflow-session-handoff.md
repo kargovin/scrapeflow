@@ -136,6 +136,32 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-18 *(clock)*
 
+🚀 **J-a RELEASED (2026-11-18, nineteenth session).** Owner: "explain j1 with background" → "build it" → "commit it"
+→ "what is y1" → "build it" → runbook → owner pushed `main` and verified.
+- **J.1 (`045f598`)** — `llm-worker/worker/rules.py` answers met / not met / cannot be checked; `negate` on every rule
+  kind flips met ↔ not met, never "cannot be checked"; `ValidateInput.when_unmet` (`fail` default). Fail mode
+  byte-identical (all 166 old worker tests unchanged). Stop mode: first rule not met → `ValidateVerdict{outcome,
+  rule_index, rule, found, expected}`; cannot be checked → non-retryable `ValidationUnverifiable`; not-JSON is judged
+  per rule in stop mode (rule order decides), up front in fail mode (as today). **My call on `found`/`expected` per
+  kind** (ADR-014 shows only `compare`): compare = value / rule value; type = JSON type name (`null` if missing) /
+  rule type; min_length = count / minimum; contains = `null` / text; json_schema = error message / `null`; present =
+  value or `null` / `null`; values over 200 chars of JSON truncated. Reversible before J.6. Worker 234 tests,
+  contracts 49, mutation 5/5.
+- **Y.1 (`8774907`)** — `POST /crawls` + `schedule_cron` → 422 (before SSRF/quota); `CrawlResponse.schedule_cron`
+  gone; `content_hash` no longer written; four columns unmapped; six `diff_detected=run.diff_detected` reads gone
+  (always `null`). Suite 786, mutation 3/3. ⚠️ **`alembic check` now lists the four drops until Y.2** — J.3's
+  entry carries the trap (delete them from 4.10's autogenerate).
+- **J.2 runbook** (`036870c`) in the backlog; **released**: step 0 count **0**, LLM worker rollback tag
+  `main-1793207138-722f54b…`; CI `44346041934` green; Flux rolled api (2 pods, rolling), workflow worker, LLM worker
+  to `036870c`. Owner verified: job `diff_detected: null`, crawl `completed`, fail-mode Validate run `failed` with
+  the `'Sold out' not found` message, crawl `schedule_cron` → 422, `http://100.64.0.1/` job → 400 (BUG-024 closed in
+  prod).
+- **Memory:** `feedback_task_explanation_shape.md` — "explain <task>" = background + flow, what changes with
+  concrete examples, release reason, traps, then ask walkthrough or build.
+- **Git:** `develop` = `main` = `036870c` + this closeout (docs). **Deployed code is `036870c`.** Infra untouched.
+  Compose `api` (+ postgres) left running. `tmp/` untracked, not mine.
+- **Next:** **J.3** — migration 4.10 (block/run reason columns, `webhook_deliveries` widened for pipeline runs).
+
 🧭 **TECH LEAD PASS — GROUPS J–P WRITTEN (2026-11-18, eighteenth session; docs only).** Owner: "assume the tech
 lead persona; read ADRs 14–16 and PRDs 17–19 and the bugs that can be fixed while coding these; build a backlog;
 slices or grouping by ADR?" Written into `docs/project/phase4-implementation-backlog.md` (status table + a *Groups
@@ -2108,6 +2134,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-11-18 *(clock, nineteenth)* | **🚀 J-a RELEASED.** J.1 (Validate three answers, `negate`, stop mode + verdict) and Y.1 (crawl `schedule_cron` refused, four columns unmapped) explained, built, mutation-checked; J.2 runbook; owner pushed `main` `eea8344..036870c` and verified all five checks; step 0 count 0 | `045f598`, `3308397`, `8774907`, `9b08d49`, `036870c`, closeout |
 | 2026-11-18 *(clock, seventeenth)* | **📐 ADR-016 drafted (Monitors, PRD-018's Architect pass), then 📝 owner review complete (12 rounds) and ✅ Accepted.** Handoff staleness fixed first (`217ffcf`). PRD-018, ADR-014/015 and the code read; OQ-1–14 + the LLM-key carry answered; ~20 corrections from code checks; G1–G8 answered; backlog row for pipeline admin stats | `217ffcf`, `defe073`, `574fd7a`…`dd8a984` (rounds 1–11), `2da69b7` (review complete), `9808684` (accepted), closeout |
 | 2026-11-18 *(clock, sixteenth)* | **📐 ADR-015 owner review — 9 rounds, complete; ADR-014 + ADR-015 Accepted.** Plain-words walkthrough per section with examples, each claim checked against code; F1–F5 accepted; httpx `sni_hostname` pin tested; LLM-key deletion under a monitor carried to ADR-016. **🔧 BUG-024 fixed locally** (public unicast only, NAT64 judged as its IPv4; 37 tests, suite 783, mutation 4/4). **BUG-032 filed.** Owner's stance on Monitors/destinations saved to memory | `57bb301`, `86bfae6` + handoff refresh |
 | 2026-11-03 → 11-05 *(clock, fifteenth)* | **📝 PRD-018 owner review — 16 rounds, complete.** Read-in from the handoff; plain-words walkthrough per section with examples and illustrations, each claim checked against code (deleted result consumer, `diff.py`, `cleaner.py`, `pipeline.py`, `PipelineEditor.tsx`, job permanent delete, schedule admission, kill switch, settings). Baseline rule rebuilt (unchanged / pre-gate / expired / superseded never baseline), version+inputs fixed, change gate renamed, fingerprint not an input, start values, waiting-check comparison, notices once per situation, OQ-14 added; Q1 = (e) drops slice 3 and OQ-12; scheduled crawls not planned. Owner steer: simplify, move polish to "not yet" | `74aa2d9` + this closeout |

@@ -2249,7 +2249,7 @@ NAT shared space, and **Tailscale assigns node addresses from it** — on a home
 those are internal hosts. Multicast (`224.0.0.0/4`) passes too (no practical fetch).
 **Discovered:** 2026-10-27, designing E.6's fixture network (by code reading, then confirmed in the api
 container on Python 3.12.14). **Not exploited, not reproduced against a real internal host.**
-**Status:** ✅ **Fixed locally 2026-11-18, unreleased** (owner, ADR-015 review round 5: "treat this project as to be
+**Status:** ✅ **Fixed 2026-11-18, RELEASED 2026-11-18 with J-a (`main` `eea8344..036870c`)** — verified in prod: a job for `http://100.64.0.1/` → `400` (owner, ADR-015 review round 5: "treat this project as to be
 used by others too"). `core/security.is_public_address`: refuse unless `is_global and not is_multicast`, with a
 NAT64 address judged as its IPv4 address. Every lane's check goes through it. ~~Open — the owner's call.~~
 
