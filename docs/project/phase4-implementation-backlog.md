@@ -116,7 +116,7 @@
 | J.2 | 🚀 Release J-a — workers first (J.1 + BUG-024 + Y.1) | ✅ **RELEASED 2026-11-18** (`main` `eea8344..036870c`; no infra change, no migration) — owner verified a job, a crawl, a fail-mode Validate run, the 422 and the 400 |
 | J.3 | Migration 4.10: block/run reason columns, `webhook_deliveries` widened for pipeline runs | 🔧 **Built 2026-11-18** (`0341771`, migration 4.10 `678c7e339d80`, local, unreleased) — ships with J.10 |
 | J.4 | Save-time config (`when_unmet`, `on_stop_outputs`, `negate`, `events`) + typed run inputs | 🔧 **Built 2026-11-18** (`f5d550d`, local, unreleased) — ships with J.10. ⚠️ Until J.6: a bound rule saves but cannot run (the worker gets `{"$input": …}`), and a saved `when_unmet: "stop"` runs as fail (the workflow does not send `when_unmet` yet) |
-| J.5 | Mirrors record skip reasons, verdict, stop, failed block; `notify_run` fields | ⬜ |
+| J.5 | Mirrors record skip reasons, verdict, stop, failed block; `notify_run` fields | 🔧 **Built 2026-11-19** (`3b427d6`, local, unreleased) — ships with J.10. `MirrorBlockInput` gains `skipped` + reason (J.7's alert-only skip writes through it); the skip reason is read from the run row's ending, so a late mirror on a cancelled run still records `cancelled`. The workflow passes `failed_block_id` (an activity argument, not a command — no patch). 11 new tests, suite 874, mutation 10/10 |
 | J.6 | Stop path in `PipelineWorkflow` (patch `validate-stop`) + `release_run_outputs` | ⬜ |
 | J.7 | Failure alerts (`queue_failure_alerts`, patch `webhook-events`, secret arms, meters) | ⬜ |
 | J.8 | BUG-030: `send_signed_post`, resolve once and connect to that IP (pulled forward — open item 13) | ⬜ |
