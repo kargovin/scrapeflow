@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 10). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 11). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -67,6 +67,11 @@ until the owner's review accepts it.
 > `CrawlResponse.schedule_cron` in release A (stop using), before the column drop in release B; no caller of ours
 > reads it. §14 was walked through again with background (what `schedule_cron` promised, why scheduled crawls are
 > not planned, why two releases).
+>
+> **Review round 11 (owner, 2026-11-18): §15 Workflow code, §16 Rollout.** Agreed, with two improvements. (1) The
+> slice-1 release gate drives 23 checks with Check now and one with a real firing (minutes, not 2 hours at the
+> 5-minute floor). (2) The LLM worker's half of slice 1 (the `changed` rule, Diff, Capture — additive) ships with
+> slice 0's release, so *workers first* holds by construction instead of needing a two-step push.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -952,8 +957,8 @@ of §11), because activity code is not replayed. The new fields on `ValidateInpu
 | Slice | Ships | Schema | Release order |
 |---|---|---|---|
 | — | D16's crawl refusal (§14) | none | api only, any time |
-| **0** | BUG-031 (§11) | none: the ledger, the FKs and the cascades exist | api only |
-| **1** | monitors (§2–§8, §10–§13), after PRD-019's build (ADR-014: stop mode, typed inputs, `when_unmet`) | `monitors`, `monitor_events`, the `pipeline_runs` and `pipeline_run_blocks` columns (§2b) | **LLM worker** (the `changed` rule, Diff, Capture) **→ api** (ADR-014 §2's order: an old worker cannot decode the `changed` rule, so every check fails at its gate) |
+| **0** | BUG-031 (§11), **plus the LLM worker's half of slice 1** (the `changed` rule, Diff, Capture — additive, nothing calls them yet) | none: the ledger, the FKs and the cascades exist | one `main` push: api and LLM worker images |
+| **1** | monitors (§2–§8, §10–§13), after PRD-019's build (ADR-014: stop mode, typed inputs, `when_unmet`) | `monitors`, `monitor_events`, the `pipeline_runs` and `pipeline_run_blocks` columns (§2b) | api only: the LLM worker's half shipped with slice 0, so ADR-014 §2's *workers first* holds by construction (an old worker cannot decode the `changed` rule, and every check would fail at its gate) |
 | **2** | Approval (§9) | the approval columns, the reason widenings | api only (the workflow worker is the api image) |
 | with PRD-017 | the notice destination, `webhook_deliveries` widened for monitors (§8) | `monitors.notice_destination_id`, the `webhook_deliveries` columns and CHECKs | whichever of the two ships second |
 
@@ -962,9 +967,15 @@ that picks up a monitor tick fails to find `MonitorCheckWorkflow` and retries th
 Both heal by themselves. No monitors exist in production before the first release, so neither has anything to
 strand (the owner's standing note on rollout windows).
 
-**Release gate for slice 1** (PRD-018's measured criterion, on compose before production): 24 hourly-equivalent
-checks of a fixture page that changes twice after the first check give exactly 3 LLM calls, 3 kept result
-copies, 3 webhook messages and 24 monthly units. Storage usage moves only for the 3 kept checks.
+**Release gate for slice 1** (PRD-018's measured criterion, on compose before production): 24 checks of a fixture
+page that changes twice after the first check give exactly 3 LLM calls, 3 kept result copies, 3 webhook messages
+and 24 monthly units. Storage usage moves only for the 3 kept checks. **23 checks are driven by Check now and one
+by a real scheduled firing**: Check now runs the same admission and check path minus the Schedule, so the gate takes
+minutes, not the 2 hours 24 firings need at the 5-minute floor, and the Schedule path is still exercised once.
+
+**Why the LLM worker's half ships early.** One `main` push rolls out every changed image together, so "LLM worker
+before api" cannot be ordered inside a single release. Shipping the worker's additive half one release earlier
+makes the order a fact rather than a step to remember.
 
 ---
 
