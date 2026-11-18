@@ -13,6 +13,7 @@ from sqlalchemy import update
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from app.core import egress
 from app.core.db import AsyncSessionLocal
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.settings import settings
@@ -56,7 +57,7 @@ class Receiver:
 @pytest.fixture
 def no_ssrf(monkeypatch):
     # The receiver is on loopback, which the real check refuses (that path has its own test).
-    monkeypatch.setattr(webhook_module, "validate_no_ssrf_core", lambda url: None)
+    monkeypatch.setattr(egress, "is_public_address", lambda ip: True)
 
 
 def _input(run_id, url, secret: str | None = None, **fields) -> WebhookInput:

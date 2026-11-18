@@ -1,30 +1,25 @@
 """Job, batch, crawl and pipeline-alert webhooks — the deleted ``webhook_loop.py``'s attempt, one call per attempt (F.4).
 
-The wire contract is unchanged, byte for byte: the row's payload as JSON, HMAC-SHA256 over it with
-the job's or batch's secret (``b""`` when there is none — a crawl has none),
-``X-ScrapeFlow-Signature: sha256=<hex>``, success = status < 300, 10 s per POST, the same backoff
-and attempt cap. SSRF is re-checked on every attempt and a refusal is final without counting as
-one. The row stays the record the admin endpoints and the webhook meters read.
+The send is ``core/egress.send_signed_post``, shared with the pipeline Webhook block: the row's
+payload as JSON, signed with the owner's secret (``b""`` when there is none — a crawl has none).
+Success = status < 300, the same backoff and attempt cap. Every attempt resolves afresh; an address
+refusal is final without counting as an attempt. The row stays the record the admin endpoints and the
+webhook meters read.
 """
 
-import asyncio
-import hashlib
-import hmac
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import httpx
 import structlog
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from app.core import webhook_delivery
+from app.core import egress, webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.core.pipeline_alerts import alert_secret
-from app.core.security import validate_no_ssrf_core
 from app.models.batch import Batch
 from app.models.job import Job
 from app.models.webhook_delivery import WebhookDelivery
@@ -39,18 +34,9 @@ from app.workflows.webhook_delivery import (
 logger = structlog.get_logger()
 
 BACKOFF_SECONDS: list[int] = [0, 30, 300, 1800, 7200]
-POST_TIMEOUT_SECONDS = 10.0
 # A pending row this far past its attempt time has no delivery running for it.
 SWEEP_GRACE = timedelta(seconds=60)
 SWEEP_BATCH = 500
-
-
-async def _post(url: str, body: bytes, headers: dict[str, str]) -> int:
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            url, content=body, headers=headers, timeout=POST_TIMEOUT_SECONDS
-        )
-    return response.status_code
 
 
 def _apply_backoff(delivery: WebhookDelivery, error: str) -> None:
@@ -94,12 +80,13 @@ async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
         if delivery is None or delivery.status != "pending":
             return AttemptOutcome(status="gone")
 
-        # Every attempt (DNS rebinding). A block is a security event, not an attempt.
+        body = json.dumps(delivery.payload).encode()
+        secret = await _secret(db, delivery)
         try:
-            await asyncio.get_running_loop().run_in_executor(
-                None, validate_no_ssrf_core, delivery.webhook_url
-            )
-        except ValueError as exc:
+            status_code = await egress.send_signed_post(delivery.webhook_url, body, secret)
+            error = None if status_code < 300 else f"HTTP {status_code}"
+        except egress.EgressBlocked as exc:
+            # A security event, not an attempt.
             delivery.status = "exhausted"
             delivery.last_error = f"ssrf_blocked: {exc}"
             await db.commit()
@@ -110,22 +97,15 @@ async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
                 error=str(exc),
             )
             return AttemptOutcome(status="exhausted")
-
-        delivery.attempts += 1
-        body = json.dumps(delivery.payload).encode()
-        signature = hmac.new(await _secret(db, delivery), body, hashlib.sha256).hexdigest()
-        try:
-            status_code = await _post(
-                delivery.webhook_url,
-                body,
-                {
-                    "Content-Type": "application/json",
-                    "X-ScrapeFlow-Signature": f"sha256={signature}",
-                },
-            )
-            error = None if status_code < 300 else f"HTTP {status_code}"
+        except egress.CertificateMismatch as exc:
+            delivery.attempts += 1
+            delivery.status = "exhausted"
+            delivery.last_error = str(exc)
+            await db.commit()
+            return AttemptOutcome(status="exhausted")
         except Exception as exc:
             error = str(exc) or type(exc).__name__
+        delivery.attempts += 1
 
         if error is None:
             delivery.status = "delivered"

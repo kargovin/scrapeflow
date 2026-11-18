@@ -11,19 +11,19 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
+from app.core import egress
 from app.core.db import AsyncSessionLocal
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.main import app
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
-from app.workflows.activities import webhook_deliveries
 from app.workflows.activities.db import mirror_run_status
 from app.workflows.activities.webhook_deliveries import _secret, attempt_webhook_delivery
 from app.workflows.pipeline import MirrorRunInput
 from app.workflows.webhook_delivery import DeliveryRef
 from tests.test_admin import admin_api_key, admin_headers, admin_user  # noqa: F401
-from tests.test_webhook_deliveries import Receiver
+from tests.test_webhook_deliveries import Receiver, stand_in
 
 ALERT_URL = "https://alerts.example.com/in"
 RESULT_URL = "https://hooks.example.com/in"
@@ -221,10 +221,7 @@ async def test_a_definition_saved_before_events_existed_sends_no_alert(db_user):
 
 @pytest.fixture
 def receiver(monkeypatch):
-    monkeypatch.setattr(webhook_deliveries, "validate_no_ssrf_core", lambda url: None)
-    r = Receiver()
-    monkeypatch.setattr(webhook_deliveries, "_post", r)
-    return r
+    return stand_in(monkeypatch, Receiver())
 
 
 async def test_an_alert_is_signed_with_its_blocks_secret(db_user, receiver):
@@ -237,8 +234,8 @@ async def test_an_alert_is_signed_with_its_blocks_secret(db_user, receiver):
         assert outcome.status == "delivered"
 
     (url_a, body_a, headers_a), (url_b, body_b, headers_b) = receiver.posts
-    assert url_b == RESULT_URL
-    assert url_a == ALERT_URL
+    assert (headers_a["Host"], headers_b["Host"]) == ("alerts.example.com", "hooks.example.com")
+    assert url_a == url_b == "https://93.184.216.34/in"
     assert json.loads(body_a) == signed.payload
     assert headers_a["X-ScrapeFlow-Signature"] == (
         "sha256=" + hmac.new(BLOCK_SECRET, body_a, hashlib.sha256).hexdigest()
@@ -250,12 +247,12 @@ async def test_an_alert_is_signed_with_its_blocks_secret(db_user, receiver):
 
 
 async def test_a_private_alert_url_is_refused_on_every_attempt(db_user, monkeypatch):
-    def blocked(url):
-        raise ValueError("URL resolves to a private address: 10.0.0.5")
+    def private(host, port, type):
+        return [(None, None, None, None, ("10.0.0.5", port))]
 
-    monkeypatch.setattr(webhook_deliveries, "validate_no_ssrf_core", blocked)
     receiver = Receiver()
-    monkeypatch.setattr(webhook_deliveries, "_post", receiver)
+    monkeypatch.setattr(egress, "_post", receiver)
+    monkeypatch.setattr(egress.socket, "getaddrinfo", private)
     run = await _run(db_user.id)
     await _fail(run)
     row, _ = await _alerts(run.id)

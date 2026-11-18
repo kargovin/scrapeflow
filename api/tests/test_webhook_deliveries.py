@@ -19,7 +19,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import Worker
 
-from app.core import webhook_delivery
+from app.core import egress, webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.main import app
 from app.models.batch import Batch
@@ -28,7 +28,6 @@ from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
-from app.workflows.activities import webhook_deliveries
 from app.workflows.activities.job_runs import finish_job_run
 from app.workflows.activities.webhook_deliveries import (
     BACKOFF_SECONDS,
@@ -58,26 +57,35 @@ PAYLOAD = {
 }
 
 
+# What every host resolves to while a Receiver stands in (core/egress.py pins the POST to it).
+PUBLIC_IP = "93.184.216.34"
+
+
 class Receiver:
     """Stands in for the POST; records exactly what would go on the wire."""
 
     def __init__(self, status=200, error=None):
         self.status, self.error = status, error
         self.posts: list[tuple[str, bytes, dict]] = []
+        self.extensions: list[dict] = []
 
-    async def __call__(self, url, body, headers):
+    async def __call__(self, url, body, headers, extensions):
         self.posts.append((url, body, headers))
+        self.extensions.append(extensions)
         if self.error:
             raise self.error
         return self.status
 
 
+def stand_in(monkeypatch, receiver: "Receiver") -> "Receiver":
+    monkeypatch.setattr(egress, "resolve_public", lambda host, port: [PUBLIC_IP])
+    monkeypatch.setattr(egress, "_post", receiver)
+    return receiver
+
+
 @pytest.fixture
 def receiver(monkeypatch):
-    monkeypatch.setattr(webhook_deliveries, "validate_no_ssrf_core", lambda url: None)
-    r = Receiver()
-    monkeypatch.setattr(webhook_deliveries, "_post", r)
-    return r
+    return stand_in(monkeypatch, Receiver())
 
 
 @pytest_asyncio.fixture
@@ -147,7 +155,9 @@ async def test_the_wire_bytes_and_signature_are_the_job_lanes(job, receiver):
     await _attempt(d)
 
     [(url, body, headers)] = receiver.posts
-    assert url == "https://hooks.example.com/in"
+    # Connected to the checked address, presenting the name (BUG-030).
+    assert url == f"https://{PUBLIC_IP}/in"
+    assert receiver.extensions == [{"sni_hostname": "hooks.example.com"}]
     # The stored row's payload as Postgres returns it (JSONB orders keys), as webhook_loop sent it.
     assert body == json.dumps((await _get(d.id)).payload).encode()
     assert json.loads(body) == PAYLOAD
@@ -155,6 +165,7 @@ async def test_the_wire_bytes_and_signature_are_the_job_lanes(job, receiver):
     assert headers == {
         "Content-Type": "application/json",
         "X-ScrapeFlow-Signature": f"sha256={expected}",
+        "Host": "hooks.example.com",
     }
 
 
@@ -189,10 +200,10 @@ async def test_the_last_attempt_exhausts_the_row(job, receiver):
 
 
 async def test_an_ssrf_block_exhausts_without_counting_an_attempt(job, receiver, monkeypatch):
-    def blocked(url):
+    def blocked(host, port):
         raise ValueError("resolves to a private address")
 
-    monkeypatch.setattr(webhook_deliveries, "validate_no_ssrf_core", blocked)
+    monkeypatch.setattr(egress, "resolve_public", blocked)
     d = await _delivery(job)
 
     assert (await _attempt(d)).status == "exhausted"

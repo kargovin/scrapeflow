@@ -2367,7 +2367,13 @@ columns — and apply it to the three lists (and `JobDetail`, which should show 
 
 **Severity:** Medium (security) — a blind SSRF from inside the cluster, for a signed-in user who controls a DNS name.
 **Discovered:** 2026-10-29, by the PRD-017 drafting subagent (code reading); confirmed against the code the same day.
-**Status:** 🔴 **OPEN — filed 2026-10-30; not fixed.**
+**Status:** 🔧 **FIXED locally 2026-11-19 (J.8), unreleased — ships with J-b (J.10).** `api/app/core/egress.py`:
+`resolve_public` makes one lookup and refuses the name if any answer is not public unicast; `send_signed_post`
+pins the POST to a vetted IP (`Host` + the `sni_hostname` request extension, so the certificate is still checked
+against the name), tries the next vetted IP only after a refused or timed-out connect, and treats a certificate
+for another name as final. Both senders call it. `api/tests/test_egress.py` holds the rebinding case (public on
+the first lookup, private on a second — there is no second). Live-checked from the api container: a pinned POST
+to example.com answered; the same name pinned to another site's address raised the mismatch.
 
 Both webhook senders check the URL, then send it, and the two steps **look the host up separately**:
 

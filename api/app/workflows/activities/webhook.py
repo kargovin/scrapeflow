@@ -1,8 +1,7 @@
 """The Webhook block's activity — workflow-worker queue (it writes the block's status).
 
-The wire contract is the job lane's (``activities/webhook_deliveries.py``), byte for byte: HMAC-SHA256 over
-the raw body, ``X-ScrapeFlow-Signature: sha256=<hex>`` always sent (``b""`` with no secret),
-success = status < 300, 10 s per POST. Changing any of it breaks receivers silently.
+The send is ``core/egress.send_signed_post``, shared with the job lane: the wire contract, the
+address check and the connection to the checked address. Success = status < 300.
 
 One call is one attempt; the retry policy is the delivery loop (ADR-009 §15). The workflow is
 blocked inside one ``execute_activity`` across every retry, so the attempt itself mirrors the
@@ -10,9 +9,6 @@ block: ``running`` as it starts (refused on a cancelled run — 15d's boundary r
 when it fails and another attempt will follow (15a — a waiting block holds no slot).
 """
 
-import asyncio
-import hashlib
-import hmac
 import json
 
 import httpx
@@ -20,7 +16,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from app.core.security import validate_no_ssrf_core
+from app.core import egress
 from app.settings import settings
 from app.workflows.activities.db import mirror_block_status
 from app.workflows.pipeline import (
@@ -30,8 +26,6 @@ from app.workflows.pipeline import (
     MirrorBlockInput,
     WebhookInput,
 )
-
-POST_TIMEOUT_SECONDS = 10.0
 
 
 def build_payload(input: WebhookInput) -> dict:
@@ -47,10 +41,6 @@ def build_payload(input: WebhookInput) -> dict:
         "diff_summary": None,
         "timestamp": input.timestamp,
     }
-
-
-def sign(secret: bytes, body: bytes) -> str:
-    return "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
 
 
 def _secret(encrypted: str | None) -> bytes:
@@ -85,25 +75,18 @@ async def deliver_webhook(input: WebhookInput) -> None:
             "the run was cancelled", type=RUN_CANCELLED_ERROR, non_retryable=True
         )
 
-    # Every attempt (DNS rebinding); a refusal is final — retrying hands an attacker hours.
+    body = json.dumps(build_payload(input)).encode()
+    secret = _secret(input.encrypted_secret)
+    # A refusal is final — retrying hands an attacker hours.
     try:
-        await asyncio.get_running_loop().run_in_executor(None, validate_no_ssrf_core, input.url)
-    except ValueError as exc:
+        status_code = await egress.send_signed_post(input.url, body, secret)
+        error = None if status_code < 300 else f"HTTP {status_code}"
+    except egress.EgressBlocked as exc:
         raise ApplicationError(
             f"ssrf_blocked: {exc}", type="WebhookBlocked", non_retryable=True
         ) from None
-
-    body = json.dumps(build_payload(input)).encode()
-    headers = {
-        "Content-Type": "application/json",
-        "X-ScrapeFlow-Signature": sign(_secret(input.encrypted_secret), body),
-    }
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                input.url, content=body, headers=headers, timeout=POST_TIMEOUT_SECONDS
-            )
-        error = None if response.status_code < 300 else f"HTTP {response.status_code}"
+    except egress.CertificateMismatch as exc:
+        raise ApplicationError(str(exc), type="WebhookCertificate", non_retryable=True) from None
     except httpx.HTTPError as exc:
         error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
