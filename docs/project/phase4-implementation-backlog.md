@@ -145,6 +145,7 @@
 | M.2 | Destinations API (CRUD, host-only display, delete-in-use 409) | ⬜ |
 | M.3 | `delivery-worker/` scaffold + egress copy + `contracts/test_egress.py` + `dependabot.yml` (BUG-006) | ⬜ |
 | M.4 | The bucket sink (deliver, undo, test; pinned resolver; classifier) | ⬜ |
+| M.14 | Email sending moved up from P (open item 19 = a): SMTP client, `test_smtp`, `send_email`, `kind = email` rows | ⬜ |
 | M.5 | The destination test (three call sites) | ⬜ |
 | M.6 | Catalog + save-time: bucket block, sink order, Webhook cap lifted, budgets + rollback reserve | ⬜ |
 | M.7 | Sinks in `PipelineWorkflow` (patch `sinks`); Webhook `block_id` + `deliveries` | ⬜ |
@@ -164,7 +165,7 @@
 | O.1 | The Postgres sink | ⬜ |
 | O.2 | 🚀 Release O | ⬜ |
 | **P** | **Email sink** (PRD-017 slice 3) | |
-| P.1 | The email sink, email alerts and email notices | ⬜ |
+| P.1 | The Email block (its sending, test and alert rows shipped in M.14) | ⬜ |
 | P.2 | 🚀 Release P | ⬜ |
 | **Y** | **Job-lane leftovers** (ADR-016 §14) | |
 | Y.1 | Release A — stop using: crawl `schedule_cron` refused, `content_hash` unwritten, four columns unmapped (rides J-a) | ⬜ |
@@ -3119,10 +3120,10 @@ Y   Job-lane leftovers (ADR-016 §14): Y.1 rides J-a, Y.2 rides K
 | **J-b** (J.10) | api | 4.10 | PRD-019 |
 | **K** (K.4) | api, llm-worker | Y.2's drop | BUG-031, the `changed` rule, Diff, Capture, Y.2 |
 | **L** (L.12) | api | monitors | monitors |
-| **M** (M.12) | api, **delivery-worker (new)** | destinations, notice destination | bucket sink, rollback, several webhooks, BUG-030 (if not pulled into J), notices to destinations. **Three steps: infra → `main` → infra** (ADR-015 §8) |
+| **M** (M.12) | api, **delivery-worker (new)** | destinations, notice destination | bucket sink, rollback, several webhooks, email sending (M.14), notices to destinations. **Three steps: infra → `main` → infra** (ADR-015 §8) |
 | **N** (N.5) | api | approval columns | approval |
 | **O** (O.2) | api, delivery-worker | none | Postgres sink |
-| **P** (P.2) | api, delivery-worker | none | email sink, email alerts and notices |
+| **P** (P.2) | api, delivery-worker | none | the Email block |
 
 **Why J ships in two releases (TL call — open item 12).** ADR-014 §2 says *release the LLM worker before the api
 image*: an old worker silently drops `when_unmet` and `negate`, so a stop reads as a fail and a reversed rule is
@@ -3137,7 +3138,7 @@ split costs one extra release and removes the note.
 | Item | Disposition | Where |
 |---|---|---|
 | **BUG-024** (SSRF admits CGNAT/multicast) | ✅ fixed locally 2026-11-18; ships | J-a |
-| **BUG-030** (webhook check vs connect) | **pulled forward from M (TL call — open item 13).** ADR-015 §3 fixes it "in slice 1". J.7 already rewrites the job-lane delivery activity (pipeline arm, explicit owners) and adds a third kind of POST through it (`pipeline.failed`), so J.8 extracts `send_signed_post` with the pin while that file is open. M then copies a proven module into the delivery worker. Nothing in ADR-015's design changes, only when it lands | J.8 |
+| **BUG-030** (webhook check vs connect) | **pulled forward from M (✅ owner, open item 13).** ADR-015 §3 fixes it "in slice 1". J.7 already rewrites the job-lane delivery activity (pipeline arm, explicit owners) and adds a third kind of POST through it (`pipeline.failed`), so J.8 extracts `send_signed_post` with the pin while that file is open. M then copies a proven module into the delivery worker. Nothing in ADR-015's design changes, only when it lands | J.8 |
 | **BUG-031** (nothing frees pipeline outputs) | ADR-016's slice 0 | K.1; the monitor parts (`?with_checks`, the 409 while a monitor uses a pipeline) in L.5 |
 | **BUG-018** (SPA caches the Clerk token) | **ride along (open item 14).** Owner tabled it "until after the Temporal pipeline", which is done. Cheaper than its writeup says: `lib/useApi.ts` already fetches the token per request, and every newer page (pipelines, batches, crawls) uses it; only the five old pages (`Jobs`, `JobDetail`, `Users`, `ApiKeys`, `UsageStats`) still cache `['token']` (checked 2026-11-18). New pages in J–N must use `useApi()` | J.9 |
 | **BUG-029** (Engine column) | optional ride-along: `Jobs.tsx` is one of BUG-018's five files | J.9 |
@@ -3161,6 +3162,18 @@ split costs one extra release and removes the note.
   Each time: the two CHECKs, a `pending()` filter, an explicit secret arm (an unknown owner raises), and the three
   `job_lane_webhook*` meters gain `… IS NULL` **in the same release** (BUG-028's class).
 - **Lock order is user, then run**, everywhere (ADR-016 §8, §11).
+- **Every migration: model first, then autogenerate with `docker compose pause api`** (the standing procedure in
+  the handoff's *Commands*); delete the dedup false positive; name every foreign key. Applies to J.3, Y.2, L.2, M.1,
+  M.9, N.1.
+- **Tests share the dev database**: a delete or cutoff test scopes its rows so nothing pre-existing qualifies.
+  **Mutation checks** on delete paths (J.6, K.1, L.5) run with `PYTHONDONTWRITEBYTECODE=1` and a cleared
+  `__pycache__`; afterwards sweep MinIO objects no ledger row holds and orphaned test users.
+- **A new workflow class joins two lists**: the worker's registration and `workflows=[...]` in
+  `api/tests/test_workflow_replay.py` (`MonitorCheckWorkflow` in L.7, `DestinationTestWorkflow` in M.5).
+- **A destination reference checks kind as well as owner**: bucket block → `bucket`; Webhook block → `webhook`;
+  Postgres block → `postgres`; Email block → `smtp`; notice and approval destinations → `webhook` or `smtp`. Every
+  reference is written to `pipeline_version_destinations` (or is a monitor column M.2's delete check reads), so
+  the delete-in-use 409 sees it.
 - **Activities before the workflow that calls them**, in every group: the mirror/activity task lands first (no
   patch needed, activity code is not replayed), then the workflow task that calls it.
 
@@ -3225,7 +3238,8 @@ positive.
 `negate` on every rule; Webhook `events` (≥ 1, no repeats, default `["pipeline.result"]`).
 `RunInputDeclaration.type` → `url | number | text`; `bindable_fields` names nested paths (`rules[].value` for
 `compare`, `rules[].text` for `contains`) and the binding check walks the rule list and pairs each binding with
-its type. The trigger checks each value against its declared type — a `number` is a JSON number only (`"100"` and
+its type. A bound `contains` text has the literal's 1–1000 character limit, checked at the trigger against the
+value sent. The trigger checks each value against its declared type — a `number` is a JSON number only (`"100"` and
 `true` → 422 naming the input) — and the three input models widen (`PipelineRunCreate.inputs`,
 `PipelineRunInput.inputs`, the run read's `inputs`). Validate's need adds the release budget when `delete`.
 `config_versions` stays `1`.
@@ -3268,7 +3282,7 @@ LLM block makes no LLM call.
 
 **Why:** ADR-014 §8.
 **What:** `queue_failure_alerts(db, run)` — reads the pinned version, one row per message-sending block whose
-`events` include `pipeline.failed`, `ON CONFLICT DO NOTHING`, best-effort start of each row's
+`events` include `pipeline.failed` (Webhook only until P.1 adds Email blocks, whose rows carry `kind = email`), `ON CONFLICT DO NOTHING`, best-effort start of each row's
 `WebhookDeliveryWorkflow` — called **in the same transaction** as the `failed` write by both writers
 (`mirror_run_status(failed)`, the trigger's except branch). Workflow: under `patched("webhook-events")` a
 Webhook block with `["pipeline.failed"]` only, on a succeeding run, is mirrored `skipped`/`alert_only` with no
@@ -3297,7 +3311,6 @@ call it and keep their own outcome handling. Correct CLAUDE.md's *SSRF re-valida
 **Verify:** one test pins identical bytes and headers from both senders; the rebinding test (public on the first
 lookup, private on a second) is refused because there is no second lookup; existing webhook histories replay
 (activity code is not replayed — the shapes are unchanged).
-**If the owner keeps BUG-030 in M** (open item 13), this task moves unchanged to the head of M, before M.3.
 **Depends on:** J.7
 
 #### J.9 — Run reads and the SPA (+ BUG-018, BUG-029)
@@ -3306,11 +3319,13 @@ lookup, private on a second) is refused because there is no second lookup; exist
 **What:** run read (user + admin) returns the new run and block columns; `"reason not recorded"` for a NULL skip
 reason; the run list gains the stop label from `stopped_at_block_id` + `stop_reason` (no join). The run page lists
 the run's alert deliveries (status, attempts, last error). SPA: verdict in words ("does not contain 'Out of
-stock'"), skip reasons, "result deleted when the run stopped", the list label, live via the existing run socket.
+stock'"), skip reasons, "result deleted when the run stopped", the list label, live via the existing run socket. **The run form sends typed values**: `PipelineDetail.tsx` keeps inputs as
+`Record<string, string>` today, so after J.4 every `number` input from the SPA would get a 422 (ADR-014 §4:
+"the SPA's run form sends a number").
 **BUG-018:** move `Jobs`, `JobDetail`, `Users`, `ApiKeys`, `UsageStats` to `useApi()`; drop the `['token']`
 queries. **BUG-029 (optional):** `engine` on `JobResponse`, one rendering on the three lists.
 **Verify:** API tests for each field; SPA build; click-through on compose — a stopped run updating live, the list
-label, an old run's "reason not recorded"; a list page left open > 2 min keeps loading (BUG-018).
+label, an old run's "reason not recorded"; a list page left open > 2 min keeps loading (BUG-018); a pipeline with a `number` input runs from the SPA.
 **Depends on:** J.5, J.7
 
 #### J.10 — 🚀 Release J-b: PRD-019 + its gate
@@ -3358,7 +3373,7 @@ met; matched names the right key.
 **Why:** ADR-016 §6a, §6b. Content queue; CPU work off the event loop (`asyncio.to_thread`, as Clean).
 **What:** **Diff** — page: unified diff (3 lines of context); extraction: path-by-path at any depth, lists by
 position; guard > 50,000 lines a side → "too large"; writes `history/{artifact_id}/diff.json` (≤ 1 MiB, marked
-cut) and returns it as an object to record; returns a summary ≤ 16 KiB (200 lines / 100 paths, values cut to 200
+cut) and returns it as an object to record (the workflow records it — L.8); returns a summary ≤ 16 KiB (200 lines / 100 paths, values cut to 200
 chars, `truncated`, counts); `NoSuchKey` → `baseline_gone` as a **result**; only transient storage errors raise.
 **Capture** — resolves each `{input, path}` with Validate's JSON Pointer code; wrong type or missing →
 `{missing: why}` (ADR-014 §4's strict rule). Contracts both copies.
@@ -3427,7 +3442,9 @@ the raw config, not the parsed model (the stored config is a full dump with defa
 
 **Why:** ADR-016 §2c, §2d, §3a, §12.
 **What:** `POST /monitors` with the seven save-time checks in order (pipeline/version/LLM keys under `lock_user`;
-inputs fixed-or-carried with strict types and a start value; SSRF on fixed URLs **before** the lock; cron ≥ 5 min;
+inputs fixed-or-carried — a fixed value strict by type, a carried input of type `number` or `text` with a start
+value of that type, `from_block` a content block whose output is `extraction` or `page:json`, `path` a JSON
+Pointer, unknown names refused; SSRF on fixed URLs **before** the lock; cron ≥ 5 min;
 D4's gate before the first LLM block; need + allowance ≤ the maximum, ceiling capped; the scheduled cap) and
 `warnings`. `core/monitor_schedules.py` — ADR-013's policy copied (`SKIP`, 365 d, `pause_on_failure=False`); the
 row is the truth, arming undone with 503 if the engine refuses. `GET` list/detail (next check, last outcome, newer
@@ -3458,8 +3475,9 @@ best effort. Admin user delete also forgets the user's monitor Schedules.
 moves the run out of `running`** (a retried mirror must not bump it). `mirror_run_status` takes `lock_user`
 **before** the run row for a monitor check, writes `baseline_eligible`, `change_status`, `change_summary`,
 `captured_values`. `mirror_block_status` writes `fingerprint`. `notify_run` gains `change_status`. The trigger's
-could-not-start branch calls it too. An events helper (find the open row of a kind → bump, or insert; under
-`lock_user`).
+could-not-start branch calls it too. An events helper under `lock_user`: find this monitor's open row of the kind → bump `count`/`last_at`, or insert
+(only an insert queues a notice, from M.9); **any other outcome of a firing — a check admitted, or a different
+skip — sets `ended_at` on the open row**; a pause (user or self) closes it too.
 **Verify:** a retried mirror moves the counter once; 5 failures pause, a success in between resets; cancelled
 moves nothing.
 **Depends on:** L.2
@@ -3468,13 +3486,14 @@ moves nothing.
 
 **Why:** ADR-016 §3b, §3c, §4, §6b, §6c.
 **What:** the activity in ADR-016 §3b's order — reads, version parse and SSRF **before** the lock; then
-`lock_user`, re-read, `PIPELINES_ENABLED`, the database overlap rule, monthly → skip event, storage → a failed
+`lock_user`, re-read, `PIPELINES_ENABLED`, the pinned version's LLM keys still exist (a missing key is a failed
+check, never a silent skip — §13), the database overlap rule, monthly → skip event, storage → a failed
 check, concurrency → `waiting`; the baseline query (`baseline_eligible`, newest by `created_at`), carried values
 from the baseline's `captured_values` or `start` with `carried_sources`, `MonitorContext`, the monitor allowance
 on the ceiling; rows via L.1's builder; a retry finds its own run. **Admission is a third writer of `failed`**: its
 failed checks call `queue_failure_alerts` and `monitor_check_ended` in the insert transaction. The workflow:
 admitted → child `PipelineWorkflow` (`REJECT_DUPLICATE`, `ABANDON`), wait for it; waiting → doubling timer
-15 s → 5 min, give up at 24 h (event).
+15 s → 5 min, give up at 24 h (event). Register the workflow on the worker and in the replay test's list.
 **Verify:** histories (first shape, no patch): admitted; skipped (monthly); waited then admitted; gave up;
 pipelines switched off. Tests: a storage-full firing is a failed check that alerts and counts; a skip is no run and
 no unit.
@@ -3487,7 +3506,9 @@ no unit.
 `change_status` from the verdict (`first_check` / `no_baseline` / `changed` / `unchanged`); on changed with a
 baseline, Diff **before** the gate block is mirrored completed (the run must hold its slot); Diff after each
 `llm_extract` with a baseline output; a final Diff error → `unavailable`, never unchanged; Capture after each
-`from_block`; `WebhookInput` + `monitor_id`, `change` and `diff_detected = (change.status == "changed")` (G7);
+`from_block`; **every Diff and Capture runs before its block is mirrored `completed`** (the slot, §19 trap), and
+each `diff.json` is recorded through `record_storage` on the block that triggered it, so it is charged and freed
+with its run; `WebhookInput` + `monitor_id`, `change` and `diff_detected = (change.status == "changed")` (G7);
 compute `baseline_eligible` and pass it on the run mirror. A hand-run through a gate reads `no_baseline`.
 **Verify:** ADR-016 §15's slice-1 histories (first check; changed with page + extraction diff; unchanged stop with
 delete; a later-gate stop; `baseline_gone`; `unavailable`; a hand-run `no_baseline`); a hand-run's webhook payload
@@ -3499,7 +3520,8 @@ byte-identical to today's.
 **Why:** ADR-016 §3d.
 **What:** `POST /monitors/{id}/check`: `lock_user`, overlap (409 naming the running check), `admit()` (429),
 baseline lookup, the shared builder, `start_workflow(PipelineWorkflow)` directly — no tick, no Schedule
-`trigger()`.
+`trigger()`. `require_pipelines_enabled`. Its could-not-start branch marks the blocks `not_started` and calls
+`queue_failure_alerts` and `monitor_check_ended` in the same transaction (§7a).
 **Verify:** refused while a check runs; a firing during a Check now is skipped as in progress.
 **Depends on:** L.7
 
@@ -3519,7 +3541,7 @@ baseline lookup, the shared builder, `start_workflow(PipelineWorkflow)` directly
 **What:** monitor list + page (state, next check, history as a scannable list, refreshing while open), create
 from the JSON editor, edit name/schedule, pause/resume/Check now/delete (with checks or not); the run page's
 verdict ("unchanged since …", "compared with a check since deleted"), the diff as a code-review view, carried
-values and where they came from; the schedules count "12 jobs, 6 monitors"; admin monitor pages. `useApi()` only.
+values and where they came from; the schedules count "12 jobs, 6 monitors"; admin monitor pages; the admin quota field labelled "schedules". `useApi()` only.
 **Verify:** click-through on compose against L.12's gate data.
 **Depends on:** L.10
 
@@ -3550,9 +3572,10 @@ delivery-worker: no DB, destinations key only, read-only MinIO user, NetworkPoli
 #### M.1 — Migration: destinations
 
 **Why:** ADR-015 §2a, §2b, §8.
-**What:** `destinations` (kind CHECK with all four kinds — no slice gating, owner round 2);
+**What:** `destinations` (`UNIQUE (user_id, name)`; kind CHECK with all four kinds — no slice gating, owner round 2);
 `pipeline_version_destinations` (both FKs `ON DELETE CASCADE`); `webhook_deliveries` + `destination_id`, `kind`
-(`webhook` | `email`, default `webhook`), `webhook_url` nullable. Setting `DESTINATION_ENCRYPTION_KEY`.
+(`webhook` | `email`, default `webhook`), `webhook_url` nullable. Setting `DESTINATION_ENCRYPTION_KEY` (required, like the other two Fernet keys), in
+`.env.example` and compose for the api, workflow worker and delivery worker.
 **Verify:** round trip; views untouched.
 **Depends on:** L.12
 
@@ -3570,7 +3593,8 @@ version referencing it and running runs using it. Admin reads (names, kinds, `di
 **Why:** ADR-015 §4, §11.
 **What:** new directory, `pyproject` + **`uv.lock`**, Dockerfile installing from the lock (BUG-013's rule); a
 Temporal worker on `delivery`, at most 8 activities at once; settings hold only Temporal, MinIO (read-only user)
-and `DESTINATION_ENCRYPTION_KEY` — no DB settings exist in it; its own contracts copy; its own
+and `DESTINATION_ENCRYPTION_KEY` — no DB settings exist in it; its own contracts copy, with `contracts/` feeding the sink activities' inputs and outputs through the delivery
+worker's real parser (ADR-015 §11); its own
 `worker/egress.py`, a deliberate copy of J.8's module, and `contracts/test_egress.py` running one table of cases
 (BUG-024's ranges, NAT64, the rebinding case) against both copies. Compose service; CI build. **`.github/dependabot.yml`
 covering every lockfiled manifest** (`api`, `frontend`, `http-worker`, `llm-worker`, `playwright-worker`,
@@ -3583,7 +3607,8 @@ module); egress table green on both copies.
 
 **Why:** ADR-015 §3, §5–§7.
 **What:** single-attempt activities `deliver_bucket`, `undo_bucket`, `test_bucket` on `delivery`. Pinned through
-an aiohttp resolver returning only vetted IPs (**to verify at build**, ADR-015 §3); `https` only; no redirects;
+an aiohttp resolver returning only vetted IPs (**to verify at build**, ADR-015 §3), tried in order, moving on
+only after a refused or timed-out connect, never after a TLS failure; `https` only; no redirects;
 client retries 0. Key `{prefix}/{pipeline_id}/{run_id}/{block_id}.{ext}`; streamed from MinIO with its length;
 undo deletes the recorded key, a missing object is "already gone". Classifier: final (address/auth/permission
 refusals, 4xx except 408/429, a certificate mismatch), transient (connect errors, timeouts, 5xx, 408/429),
@@ -3592,14 +3617,31 @@ unknown → final. Errors built from the class and non-secret fields, never the 
 delete-refused bucket → the test reports it; a private endpoint refused at every attempt.
 **Depends on:** M.3
 
+#### M.14 — Email sending, moved up from P (open item 19 = a; inserted after M.4)
+
+**Why:** M.1 admits `smtp` destinations and M.9 lets one be a notice destination, so email must send from the day it
+can be chosen (owner, 2026-11-18). ADR-015 §2d, §3, §4, §5, §7 — design unchanged; only slice 3's send step moves.
+**What:** on the delivery worker: the SMTP client pinned to the vetted IP (STARTTLS or implicit TLS with the name,
+never plain AUTH — **to verify at build**), `test_smtp` (EHLO, AUTH, QUIT — sends nothing; M.5 calls it), and a
+single-attempt `send_email` (Message-ID `<{run_id}.{block_id}[.failed]@{host}>` — notices use the event id; inline
+≤ 256 KiB, else the "too large" note). `WebhookDeliveryWorkflow` branches on `kind = email` and calls `send_email`
+on `delivery` under its existing retry schedule and sweep. Classifier: SMTP 4xx replies and connection errors
+transient, auth and 5xx final, unknown final. The Message-ID host is a setting introduced here
+(`PUBLIC_BASE_URL`'s host — N.2 reuses it for its links).
+**Verify:** against a local SMTP sink on compose: a monitor notice to an `smtp` destination arrives once; a retry
+repeats the Message-ID; a private mail host refused at every attempt; the egress table covers the SMTP pin.
+**Depends on:** M.3, M.4
+
 #### M.5 — The destination test
 
 **Why:** ADR-015 §2d (F2: no test POST, no test email).
-**What:** `DestinationTestWorkflow` on the delivery worker; the API waits ≤ 30 s. `POST /destinations/test`
+**What:** `DestinationTestWorkflow` — **TL call:** the workflow class lives in the api image on the `workflow`
+queue, and only its test activities run on `delivery`, so the workflow stays under the api build's replay gate
+(ADR-012); recorded history + replay list. The API waits ≤ 30 s. `POST /destinations/test`
 (unsaved), save and edit (refused on any failed check, saved on a warning), `POST /destinations/{id}/test`. Bucket:
-PUT then DELETE a `.scrapeflow-test-{uuid}`; webhook: address + TLS handshake only.
+PUT then DELETE a `.scrapeflow-test-{uuid}`; smtp: `test_smtp` (M.14); webhook: address + TLS handshake only.
 **Verify:** each call site; a down destination cannot be saved; the delete-refused warning shown before save.
-**Depends on:** M.2, M.4
+**Depends on:** M.2, M.4, M.14
 
 #### M.6 — Catalog and save-time: sinks, order, budgets
 
@@ -3609,8 +3651,10 @@ sink after an irreversible one**, naming both blocks; the one-Webhook cap lifted
 **or** `destination_id`, exactly one. Budgets in `Timing`: per attempt, five attempts, waits ×10 capped at
 7,200 s, **plus `(1 + 2) × DB_ACTIVITY_SECONDS` per deliver try and one per undo try**; the rollback reserve (undo
 budget × reversible sinks) — save refuses forward + reserve > the ceiling, naming both. Saving writes
-`pipeline_version_destinations`. Save and trigger check each destination exists and is the user's (404); the
-trigger checks **after `admit()`'s lock**.
+`pipeline_version_destinations`. Save and trigger check each destination exists, is the user's (404) and is of the kind the block needs; the
+trigger checks **after `admit()`'s lock**. **`GET /pipelines/catalog`** (new — no catalog route exists): each
+block type with its kind, whether it can be undone, and its timing, so users can see reversibility and add up a
+chain (PRD-017 R2, ADR-015 §6).
 **Verify:** refusals and the 28 h message shape; the worked example (≈ 10 h + 6 h) fits.
 **Depends on:** M.2
 
@@ -3618,7 +3662,7 @@ trigger checks **after `admit()`'s lock**.
 
 **Why:** ADR-015 §4; PRD-017 R4.
 **What:** under `patched("sinks")`: the workflow-driven loop — `load_destination` (workflow queue: ciphertext +
-current address) → one attempt on `delivery` → ok: mirror completed + `delivery`; final: block failed; transient
+current address; a destination gone → non-retryable "destination deleted", ADR-015 §2c) → one attempt on `delivery` → ok: mirror completed + `delivery`; final: block failed; transient
 with tries left: mirror `waiting` → durable sleep (a cancel interrupts it) → mirror `running` → again. The
 Webhook block resolves a destination's URL and secret at each attempt (via `send_signed_post`) and its payload
 gains `block_id` and `deliveries`. Alert rows for a destination-backed block store `destination_id` and a NULL
@@ -3649,7 +3693,7 @@ permission); a failure after a webhook went out (nothing undone); a cancel durin
 both CHECKs widened, `UNIQUE (monitor_event_id)`; the three meters gain `monitor_id IS NULL` (same migration's
 release). The events helper and `monitor_check_ended` queue a `monitor.notice` row with each new situation's
 event, in the same transaction; `pending()` gains `monitor_event_id`; secret arm monitor → destination.
-`PATCH /monitors/{id}` accepts `notice_destination_id`; a destination delete also names monitors using it; the
+`PATCH /monitors/{id}` accepts `notice_destination_id` (a `webhook` or `smtp` destination of the user's); a destination delete also names monitors using it; the
 save-time "no failure route" warning counts a notice destination.
 **Verify:** a month of skipped firings sends one notice; an undeliverable notice changes nothing about the monitor.
 **Depends on:** M.2, M.7
@@ -3660,7 +3704,8 @@ save-time "no failure route" warning counts a notice destination.
 **What:** destinations page (names, kinds, `display_host`, Test, the delete-permission warning before save, the
 409 list on delete); the run page's sink states (delivered / undone / undo failed with the exact location / kept /
 irreversible), "undoing deliveries — N left, by HH:MM", live; admin destination and run reads; the monitor's
-notice destination on its page.
+notice destination on its page, editable; each notice's delivery state beside its event in the history
+("undelivered" — PRD-018 R6).
 **Verify:** click-through on compose against M.12's gate data.
 **Depends on:** M.8, M.9
 
@@ -3670,7 +3715,8 @@ notice destination on its page.
 **What:** step 1 (before `main`): the destinations Secret, the read-only MinIO user and policy through the chart's
 values (+ its Secret), the NetworkPolicy (DNS, Temporal and MinIO by port, `0.0.0.0/0` except pod/service CIDRs,
 RFC 1918, `100.64.0.0/10`, link-local, loopback, **the node's public IP**), `DESTINATION_ENCRYPTION_KEY` on the
-workflow worker. Step 3 (after `main`): the delivery worker's Deployment and image policy carrying the tag CI built.
+workflow worker **and on the api** (`app/api.yaml` — the api encrypts secrets on save; the setting is required, so
+without it the api pods crash-loop at step 2). Step 3 (after `main`): the delivery worker's Deployment and image policy carrying the tag CI built.
 **Verify:** `kubectl apply --dry-run=server`; the policy matches no pod until step 3.
 **Depends on:** M.3
 
@@ -3682,7 +3728,7 @@ order; between steps 2 and 3 a sink finds no poller (noted, not guarded). **Rele
 worker pod, TCP to `scrapeflow-postgresql:5432`, Redis, the node's LAN address and the node's public IP **fail**,
 to a public host **succeeds** — the first proof that this cluster enforces NetworkPolicy.
 **Verify:** owner — a bucket pipeline in prod, then the same with a refusing webhook (object undone).
-**Depends on:** M.1–M.11
+**Depends on:** M.1–M.11, M.14
 
 #### M.13 — (optional, owner's call) BUG-032: fence the scrape workers
 
@@ -3705,7 +3751,8 @@ is refused.
 **What:** migration: block columns `approval_deadline`, `approval_answer` (CHECK), `answered_at`, `answered_by`
 (SET NULL), `superseded_by_run_id` (SET NULL); `stop_reason` + `approval_rejected`, `approval_expired`,
 `approval_superseded`; `status_reason` + `awaiting_approval`. Catalog `approval` (effect; `deadline_hours` 1 to
-`approval_max_deadline_hours`, default 24; a destination field); not first, not last, at most one per pipeline;
+`approval_max_deadline_hours`, default 24; a destination field — `webhook` or `smtp`, checked at save and trigger,
+written to `pipeline_version_destinations`); not first, not last, at most one per pipeline;
 its `Timing` covers its two DB activities only; the save rule's second part (deadline ≤ the maximum).
 **Verify:** refusals named; round trip.
 **Depends on:** L.12, M.12
@@ -3718,7 +3765,11 @@ destination, keyed `(pipeline_run_id, block_id, event)`) → `wait_condition(wok
 reminder row → wait to the deadline → `resolve_approval` (under the run lock: the recorded answer, or `expired`
 conditional on `answer IS NULL`). Approved → continue without asking for a slot (G8); rejected / expired /
 superseded → the stop path, copies kept. The run deadline moves back by the time waited. Cancel while waiting →
-`cancelled` at once. `POST /pipelines/{pid}/runs/{rid}/approval`: owner only (404 otherwise, admins included),
+`cancelled` at once. Message rows: `approval_requested`, `approval_expiring`, `expired`, `superseded` (N.3 writes the last), all to the
+block's destination; the request carries `change_summary`, the blocks' `delivery` records, the deadline and a
+link to the run in the SPA — the `PUBLIC_BASE_URL` setting M.14 introduced (api env, `.env.example`, infra
+`api.yaml` and `workflow-worker.yaml`; add it to whichever of those M.14 did not need).
+`POST /pipelines/{pid}/runs/{rid}/approval`: owner only (404 otherwise, admins included),
 conditional update, 409 with the current state, then the signal best effort. `GET /approvals`.
 **Verify:** histories: approve; reject; expiry with the reminder; cancel while waiting. A lost signal still
 resolves at the deadline; an answer racing the expiry — one wins.
@@ -3740,7 +3791,7 @@ matching the waiting content; the tick closing on `check_settled`. At most one a
 #### N.4 — SPA: approvals
 
 **What:** the approvals list, approve / reject on the run page with the deadline and what changed and what was
-delivered; the waiting state on the monitor page.
+delivered; the waiting state on the monitor page; admins see pending approvals (read-only, PRD-018 R9).
 **Depends on:** N.3
 
 #### N.5 — 🚀 Release N
@@ -3761,7 +3812,8 @@ rollback-after-approval checks (the reason N follows M). `main` push → api.
 index on exactly `(run_id, block_id)`, probe insert + delete, ROLLBACK). asyncpg pinned to the vetted IP with
 hostname verification — **to verify at build**; if the driver cannot, a resolver override, with the NetworkPolicy
 as the backstop (ADR-015 §3). TLS with verification required. Classifier: SQLSTATE `08`, `53`, `57P01`–`57P03`,
-`40001`, `40P01` transient. Catalog: `postgres` block, JSON input only. Never DDL.
+`40001`, `40P01` transient. Catalog: `postgres` block, JSON input only, can be undone, `Timing` 30 s × 5 attempts plus per-try DB writes;
+its undo counts in the rollback reserve. Never DDL. User guide: the fixed row shape (X.4).
 **Verify:** PRD-017's slice-2 criteria against a TLS Postgres on compose.
 **Depends on:** M.12
 
@@ -3773,14 +3825,13 @@ as the backstop (ADR-015 §3). TLS with verification required. Classifier: SQLST
 
 ## Group P — Email sink (PRD-017 slice 3)
 
-#### P.1 — The email sink, email alerts and email notices
+#### P.1 — The Email block
 
 **Why:** ADR-015 §2d, §3, §4, §5, §7; PRD-019 R5 for Email.
-**What:** `deliver_email` / `test_smtp` (EHLO, AUTH, QUIT — sends nothing); STARTTLS or implicit TLS, never plain
-AUTH; `Message-ID: <{run_id}.{block_id}@{PUBLIC_HOST}>` (`.failed` for alerts); inline ≤ 256 KiB, else the "too
-large" note. Email block (irreversible, `events` like Webhook). `send_email` single-attempt activity on `delivery`;
-`WebhookDeliveryWorkflow` branches on `kind = email` — so failure alerts and monitor notices go by email with no
-new record.
+**What:** the Email *block* on M.14's sending: irreversible, `events` like Webhook, `Timing` 60 s × 5, a
+`deliver_email` sink step in the `sinks` loop (subject naming pipeline and run, content inline ≤ 256 KiB);
+`queue_failure_alerts` writes `kind = email` rows for Email blocks; on a monitor check the body carries the change
+summary (PRD-018 R4).
 **Verify:** PRD-017's slice-3 criteria against a local SMTP sink; an Email block before a reversible sink refused.
 **Depends on:** M.12
 
@@ -3801,13 +3852,16 @@ replayed). Unmap `job_runs.content_hash`, `diff_detected`, `diff_summary` and `c
 pattern: two replicas run side by side in a rollout). **TL call (open item 16):** `JobRunResponse.diff_detected`
 (read in four `routers/jobs.py` and two `routers/admin.py` sites — ADR-016 §14 does not mention it) stays, always
 `null`, the payload rule D17 applied to the read.
+CLAUDE.md: the *Content deduplication* row says the job lane no longer writes `content_hash`.
 **Verify:** suite; a job's run read shows `diff_detected: null`; the prod count from J.2's runbook recorded.
 **Depends on:** —
 
 #### Y.2 — Release B: drop (rides K)
 
 **What:** migration dropping the four columns; delete `core/diff.py` and `create_webhook_delivery`'s unused `diff`
-parameter with `DiffResult`. No view reads any of them.
+parameter with `DiffResult`. No view reads any of them. CLAUDE.md: the *Do not delete — port* line drops
+`diff.py` (ADR-016 §6a: rewritten in the LLM worker, not reused) and the *Content deduplication* row is marked
+retired.
 **Verify:** round trip; `alembic check`; `grep` finds no reader.
 **Depends on:** J.2 released (A must be fully rolled out first)
 
@@ -3820,6 +3874,8 @@ parameter with `DiffResult`. No view reads any of them.
 | X.1 | ~~**PRD-019** — conditional execution (four obligations on its `phase4-backlog.md` §2 row)~~ ✅ written; ADR-014 Accepted 2026-11-18 | before PRD-018; not on this critical path |
 | X.2 | **Promote ADR-010** (owner review) | E.0 |
 | X.3 | ~~**Schedule overlap policy** ADR — ADR-013, `SKIP`~~ ✅ Accepted 2026-10-27 | F.0 |
+| X.4 | **User guide for pipelines** (new `docs/guides/pipelines-user-guide.md`, TL call — no user-docs home exists), one section per release: stop/keep/delete, reverse rules, typed inputs, failure alerts (J.10); monitors, the change gate after Clean, why a raw-HTML diff reads poorly, jobs keep no change detection and `diff_detected`/`diff_summary` are always `null` (L.12); sinks, which can be undone, the reader's contract (only `completed` is final), a failed Webhook block fails the run while a failed job webhook does not (M.12); the Postgres row shape (O.2); email (P.2) | each 🚀 from J.10 on |
+| X.5 | ✅ 2026-11-18 — **Carried docs edits from PRD-018's review**: open item 10 answered (e); `phase4-backlog.md` §3's scheduled-crawl row → "refused; not planned"; §2's PRD-018 row (reviewed, ADR-016 Accepted, no slice 3) | done |
 
 ---
 
@@ -3870,8 +3926,9 @@ parameter with `DiffResult`. No view reads any of them.
    `{provider, encrypted_api_key, base_url}` per `llm_key_id` in `PipelineRunInput.llm_keys`, as
    `LLMProbeWorkflow` does. Accepted cost: a key deleted or rotated mid-run is not seen by that run.
    Built in the *C.4–C.7 MVP slice*.
-10. **Should `/jobs` become a front end over pipelines?** *(raised by the owner 2026-10-12, reading D;
-    deferred — decide with Monitors / PRD-018, not before D.5.)* A job is a pipeline of
+10. ~~**Should `/jobs` become a front end over pipelines?**~~ **Answered 2026-11-05 (owner, PRD-018 review Q1):
+    (e) — jobs stay as they are; change detection is a monitor feature.** (d), all of `/jobs` over pipelines, is the
+    long-term direction, not planned. PRD-018 R10 records the options. *(Raised by the owner 2026-10-12, reading D.)* A job is a pipeline of
     `scrape → (llm_extract) → (webhook)` — R6 proved the equivalence — and both workflows already call
     the same `Scrape` / `LLMExtract` activities; what `JobWorkflow` duplicates is the orchestration and
     its five DB activities (~250 lines). ADR-009 and `temporal-full-migration.md` assumed a separate
@@ -3902,3 +3959,14 @@ parameter with `DiffResult`. No view reads any of them.
     notice-destination task (M.9) into L.
 18. **N (approval) after M**, so every PRD-018 approval check (bucket kept on reject, rollback after approval,
     the request sent to the block's destination) is runnable at N's gate.
+
+**Raised by the completeness audit of groups J–P (2026-11-18):**
+
+19. ✅ **Answered 2026-11-18 (owner): (a)** — built as M.14; P keeps only the Email block. **An email notice or approval message between M and P.** M.1 admits all four destination kinds (owner: no
+    slice gating), so from M.12 a user can pick an `smtp` destination as a monitor's notice destination (M.9) or,
+    from N, an Approval block's. Its `webhook_deliveries` row has `kind = email`, and nothing sends email until
+    P.1's `send_email`. Options: **(a)** move `send_email`, the SMTP client and `test_smtp` into M (P then adds
+    only the Email *block*); **(b)** build P before N, and accept the gap for notices from M to P; **(c)** refuse
+    `smtp` for notices and approvals until P, widening the check then. **TL recommendation: (a)** — no code is
+    added only to be changed later, and every email path works the day its destination can be chosen. It moves
+    ADR-015 slice 3's send step earlier; the Email block itself stays in P.

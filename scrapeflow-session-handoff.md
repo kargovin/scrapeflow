@@ -139,7 +139,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 🧭 **TECH LEAD PASS — GROUPS J–P WRITTEN (2026-11-18, eighteenth session; docs only).** Owner: "assume the tech
 lead persona; read ADRs 14–16 and PRDs 17–19 and the bugs that can be fixed while coding these; build a backlog;
 slices or grouping by ADR?" Written into `docs/project/phase4-implementation-backlog.md` (status table + a *Groups
-J–P* section before *Docs track* + open items 11–18). **Not committed** (no commit was asked for).
+J–P* section before *Docs track* + open items 11–18). Committed and pushed at the owner's request.
 - **Answer: by slice, not by ADR.** ADR-014 ships across J and M (its own §10 puts `rollback` in PRD-017 slice 1);
   ADR-016 across Y, K, L, M, N. Each group = one releasable slice; each task cites its ADR sections.
 - **Order:** J conditional execution (2 releases: J-a workers first, J-b api) → K pipeline deletes + monitors'
@@ -154,7 +154,23 @@ J–P* section before *Docs track* + open items 11–18). **Not committed** (no 
   it, always `null` — open item 16).
 - ✅ **Open items 11–18 all agreed by the owner** (structure, J's split release, BUG-030 in J.8, BUG-018 in J.9,
   M.13, Y.1's `diff_detected`, L-before-M, N-after-M).
-- **Next:** J.1 (owner to choose walkthrough or "build it").
+- **Completeness audit** (a read-only subagent, owner's ask: every doc and memory against groups J–P). Folded
+  into the backlog: a `PUBLIC_BASE_URL` setting (N.2; P.1's Message-ID); `DESTINATION_ENCRYPTION_KEY` on the api
+  too (M.11 — else the api crash-loops); the SPA run form sending typed numbers (J.9); `GET /pipelines/catalog`
+  (M.6); destination kind checks; closing open monitor events; Check now's could-not-start branch; Diff/Capture
+  before `completed`; `diff.json` recorded; `DestinationTestWorkflow` on the `workflow` queue (TL call, replay
+  gate); migration/test/mutation traps; X.4 user guide (`docs/guides/pipelines-user-guide.md`, a section per
+  release); Y.1/Y.2 carry their CLAUDE.md edits. **X.5 done:** open item 10 marked answered (e);
+  `phase4-backlog.md` §3 scheduled-crawl row → refused; §2's PRD-018 row current. **Open item 19 answered (a)**
+  by the owner: email sending (SMTP client, `test_smtp`, `send_email`, `kind = email` rows) moves into M as
+  **M.14**; P keeps only the Email block.
+- **Dependabot:** owner, 2026-11-18 — ignore the alerts (104 on `main` at the push) until group P is released;
+  saved to memory. M.3's `dependabot.yml` is still built.
+- **Git at close:** `develop` pushed to `origin/develop` (`819f5a5` backlog, then this closeout); `main` =
+  `eea8344` (deployed, unchanged) — the next `main` ff is **J.2** (J-a: J.1 + BUG-024 + Y.1). Infra untouched.
+  `tmp/` untracked, not mine. Compose stopped.
+- **Next:** **J.1** — LLM worker: Validate's stop mode, `negate`, three answers (owner to choose walkthrough or
+  "build it").
 
 ✅ **ADR-016 REVIEWED AND ACCEPTED (2026-11-18, seventeenth session, 12 rounds).** Owner: "accept adr". Plain-words
 walkthrough per section with examples, each claim checked against code; every round is a `Review round N` note at the
