@@ -41,6 +41,7 @@ from app.pipelines.definition import (
     LLMExtractBlock,
     ScrapeBlock,
     WebhookBlock,
+    input_value_problems,
     parse_definition,
 )
 from app.pipelines.validator import (
@@ -545,6 +546,7 @@ async def create_run(
     declared, given = set(parsed.inputs), set(body.inputs)
     problems = [Problem(None, f"missing run input {n!r}") for n in sorted(declared - given)]
     problems += [Problem(None, f"unexpected run input {n!r}") for n in sorted(given - declared)]
+    problems += [Problem(b, m) for b, m in input_value_problems(parsed, body.inputs)]
     if problems:
         raise _unprocessable(problems)
 
@@ -553,7 +555,9 @@ async def create_run(
     for block in parsed.blocks:
         if isinstance(block, ScrapeBlock):
             url = block.config.url
-            await _ssrf_check(body.inputs[url.input] if isinstance(url, InputBinding) else str(url))
+            await _ssrf_check(
+                str(body.inputs[url.input]) if isinstance(url, InputBinding) else str(url)
+            )
         elif isinstance(block, WebhookBlock):
             await _ssrf_check(str(block.config.url))
 

@@ -22,6 +22,11 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    StringConstraints,
     Tag,
     field_serializer,
     field_validator,
@@ -87,6 +92,10 @@ BindableUrl = Annotated[
     Discriminator(_binding_or_literal),
 ]
 
+# A run input's value, as the trigger admits it against the declared type (ADR-014 §4).
+RunInputType = Literal["url", "number", "text"]
+RunInputValue = StrictStr | StrictInt | StrictFloat
+
 
 # --- timing (PRD-016 R4; ADR-009 §15c) -----------------------------------------------------
 
@@ -104,6 +113,8 @@ class Timing:
     schedule_to_start: int = SCHEDULE_TO_START_SECONDS
     # Time the run spends around the block outside its activity (a host-slot wait).
     host_slot: int = 0
+    # Time the run spends after the activity: a stop's release of stored outputs (ADR-014 §6).
+    after: int = 0
 
     @property
     def budget(self) -> int:
@@ -121,7 +132,7 @@ class Timing:
     @property
     def need(self) -> int:
         """What the run budgets for the block: its budget, its host-slot wait, the DB overhead."""
-        return self.budget + self.host_slot + BLOCK_OVERHEAD_SECONDS
+        return self.budget + self.host_slot + self.after + BLOCK_OVERHEAD_SECONDS
 
 
 def _worker_retry(start_to_close: int, heartbeat: int | None = None, **extra: int) -> Timing:
@@ -195,47 +206,67 @@ class LLMExtractConfigV1(_Config):
 # RFC 6901 JSON Pointer; "" is the whole document.
 JsonPointer = Annotated[str, Field(pattern=r"^(/([^/~]|~[01])*)*$", max_length=500)]
 Scalar = str | int | float | bool | None
+CONTAINS_TEXT_MAX = 1000
+ContainsText = Annotated[str, StringConstraints(min_length=1, max_length=CONTAINS_TEXT_MAX)]
+ORDERED_OPS = frozenset({"lt", "le", "gt", "ge"})
+
+BindableScalar = Annotated[
+    Annotated[InputBinding, Tag(_BINDING_TAG)] | Annotated[Scalar, Tag(_LITERAL_TAG)],
+    Discriminator(_binding_or_literal),
+]
+BindableText = Annotated[
+    Annotated[InputBinding, Tag(_BINDING_TAG)] | Annotated[ContainsText, Tag(_LITERAL_TAG)],
+    Discriminator(_binding_or_literal),
+]
 
 
-class JsonSchemaRule(_Config):
+class _Rule(_Config):
+    # Flips met and not met; "cannot be checked" stays (ADR-014 §3). Strict: "yes" is not true.
+    negate: StrictBool = False
+
+
+class JsonSchemaRule(_Rule):
     kind: Literal["json_schema"]
     schema_: dict[str, Any] = Field(alias="schema")
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
-class PresentRule(_Config):
+class PresentRule(_Rule):
     kind: Literal["present"]
     path: JsonPointer
 
 
-class TypeRule(_Config):
+class TypeRule(_Rule):
     kind: Literal["type"]
     path: JsonPointer
     type: Literal["string", "number", "integer", "boolean", "object", "array", "null"]
 
 
-class CompareRule(_Config):
+class CompareRule(_Rule):
     kind: Literal["compare"]
     path: JsonPointer
     op: Literal["eq", "ne", "lt", "le", "gt", "ge"]
-    value: Scalar
+    value: BindableScalar
 
     @model_validator(mode="after")
     def _ordered_needs_number(self) -> "CompareRule":
-        if self.op in {"lt", "le", "gt", "ge"} and (
+        # A bound value is checked against its input's declared type instead (the validator).
+        if isinstance(self.value, InputBinding):
+            return self
+        if self.op in ORDERED_OPS and (
             isinstance(self.value, bool) or not isinstance(self.value, int | float)
         ):
             raise ValueError(f"op {self.op!r} compares numbers; value must be a number")
         return self
 
 
-class ContainsRule(_Config):
+class ContainsRule(_Rule):
     kind: Literal["contains"]
-    text: str = Field(min_length=1, max_length=1000)
+    text: BindableText
 
 
-class MinLengthRule(_Config):
+class MinLengthRule(_Rule):
     kind: Literal["min_length"]
     chars: int = Field(ge=1)
 
@@ -250,12 +281,36 @@ TEXT_RULES = frozenset({"contains", "min_length"})
 
 class ValidateConfigV1(_Config):
     rules: list[Rule] = Field(min_length=1, max_length=50)
+    when_unmet: Literal["fail", "stop"] = "fail"
+    # Stop mode only. Saved explicitly: a stop without it is stored as "keep".
+    on_stop_outputs: Literal["keep", "delete"] | None = None
+
+    @model_validator(mode="after")
+    def _outputs_only_with_stop(self) -> "ValidateConfigV1":
+        if self.when_unmet == "fail" and self.on_stop_outputs is not None:
+            raise ValueError("on_stop_outputs applies only when when_unmet is 'stop'")
+        if self.when_unmet == "stop" and self.on_stop_outputs is None:
+            self.on_stop_outputs = "keep"
+        return self
+
+
+WEBHOOK_EVENTS = ("pipeline.result", "pipeline.failed")
 
 
 class WebhookConfigV1(_Config):
     url: AnyHttpUrl
     # HMAC-SHA256 key for X-ScrapeFlow-Signature; none signs with b"" (the header is always sent).
     secret: str | None = Field(default=None, max_length=500)
+    events: list[Literal["pipeline.result", "pipeline.failed"]] = Field(
+        default_factory=lambda: ["pipeline.result"], min_length=1
+    )
+
+    @field_validator("events")
+    @classmethod
+    def _no_repeats(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("each event may be listed once")
+        return v
 
     @field_serializer("url")
     def _url(self, v: AnyHttpUrl) -> str:
@@ -276,8 +331,12 @@ class BlockType:
     # Output reference type, given the config and the input's type. Effect blocks return the input.
     produces: Callable[[Any, str | None], str]
     timing: Callable[[Any], Timing]
-    # Config fields that may hold an InputBinding (ADR-009 §4 — narrow on purpose).
-    bindable_fields: frozenset[str] = frozenset()
+    # Config fields that may hold an InputBinding (ADR-009 §4 — narrow on purpose), each with
+    # the run-input types it takes, given the object holding it: the config, or the list item
+    # for a "<list>[].<field>" path. An empty set refuses the binding there.
+    bindable_fields: Mapping[str, Callable[[Mapping[str, Any]], frozenset[str]]] = field(
+        default_factory=dict
+    )
     # Config fields holding user secrets — C.4 must not store or return them in plaintext.
     secret_fields: frozenset[str] = frozenset()
     # Extra save-time checks that need the input's reference type; returns problem messages.
@@ -311,6 +370,25 @@ def _pass_through(_config: Any, ref: str | None) -> str:
     return ref
 
 
+def _compare_value_types(rule: Mapping[str, Any]) -> frozenset[str]:
+    if rule.get("kind") != "compare":
+        return frozenset()
+    return frozenset({"number"}) if rule.get("op") in ORDERED_OPS else frozenset({"number", "text"})
+
+
+def _contains_text_types(rule: Mapping[str, Any]) -> frozenset[str]:
+    return frozenset({"text"}) if rule.get("kind") == "contains" else frozenset()
+
+
+# The release a stop with "delete" runs after the Validate activity (J.6's release_run_outputs).
+RELEASE_OUTPUTS_TIMING = _worker_retry(60)
+
+
+def _validate_timing(config: ValidateConfigV1) -> Timing:
+    after = RELEASE_OUTPUTS_TIMING.budget if config.on_stop_outputs == "delete" else 0
+    return _worker_retry(60, after=after)
+
+
 def _validate_check_input(config: ValidateConfigV1, ref: str) -> list[str]:
     problems = []
     for i, rule in enumerate(config.rules):
@@ -328,7 +406,7 @@ SCRAPE = BlockType(
     consumes=frozenset(),
     produces=lambda config, _ref: f"page:{config.output_format.value}",
     timing=_scrape_timing,
-    bindable_fields=frozenset({"url"}),
+    bindable_fields={"url": lambda _config: frozenset({"url"})},
     secret_fields=frozenset({"proxy_url", "cookies"}),
 )
 
@@ -357,7 +435,8 @@ VALIDATE = BlockType(
     config_versions={1: ValidateConfigV1},
     consumes=ALL_REFS,
     produces=_pass_through,
-    timing=lambda _config: _worker_retry(60),
+    timing=_validate_timing,
+    bindable_fields={"rules[].value": _compare_value_types, "rules[].text": _contains_text_types},
     check_input=_validate_check_input,
 )
 

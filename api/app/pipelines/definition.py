@@ -7,13 +7,18 @@ Parse, never re-validate: a pinned version keeps the rules of the day it was sav
 tightened since must not strand it. ``validate()`` runs at save time only.
 """
 
+import json
+import math
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.pipelines.catalog import (
     CATALOG,
+    CONTAINS_TEXT_MAX,
     CleanConfigV1,
+    ContainsRule,
+    InputBinding,
     LLMExtractConfigV1,
     ScrapeConfigV1,
     ValidateConfigV1,
@@ -91,8 +96,8 @@ _RUN_BLOCKS: dict[str, type[_RunBlock]] = {
 
 
 class ParsedDefinition(BaseModel):
-    # Declared run-input names.
-    inputs: list[str] = []
+    # Declared run inputs: name -> type ("url" | "number" | "text").
+    inputs: dict[str, str] = {}
     time_budget_seconds: int | None = None
     blocks: list[RunBlock]
 
@@ -152,6 +157,49 @@ def parse_definition(raw: Any) -> tuple[ParsedDefinition, dict[str, dict[str, st
         raise DefinitionUnreadable(problems)
 
     parsed = ParsedDefinition(
-        inputs=list(stored.inputs), time_budget_seconds=stored.time_budget_seconds, blocks=blocks
+        inputs={name: decl.get("type", "url") for name, decl in stored.inputs.items()},
+        time_budget_seconds=stored.time_budget_seconds,
+        blocks=blocks,
     )
     return parsed, {b.id: b.secrets for b in stored.blocks if b.secrets}
+
+
+_A = {"number": "a number", "text": "text", "url": "a URL"}
+
+
+def _is_input_type(kind: str, value: Any) -> bool:
+    if kind == "number":
+        # JSON numbers only: "100" is text and true is not 1 (ADR-014 §4).
+        return (
+            isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+        )
+    return isinstance(value, str)
+
+
+def input_value_problems(
+    parsed: ParsedDefinition, inputs: dict[str, Any]
+) -> list[tuple[str | None, str]]:
+    """Each given value against its declared type; (block_id, message) per problem."""
+    problems: list[tuple[str | None, str]] = []
+    for name, kind in parsed.inputs.items():
+        if name in inputs and not _is_input_type(kind, inputs[name]):
+            shown = json.dumps(inputs[name])
+            shown = shown if len(shown) <= 80 else shown[:77] + "..."
+            problems.append((None, f"run input {name!r} must be {_A.get(kind, kind)}; got {shown}"))
+    # A bound contains text keeps the literal's length limit.
+    for block in parsed.blocks:
+        if not isinstance(block, ValidateBlock):
+            continue
+        for i, rule in enumerate(block.config.rules):
+            if not (isinstance(rule, ContainsRule) and isinstance(rule.text, InputBinding)):
+                continue
+            value = inputs.get(rule.text.input)
+            if isinstance(value, str) and not 1 <= len(value) <= CONTAINS_TEXT_MAX:
+                problems.append(
+                    (
+                        block.id,
+                        f"rules[{i}].text uses run input {rule.text.input!r}: {len(value)} "
+                        f"characters; 1 to {CONTAINS_TEXT_MAX} allowed",
+                    )
+                )
+    return problems

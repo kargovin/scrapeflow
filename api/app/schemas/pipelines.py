@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.pipelines.catalog import RunInputValue
+
 
 class PipelineCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
@@ -49,8 +51,8 @@ class AdminPipelineResponse(PipelineResponse):
 
 
 class PipelineRunCreate(BaseModel):
-    # One value per input the pipeline declares.
-    inputs: dict[str, str] = {}
+    # One value per input the pipeline declares; the trigger checks each against its type.
+    inputs: dict[str, Any] = {}
     # The version to run; omitted = the latest.
     version: int | None = Field(default=None, ge=1)
 
@@ -82,7 +84,7 @@ class PipelineRunSummary(BaseModel):
     status: str
     # Set once a cancel is requested; status turns cancelled when the run has stopped (R3).
     cancel_requested_at: datetime | None
-    inputs: dict[str, str]
+    inputs: dict[str, RunInputValue]
     result_path: str | None
     error: str | None
     created_at: datetime

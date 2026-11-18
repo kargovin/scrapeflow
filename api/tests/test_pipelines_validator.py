@@ -363,13 +363,20 @@ def test_run_input_name_and_type_checked():
     assert "run input name 'Bad-Name'" in one_problem(definition)
 
     definition = r6()
-    definition["inputs"]["url"] = {"type": "number"}
+    definition["inputs"]["url"] = {"type": "date"}
     assert one_problem(definition).startswith("inputs.url.type")
 
+    definition = r6()
+    definition["inputs"]["url"] = {"type": "number"}
+    assert one_problem(definition) == (
+        "block 'fetch': config.url takes a url run input; 'url' is declared number"
+    )
 
-def test_scrape_url_is_the_only_bindable_field():
-    assert {t.name: t.bindable_fields for t in CATALOG.values() if t.bindable_fields} == {
-        "scrape": frozenset({"url"})
+
+def test_the_bindable_fields_are_scrape_url_and_two_rule_fields():
+    assert {t.name: set(t.bindable_fields) for t in CATALOG.values() if t.bindable_fields} == {
+        "scrape": {"url"},
+        "validate": {"rules[].value", "rules[].text"},
     }
 
 
@@ -487,3 +494,282 @@ def test_every_block_type_declares_a_budget_and_a_finite_retry():
         timing = block_type.timing(config)
         assert timing.budget > 0
         assert 1 <= timing.maximum_attempts <= 5, block_type.name
+
+
+# --- J.4: stop mode, reverse rules, events, typed run inputs (ADR-014 §4, §9) --------------
+
+
+def json_scrape(id="fetch"):
+    return {
+        "id": id,
+        "type": "scrape",
+        "config": {"url": "https://example.com", "output_format": "json"},
+    }
+
+
+def guard(rules, id="check", input="fetch", **config):
+    return {"id": id, "type": "validate", "input": input, "config": {"rules": rules, **config}}
+
+
+def watch(rules, inputs, **config):
+    """scrape (JSON) -> Validate(rules) -> webhook, with the given run inputs."""
+    return {
+        "inputs": inputs,
+        "blocks": [json_scrape(), guard(rules, **config), webhook(input="check")],
+    }
+
+
+BELOW = {"kind": "compare", "path": "/price", "op": "lt", "value": {"$input": "max_price"}}
+
+
+def test_new_settings_default_so_an_old_definition_means_what_it_meant():
+    result = validate(
+        pipeline(json_scrape(), guard([{"kind": "present", "path": "/p"}]), webhook(input="check"))
+    )
+    _, check_block, notify = result.definition["blocks"]
+
+    assert check_block["config"] == {
+        "rules": [{"kind": "present", "path": "/p", "negate": False}],
+        "when_unmet": "fail",
+        "on_stop_outputs": None,
+    }
+    assert notify["config"]["events"] == ["pipeline.result"]
+    assert {b["config_schema_version"] for b in result.definition["blocks"]} == {1}
+
+
+def test_a_definition_stored_before_j4_still_parses_with_the_defaults():
+    from app.pipelines.definition import parse_definition
+
+    stored = {
+        "inputs": {},
+        "time_budget_seconds": None,
+        "blocks": [
+            {
+                "id": "fetch",
+                "type": "scrape",
+                "config_schema_version": 1,
+                "config": {"url": "https://example.com", "output_format": "json"},
+            },
+            {
+                "id": "check",
+                "type": "validate",
+                "input": "fetch",
+                "config_schema_version": 1,
+                "config": {
+                    "rules": [{"kind": "compare", "path": "/price", "op": "lt", "value": 100}]
+                },
+            },
+            {
+                "id": "notify",
+                "type": "webhook",
+                "input": "check",
+                "config_schema_version": 1,
+                "config": {"url": "https://example.com/hook", "secret": None},
+            },
+        ],
+    }
+    parsed, _ = parse_definition(stored)
+    _, check_block, notify = parsed.blocks
+
+    assert check_block.config.when_unmet == "fail"
+    assert check_block.config.on_stop_outputs is None
+    assert check_block.config.rules[0].negate is False
+    assert notify.config.events == ["pipeline.result"]
+
+
+def test_a_saved_definition_round_trips_unchanged():
+    first = validate(watch([BELOW], {"max_price": {"type": "number"}}, when_unmet="stop"))
+    again = validate(copy.deepcopy(first.definition))
+
+    assert again.definition == first.definition
+
+
+def test_stop_without_on_stop_outputs_is_saved_as_keep():
+    result = validate(watch([BELOW], {"max_price": {"type": "number"}}, when_unmet="stop"))
+
+    assert result.definition["blocks"][1]["config"]["on_stop_outputs"] == "keep"
+
+
+@pytest.mark.parametrize("outputs", ["keep", "delete"])
+def test_on_stop_outputs_is_refused_with_fail(outputs):
+    found = one_problem(watch([{"kind": "present", "path": "/p"}], {}, on_stop_outputs=outputs))
+
+    assert found.startswith("block 'check': config")
+    assert "on_stop_outputs applies only when when_unmet is 'stop'" in found
+
+
+def test_stop_on_the_last_block_is_refused():
+    definition = {
+        "blocks": [json_scrape(), guard([{"kind": "present", "path": "/p"}], when_unmet="stop")]
+    }
+
+    assert one_problem(definition) == (
+        "block 'check': when_unmet 'stop' on the last block skips nothing; use 'fail', "
+        "or put it before the blocks it guards"
+    )
+
+
+def test_fail_on_the_last_block_is_still_allowed():
+    validate({"blocks": [json_scrape(), guard([{"kind": "present", "path": "/p"}])]})
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"when_unmet": "skip"}, "when_unmet"),
+        ({"when_unmet": "stop", "on_stop_outputs": "archive"}, "on_stop_outputs"),
+    ],
+)
+def test_unknown_stop_settings_are_refused(config, message):
+    found = one_problem(watch([{"kind": "present", "path": "/p"}], {}, **config))
+
+    assert found.startswith("block 'check': config") and message in found
+
+
+def test_negate_is_accepted_on_every_rule_kind():
+    rules = [
+        {"kind": "json_schema", "schema": {"type": "object"}, "negate": True},
+        {"kind": "present", "path": "/p", "negate": True},
+        {"kind": "type", "path": "/p", "type": "number", "negate": True},
+        {"kind": "compare", "path": "/p", "op": "lt", "value": 1, "negate": True},
+    ]
+    result = validate(watch(rules, {}))
+    page_rules = [
+        {"kind": "contains", "text": "x", "negate": True},
+        {"kind": "min_length", "chars": 5, "negate": True},
+    ]
+    page = validate({"blocks": [scrape(url="https://example.com"), guard(page_rules)]})
+
+    assert all(r["negate"] for r in result.definition["blocks"][1]["config"]["rules"])
+    assert all(r["negate"] for r in page.definition["blocks"][1]["config"]["rules"])
+
+
+def test_negate_must_be_a_boolean():
+    found = one_problem(watch([{"kind": "present", "path": "/p", "negate": "yes"}], {}))
+
+    assert "negate" in found
+
+
+@pytest.mark.parametrize(
+    ("events", "message"),
+    [
+        ([], "at least 1"),
+        (["pipeline.result", "pipeline.result"], "each event may be listed once"),
+        (["job.failed"], "events"),
+    ],
+)
+def test_webhook_events_are_checked(events, message):
+    definition = r6()
+    definition["blocks"][2]["config"]["events"] = events
+    found = one_problem(definition)
+
+    assert found.startswith("block 'notify': config") and message in found
+
+
+def test_webhook_events_take_both_names():
+    definition = r6()
+    definition["blocks"][2]["config"]["events"] = ["pipeline.failed", "pipeline.result"]
+
+    assert validate(definition).definition["blocks"][2]["config"]["events"] == [
+        "pipeline.failed",
+        "pipeline.result",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rule", "declared"),
+    [
+        (BELOW, "number"),
+        ({**BELOW, "op": "ge"}, "number"),
+        ({**BELOW, "op": "eq"}, "number"),
+        ({**BELOW, "op": "ne"}, "text"),
+    ],
+)
+def test_a_compare_value_binds_an_input_of_a_suitable_type(rule, declared):
+    validate(watch([rule], {"max_price": {"type": declared}}))
+
+
+@pytest.mark.parametrize(
+    ("rule", "declared", "needs"),
+    [
+        (BELOW, "text", "number"),
+        (BELOW, "url", "number"),
+        ({**BELOW, "op": "eq"}, "url", "number or text"),
+    ],
+)
+def test_a_compare_value_refuses_an_input_of_the_wrong_type(rule, declared, needs):
+    found = one_problem(watch([rule], {"max_price": {"type": declared}}))
+
+    assert found == (
+        f"block 'check': config.rules[0].value takes a {needs} run input; "
+        f"'max_price' is declared {declared}"
+    )
+
+
+def test_a_contains_text_binds_a_text_input_only():
+    bound = {"kind": "contains", "text": {"$input": "phrase"}}
+    page = {"blocks": [scrape(url="https://example.com"), guard([bound])]}
+
+    validate({**page, "inputs": {"phrase": {"type": "text"}}})
+    found = one_problem({**page, "inputs": {"phrase": {"type": "number"}}})
+    assert found == (
+        "block 'check': config.rules[0].text takes a text run input; 'phrase' is declared number"
+    )
+
+
+@pytest.mark.parametrize(
+    ("rule", "where"),
+    [
+        ({"kind": "min_length", "chars": {"$input": "n"}}, "config.rules[0].chars"),
+        ({"kind": "present", "path": {"$input": "n"}}, "config.rules[0].path"),
+        (
+            {"kind": "type", "path": "/p", "type": "number", "negate": {"$input": "n"}},
+            "config.rules[0].negate",
+        ),
+    ],
+)
+def test_only_compare_value_and_contains_text_take_a_run_input(rule, where):
+    found = one_problem(watch([rule], {"n": {"type": "number"}}))
+
+    assert found == (
+        f"block 'check': {where} cannot take a run input; validate binds: "
+        "rules[].text, rules[].value"
+    )
+
+
+def test_a_value_binding_on_a_rule_without_that_field_is_refused():
+    # "value" is bindable on compare only; on contains it is not a field at all.
+    rule = {"kind": "contains", "text": "x", "value": {"$input": "n"}}
+    page = {
+        "inputs": {"n": {"type": "text"}},
+        "blocks": [scrape(url="https://example.com"), guard([rule])],
+    }
+
+    assert "config.rules[0].value cannot take a run input" in one_problem(page)
+
+
+def test_a_rule_binding_an_undeclared_input_is_refused():
+    found = one_problem(watch([BELOW], {}))
+
+    assert found == (
+        "block 'check': config.rules[0].value uses run input 'max_price', "
+        "which the pipeline does not declare"
+    )
+
+
+def test_a_bound_rule_counts_as_using_its_input():
+    # No "declared but no block uses it" for an input only a rule reads.
+    validate(watch([BELOW], {"max_price": {"type": "number"}}))
+
+
+def test_a_stop_that_deletes_needs_the_release_time_too():
+    from app.pipelines.catalog import RELEASE_OUTPUTS_TIMING
+
+    rules, inputs = [BELOW], {"max_price": {"type": "number"}}
+    keep = validate(watch(rules, inputs, when_unmet="stop")).blocks[1].timing
+    delete = (
+        validate(watch(rules, inputs, when_unmet="stop", on_stop_outputs="delete")).blocks[1].timing
+    )
+
+    assert delete.need - keep.need == RELEASE_OUTPUTS_TIMING.budget
+    assert delete.budget == keep.budget  # the Validate activity itself is unchanged

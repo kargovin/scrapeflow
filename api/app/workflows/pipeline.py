@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
         CATALOG,
         HOST_SLOT_SECONDS,
         InputBinding,
+        RunInputValue,
         Timing,
     )
     from app.pipelines.definition import (
@@ -79,7 +80,7 @@ class PipelineRunInput(BaseModel):
     blocks: list[RunBlock]
     # The run ceiling, resolved at the trigger: declared, or what the blocks need.
     time_budget_seconds: int
-    inputs: dict[str, str] = {}
+    inputs: dict[str, RunInputValue] = {}
     # pipeline_run_blocks.id per block id: each block's artifact key (ADR-011).
     artifact_ids: dict[str, str]
     llm_keys: dict[str, LLMKey] = {}
@@ -177,7 +178,7 @@ def _block_options(timing: Timing, remaining_s: float) -> dict[str, Any]:
 
 def _scrape_url(block: ScrapeBlock, input: PipelineRunInput) -> str:
     url = block.config.url
-    return input.inputs[url.input] if isinstance(url, InputBinding) else str(url)
+    return str(input.inputs[url.input]) if isinstance(url, InputBinding) else str(url)
 
 
 def _is_cancellation(exc: BaseException) -> bool:

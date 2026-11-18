@@ -1195,3 +1195,153 @@ async def test_budget_audit_lists_versions_declared_too_short(db_user, capsys):
     assert out == [
         f"SHORT {pipeline.name} v1 ({pipeline.id}): declared {need - 1} s, blocks need {need} s"
     ]
+
+
+# --- J.4: typed run inputs at the trigger (ADR-014 §4) ------------------------------------
+
+WATCH = {
+    "inputs": {"max_price": {"type": "number"}, "phrase": {"type": "text"}},
+    "blocks": [
+        {
+            "id": "fetch",
+            "type": "scrape",
+            "config": {"url": "https://example.com", "output_format": "json"},
+        },
+        {
+            "id": "check",
+            "type": "validate",
+            "input": "fetch",
+            "config": {
+                "when_unmet": "stop",
+                "rules": [
+                    {
+                        "kind": "compare",
+                        "path": "/price",
+                        "op": "lt",
+                        "value": {"$input": "max_price"},
+                    },
+                    {"kind": "compare", "path": "/name", "op": "ne", "value": {"$input": "phrase"}},
+                ],
+            },
+        },
+        {
+            "id": "notify",
+            "type": "webhook",
+            "input": "check",
+            "config": {"url": "https://example.com/hook"},
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("price", [100, 99.5, 0, -3])
+async def test_a_number_input_takes_a_json_number(client, headers, db_user, temporal, price):
+    pipeline = await _create(client, headers, WATCH)
+    resp = await client.post(
+        f"/pipelines/{pipeline['id']}/runs",
+        json={"inputs": {"max_price": price, "phrase": "Blue Kettle"}},
+        headers=headers,
+    )
+
+    assert resp.status_code == 202, resp.text
+    sent = temporal.start_workflow.await_args.args[1].inputs
+    assert sent == {"max_price": price, "phrase": "Blue Kettle"}
+    assert type(sent["max_price"]) is type(price)
+    assert resp.json()["inputs"]["max_price"] == price
+    [run] = await _runs(db_user.id)
+    assert run.inputs == {"max_price": price, "phrase": "Blue Kettle"}
+
+    read = await client.get(f"/pipelines/{pipeline['id']}/runs/{run.id}", headers=headers)
+    assert read.json()["inputs"]["max_price"] == price
+
+
+@pytest.mark.parametrize(
+    ("inputs", "message"),
+    [
+        (
+            {"max_price": "100", "phrase": "x"},
+            "run input 'max_price' must be a number; got \"100\"",
+        ),
+        ({"max_price": True, "phrase": "x"}, "run input 'max_price' must be a number; got true"),
+        ({"max_price": None, "phrase": "x"}, "run input 'max_price' must be a number; got null"),
+        ({"max_price": [1], "phrase": "x"}, "run input 'max_price' must be a number; got [1]"),
+        ({"max_price": 1, "phrase": 7}, "run input 'phrase' must be text; got 7"),
+    ],
+)
+async def test_a_wrongly_typed_input_is_refused_before_any_row(
+    client, headers, db_user, temporal, inputs, message
+):
+    pipeline = await _create(client, headers, WATCH)
+    resp = await client.post(
+        f"/pipelines/{pipeline['id']}/runs", json={"inputs": inputs}, headers=headers
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == [{"block_id": None, "message": message}]
+    assert await _runs(db_user.id) == []
+    temporal.start_workflow.assert_not_awaited()
+
+
+async def test_a_non_finite_number_is_refused(client, headers, db_user, temporal):
+    pipeline = await _create(client, headers, WATCH)
+    resp = await client.post(
+        f"/pipelines/{pipeline['id']}/runs",
+        content=b'{"inputs": {"max_price": NaN, "phrase": "x"}}',
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == [
+        {"block_id": None, "message": "run input 'max_price' must be a number; got NaN"}
+    ]
+    assert await _runs(db_user.id) == []
+
+
+async def test_a_url_input_is_still_text(client, headers, db_user, temporal):
+    definition = {
+        "inputs": {"url": {"type": "url"}},
+        "blocks": [{"id": "fetch", "type": "scrape", "config": {"url": {"$input": "url"}}}],
+    }
+    pipeline = await _create(client, headers, definition)
+    resp = await client.post(
+        f"/pipelines/{pipeline['id']}/runs", json={"inputs": {"url": 5}}, headers=headers
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == [
+        {"block_id": None, "message": "run input 'url' must be a URL; got 5"}
+    ]
+
+
+@pytest.mark.parametrize(("phrase", "length"), [("", 0), ("x" * 1001, 1001)])
+async def test_a_bound_contains_text_keeps_the_literal_length_limit(
+    client, headers, db_user, temporal, phrase, length
+):
+    definition = {
+        "inputs": {"phrase": {"type": "text"}},
+        "blocks": [
+            {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com"}},
+            {
+                "id": "check",
+                "type": "validate",
+                "input": "fetch",
+                "config": {"rules": [{"kind": "contains", "text": {"$input": "phrase"}}]},
+            },
+        ],
+    }
+    pipeline = await _create(client, headers, definition)
+    runs_url = f"/pipelines/{pipeline['id']}/runs"
+
+    resp = await client.post(runs_url, json={"inputs": {"phrase": phrase}}, headers=headers)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == [
+        {
+            "block_id": "check",
+            "message": f"rules[0].text uses run input 'phrase': {length} characters; "
+            "1 to 1000 allowed",
+        }
+    ]
+    assert await _runs(db_user.id) == []
+
+    resp = await client.post(runs_url, json={"inputs": {"phrase": "x" * 1000}}, headers=headers)
+    assert resp.status_code == 202, resp.text

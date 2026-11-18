@@ -587,7 +587,9 @@ async def test_clean_and_validate_run_on_the_content_queue_between_scrape_and_ll
 
     assert result == LLM_PATH
     assert h.cleaned == [CleanInput(artifact_id="a-clean", input_path=SCRAPE_PATH)]
-    assert h.validated == [ValidateInput(input_path=CLEAN_PATH, rules=RULES)]
+    assert h.validated == [
+        ValidateInput(input_path=CLEAN_PATH, rules=[{**r, "negate": False} for r in RULES])
+    ]
     # Validate is an effect block: it stores nothing and passes Clean's object on to the LLM.
     [llm] = h.extracted
     assert llm.raw_minio_path == CLEAN_PATH
@@ -615,7 +617,7 @@ async def test_validate_block_sends_the_rules_by_alias():
     await h.run(_with_content_blocks(("guard", "validate", {"rules": [schema_rule]})))
 
     [validated] = h.validated
-    assert validated.rules == [schema_rule]
+    assert validated.rules == [{**schema_rule, "negate": False}]
 
 
 async def test_a_trailing_validate_leaves_the_result_on_the_last_content_block():

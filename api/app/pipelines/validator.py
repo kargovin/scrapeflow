@@ -5,8 +5,9 @@ network — LLM key ownership, SSRF on literal URLs, the per-user pipeline count
 """
 
 import re
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from jsonschema import exceptions as jsonschema_exceptions
 from jsonschema import validators as jsonschema_validators
@@ -15,10 +16,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.pipelines.catalog import (
     CATALOG,
     SCRAPE,
+    VALIDATE,
     WEBHOOK,
     BlockType,
     JsonSchemaRule,
     LLMExtractConfigV1,
+    RunInputType,
     Timing,
     ValidateConfigV1,
     is_binding,
@@ -33,8 +36,8 @@ BlockId = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")]
 class RunInputDeclaration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Widen alongside BlockType.bindable_fields; Scrape's url is the only bindable field today.
-    type: Literal["url"]
+    # A binding's field must take this type (BlockType.bindable_fields).
+    type: RunInputType
 
 
 class BlockDefinition(BaseModel):
@@ -130,8 +133,61 @@ def _shape_problems(exc: ValidationError, raw: Any) -> list[Problem]:
     return problems
 
 
+def _bindings(config: Mapping[str, Any]) -> Iterator[tuple[str, str, Mapping[str, Any], Any]]:
+    """Each binding in a config: (where, bindable-field key, the object holding it, the binding).
+
+    Top-level fields, and fields of objects in a top-level list ("rules[].value").
+    """
+    for name, value in config.items():
+        if is_binding(value):
+            yield f"config.{name}", name, config, value
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                if not isinstance(item, dict):
+                    continue
+                for key, inner in item.items():
+                    if is_binding(inner):
+                        yield f"config.{name}[{i}].{key}", f"{name}[].{key}", item, inner
+
+
+def _types(allowed: frozenset[str]) -> str:
+    return " or ".join(sorted(allowed))
+
+
+def _binding_problems(
+    block: BlockDefinition, block_type: BlockType, declared: Mapping[str, str], used: set[str]
+) -> list[Problem]:
+    problems = []
+    fields = block_type.bindable_fields
+    for where, key, holder, value in _bindings(block.config):
+        name = value.get("$input")
+        used.add(name)
+        allowed = fields[key](holder) if key in fields else frozenset()
+        if not allowed:
+            binds = ", ".join(sorted(fields)) or "nothing"
+            problems.append(
+                Problem(block.id, f"{where} cannot take a run input; {block.type} binds: {binds}")
+            )
+        elif name not in declared:
+            problems.append(
+                Problem(
+                    block.id,
+                    f"{where} uses run input {name!r}, which the pipeline does not declare",
+                )
+            )
+        elif declared[name] not in allowed:
+            problems.append(
+                Problem(
+                    block.id,
+                    f"{where} takes a {_types(allowed)} run input; {name!r} is declared "
+                    f"{declared[name]}",
+                )
+            )
+    return problems
+
+
 def _parse_block(
-    block: BlockDefinition, declared: set[str], used: set[str]
+    block: BlockDefinition, declared: Mapping[str, str], used: set[str]
 ) -> tuple[ValidatedBlock | None, list[Problem]]:
     block_type = CATALOG.get(block.type)
     if block_type is None:
@@ -143,27 +199,7 @@ def _parse_block(
     if model is None:
         return None, [Problem(block.id, f"{block.type} has no config schema version {version}")]
 
-    problems = []
-    for name, value in block.config.items():
-        if not is_binding(value):
-            continue
-        used.add(value.get("$input"))
-        if name not in block_type.bindable_fields:
-            allowed = ", ".join(sorted(block_type.bindable_fields)) or "nothing"
-            problems.append(
-                Problem(
-                    block.id,
-                    f"config.{name} cannot take a run input; {block.type} binds: {allowed}",
-                )
-            )
-        elif value.get("$input") not in declared:
-            problems.append(
-                Problem(
-                    block.id,
-                    f"config.{name} uses run input {value.get('$input')!r}, "
-                    "which the pipeline does not declare",
-                )
-            )
+    problems = _binding_problems(block, block_type, declared, used)
     if problems:
         return None, problems
 
@@ -273,6 +309,20 @@ def _type_problems(parsed: list[ValidatedBlock]) -> list[Problem]:
     return problems
 
 
+def _stop_problems(parsed: list[ValidatedBlock]) -> list[Problem]:
+    """A stop skips the blocks after it; on the last block there is nothing to skip (D8)."""
+    last = parsed[-1]
+    if last.type is VALIDATE and last.config.when_unmet == "stop":
+        return [
+            Problem(
+                last.id,
+                "when_unmet 'stop' on the last block skips nothing; use 'fail', or put it "
+                "before the blocks it guards",
+            )
+        ]
+    return []
+
+
 def _webhook_problems(blocks: list[BlockDefinition]) -> list[Problem]:
     webhooks = [b for b in blocks if b.type == WEBHOOK.name]
     return [
@@ -336,7 +386,7 @@ def validate(raw: Any) -> ValidatedPipeline:
             problems.append(Problem(block.id, "block id is used more than once"))
         seen.add(block.id)
 
-    declared = set(definition.inputs)
+    declared = {name: decl.type for name, decl in definition.inputs.items()}
     used: set[str] = set()
     parsed: list[ValidatedBlock] = []
     for block in blocks:
@@ -344,7 +394,7 @@ def validate(raw: Any) -> ValidatedPipeline:
         problems += block_problems
         if validated is not None:
             parsed.append(validated)
-    for name in sorted(declared - used):
+    for name in sorted(set(declared) - used):
         problems.append(Problem(None, f"run input {name!r} is declared but no block uses it"))
 
     starting = _starting_block_problems(blocks)
@@ -353,7 +403,7 @@ def validate(raw: Any) -> ValidatedPipeline:
 
     run_budget = 0
     if len(parsed) == len(blocks) and not starting and not chain:
-        problems += _type_problems(parsed)
+        problems += _type_problems(parsed) + _stop_problems(parsed)
         run_budget, budget_problems = _budget_problems(definition.time_budget_seconds, parsed)
         problems += budget_problems
 
