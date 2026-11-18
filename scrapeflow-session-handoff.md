@@ -143,7 +143,36 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-18 *(clock)*
+## Current state — as of 2026-11-19 *(clock)*
+
+🔧 **J.5–J.9 BUILT, 🧪 J.10 GATE PASSED ON COMPOSE (2026-11-19, twentieth session; delegated build).** Owner: "read the
+handoff" → "start with j5 and build until j10". One reviewable step per commit; each task's *Built* note in the backlog
+status table lists its commits and my calls. **Order to replay:**
+- **J.5** `3b427d6` — mirrors write skip reasons (`stopped` / `upstream_failed` / `cancelled`, read from the run row's
+  ending, so a late mirror on a cancelled run still says `cancelled`), the verdict, the stop, `failed_block_id`; the
+  trigger's could-not-start writes `not_started`; `notify_run` gains four identifier/state fields.
+- **J.6** `1f0f736` — `patched("validate-stop")` at every Validate: bound values substituted, `when_unmet` sent, the
+  stop path; `release_run_outputs` (no lock — `lock_user` forbids network calls; retryable `OutputsLeft` naming the
+  keys still held). Verdict stores the rule **as saved**. Four harness histories.
+- **J.7** `f2a1513` — `core/pipeline_alerts.py`: alerts queued in the `failed` write by both writers, started after
+  commit; delivery `_secret` arms explicit (pipeline = block secret, credentials key; unknown owner raises); three
+  meters exclude pipeline rows; admin reads show run + block. `c298014` — the alert-only skip under
+  `patched("webhook-events")`; an alert-only Webhook's need is the block overhead (ADR-014 §8d, beyond the task text).
+- **J.8** `bac7a16` — BUG-030: `core/egress.py` (`resolve_public`, `send_signed_post`: pin to the vetted IP, `Host` +
+  `sni_hostname`, next IP on refused/timed-out connect, certificate mismatch final); both senders call it. Live-checked
+  against example.com. CLAUDE.md's *SSRF re-validation* row rewritten.
+- **J.9** `6abc040` API reads (run + block fields, `not_recorded`, the run's alerts, live fields); `4fc099f` BUG-018
+  (five pages + `ResultViewer` on `useApi()`); `dd0676a` SPA (verdict in words, skip reasons, alerts, stop label, typed
+  run form). **Not click-tested** — the SPA signs in through Clerk; moved to J.10's runbook step 3.
+- **J.10** `ac3c1ef` — the gate harness (fixture: shop + stand-in LLM + receiver; `scripts/pipeline_gate.py`; four
+  compose histories). 42/42; worker kill and could-not-start by hand. Runbook in the backlog's J.10 section.
+- **Numbers:** suite 930, replay 51, mutation checks per task (all killed after two tests were tightened).
+- **Git:** `main` = `036870c` (deployed, unchanged). `develop` = 16 ahead of `origin/develop` + this closeout, **not
+  pushed**. Infra untouched. Compose up, with `pipeline-fixture` (profile `gate`). `tmp/` untracked, not mine.
+- **Next:** **J.10 is the owner's** — the runbook (push `develop`, ff `main`, migration 4.10 on startup, SPA checks).
+  Then **K.1** (BUG-031: delete a run, permanent pipeline delete; the mirrors read a missing run as `cancelled`).
+
+## Earlier state — 2026-11-18 *(clock)*
 
 🚀 **J-a RELEASED; 🔧 J.3 + J.4 BUILT (2026-11-18, nineteenth session).** Owner: "explain j1 with background" →
 "build it" → "commit it" → "what is y1" → "build it" → runbook → owner pushed `main` and verified → "explain j3 …
@@ -2000,6 +2029,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-19 (J.5–J.10 delegated build close):** `develop` = `c595f41` + this closeout, 17 ahead of `origin/develop` (`f4ff446`), **not pushed**; `main` = `origin/main` = `036870c` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-016 accepted, session close):** `develop` = `9808684` (ADR-016 accepted) + this closeout, 22 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-015 review + acceptance close):** `develop` = `86bfae6`, 6 ahead of `origin/develop` (`b8c3900`), **not pushed** — includes BUG-024's fix `57bb301` (code, unreleased); `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-05 (PRD-018 review close):** `develop` = `a8a9b63`, 4 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched.
@@ -2167,6 +2197,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-11-19 *(clock, twentieth)* | **🔧 J.5–J.9 built, 🧪 J.10 compose gate passed** (delegated build, no walkthrough). Mirrors record endings; the stop path (`validate-stop`); failure alerts + alert-only skip (`webhook-events`); BUG-030 (`core/egress`); run reads + SPA + BUG-018; the pipeline gate harness (42/42, worker kill, could-not-start). J-b runbook written | `3b427d6`, `936be65`, `1f0f736`, `19f78b5`, `f2a1513`, `c298014`, `fe75dd8`, `bac7a16`, `12fad79`, `6abc040`, `4fc099f`, `dd0676a`, `491a15b`, `6106207`, `ac3c1ef`, `c595f41`, closeout |
 | 2026-11-18 *(clock, nineteenth)* | **🚀 J-a RELEASED; J.3 + J.4 built.** J.1 (Validate three answers, `negate`, stop mode + verdict) and Y.1 (crawl `schedule_cron` refused, four columns unmapped) explained, built, mutation-checked; J.2 runbook; owner pushed `main` `eea8344..036870c` and verified all five checks; step 0 count 0. J.3 migration 4.10 (reason/verdict/undo columns, pipeline alert rows) and J.4 (stop/negate/events config, typed run inputs) explained, built, mutation-checked | `045f598`, `3308397`, `8774907`, `9b08d49`, `036870c`, `a929340`, `0341771`, `4b58bc7`, `f5d550d`, `a037a53`, closeout |
 | 2026-11-18 *(clock, seventeenth)* | **📐 ADR-016 drafted (Monitors, PRD-018's Architect pass), then 📝 owner review complete (12 rounds) and ✅ Accepted.** Handoff staleness fixed first (`217ffcf`). PRD-018, ADR-014/015 and the code read; OQ-1–14 + the LLM-key carry answered; ~20 corrections from code checks; G1–G8 answered; backlog row for pipeline admin stats | `217ffcf`, `defe073`, `574fd7a`…`dd8a984` (rounds 1–11), `2da69b7` (review complete), `9808684` (accepted), closeout |
 | 2026-11-18 *(clock, sixteenth)* | **📐 ADR-015 owner review — 9 rounds, complete; ADR-014 + ADR-015 Accepted.** Plain-words walkthrough per section with examples, each claim checked against code; F1–F5 accepted; httpx `sni_hostname` pin tested; LLM-key deletion under a monitor carried to ADR-016. **🔧 BUG-024 fixed locally** (public unicast only, NAT64 judged as its IPv4; 37 tests, suite 783, mutation 4/4). **BUG-032 filed.** Owner's stance on Monitors/destinations saved to memory | `57bb301`, `86bfae6` + handoff refresh |
