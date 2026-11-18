@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 1). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 2). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -13,6 +13,11 @@ until the owner's review accepts it.
 > `monitors_paused_itself`. Owner asked where "check" comes from: PRD-018 D1 and review round 5 — a check is a
 > pipeline run a monitor started; a firing becomes a check only if admission lets it run. Pipeline-lane admin
 > metrics, missing today, go to the backlog (§4), not this ADR.
+>
+> **Review round 2 (owner, 2026-11-18): §3 The firing.** Agreed, with one gap closed: admission is a **third
+> writer** of a failed run (storage full, refused firing), outside ADR-014 §8a's two, so it calls
+> `queue_failure_alerts` and `monitor_check_ended` in its insert transaction — otherwise *the run breaks* stays
+> silent for exactly those failures. §7a's writer table and §19's trap updated.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -228,6 +233,11 @@ lock_user(user)
   with ADR-014's `not_started`. It costs one monthly run and counts towards self-pause, exactly as a storage-full
   firing does (ADR-010 §1). The alternative, recording it as a monitor event, would let a broken monitor fire for
   ever without ever pausing. (§17, escalation G3.)
+- **Admission is a third writer of `failed`.** ADR-014 §8a names two (`mirror_run_status`, and the trigger's
+  "could not start" branch), each calling `queue_failure_alerts` in the transaction that marks the run failed. The
+  failed checks admission inserts (storage full, refused firing) never reach either, so admission calls
+  `queue_failure_alerts` and `monitor_check_ended` (§7a) in its own insert transaction. Otherwise a Webhook block
+  set to *the run breaks* stays silent for exactly the failures that need a person.
 - **The run rows and the `PipelineRunInput` are built by one function** shared with the API's trigger
   (`create_run`) and Check now. Today `create_run` builds both inline (`routers/pipelines.py`). The build moves it
   to `core/pipeline_trigger.py`, so a monitor's check and a hand-run cannot drift. This is P9's lesson about the
@@ -487,7 +497,7 @@ writer ends it. No Temporal setting, and no change to ADR-013.**
 
 | The check ends | Counter | Writer |
 |---|---|---|
-| `failed` (any cause, storage-full and refused firings included) | +1 | `mirror_run_status`; admission for the failed checks it writes (§3b) |
+| `failed` (any cause, storage-full and refused firings included) | +1 | `mirror_run_status`; the trigger's could-not-start branch (Check now); admission for the failed checks it writes (§3b) |
 | `completed` (any stop included) | reset to 0 | `mirror_run_status` |
 | `cancelled` | unchanged (D12) | — |
 | a skipped firing | unchanged (D12) | — |
@@ -496,8 +506,8 @@ At the 5th failure the same transaction sets `state = paused_itself`, records a 
 last failure (§7b), and queues its notice (§8). After the commit the writer pauses the Schedule best effort. The
 row is already the truth, so a Schedule left running fires into "stopped".
 
-- **Both writers call one helper**, `monitor_check_ended(db, run)`, as ADR-014 §8a has `queue_failure_alerts` for
-  the same two writers. A check of a deleted monitor (`monitor_id` NULL) moves nothing.
+- **Every writer calls one helper**, `monitor_check_ended(db, run)`, as ADR-014 §8a has `queue_failure_alerts` for
+  its writers. A check of a deleted monitor (`monitor_id` NULL) moves nothing.
 - **Pause_on_failure stays `False`** on the Schedule: Temporal sees a `MonitorCheckWorkflow`, which succeeds even
   when its check fails, and in slice 2 it has often closed before its check ends (§9e). Only the row knows.
 - Resume (§2c) re-arms and resets the counter. A user pause or resume does not count as a check.
@@ -926,7 +936,9 @@ Product-visible consequences of the design, each with a recommendation.
   - `record_storage` locks the run row and deletes its objects when the run is gone, and the mirrors read a
     missing run as cancelled. Otherwise a mid-flight delete leaves uncharged objects on disk, or fails the
     workflow (§11);
-  - both writers that end a check call `monitor_check_ended` in the same transaction as the outcome (§7a);
+  - all three writers of a check's outcome (`mirror_run_status`, the trigger's could-not-start branch, admission's
+    failed checks) call `monitor_check_ended`, and the two that write `failed` before any workflow runs also call
+    `queue_failure_alerts`, each in the transaction that writes the outcome (§3b, §7a);
   - an approval answer and the expiry are both conditional on `approval_answer IS NULL`. Neither may overwrite the
     other (§9b);
   - an approval message never sets `announced` (§9c; ADR-014 §7);
