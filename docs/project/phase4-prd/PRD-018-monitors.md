@@ -9,7 +9,7 @@ change detection belongs here), OQ-4 (metering), R5 (the job lane's second named
 PRD-017 "What this hands forward"; ADR-009 §4, §8, §15a; ADR-010 §1; ADR-013.
 **Status:** **Draft — owner's section-by-section review complete (2026-11-03 → 2026-11-05, 16 rounds).** Written
 2026-10-30 by the PM persona. Every decision carries the round that agreed it. Architect pass drafted 2026-11-18 as
-**ADR-016** (Draft, owner review complete 2026-11-18, 12 rounds), answering OQ-1–14; ADR-014 and ADR-015 Accepted 2026-11-18. Not Accepted.
+**ADR-016** (Accepted 2026-11-18, after a 12-round owner review), answering OQ-1–14; ADR-014 and ADR-015 Accepted 2026-11-18. Not Accepted.
 **Last updated:** 2026-11-05 (review round 16: D1, Q9 — owner review complete)
 
 > **Built last, on top of three PRDs.** This PRD consumes PRD-019 (a Validate set to *stop*, run inputs of type

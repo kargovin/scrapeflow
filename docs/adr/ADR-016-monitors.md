@@ -1,9 +1,11 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; **owner review complete 2026-11-18 (12 rounds)**.
-Not Accepted. Implement nothing against it
-until the owner's review accepts it.
+**Status:** **Accepted 2026-11-18** (owner) — after the owner's section-by-section review (2026-11-18, 12 rounds).
+Implement against it; immutable from here (a change is a superseding ADR).
 **Date:** 2026-11-18
+**Last updated:** 2026-11-18 (Accepted)
+> **At acceptance (owner, 2026-11-18).** Accepted as reviewed; no text changed at acceptance.
+>
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
 > check 6: the refusal is on the blocks' *need* plus the allowance, and the check's ceiling is capped at the
 > maximum; as drafted, a version declaring the full 86,400 s could never be monitored. (2) §2c: a cron change on an
