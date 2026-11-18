@@ -89,11 +89,26 @@ class CleanOutput(BaseModel):
 
 
 class ValidateInput(BaseModel):
-    """A failing rule is raised, not returned."""
+    """Fail mode raises naming every rule not met; stop mode returns a ValidateVerdict.
+
+    Either mode raises, non-retryable, on a rule that cannot be checked.
+    """
 
     input_path: Annotated[str, StringConstraints(min_length=1)]
     # The Validate block's rules as the catalog dumps them (by alias: "schema").
     rules: list[dict[str, Any]] = Field(min_length=1)
+    when_unmet: Literal["fail", "stop"] = "fail"
+
+
+class ValidateVerdict(BaseModel):
+    """Stop mode's answer; fail mode returns None."""
+
+    outcome: Literal["met", "not_met"]
+    # The first rule not met, as saved (by alias); None when every rule is met.
+    rule_index: int | None = None
+    rule: dict[str, Any] | None = None
+    found: Any = None
+    expected: Any = None
 
 
 class DiscoverSitemapsInput(BaseModel):

@@ -48,22 +48,26 @@ class CleanOutput(BaseModel):
 
 class JsonSchemaRule(BaseModel):
     kind: Literal["json_schema"]
+    negate: bool = False
     schema_: dict[str, Any] = Field(alias="schema")
 
 
 class PresentRule(BaseModel):
     kind: Literal["present"]
+    negate: bool = False
     path: str
 
 
 class TypeRule(BaseModel):
     kind: Literal["type"]
+    negate: bool = False
     path: str
     type: Literal["string", "number", "integer", "boolean", "object", "array", "null"]
 
 
 class CompareRule(BaseModel):
     kind: Literal["compare"]
+    negate: bool = False
     path: str
     op: Literal["eq", "ne", "lt", "le", "gt", "ge"]
     value: str | int | float | bool | None
@@ -71,11 +75,13 @@ class CompareRule(BaseModel):
 
 class ContainsRule(BaseModel):
     kind: Literal["contains"]
+    negate: bool = False
     text: str
 
 
 class MinLengthRule(BaseModel):
     kind: Literal["min_length"]
+    negate: bool = False
     chars: int
 
 
@@ -93,3 +99,15 @@ Rule = Annotated[
 class ValidateInput(BaseModel):
     input_path: NonEmptyStr
     rules: list[Rule] = Field(min_length=1)
+    when_unmet: Literal["fail", "stop"] = "fail"
+
+
+class ValidateVerdict(BaseModel):
+    """Stop mode's answer; fail mode returns None."""
+
+    outcome: Literal["met", "not_met"]
+    # The first rule not met, as saved (by alias); None when every rule is met.
+    rule_index: int | None = None
+    rule: dict[str, Any] | None = None
+    found: Any = None
+    expected: Any = None

@@ -13,10 +13,11 @@ from worker.content import (
     CONTENT_FAILED,
     STORAGE_TRANSIENT,
     VALIDATION_FAILED,
+    VALIDATION_UNVERIFIABLE,
     ContentActivities,
 )
-from worker.contracts import CleanInput, ValidateInput
-from worker.rules import failures
+from worker.contracts import CleanInput, ValidateInput, ValidateVerdict
+from worker.rules import failures, first_unmet
 
 _ARTIFACT = "3f8b7a12-0c44-4e7a-9a1e-1b2c3d4e5f60"
 _IN = f"scrapeflow-results/history/{_ARTIFACT}/scrape.html"
@@ -139,99 +140,110 @@ def _check(*rules, text=None):
     return failures(parsed, json.dumps(DOC) if text is None else text)
 
 
-@pytest.mark.parametrize(
-    "rule",
-    [
-        {"kind": "present", "path": ""},
-        {"kind": "present", "path": "/discount"},  # null is present
-        {"kind": "present", "path": "/tags/1"},
-        {"kind": "present", "path": "/a~1b/m~0n"},  # RFC 6901 escapes
-        {"kind": "type", "path": "/name", "type": "string"},
-        {"kind": "type", "path": "/price", "type": "number"},
-        {"kind": "type", "path": "/stock", "type": "number"},
-        {"kind": "type", "path": "/stock", "type": "integer"},
-        {
-            "kind": "type",
-            "path": "/price",
-            "type": "integer",
-        },  # 39.0 is an integer in JSON
-        {"kind": "type", "path": "/in_stock", "type": "boolean"},
-        {"kind": "type", "path": "/discount", "type": "null"},
-        {"kind": "type", "path": "/tags", "type": "array"},
-        {"kind": "type", "path": "", "type": "object"},
-        {"kind": "compare", "path": "/price", "op": "eq", "value": 39},
-        {"kind": "compare", "path": "/price", "op": "gt", "value": 0},
-        {"kind": "compare", "path": "/price", "op": "le", "value": 39.0},
-        {"kind": "compare", "path": "/stock", "op": "ge", "value": 3},
-        {"kind": "compare", "path": "/stock", "op": "lt", "value": 4},
-        {"kind": "compare", "path": "/in_stock", "op": "eq", "value": True},
-        {"kind": "compare", "path": "/name", "op": "ne", "value": ""},
-        {"kind": "compare", "path": "/discount", "op": "eq", "value": None},
-        {
-            "kind": "json_schema",
-            "schema": {"type": "object", "required": ["name", "price"]},
-        },
-    ],
-)
+PASSING = [
+    {"kind": "present", "path": ""},
+    {"kind": "present", "path": "/discount"},  # null is present
+    {"kind": "present", "path": "/tags/1"},
+    {"kind": "present", "path": "/a~1b/m~0n"},  # RFC 6901 escapes
+    {"kind": "type", "path": "/name", "type": "string"},
+    {"kind": "type", "path": "/price", "type": "number"},
+    {"kind": "type", "path": "/stock", "type": "number"},
+    {"kind": "type", "path": "/stock", "type": "integer"},
+    {
+        "kind": "type",
+        "path": "/price",
+        "type": "integer",
+    },  # 39.0 is an integer in JSON
+    {"kind": "type", "path": "/in_stock", "type": "boolean"},
+    {"kind": "type", "path": "/discount", "type": "null"},
+    {"kind": "type", "path": "/tags", "type": "array"},
+    {"kind": "type", "path": "", "type": "object"},
+    {"kind": "compare", "path": "/price", "op": "eq", "value": 39},
+    {"kind": "compare", "path": "/price", "op": "gt", "value": 0},
+    {"kind": "compare", "path": "/price", "op": "le", "value": 39.0},
+    {"kind": "compare", "path": "/stock", "op": "ge", "value": 3},
+    {"kind": "compare", "path": "/stock", "op": "lt", "value": 4},
+    {"kind": "compare", "path": "/in_stock", "op": "eq", "value": True},
+    {"kind": "compare", "path": "/name", "op": "ne", "value": ""},
+    {"kind": "compare", "path": "/discount", "op": "eq", "value": None},
+    {
+        "kind": "json_schema",
+        "schema": {"type": "object", "required": ["name", "price"]},
+    },
+]
+
+
+@pytest.mark.parametrize("rule", PASSING)
 def test_rule_passes(rule):
     assert _check(rule) == []
 
 
-@pytest.mark.parametrize(
-    ("rule", "message"),
-    [
-        ({"kind": "present", "path": "/missing"}, "'/missing' is missing"),
-        ({"kind": "present", "path": "/tags/2"}, "'/tags/2' is missing"),
-        ({"kind": "present", "path": "/tags/01"}, "'/tags/01' is missing"),
-        ({"kind": "present", "path": "/name/x"}, "'/name/x' is missing"),
-        (
-            {"kind": "type", "path": "/in_stock", "type": "number"},
-            "is boolean, not number",
-        ),
-        (
-            {"kind": "type", "path": "/stock", "type": "string"},
-            "is integer, not string",
-        ),
-        ({"kind": "type", "path": "/missing", "type": "string"}, "is missing"),
-        (
-            {"kind": "compare", "path": "/price", "op": "lt", "value": 10},
-            "is 39.0; expected lt 10",
-        ),
-        (
-            {"kind": "compare", "path": "/name", "op": "gt", "value": 1},
-            "is string, not a number",
-        ),
-        # true is not 1 in JSON, though it is in Python.
-        (
-            {"kind": "compare", "path": "/in_stock", "op": "eq", "value": 1},
-            "expected eq 1",
-        ),
-        (
-            {"kind": "compare", "path": "/stock", "op": "eq", "value": True},
-            "expected eq true",
-        ),
-        (
-            {"kind": "compare", "path": "/name", "op": "eq", "value": "Red"},
-            'expected eq "Red"',
-        ),
-        (
-            {"kind": "compare", "path": "/discount", "op": "ne", "value": None},
-            "expected ne null",
-        ),
-        (
-            {
-                "kind": "json_schema",
-                "schema": {"properties": {"price": {"type": "string"}}},
-            },
-            "39.0 is not of type 'string' at '/price'",
-        ),
-        (
-            {"kind": "json_schema", "schema": {"required": ["sku"]}},
-            "'sku' is a required property",
-        ),
-        ({"kind": "json_schema", "schema": {"type": 5}}, "invalid schema"),
-    ],
-)
+FAILING = [
+    ({"kind": "present", "path": "/missing"}, "'/missing' is missing"),
+    ({"kind": "present", "path": "/tags/2"}, "'/tags/2' is missing"),
+    ({"kind": "present", "path": "/tags/01"}, "'/tags/01' is missing"),
+    ({"kind": "present", "path": "/name/x"}, "'/name/x' is missing"),
+    (
+        {"kind": "type", "path": "/in_stock", "type": "number"},
+        "is boolean, not number",
+    ),
+    (
+        {"kind": "type", "path": "/stock", "type": "string"},
+        "is integer, not string",
+    ),
+    ({"kind": "type", "path": "/missing", "type": "string"}, "is missing"),
+    (
+        {"kind": "compare", "path": "/price", "op": "lt", "value": 10},
+        "is 39.0; expected lt 10",
+    ),
+    (
+        {"kind": "compare", "path": "/name", "op": "gt", "value": 1},
+        "is string, not a number",
+    ),
+    # true is not 1 in JSON, though it is in Python.
+    (
+        {"kind": "compare", "path": "/in_stock", "op": "eq", "value": 1},
+        "expected eq 1",
+    ),
+    (
+        {"kind": "compare", "path": "/stock", "op": "eq", "value": True},
+        "expected eq true",
+    ),
+    (
+        {"kind": "compare", "path": "/name", "op": "eq", "value": "Red"},
+        'expected eq "Red"',
+    ),
+    (
+        {"kind": "compare", "path": "/discount", "op": "ne", "value": None},
+        "expected ne null",
+    ),
+    (
+        {
+            "kind": "json_schema",
+            "schema": {"properties": {"price": {"type": "string"}}},
+        },
+        "39.0 is not of type 'string' at '/price'",
+    ),
+    (
+        {"kind": "json_schema", "schema": {"required": ["sku"]}},
+        "'sku' is a required property",
+    ),
+    ({"kind": "json_schema", "schema": {"type": 5}}, "invalid schema"),
+]
+
+# Not met or met is flippable; these cannot be checked, which negate never flips.
+UNVERIFIABLE = [
+    {"kind": "compare", "path": "/missing", "op": "eq", "value": 1},
+    {"kind": "compare", "path": "/missing", "op": "ne", "value": None},
+    {"kind": "compare", "path": "/name", "op": "gt", "value": 1},
+    {"kind": "compare", "path": "/discount", "op": "lt", "value": 1},
+    {"kind": "compare", "path": "/price", "op": "lt", "value": "100"},
+    {"kind": "compare", "path": "/price", "op": "ge", "value": True},
+    {"kind": "json_schema", "schema": {"type": 5}},
+]
+
+
+@pytest.mark.parametrize(("rule", "message"), FAILING)
 def test_rule_fails_and_names_itself(rule, message):
     [problem] = _check(rule)
 
@@ -273,6 +285,129 @@ def test_json_rules_on_input_that_is_not_json():
 
 def test_text_rules_alone_do_not_parse_json():
     assert _check({"kind": "contains", "text": "<"}, text="<html>") == []
+
+
+# ---------------------------------------------------------------------------
+# three answers, and negate
+# ---------------------------------------------------------------------------
+
+
+def _answer(rule, text=None):
+    from pydantic import TypeAdapter
+
+    from worker.contracts import Rule
+
+    [parsed] = TypeAdapter(list[Rule]).validate_python([rule])
+    first = first_unmet([parsed], json.dumps(DOC) if text is None else text)
+    return "met" if first is None else first[1].answer
+
+
+def _negated(rule):
+    return {**rule, "negate": True}
+
+
+TEXT_PAGE = "# Blue Kettle\n\nAdd to cart\n"
+TEXT_RULES = [
+    {"kind": "contains", "text": "Add to cart"},
+    {"kind": "contains", "text": "Sold out"},
+    {"kind": "min_length", "chars": 5},
+    {"kind": "min_length", "chars": 500},
+]
+
+
+@pytest.mark.parametrize(
+    "rule",
+    PASSING + [r for r, _ in FAILING if r not in UNVERIFIABLE],
+)
+def test_a_json_rule_and_its_reverse_disagree(rule):
+    answers = {_answer(rule), _answer(_negated(rule))}
+
+    assert answers == {"met", "not_met"}
+
+
+@pytest.mark.parametrize("rule", TEXT_RULES)
+def test_a_text_rule_and_its_reverse_disagree(rule):
+    answers = {_answer(rule, TEXT_PAGE), _answer(_negated(rule), TEXT_PAGE)}
+
+    assert answers == {"met", "not_met"}
+
+
+@pytest.mark.parametrize("rule", UNVERIFIABLE)
+def test_cannot_be_checked_is_never_flipped(rule):
+    assert _answer(rule) == "unverifiable"
+    assert _answer(_negated(rule)) == "unverifiable"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"kind": "present", "path": "/price"},
+        {"kind": "type", "path": "/price", "type": "number"},
+        {"kind": "compare", "path": "/price", "op": "lt", "value": 100},
+        {"kind": "json_schema", "schema": {"type": "object"}},
+    ],
+)
+def test_a_json_rule_on_input_that_is_not_json_cannot_be_checked(rule):
+    # Else `present /price, negate` on an HTML error page would read as absent, so met.
+    assert _answer(rule, "<html>Error</html>") == "unverifiable"
+    assert _answer(_negated(rule), "<html>Error</html>") == "unverifiable"
+
+
+def test_a_missing_path_answers_present_and_type_but_not_compare():
+    # ADR-014 §3's table.
+    assert _answer({"kind": "present", "path": "/x", "negate": True}) == "met"
+    assert (
+        _answer({"kind": "type", "path": "/x", "type": "number", "negate": True})
+        == "met"
+    )
+    assert _answer({"kind": "type", "path": "/x", "type": "number"}) == "not_met"
+    assert (
+        _answer(
+            {"kind": "compare", "path": "/x", "op": "lt", "value": 1, "negate": True}
+        )
+        == "unverifiable"
+    )
+
+
+def test_fail_mode_names_a_reversed_rule_as_reversed():
+    problems = _check(
+        {"kind": "present", "path": "/price", "negate": True},
+        {"kind": "compare", "path": "/price", "op": "lt", "value": 100, "negate": True},
+        {"kind": "type", "path": "/price", "type": "number", "negate": True},
+        {"kind": "json_schema", "schema": {"type": "object"}, "negate": True},
+    )
+
+    assert problems == [
+        "rules[0] (present, negate): '/price' is present",
+        "rules[1] (compare, negate): '/price' is 39.0; expected not lt 100",
+        "rules[2] (type, negate): '/price' is number",
+        "rules[3] (json_schema, negate): input matches the schema",
+    ]
+    page = "Out of stock"
+    assert _check({"kind": "contains", "text": "Out", "negate": True}, text=page) == [
+        "rules[0] (contains, negate): 'Out' found"
+    ]
+    assert _check({"kind": "min_length", "chars": 3, "negate": True}, text=page) == [
+        "rules[0] (min_length, negate): 12 characters; fewer than 3 required"
+    ]
+
+
+def test_fail_mode_lists_a_rule_that_cannot_be_checked():
+    [problem] = _check(
+        {"kind": "compare", "path": "/sku", "op": "eq", "value": 1, "negate": True}
+    )
+
+    assert problem == "rules[0] (compare, negate): '/sku' is missing"
+
+
+def test_fail_mode_still_reports_only_the_json_error_when_input_is_not_json():
+    problems = _check(
+        {"kind": "contains", "text": "absent"},
+        {"kind": "present", "path": "/x"},
+        text="<html>",
+    )
+
+    assert len(problems) == 1 and problems[0].startswith("input is not JSON: ")
 
 
 # ---------------------------------------------------------------------------
@@ -362,13 +497,16 @@ async def test_clean_conversion_error_is_not_retryable():
     assert "RecursionError: too deep" in err.value.message
 
 
-async def _validate(rules, body: bytes, fetch=None):
+async def _validate(rules, body: bytes, fetch=None, when_unmet=None):
+    job = {"input_path": _IN, "rules": rules}
+    if when_unmet is not None:
+        job["when_unmet"] = when_unmet
     with patch("worker.content.fetch_bytes", new_callable=AsyncMock) as f:
         f.return_value = body
         f.side_effect = fetch
         return await ActivityEnvironment().run(
             ContentActivities(AsyncMock()).validate,
-            ValidateInput.model_validate({"input_path": _IN, "rules": rules}),
+            ValidateInput.model_validate(job),
         )
 
 
@@ -409,3 +547,175 @@ async def test_validate_minio_unreachable_is_retryable():
 
     assert err.value.type == STORAGE_TRANSIENT
     assert not err.value.non_retryable
+
+
+async def test_validate_fail_mode_reports_every_kind_of_problem_together():
+    with pytest.raises(ApplicationError) as err:
+        await _validate(
+            [
+                {"kind": "present", "path": "/price", "negate": True},
+                {"kind": "compare", "path": "/sku", "op": "gt", "value": 1},
+            ],
+            json.dumps(DOC).encode(),
+            when_unmet="fail",
+        )
+
+    assert err.value.type == VALIDATION_FAILED
+    assert err.value.message == (
+        "rules[0] (present, negate): '/price' is present; "
+        "rules[1] (compare): '/sku' is missing"
+    )
+
+
+async def test_validate_stop_mode_all_met_returns_met():
+    out = await _validate(
+        [
+            {"kind": "present", "path": "/price"},
+            {"kind": "contains", "text": "Sold out", "negate": True},
+        ],
+        json.dumps(DOC).encode(),
+        when_unmet="stop",
+    )
+
+    assert out == ValidateVerdict(outcome="met")
+
+
+async def test_validate_stop_mode_returns_the_first_rule_not_met():
+    out = await _validate(
+        [
+            {"kind": "present", "path": "/price"},
+            {"kind": "compare", "path": "/price", "op": "lt", "value": 10},
+            {"kind": "present", "path": "/sku"},
+        ],
+        json.dumps(DOC).encode(),
+        when_unmet="stop",
+    )
+
+    assert out == ValidateVerdict(
+        outcome="not_met",
+        rule_index=1,
+        rule={
+            "kind": "compare",
+            "path": "/price",
+            "op": "lt",
+            "value": 10,
+            "negate": False,
+        },
+        found=39.0,
+        expected=10,
+    )
+
+
+async def test_validate_stop_mode_on_a_null_price_stops_at_the_type_rule():
+    # The type rule decides before the compare that could not be checked is reached.
+    out = await _validate(
+        [
+            {"kind": "type", "path": "/price", "type": "number"},
+            {"kind": "compare", "path": "/price", "op": "lt", "value": 100},
+        ],
+        b'{"price": null}',
+        when_unmet="stop",
+    )
+
+    assert out.outcome == "not_met"
+    assert out.rule_index == 0
+    assert (out.found, out.expected) == ("null", "number")
+
+
+async def test_validate_stop_mode_rule_order_decides_against_input_that_is_not_json():
+    out = await _validate(
+        [
+            {"kind": "contains", "text": "Add to cart"},
+            {"kind": "present", "path": "/price"},
+        ],
+        b"<html>Out of stock</html>",
+        when_unmet="stop",
+    )
+
+    assert (out.outcome, out.rule_index) == ("not_met", 0)
+    assert out.expected == "Add to cart"
+
+
+async def test_validate_stop_mode_present_negate_on_an_html_page_cannot_be_checked():
+    with pytest.raises(ApplicationError) as err:
+        await _validate(
+            [{"kind": "present", "path": "/price", "negate": True}],
+            b"<html>Service unavailable</html>",
+            when_unmet="stop",
+        )
+
+    assert err.value.type == VALIDATION_UNVERIFIABLE
+    assert err.value.non_retryable
+    assert err.value.message.startswith(
+        "rules[0] (present, negate): input is not JSON: "
+    )
+
+
+async def test_validate_stop_mode_cannot_be_checked_names_the_rule_and_what_was_found():
+    with pytest.raises(ApplicationError) as err:
+        await _validate(
+            [
+                {"kind": "present", "path": "/name"},
+                {"kind": "compare", "path": "/name", "op": "lt", "value": 100},
+            ],
+            json.dumps(DOC).encode(),
+            when_unmet="stop",
+        )
+
+    assert err.value.type == VALIDATION_UNVERIFIABLE
+    assert err.value.non_retryable
+    assert err.value.message == "rules[1] (compare): '/name' is string, not a number"
+
+
+async def test_validate_stop_mode_verdict_keeps_the_rule_as_saved():
+    out = await _validate(
+        [{"kind": "json_schema", "schema": {"required": ["sku"]}, "negate": False}],
+        json.dumps(DOC).encode(),
+        when_unmet="stop",
+    )
+
+    assert out.rule == {
+        "kind": "json_schema",
+        "schema": {"required": ["sku"]},
+        "negate": False,
+    }
+    assert out.found == "'sku' is a required property"
+
+
+async def test_validate_stop_mode_bounds_a_large_found_value():
+    big = {"items": ["x" * 50] * 20}
+    out = await _validate(
+        [{"kind": "present", "path": "/items", "negate": True}],
+        json.dumps(big).encode(),
+        when_unmet="stop",
+    )
+
+    assert isinstance(out.found, str)
+    assert len(out.found) == 200 and out.found.endswith("...")
+
+
+@pytest.mark.parametrize(
+    ("rule", "body", "found", "expected"),
+    [
+        ({"kind": "min_length", "chars": 500}, b"short", 5, 500),
+        (
+            {"kind": "contains", "text": "short", "negate": True},
+            b"short",
+            None,
+            "short",
+        ),
+        ({"kind": "present", "path": "/sku"}, json.dumps(DOC).encode(), None, None),
+        (
+            {"kind": "type", "path": "/in_stock", "type": "number"},
+            json.dumps(DOC).encode(),
+            "boolean",
+            "number",
+        ),
+    ],
+)
+async def test_validate_stop_mode_found_and_expected_per_kind(
+    rule, body, found, expected
+):
+    out = await _validate([rule], body, when_unmet="stop")
+
+    assert (out.outcome, out.found, out.expected) == ("not_met", found, expected)

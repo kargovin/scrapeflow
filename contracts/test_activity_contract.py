@@ -182,9 +182,36 @@ def test_llm_worker_parses_every_validate_rule_kind():
     received = _decode(_encode(VALIDATE_INPUT), llm.ValidateInput)
 
     assert received.input_path == VALIDATE_INPUT.input_path
-    assert [r.model_dump(by_alias=True) for r in received.rules] == VALIDATE_RULES
+    dumped = [r.model_dump(by_alias=True, exclude_defaults=True) for r in received.rules]
+    assert dumped == VALIDATE_RULES
     # A bool stays a bool through the union: `eq true` must not become `eq 1`.
     assert received.rules[4].value is True
+
+
+def test_validate_input_defaults_to_fail_mode_and_unnegated_rules():
+    received = _decode(_encode(VALIDATE_INPUT), llm.ValidateInput)
+
+    assert received.when_unmet == "fail"
+    assert not any(r.negate for r in received.rules)
+
+
+def test_llm_worker_reads_stop_mode_and_negate_on_every_rule_kind():
+    rules = [{**r, "negate": True} for r in VALIDATE_RULES]
+    sent = api.ValidateInput(input_path="b/k", rules=rules, when_unmet="stop")
+    received = _decode(_encode(sent), llm.ValidateInput)
+
+    assert received.when_unmet == "stop"
+    assert all(r.negate for r in received.rules)
+    assert [r.model_dump(by_alias=True) for r in received.rules] == rules
+
+
+def test_a_validate_input_recorded_before_stop_mode_still_decodes():
+    # The shape every pre-J.1 history holds.
+    data = json.dumps({"input_path": "b/k", "rules": [{"kind": "present", "path": "/p"}]})
+    received = _decode(data.encode(), llm.ValidateInput)
+
+    assert received.when_unmet == "fail"
+    assert received.rules[0].negate is False
 
 
 def test_llm_worker_refuses_an_unknown_rule_kind():
@@ -246,6 +273,38 @@ def test_api_parses_the_clean_output():
     received = _decode(_encode(sent), api.CleanOutput)
 
     assert received.model_dump() == sent.model_dump()
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        llm.ValidateVerdict(outcome="met"),
+        llm.ValidateVerdict(
+            outcome="not_met",
+            rule_index=1,
+            rule={"kind": "compare", "path": "/price", "op": "lt", "value": 100, "negate": False},
+            found=120,
+            expected=100,
+        ),
+        llm.ValidateVerdict(
+            outcome="not_met",
+            rule_index=0,
+            rule={"kind": "json_schema", "schema": {"type": "object"}, "negate": True},
+            found={"nested": [1, None, True]},
+        ),
+    ],
+)
+def test_api_parses_the_validate_verdict(verdict):
+    received = _decode(_encode(verdict), api.ValidateVerdict)
+
+    assert received.model_dump() == verdict.model_dump()
+
+
+def test_api_parses_fail_mode_s_none():
+    # Every pre-J.1 history recorded Validate's result as null.
+    [payload] = converter.to_payloads([None])
+    [value] = converter.from_payloads([payload], [api.ValidateVerdict | None])
+    assert value is None
 
 
 def test_api_parses_the_go_worker_output():
@@ -346,6 +405,7 @@ def test_the_crawl_queue_registers_the_names_the_api_calls():
         (llm.LLMOutput, api.LLMOutput),
         (llm.StoredObject, api.StoredObject),
         (llm.CleanOutput, api.CleanOutput),
+        (llm.ValidateVerdict, api.ValidateVerdict),
     ],
 )
 def test_api_accepts_every_output_field_the_workers_send(producer, consumer):

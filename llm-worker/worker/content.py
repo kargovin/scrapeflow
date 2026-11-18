@@ -15,9 +15,10 @@ from .contracts import (
     CleanOutput,
     StoredObject,
     ValidateInput,
+    ValidateVerdict,
 )
 from .errors import TERMINAL, classify, describe
-from .rules import failures
+from .rules import failures, first_unmet, label
 from .storage import fetch_bytes, put
 
 log = structlog.get_logger()
@@ -25,6 +26,7 @@ log = structlog.get_logger()
 # ApplicationError.type values.
 CONTENT_FAILED = "ContentFailed"  # non-retryable
 VALIDATION_FAILED = "ValidationFailed"  # non-retryable
+VALIDATION_UNVERIFIABLE = "ValidationUnverifiable"  # non-retryable
 STORAGE_TRANSIENT = "StorageTransient"
 
 
@@ -75,9 +77,11 @@ class ContentActivities:
         return CleanOutput(result=StoredObject(path=path, size=len(markdown)))
 
     @activity.defn(name=VALIDATE_ACTIVITY)
-    async def validate(self, job: ValidateInput) -> None:
-        """Check the input object against every rule; raise naming each one that fails."""
+    async def validate(self, job: ValidateInput) -> ValidateVerdict | None:
+        """Fail mode: raise naming every rule not met. Stop mode: the first rule not met decides."""
         text = await self._read(job.input_path)
+        if job.when_unmet == "stop":
+            return await self._validate_stop(job, text)
         problems = await asyncio.to_thread(failures, job.rules, text)
         if problems:
             log.info("validate_failed", path=job.input_path, problems=problems)
@@ -85,3 +89,26 @@ class ContentActivities:
                 "; ".join(problems), type=VALIDATION_FAILED, non_retryable=True
             )
         log.info("validate_passed", path=job.input_path, rules=len(job.rules))
+        return None
+
+    async def _validate_stop(self, job: ValidateInput, text: str) -> ValidateVerdict:
+        first = await asyncio.to_thread(first_unmet, job.rules, text)
+        if first is None:
+            log.info("validate_passed", path=job.input_path, rules=len(job.rules))
+            return ValidateVerdict(outcome="met")
+        index, result = first
+        rule = job.rules[index]
+        if result.answer == "unverifiable":
+            problem = f"{label(index, rule)}: {result.problem}"
+            log.info("validate_unverifiable", path=job.input_path, problem=problem)
+            raise ApplicationError(
+                problem, type=VALIDATION_UNVERIFIABLE, non_retryable=True
+            )
+        log.info("validate_not_met", path=job.input_path, rule_index=index)
+        return ValidateVerdict(
+            outcome="not_met",
+            rule_index=index,
+            rule=rule.model_dump(mode="json", by_alias=True),
+            found=result.found,
+            expected=result.expected,
+        )
