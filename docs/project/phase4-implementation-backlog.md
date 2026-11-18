@@ -3218,6 +3218,49 @@ step 0 is Y.1's: `SELECT count(*) FROM crawls WHERE schedule_cron IS NOT NULL` i
 `POST /crawls` with `schedule_cron` → 422.
 **Depends on:** J.1, Y.1
 
+**Ships** (`main` `eea8344..develop`): `api/` (BUG-024 `57bb301`, J.1's contract `045f598`, Y.1 `8774907`) and
+`llm-worker/` (J.1). CI: `replay` → `build-api`, and `build-llm-worker`; no http or playwright image. Flux bumps
+`api`, `workflow-worker`, the cleanup CronJob and `llm-worker-temporal`. **No migration, no infra change.**
+**Order inside the push does not matter**: nothing sends `when_unmet` or `negate` until J-b, so an old LLM
+worker beside a new api (or the reverse) answers exactly as today. During the api's rolling update an old pod
+still reads and writes Y.1's four columns. That is safe: they stay in the table until Y.2.
+
+**Runbook** (owner-run; `curl` in your own terminal so the key stays out of any transcript,
+`KEY=<an API key>`, `B=https://scrapeflow.govindappa.com`):
+0. **Before (read-only, prod):**
+   - `SELECT count(*) FROM crawls WHERE schedule_cron IS NOT NULL;` → **record the number here** (Y.1, ADR-016
+     §14). Whatever it is stays ignored, as it always has been: nothing has ever run a crawl's schedule.
+   - `kubectl -n scrapeflow get deploy scrapeflow-llm-worker-temporal -o jsonpath='{.spec.template.spec.containers[0].image}'`
+     → note the tag (expected `main-…-722f54b…`, H.1). It is the LLM worker's rollback target.
+1. **Push `develop`, ff `main` to it, push.** Watch CI: `replay` (every recorded history) then `build-api`,
+   and `build-llm-worker`. Flux's image automation bumps the four manifests (one infra commit).
+   `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → `2/2` on the new tag;
+   `kubectl -n scrapeflow rollout status deploy/scrapeflow-llm-worker-temporal` and `deploy/scrapeflow-workflow-worker`
+   → rolled out.
+2. **Verify — unchanged paths:**
+   - **http job:** `curl -s -X POST $B/jobs -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d
+     '{"url":"https://example.com/"}'` → then `GET $B/jobs/<id>` → `completed`, and **`"diff_detected": null`**
+     (Y.1).
+   - **crawl:** `POST $B/crawls` `{"seed_url":"https://example.com/","max_pages":2}` → `201`, the body has **no
+     `schedule_cron`** key; `GET $B/crawls/<id>` → `completed`.
+   - **pipeline, fail-mode Validate (new LLM worker image, `content` queue):** create one —
+     `POST $B/pipelines` `{"name":"j2-validate","definition":{"blocks":[{"id":"fetch","type":"scrape","config":{"url":"https://example.com/"}},{"id":"clean","type":"clean","input":"fetch"},{"id":"guard","type":"validate","input":"clean","config":{"rules":[{"kind":"contains","text":"Example Domain"},{"kind":"contains","text":"Sold out"}]}}]}}`
+     → `201`; `POST $B/pipelines/<id>/runs` `{}` → `202`; `GET $B/pipelines/<id>/runs/<run_id>` → **`failed`**,
+     `error` ends with `rules[1] (contains): 'Sold out' not found` (rule 0 met, rule 1 not — today's fail-mode
+     message, byte for byte). Then soft-delete it: `DELETE $B/pipelines/<id>`. (Its few KB of outputs stay
+     charged — BUG-031, K.1.)
+3. **Verify — what changed:**
+   - **Y.1:** `POST $B/crawls` `{"seed_url":"https://example.org/","schedule_cron":"0 * * * *"}` → **`422`**,
+     `{"detail":"scheduled crawls are not supported"}`.
+   - **BUG-024:** `POST $B/jobs` `{"url":"http://100.64.0.1/"}` → **`400`**, `URL resolves to a private address:
+     100.64.0.1` (it was admitted before).
+4. Record step 0's count and the results in the handoff; mark J.2 and Y.1 ✅ in the status table.
+
+**Rollback:** an image revert — api, workflow-worker and the CronJob to `eea8344`'s tag, `llm-worker-temporal`
+to step 0's tag. Safe in either half: no migration, the old api image maps columns that still exist, and no
+caller sends J.1's new fields. Prefer a forward fix. **Do not run Y.2 (the column drop, rides K) until this
+release has fully rolled out.**
+
 #### J.3 — Migration 4.10: how runs and blocks end
 
 **Why:** ADR-014 §5a, §8b; one migration for PRD-019 and PRD-017 (the undo columns sit unused until M).
