@@ -112,7 +112,7 @@
 | I.1 | Alembic-on-startup made multi-replica safe; carries H.2's `nats_stream_seq` drop | 🔧 **Built 2026-10-29** (local, unreleased) — advisory lock in `migrations/env.py`, migration 4.9 `47a8f9f3f4e2`; ships with I.2 |
 | I.2 | 🚀 `replicas: 2`, `RollingUpdate`; JobNotifier per replica verified | ✅ **RELEASED 2026-10-29** — infra `5e9087e`, `main` `cd5c60e..eea8344` (carries I.1); rolling deploy 0/359 failed probes vs ~40 s down before. **Group I closed** |
 | **J** | **Conditional execution** (PRD-019 · ADR-014 except §7) | |
-| J.1 | LLM worker: Validate stop mode, reverse rules (`negate`), three answers | ⬜ |
+| J.1 | LLM worker: Validate stop mode, reverse rules (`negate`), three answers | 🔧 **Built 2026-11-18** (`045f598`, local, unreleased) — ships with J.2 |
 | J.2 | 🚀 Release J-a — workers first (J.1 + BUG-024 + Y.1) | ⬜ |
 | J.3 | Migration 4.10: block/run reason columns, `webhook_deliveries` widened for pipeline runs | ⬜ |
 | J.4 | Save-time config (`when_unmet`, `on_stop_outputs`, `negate`, `events`) + typed run inputs | ⬜ |
