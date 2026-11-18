@@ -136,6 +136,26 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-18 *(clock)*
 
+🧭 **TECH LEAD PASS — GROUPS J–P WRITTEN (2026-11-18, eighteenth session; docs only).** Owner: "assume the tech
+lead persona; read ADRs 14–16 and PRDs 17–19 and the bugs that can be fixed while coding these; build a backlog;
+slices or grouping by ADR?" Written into `docs/project/phase4-implementation-backlog.md` (status table + a *Groups
+J–P* section before *Docs track* + open items 11–18). **Not committed** (no commit was asked for).
+- **Answer: by slice, not by ADR.** ADR-014 ships across J and M (its own §10 puts `rollback` in PRD-017 slice 1);
+  ADR-016 across Y, K, L, M, N. Each group = one releasable slice; each task cites its ADR sections.
+- **Order:** J conditional execution (2 releases: J-a workers first, J-b api) → K pipeline deletes + monitors'
+  worker half (BUG-031, `changed`, Diff, Capture) → L monitors → M bucket sink + rollback + notices to
+  destinations (3-step release) → N approval → O Postgres → P email. Y (job-lane leftovers) rides J-a and K.
+- **Ride-alongs:** BUG-024 (J-a), BUG-030 pulled forward into J.8 (TL call), BUG-031 (K.1/L.5), BUG-018 (+029)
+  into J.9 — cheap now, `lib/useApi.ts` exists and only five old pages cache the token; BUG-006 via M.3's
+  `dependabot.yml`; BUG-032 optional M.13 after M proves NetworkPolicy enforcement; `host-slot` deprecation optional
+  on J.6. Not taken: BUG-019, -021, -004, -013 (`mcp/`), backups, admin pipeline stats.
+- **Found reading code:** the pipeline alert's secret is encrypted with `CREDENTIALS_ENCRYPTION_KEY`, not the key
+  `_secret` uses today (trap in J.7); `JobRunResponse.diff_detected` reads the column ADR-016 §14 drops (Y.1 keeps
+  it, always `null` — open item 16).
+- ✅ **Open items 11–18 all agreed by the owner** (structure, J's split release, BUG-030 in J.8, BUG-018 in J.9,
+  M.13, Y.1's `diff_detected`, L-before-M, N-after-M).
+- **Next:** J.1 (owner to choose walkthrough or "build it").
+
 ✅ **ADR-016 REVIEWED AND ACCEPTED (2026-11-18, seventeenth session, 12 rounds).** Owner: "accept adr". Plain-words
 walkthrough per section with examples, each claim checked against code; every round is a `Review round N` note at the
 top of the ADR. G1–G8 answered (G8 added in round 8: an approved run continues without re-asking for a slot — option
