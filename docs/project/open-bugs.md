@@ -1794,7 +1794,7 @@ random)
 **Discovered:** 2026-09-19, owner's report after the queue release — "after some time the
 frontend shows failed to load in the job list and user list". Pre-existing; not introduced by the
 `react-router-dom` 6 → 7 or `clerk-backend-api` 6 → 7 bumps in that release.
-**Status:** 🔴 **Open — owner's call 2026-09-19: tabled until after the Temporal pipeline.**
+**Status:** 🔧 **FIXED locally 2026-11-19 (J.9, `4fc099f`), unreleased — ships with J-b.** `Jobs`, `JobDetail`, `Users`, `ApiKeys`, `UsageStats` and `ResultViewer` call `useApi()` (a fresh `getToken()` per request); no `['token']` query is left in the SPA. The *a page left open > 2 min keeps loading* check is J.10's (it needs a signed-in browser). *(Was: 🔴 Open — owner's call 2026-09-19: tabled until after the Temporal pipeline.)*
 Not a Phase 4 item (backlog §4). Root cause read from the code; not yet confirmed against a
 captured 401 — the confirmation step is in *What to capture*.
 
