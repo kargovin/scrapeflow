@@ -14,15 +14,19 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.core.db import AsyncSessionLocal
-from app.core.ledger import record_object
+from app.core.ledger import objects_for_pipeline_run, record_object, release_objects
 from app.core.pipeline_status import notify_run
 from app.core.quota import storage_usage
 from app.models.pipeline import PipelineRun, PipelineRunBlock
+from app.models.storage_object import StorageObject
+from app.workflows.activities.job_runs import get_minio
 from app.workflows.pipeline import (
     CHECK_CANCELLED_ACTIVITY,
     MIRROR_BLOCK_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
+    OUTPUTS_LEFT_ERROR,
     RECORD_STORAGE_ACTIVITY,
+    RELEASE_RUN_OUTPUTS_ACTIVITY,
     MirrorBlockInput,
     MirrorRunInput,
     RecordStorageInput,
@@ -184,3 +188,39 @@ async def check_cancelled(input: RunRef) -> bool:
         if run is None:
             raise ApplicationError(f"no run {input.run_id}", non_retryable=True)
         return _cancel_requested(run)
+
+
+@activity.defn(name=RELEASE_RUN_OUTPUTS_ACTIVITY)
+async def release_run_outputs(input: RunRef) -> None:
+    """A stop's *delete* (ADR-014 §6): the ledger releases every object the run holds.
+
+    Commits what it released, then raises retryable naming what is left — ``release_objects``
+    never raises on a failed delete. Each attempt re-reads the rows.
+    """
+    run_id = uuid.UUID(input.run_id)
+    async with AsyncSessionLocal() as db:
+        rows = await objects_for_pipeline_run(db, run_id)
+        outcome = await release_objects(db, await get_minio(), rows, "pipeline_stop")
+        held = (
+            select(StorageObject.pipeline_run_block_id)
+            .join(PipelineRunBlock, PipelineRunBlock.id == StorageObject.pipeline_run_block_id)
+            .where(PipelineRunBlock.pipeline_run_id == run_id)
+        )
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(
+                PipelineRunBlock.pipeline_run_id == run_id,
+                PipelineRunBlock.output_ref.is_not(None),
+                PipelineRunBlock.collected_at.is_(None),
+                PipelineRunBlock.id.not_in(held),
+            )
+            .values(collected_at=datetime.now(UTC))
+        )
+        await db.commit()
+        if outcome.failed:
+            left = sorted(r.object_key for r in await objects_for_pipeline_run(db, run_id))
+            raise ApplicationError(
+                f"{len(left)} stored objects could not be deleted",
+                left,
+                type=OUTPUTS_LEFT_ERROR,
+            )

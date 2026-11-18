@@ -10,7 +10,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.workflows.job import RECORD_JOB_OBJECTS_ACTIVITY, JobLLM
-from app.workflows.pipeline import RUN_CANCELLED_ERROR, StorageUsage
+from app.workflows.pipeline import OUTPUTS_LEFT_ERROR, RUN_CANCELLED_ERROR, StorageUsage
 from app.workflows.steps import HostSlot
 from tests.replay.export_history import HISTORIES
 from tests.test_workflows_batch import Harness as BatchHarness
@@ -19,7 +19,17 @@ from tests.test_workflows_crawl import SITE, Frontier, _sitemaps, crawl_input
 from tests.test_workflows_crawl import Harness as CrawlHarness
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
-from tests.test_workflows_pipeline import CLEAN_GUARD, R6, RUN_INPUT, Harness
+from tests.test_workflows_pipeline import (
+    CLEAN_GUARD,
+    CLEAN_PATH,
+    R6,
+    RUN_INPUT,
+    SCRAPE_PATH,
+    Harness,
+    _met,
+    _not_met,
+    _stop_guard,
+)
 from tests.test_workflows_scheduled_job import Harness as ScheduledHarness
 
 
@@ -30,6 +40,12 @@ async def _webhook_flaky(input):
 
 async def _webhook_cancelled(input):
     raise ApplicationError("the run was cancelled", type=RUN_CANCELLED_ERROR, non_retryable=True)
+
+
+async def _outputs_left(input):
+    raise ApplicationError(
+        "2 stored objects could not be deleted", [CLEAN_PATH, SCRAPE_PATH], type=OUTPUTS_LEFT_ERROR
+    )
 
 
 async def _llm_overloaded(input):
@@ -68,6 +84,14 @@ SCENARIOS = {
         {"slots": [BUSY] * 1000, "during": _cancel_while_waiting},
         RUN_INPUT,
     ),
+    # J.6 — a stop-mode Validate (patch "validate-stop").
+    "harness_validate_stop_keep": ({"validate": _not_met}, _stop_guard("keep")),
+    "harness_validate_stop_delete": ({"validate": _not_met}, _stop_guard("delete")),
+    "harness_validate_stop_delete_gave_up": (
+        {"validate": _not_met, "release_outputs": _outputs_left},
+        _stop_guard("delete"),
+    ),
+    "harness_validate_stop_passed": ({"validate": _met}, _stop_guard("keep")),
 }
 
 

@@ -29,6 +29,7 @@ from app.workflows.activities.db import (
     mirror_block_status,
     mirror_run_status,
     record_storage,
+    release_run_outputs,
 )
 from app.workflows.activities.host_slots import acquire_host_slot, release_host_slot
 from app.workflows.activities.job_runs import (
@@ -88,6 +89,7 @@ async def main() -> None:
             mirror_block_status,
             mirror_run_status,
             record_storage,
+            release_run_outputs,
             check_cancelled,
             deliver_webhook,
             job_run_started,

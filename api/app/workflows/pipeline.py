@@ -14,6 +14,7 @@ with workflow.unsafe.imports_passed_through():
         BLOCK_OVERHEAD_SECONDS,
         CATALOG,
         HOST_SLOT_SECONDS,
+        RELEASE_OUTPUTS_TIMING,
         InputBinding,
         RunInputValue,
         Timing,
@@ -43,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
         ScrapeOutput,
         StoredObject,
         ValidateInput,
+        ValidateVerdict,
     )
     from app.workflows.queues import (
         CONTENT_QUEUE,
@@ -57,12 +59,18 @@ MIRROR_RUN_ACTIVITY = "mirror_run_status"
 RECORD_STORAGE_ACTIVITY = "record_storage"
 CHECK_CANCELLED_ACTIVITY = "check_cancelled"
 WEBHOOK_ACTIVITY = "deliver_webhook"
+RELEASE_RUN_OUTPUTS_ACTIVITY = "release_run_outputs"
+
+# ADR-012: a Validate's stop mode, its bound rule values and the stop path (ADR-014 §6, J.6).
+VALIDATE_STOP_PATCH = "validate-stop"
 
 # The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
 WEBHOOK_EVENT = "pipeline.result"
 
 # Raised non-retryable by an activity that finds its run cancelled (ADR-009 15d's fallback).
 RUN_CANCELLED_ERROR = "RunCancelled"
+# Raised retryable by release_run_outputs; its one detail is the object keys still held.
+OUTPUTS_LEFT_ERROR = "OutputsLeft"
 
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
 # ADR-014 §5a; each list matches its CHECK in migration 4.10 — a new value widens both.
@@ -196,6 +204,27 @@ def _block_options(timing: Timing, remaining_s: float) -> dict[str, Any]:
     return options
 
 
+def _bound_rules(block: ValidateBlock, inputs: dict[str, RunInputValue]) -> list[dict[str, Any]]:
+    """The rules as the worker reads them, each bound value replaced by its run input's."""
+    rules = []
+    for rule in block.config.rules:
+        dumped = rule.model_dump(mode="json", by_alias=True)
+        for field in ("value", "text"):
+            bound = getattr(rule, field, None)
+            if isinstance(bound, InputBinding):
+                dumped[field] = inputs[bound.input]
+        rules.append(dumped)
+    return rules
+
+
+def _kept_objects(exc: ActivityError) -> list[str]:
+    cause = exc.cause
+    if isinstance(cause, ApplicationError) and cause.type == OUTPUTS_LEFT_ERROR and cause.details:
+        return list(cause.details[0])
+    # Gave up without a count (e.g. timed out): the result is assumed still there.
+    return []
+
+
 def _scrape_url(block: ScrapeBlock, input: PipelineRunInput) -> str:
     url = block.config.url
     return str(input.inputs[url.input]) if isinstance(url, InputBinding) else str(url)
@@ -244,6 +273,7 @@ class PipelineWorkflow:
         for block in input.blocks:
             block_type = CATALOG[block.type]
             input_ref = refs.get(block.input) if block.input else None
+            verdict: ValidateVerdict | None = None
             if self._cancel_requested or (
                 await self._mirror_block(input.run_id, block.id, "running", input_ref=input_ref)
                 != "running"
@@ -259,10 +289,14 @@ class PipelineWorkflow:
                         block, input, input_ref, deadline, timing
                     )
                 else:
-                    objects = await self._finish(
+                    outcome = await self._finish(
                         self._execute(block, input, input_ref, deadline),
                         interruptible=block_type.kind == "effect",
                     )
+                    if isinstance(outcome, ValidateVerdict):
+                        verdict, objects = outcome, []
+                    else:
+                        objects = outcome
                 usage = None
                 if objects:
                     usage = await self._finish(
@@ -291,6 +325,10 @@ class PipelineWorkflow:
                     input.run_id, "failed", error=f"{block.id}: {message}", failed_block_id=block.id
                 )
                 raise ApplicationError(f"{block.id}: {message}", non_retryable=True) from exc
+
+            if verdict is not None and verdict.outcome == "not_met":
+                assert isinstance(block, ValidateBlock)
+                return await self._stop(input, block, verdict, input_ref, result_path, wall)
 
             # ADR-009 §5: content blocks write an object; effect blocks pass their input on.
             output_ref = objects[0].path if block_type.kind == "content" else input_ref
@@ -328,12 +366,59 @@ class PipelineWorkflow:
                 self._cancel_requested = True
         return task.result()
 
+    async def _stop(
+        self,
+        input: PipelineRunInput,
+        block: ValidateBlock,
+        verdict: ValidateVerdict,
+        input_ref: str | None,
+        result_path: str | None,
+        wall: str | None,
+    ) -> str | None:
+        """A stop-mode Validate's rule was not met: the run ends completed, here (ADR-014 §6)."""
+        assert verdict.rule_index is not None
+        # The rule as saved: a bound value stays a binding; `expected` holds what was compared.
+        saved = block.config.rules[verdict.rule_index].model_dump(mode="json", by_alias=True)
+        recorded = verdict.model_dump(mode="json", exclude={"outcome"}) | {"rule": saved}
+        await self._mirror_block(
+            input.run_id, block.id, "completed", output_ref=input_ref, verdict=recorded
+        )
+        notes = [wall] if wall else []
+        if block.config.on_stop_outputs == "delete":
+            try:
+                await self._finish(
+                    workflow.execute_activity(
+                        RELEASE_RUN_OUTPUTS_ACTIVITY,
+                        RunRef(run_id=input.run_id),
+                        task_queue=WORKFLOW_QUEUE,
+                        # Its own full budget: the Validate's need reserves it (Timing.after).
+                        **_block_options(RELEASE_OUTPUTS_TIMING, RELEASE_OUTPUTS_TIMING.budget),
+                    )
+                )
+                result_path = None
+            except ActivityError as exc:
+                # E3: the run still ends stopped; what is left stays on disk and charged.
+                kept = _kept_objects(exc)
+                if kept and result_path not in kept:
+                    result_path = None
+                count = f"{len(kept)} stored objects" if kept else "stored objects"
+                notes.append(f"stopped; {count} could not be deleted and are kept and charged")
+        await self._mirror_run(
+            input.run_id,
+            "completed",
+            result_path=result_path,
+            error="; ".join(notes) or None,
+            stopped_at_block_id=block.id,
+            stop_reason="rule_not_met",
+        )
+        return result_path
+
     async def _mirror_block(
         self,
         run_id: str,
         block_id: str,
         status: Literal["running", "waiting", "completed", "failed"],
-        **fields: str | None,
+        **fields: Any,
     ) -> RunStatus:
         return await self._finish(
             _db(
@@ -388,8 +473,11 @@ class PipelineWorkflow:
         input: PipelineRunInput,
         input_ref: str | None,
         deadline: datetime,
-    ) -> list[StoredObject]:
-        """Runs the block's activity on its queue; returns what it stored, result first."""
+    ) -> list[StoredObject] | ValidateVerdict:
+        """Runs the block's activity on its queue; returns what it stored, result first.
+
+        A stop-mode Validate returns its verdict instead (it stores nothing).
+        """
         remaining_s = (deadline - workflow.now()).total_seconds()
         if remaining_s <= 0:
             raise ApplicationError("the run's time budget is spent", non_retryable=True)
@@ -459,6 +547,19 @@ class PipelineWorkflow:
         if isinstance(block, ValidateBlock):
             if input_ref is None:
                 raise ApplicationError("validate has no input", non_retryable=True)
+            if workflow.patched(VALIDATE_STOP_PATCH):
+                verdict = await workflow.execute_activity(
+                    VALIDATE_ACTIVITY,
+                    ValidateInput(
+                        input_path=input_ref,
+                        rules=_bound_rules(block, input.inputs),
+                        when_unmet=block.config.when_unmet,
+                    ),
+                    task_queue=CONTENT_QUEUE,
+                    result_type=ValidateVerdict | None,
+                    **options,
+                )
+                return verdict if verdict is not None else []
             await workflow.execute_activity(
                 VALIDATE_ACTIVITY,
                 ValidateInput(

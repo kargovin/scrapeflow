@@ -26,6 +26,7 @@ from app.pipelines.catalog import (
     BLOCK_OVERHEAD_SECONDS,
     CLEAN,
     LLM_EXTRACT,
+    RELEASE_OUTPUTS_TIMING,
     SCRAPE,
     VALIDATE,
     WEBHOOK,
@@ -46,18 +47,22 @@ from app.workflows.activities.contracts import (
     ScrapeOutput,
     StoredObject,
     ValidateInput,
+    ValidateVerdict,
 )
 from app.workflows.activities.db import (
     check_cancelled,
     mirror_block_status,
     mirror_run_status,
     record_storage,
+    release_run_outputs,
 )
 from app.workflows.pipeline import (
     DB_ACTIVITY_SECONDS,
     MIRROR_BLOCK_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
+    OUTPUTS_LEFT_ERROR,
     RECORD_STORAGE_ACTIVITY,
+    RELEASE_RUN_OUTPUTS_ACTIVITY,
     RUN_CANCELLED_ERROR,
     WEBHOOK_ACTIVITY,
     LLMKey,
@@ -157,6 +162,10 @@ async def _validate_ok(input: ValidateInput) -> None:
     return None
 
 
+async def _release_ok(input: RunRef) -> None:
+    return None
+
+
 async def _webhook_ok(input: WebhookInput) -> None:
     return None
 
@@ -173,6 +182,7 @@ class Harness:
         webhook=_webhook_ok,
         usage=None,
         slots=(),
+        release_outputs=_release_ok,
     ):
         self.calls: list = []
         self.acquired: list[HostSlotInput] = []
@@ -195,6 +205,8 @@ class Harness:
         self._clean = clean
         self._validate = validate
         self._webhook = webhook
+        self._release_outputs = release_outputs
+        self.release_info: list = []
 
     def activities(self):
         @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
@@ -232,7 +244,7 @@ class Harness:
             return await self._clean(input)
 
         @activity.defn(name=VALIDATE_ACTIVITY)
-        async def validate(input: ValidateInput) -> None:
+        async def validate(input: ValidateInput) -> ValidateVerdict | None:
             self.validated.append(input)
             self.content_info.append(activity.info())
             return await self._validate(input)
@@ -253,7 +265,14 @@ class Harness:
         async def release(input: HostSlotRelease) -> None:
             self.released.append(input)
 
+        @activity.defn(name=RELEASE_RUN_OUTPUTS_ACTIVITY)
+        async def release_outputs(input: RunRef) -> None:
+            self.calls.append(input)
+            self.release_info.append(activity.info())
+            return await self._release_outputs(input)
+
         workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
+        workflow_queue.append(release_outputs)
         return workflow_queue, scrape, llm, [clean, validate]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
@@ -679,6 +698,179 @@ async def test_a_failed_rule_stops_the_run_before_the_llm_is_billed():
     ]
 
 
+# --- J.6: a stop-mode Validate (patch "validate-stop") ------------------------------------------
+
+PRICE_RULE = {"kind": "compare", "path": "/price", "op": "lt", "value": {"$input": "max_price"}}
+
+
+def _stop_guard(on_stop_outputs="keep", rules=None, max_price=100):
+    """fetch -> clean -> guard (stop mode) -> extract; guard reads max_price."""
+    run_input = _with_content_blocks(
+        ("clean", "clean", {}),
+        (
+            "guard",
+            "validate",
+            {
+                "rules": rules or [PRICE_RULE],
+                "when_unmet": "stop",
+                "on_stop_outputs": on_stop_outputs,
+            },
+        ),
+    )
+    return run_input.model_copy(update={"inputs": {**run_input.inputs, "max_price": max_price}})
+
+
+NOT_MET = ValidateVerdict(
+    outcome="not_met",
+    rule_index=0,
+    rule={"kind": "compare", "path": "/price", "op": "lt", "value": 100, "negate": False},
+    found=120,
+    expected=100,
+)
+RECORDED_VERDICT = {
+    "rule_index": 0,
+    "rule": {**PRICE_RULE, "negate": False},
+    "found": 120,
+    "expected": 100,
+}
+
+
+async def _not_met(input):
+    return NOT_MET
+
+
+async def _met(input):
+    return ValidateVerdict(outcome="met")
+
+
+async def test_a_stop_with_keep_ends_the_run_completed_at_the_validate():
+    h = Harness(validate=_not_met)
+    result = await h.run(_stop_guard("keep"))
+
+    assert result == CLEAN_PATH
+    assert h.extracted == []  # stopped before the LLM is billed
+    assert len(h.validated) == 1
+    assert h.calls[-2:] == [
+        MirrorBlockInput(
+            run_id="r1",
+            block_id="guard",
+            status="completed",
+            output_ref=CLEAN_PATH,
+            verdict=RECORDED_VERDICT,
+        ),
+        MirrorRunInput(
+            run_id="r1",
+            status="completed",
+            result_path=CLEAN_PATH,
+            stopped_at_block_id="guard",
+            stop_reason="rule_not_met",
+        ),
+    ]
+    assert not any(isinstance(c, RunRef) for c in h.calls)
+
+
+async def test_a_stop_with_delete_releases_the_runs_outputs_then_ends_without_a_result():
+    h = Harness(validate=_not_met)
+    result = await h.run(_stop_guard("delete"))
+
+    assert result is None
+    assert h.calls[-3:] == [
+        MirrorBlockInput(
+            run_id="r1",
+            block_id="guard",
+            status="completed",
+            output_ref=CLEAN_PATH,
+            verdict=RECORDED_VERDICT,
+        ),
+        RunRef(run_id="r1"),
+        MirrorRunInput(
+            run_id="r1",
+            status="completed",
+            result_path=None,
+            stopped_at_block_id="guard",
+            stop_reason="rule_not_met",
+        ),
+    ]
+    # Its own full budget, on the workflow queue, whatever the run has left.
+    [info] = h.release_info
+    assert info.task_queue == WORKFLOW_QUEUE
+    assert info.schedule_to_close_timeout == timedelta(seconds=RELEASE_OUTPUTS_TIMING.budget)
+
+
+async def test_a_delete_that_gives_up_still_stops_and_says_what_it_kept():
+    async def left(input):
+        raise ApplicationError(
+            "2 stored objects could not be deleted",
+            [CLEAN_PATH, SCRAPE_PATH],
+            type=OUTPUTS_LEFT_ERROR,
+        )
+
+    h = Harness(validate=_not_met, release_outputs=left)
+    result = await h.run(_stop_guard("delete"))
+
+    assert result == CLEAN_PATH  # still on disk, still retrievable
+    assert len(h.release_info) == RELEASE_OUTPUTS_TIMING.maximum_attempts
+    assert h.calls[-1] == MirrorRunInput(
+        run_id="r1",
+        status="completed",
+        result_path=CLEAN_PATH,
+        error="stopped; 2 stored objects could not be deleted and are kept and charged",
+        stopped_at_block_id="guard",
+        stop_reason="rule_not_met",
+    )
+
+
+async def test_a_delete_that_removed_the_result_but_not_the_rest_points_at_nothing():
+    async def left(input):
+        raise ApplicationError(
+            "1 stored objects could not be deleted", [SCRAPE_PATH], type=OUTPUTS_LEFT_ERROR
+        )
+
+    h = Harness(validate=_not_met, release_outputs=left)
+    assert await h.run(_stop_guard("delete")) is None
+    assert h.calls[-1].result_path is None
+    assert h.calls[-1].error.startswith("stopped; 1 stored objects could not be deleted")
+
+
+async def test_a_met_stop_mode_validate_passes_through_to_the_next_block():
+    h = Harness(validate=_met)
+    result = await h.run(_stop_guard("keep"))
+
+    assert result == LLM_PATH
+    assert len(h.extracted) == 1
+    [validated] = h.validated
+    assert validated.when_unmet == "stop"
+    guard = [c for c in h.calls if isinstance(c, MirrorBlockInput) and c.block_id == "guard"]
+    assert guard[-1] == MirrorBlockInput(
+        run_id="r1", block_id="guard", status="completed", output_ref=CLEAN_PATH
+    )
+    assert h.calls[-1] == MirrorRunInput(run_id="r1", status="completed", result_path=LLM_PATH)
+
+
+async def test_bound_rule_values_are_the_run_inputs_by_the_time_the_worker_sees_them():
+    contains = {"kind": "contains", "text": {"$input": "phrase"}, "negate": True}
+    run_input = _stop_guard("keep", rules=[PRICE_RULE, contains], max_price=99.5)
+    run_input = run_input.model_copy(
+        update={"inputs": {**run_input.inputs, "phrase": "Out of stock"}}
+    )
+    h = Harness(validate=_met)
+    await h.run(run_input)
+
+    [validated] = h.validated
+    assert validated.rules == [
+        {**PRICE_RULE, "value": 99.5, "negate": False},
+        {"kind": "contains", "text": "Out of stock", "negate": True},
+    ]
+
+
+async def test_a_fail_mode_validate_says_so_and_ends_the_run_as_before():
+    h = Harness()
+    await h.run(CLEAN_GUARD)
+    [validated] = h.validated
+    assert validated.when_unmet == "fail"
+    assert not any(isinstance(c, RunRef) for c in h.calls)
+
+
 async def test_content_block_timeouts_come_from_the_catalog():
     h = Harness()
     await h.run(CLEAN_GUARD)
@@ -1097,6 +1289,139 @@ def test_mirror_inputs_recorded_before_j5_still_decode():
     [block] = converter.from_payloads(old_block, [MirrorBlockInput])
     assert (run.failed_block_id, run.stopped_at_block_id, run.stop_reason) == (None, None, None)
     assert (block.verdict, block.status_reason, block.reason_block_id) == (None, None, None)
+
+
+class _FakeMinio:
+    """remove_object succeeds unless the key is in ``fail``."""
+
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+        self.removed: list[str] = []
+
+    async def remove_object(self, bucket, key):
+        if f"{bucket}/{key}" in self.fail:
+            raise RuntimeError("minio down")
+        self.removed.append(f"{bucket}/{key}")
+
+
+async def _stored_run(user_id):
+    """A stopped-at-guard run: fetch and clean each hold an object; guard passed clean's on."""
+    run = await _run_rows(
+        user_id,
+        (
+            ("fetch", "scrape", "completed"),
+            ("clean", "clean", "completed"),
+            ("guard", "validate", "completed"),
+            ("extract", "llm_extract", "pending"),
+        ),
+    )
+    tag = uuid.uuid4().hex[:8]
+    keys = {
+        "fetch": f"scrapeflow-results/history/{tag}-fetch/scrape.html",
+        "clean": f"scrapeflow-results/history/{tag}-clean/clean.md",
+    }
+    sizes = {"fetch": 4000, "clean": 300}
+    for block_id, key in keys.items():
+        await record_storage(
+            RecordStorageInput(
+                run_id=str(run.id),
+                block_id=block_id,
+                objects=[StoredObject(path=key, size=sizes[block_id])],
+            )
+        )
+    async with AsyncSessionLocal() as db:
+        for block_id, ref in (("fetch", keys["fetch"]), ("clean", keys["clean"])):
+            await db.execute(
+                update(PipelineRunBlock)
+                .where(
+                    PipelineRunBlock.pipeline_run_id == run.id,
+                    PipelineRunBlock.block_id == block_id,
+                )
+                .values(output_ref=ref)
+            )
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(PipelineRunBlock.pipeline_run_id == run.id, PipelineRunBlock.block_id == "guard")
+            .values(output_ref=keys["clean"])
+        )
+        await db.commit()
+    return run, keys
+
+
+async def _used(user_id) -> int:
+    async with AsyncSessionLocal() as db:
+        return (await db.get(UserQuota, user_id)).storage_bytes_used
+
+
+async def _held(run_id) -> list[str]:
+    async with AsyncSessionLocal() as db:
+        return sorted(
+            (
+                await db.scalars(
+                    select(StorageObject.object_key)
+                    .join(
+                        PipelineRunBlock,
+                        PipelineRunBlock.id == StorageObject.pipeline_run_block_id,
+                    )
+                    .where(PipelineRunBlock.pipeline_run_id == run_id)
+                )
+            ).all()
+        )
+
+
+async def test_release_run_outputs_frees_exactly_the_runs_bytes_and_marks_blocks_collected(
+    db_user, monkeypatch
+):
+    run, keys = await _stored_run(db_user.id)
+    before = await _used(db_user.id)
+    fake = _FakeMinio()
+
+    async def get_fake():
+        return fake
+
+    monkeypatch.setattr("app.workflows.activities.db.get_minio", get_fake)
+
+    await release_run_outputs(RunRef(run_id=str(run.id)))
+    await release_run_outputs(RunRef(run_id=str(run.id)))  # a retry after a lost reply
+
+    assert await _used(db_user.id) == before - 4300
+    assert sorted(fake.removed) == sorted(keys.values())
+    assert await _held(run.id) == []
+    collected = {b: (await _block(run.id, b)).collected_at is not None for b in keys | {"guard": 0}}
+    assert collected == {"fetch": True, "clean": True, "guard": True}
+    # A block that never ran has nothing to collect.
+    assert (await _block(run.id, "extract")).collected_at is None
+
+
+async def test_release_run_outputs_commits_what_it_freed_and_raises_naming_the_rest(
+    db_user, monkeypatch
+):
+    run, keys = await _stored_run(db_user.id)
+    before = await _used(db_user.id)
+    fake = _FakeMinio(fail={keys["fetch"]})
+
+    async def get_fake():
+        return fake
+
+    monkeypatch.setattr("app.workflows.activities.db.get_minio", get_fake)
+
+    with pytest.raises(ApplicationError) as exc_info:
+        await release_run_outputs(RunRef(run_id=str(run.id)))
+    assert exc_info.value.type == OUTPUTS_LEFT_ERROR
+    assert not exc_info.value.non_retryable
+    assert list(exc_info.value.details) == [[keys["fetch"]]]
+    assert await _used(db_user.id) == before - 300
+    assert await _held(run.id) == [keys["fetch"]]
+    assert (await _block(run.id, "fetch")).collected_at is None
+    assert (await _block(run.id, "clean")).collected_at is not None
+
+    # The next attempt touches only what is left.
+    fake.fail.clear()
+    fake.removed.clear()
+    await release_run_outputs(RunRef(run_id=str(run.id)))
+    assert fake.removed == [keys["fetch"]]
+    assert await _used(db_user.id) == before - 4300
+    assert (await _block(run.id, "fetch")).collected_at is not None
 
 
 async def test_record_storage_charges_once_and_reports_usage(db_user):
