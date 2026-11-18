@@ -121,7 +121,7 @@
 | J.7 | Failure alerts (`queue_failure_alerts`, patch `webhook-events`, secret arms, meters) | 🔧 **Built 2026-11-19** (`f2a1513` rows, writers, secret arms, meters, admin reads; `c298014` the workflow's alert-only skip), local, unreleased — ships with J.10. `app/core/pipeline_alerts.py`. The mirror queues alerts only when it is the call that leaves the run `failed` (a failure reported after a cancel queues nothing), then starts them after its commit; the trigger tries the start too and leaves the row to the sweep. `rollback` lists are constant empty until M fills them. **Beyond the task text (ADR-014 §8d):** an alert-only Webhook's need is the block overhead only (`Timing.calls_activity`); three tests that called `WEBHOOK.timing(None)` now pass a config. 22 new tests, suite 908, mutation 21/21 (one test tightened: the 7-day rate needed a delivered pipeline row to see the filter) |
 | J.8 | BUG-030: `send_signed_post`, resolve once and connect to that IP (pulled forward — open item 13) | 🔧 **Built 2026-11-19** (`bac7a16`, local, unreleased) — ships with J.10. `app/core/egress.py`; both senders keep their outcome handling (job lane: an address refusal is still not an attempt; a certificate mismatch is one, and final). **My calls:** userinfo stays in the pinned URL (httpx sends it as Basic auth, as before); an unresolvable name stays a final refusal (the old check's behaviour). Live-checked against example.com from the api container. The bytes test compares the two bodies as JSON (JSONB reorders the stored payload's keys) and each signature over its own bytes. 18 new tests, suite 926, mutation 10/10 |
 | J.9 | Run reads + SPA for stops, skips, alerts (+ BUG-018, BUG-029 optional) | 🔧 **Built 2026-11-19** (`6abc040` run reads + alerts + live fields; `4fc099f` BUG-018; `dd0676a` SPA), local, unreleased — ships with J.10. **My calls:** a skipped block with no reason reads `status_reason: "not_recorded"` (an identifier; the SPA words it); the run page words the verdict from the rule as saved plus `expected` ("/price is below input max_price (100); found 120"); old failed runs fall back to the error's `"<block>: "` prefix; a number input that does not parse is sent as typed so the trigger's 422 names it. **Not taken:** BUG-029 (optional); a rolling-back banner (nothing writes `rollback_deadline` until M). **Not verified here:** the compose click-through — the SPA signs in through Clerk and this session has no account; `tsc -b` and `vite build` pass and the wording was run under Node. Moved to J.10's owner checks. 7 new API tests (suite 930), mutation 5/5 |
-| J.10 | 🚀 Release J-b — PRD-019 + its gate | ⬜ |
+| J.10 | 🚀 Release J-b — PRD-019 + its gate | 🔧 **Compose gate passed 2026-11-19** (`ac3c1ef`, 42/42 + worker kill + could-not-start by hand); **runbook ready — the owner releases** (`main` push → api image, migration 4.10) |
 | **K** | **Pipeline deletes + the monitors' worker half** (Monitors slice 0) | |
 | K.1 | BUG-031: delete a run, delete a pipeline permanently; `record_storage` / mirror changes | ⬜ |
 | K.2 | LLM worker: the `changed` rule + SHA-256 fingerprint | ⬜ |
@@ -3391,6 +3391,89 @@ migration 4.10 on startup.
 **Verify:** owner — one stop pipeline (stopped label, skipped reasons), one breaks-only alert delivered, an
 existing pipeline unchanged.
 **Depends on:** J.2, J.6–J.9
+
+**Compose gate — passed 2026-11-19** (`ac3c1ef`). The harness stays for K–P: `contracts/fixtures/pipeline-gate/server.py`
+(a shop, a stand-in OpenAI-compatible LLM that counts its calls, a webhook receiver that logs every POST, all on the
+public-range fixture network), compose service `pipeline-fixture` (profile `gate`; `llm-worker-temporal` now joins
+that network), and `api/scripts/pipeline_gate.py` — a throwaway user, removed afterwards (`--keep` to inspect):
+
+```
+docker compose --profile gate up -d pipeline-fixture
+docker compose restart workflow-worker          # no hot reload
+docker compose exec -T api uv run python -m scripts.pipeline_gate [scenario …]
+```
+
+**42/42 checks** through the real API, `PipelineWorkflow`, the three workers and `WebhookDeliveryWorkflow`: the £80/£120
+stop with a bound threshold (verdict, skip reasons, nothing sent on a stop, the extraction kept and retrievable, the
+list label, 40 and 200 with no edit, `"100"` and a missing input → 422); fail mode and a definition without the new
+fields unchanged; delete (storage back to exactly where it was, blocks collected, result 404); a stop before the LLM
+makes no LLM call; bound and reversed `contains`; `[type, compare]` on a null price stops at rule 0, a bare `compare`
+fails as unverifiable; breaks-only skipped as alert-only on success, one signed `pipeline.failed` on a Scrape failure,
+listed as delivered; OK + breaks sends the result then the alert to the same URL; receiver down → the run fails at
+once, the alert waits (`HTTP 503`, attempt 1); a cancel sends nothing and skips as `cancelled`.
+**By hand, same day:** (1) **worker kill** — the workflow worker killed while the LLM block ran after a passed
+stop-mode Validate, restarted 8 s later: the run completed, its history schedules `Validate` once, `LLMExtract` once,
+`deliver_webhook` once, and the stand-in LLM saw one call. (2) **could not start** — Temporal stopped, a breaks-only
+pipeline triggered: `503`, the run `failed` with both blocks `not_started`, the alert row pending; Temporal started
+again and the `webhook-sweep` Schedule delivered it, signed, ~4.5 min later. **Not run on compose:** the time budget
+running out and the Webhook block's own failure (unit-tested, J.7 — a block's own retries take ≈2.9 h); the SPA
+(Clerk sign-in) — step 3 below; the bucket criterion (M's gate). Four compose histories exported
+(`compose_validate_stop_{keep,passed}`, `compose_alert_only_{webhook_skipped,scrape_failed}`): replay now also decodes
+a verdict the real LLM worker returned. Suite 930, replay 51.
+
+**Ships** (`main` `036870c..develop`): `api/` + `frontend/` only — J.3 (migration 4.10), J.4, J.5–J.9, BUG-030,
+BUG-018. CI: `replay` → `build-api`; no worker image (J.1, the LLM worker's half, shipped in J-a). Flux bumps `api`,
+`workflow-worker` and the cleanup CronJob. **Migration 4.10 on api startup**: columns added, CHECKs widened, one
+partial unique index — no view touched, nothing an old pod reads changes. **No infra change.**
+
+**Rollout window** (both Deployments `RollingUpdate`): an old api pod refuses a save that uses a new field (422) and an
+old workflow-worker pod cannot decode a new run's first task (retried until a new pod takes it) — both heal on their
+own (ADR-014 §9). Nothing is in flight that the patches change: no run before this release carries a stop-mode
+Validate or an `events` list.
+
+**Runbook** (owner-run; `curl` in your own terminal, `KEY=<an API key>`, `B=https://scrapeflow.govindappa.com`,
+`HOOK=<a receiver URL you can watch, e.g. a webhook.site URL>`):
+0. **Before (read-only, prod):**
+   - `SELECT version_num FROM alembic_version;` → expect `47a8f9f3f4e2` (I.1's 4.9).
+   - `SELECT count(*) FROM pipeline_runs WHERE status = 'running';` → record it (expected 0).
+   - `kubectl -n scrapeflow get deploy scrapeflow-api -o jsonpath='{.spec.template.spec.containers[0].image}'` → note the
+     tag (expected `main-…-036870c…`): the rollback target.
+1. **Push `develop`, ff `main` to it, push.** Watch CI: `replay` then `build-api` (no worker builds). Flux bumps the
+   api, workflow-worker and CronJob manifests. `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → `2/2` on
+   the new tag; `… deploy/scrapeflow-workflow-worker` → rolled out. Then `SELECT version_num FROM alembic_version;` →
+   **`678c7e339d80`**, and `SELECT count(*) FROM quota_active_submissions;` returns (the views still read).
+2. **Verify — what changed** (save each JSON body to a file if your shell quotes awkwardly):
+   - **A stop:** `POST $B/pipelines` `{"name":"jb-stop","definition":{"blocks":[{"id":"fetch","type":"scrape","config":{"url":"https://example.com/"}},{"id":"clean","type":"clean","input":"fetch"},{"id":"guard","type":"validate","input":"clean","config":{"rules":[{"kind":"contains","text":"Sold out"}],"when_unmet":"stop"}},{"id":"notify","type":"webhook","input":"guard","config":{"url":"'$HOOK'"}}]}}`
+     → `201`; `POST $B/pipelines/<id>/runs` `{}` → `202`; `GET …/runs/<run_id>` → **`completed`**,
+     `"stopped_at_block_id": "guard"`, `"stop_reason": "rule_not_met"`; `guard.verdict.rule.text` = `"Sold out"`;
+     `notify` → `"status": "skipped"`, `"status_reason": "stopped"`, `"reason_block_id": "guard"`; **nothing arrives at
+     `$HOOK`**; `GET …/runs` → that run carries `stopped_at_block_id`.
+   - **A breaks-only alert:** `POST $B/pipelines` `{"name":"jb-alert","definition":{"blocks":[{"id":"fetch","type":"scrape","config":{"url":"https://example.com/"}},{"id":"clean","type":"clean","input":"fetch"},{"id":"guard","type":"validate","input":"clean","config":{"rules":[{"kind":"contains","text":"Sold out"}]}},{"id":"notify","type":"webhook","input":"guard","config":{"url":"'$HOOK'","secret":"jb-secret","events":["pipeline.failed"]}}]}}`
+     → run it → **`failed`**, `"failed_block_id": "guard"`; within seconds `$HOOK` receives **one** POST:
+     `"event": "pipeline.failed"`, `"block_id": "notify"`, `"failed_block_id": "guard"`, `"error"` ending `'Sold out' not
+     found`, header `X-ScrapeFlow-Signature` = HMAC-SHA256 of the body with `jb-secret`; `GET …/runs/<run_id>` →
+     `"alerts": [{"block_id": "notify", "status": "delivered", …}]`. (BUG-030: that POST went to the checked address.)
+   - **An existing pipeline unchanged:** re-run a pipeline saved before today (e.g. the R6 recipe) → same outcome as
+     before; any skipped block of an **older** run now reads `"status_reason": "not_recorded"`.
+   - **Typed inputs:** a pipeline with `"inputs":{"max_price":{"type":"number"}}` refuses `{"inputs":{"max_price":"100"}}`
+     with a `422` naming `max_price`.
+3. **SPA** (signed in, `/app/dashboard/pipelines`) — the checks J.9 could not run here:
+   - open `jb-stop`, click **Run**: the run page updates live to `completed`, shows *Stopped at guard — rule 1 not met:
+     contains 'Sold out'*, and `notify`'s Details read *skipped — the run stopped at guard*; the run list shows
+     *stopped at guard* beside the pill;
+   - `jb-alert`'s run page lists the alert under **Failure alerts** as delivered;
+   - a pipeline with a `number` input runs from the form (no 422);
+   - leave **Jobs** or **Users** open for > 2 min: it keeps loading (BUG-018).
+4. Soft-delete the two test pipelines (`DELETE $B/pipelines/<id>`; their few KB stay charged — BUG-031, K.1). Record
+   step 0's values and the results here; mark J.3–J.10 ✅ in the status table; BUG-018 and BUG-030 closed.
+
+**Rollback:** prefer a forward fix. An image revert (api, workflow-worker, CronJob to step 0's tag) leaves 4.10
+applied — harmless to the old code — but has two costs: a run that took a `validate-stop` or `webhook-events` path
+and is still open fails replay on the old workflow worker (it stays `running` until the new image returns), and the
+old delivery activity signs any pending **pipeline alert** row with an empty key (its `_secret` had no pipeline
+arm). Before reverting: `PIPELINES_ENABLED=false`, let running runs finish, and mark pending pipeline alert rows
+`exhausted` (`UPDATE webhook_deliveries SET status='exhausted', last_error='rolled back' WHERE pipeline_run_id IS NOT
+NULL AND status='pending';`).
 
 ---
 
