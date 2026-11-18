@@ -20,6 +20,7 @@ from tests.test_workflows_crawl import Harness as CrawlHarness
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
 from tests.test_workflows_pipeline import (
+    ALERT_ONLY,
     CLEAN_GUARD,
     CLEAN_PATH,
     R6,
@@ -46,6 +47,10 @@ async def _outputs_left(input):
     raise ApplicationError(
         "2 stored objects could not be deleted", [CLEAN_PATH, SCRAPE_PATH], type=OUTPUTS_LEFT_ERROR
     )
+
+
+async def _llm_unauthorised(input):
+    raise ApplicationError("401 invalid key", type="LLMFailed", non_retryable=True)
 
 
 async def _llm_overloaded(input):
@@ -92,6 +97,9 @@ SCENARIOS = {
         _stop_guard("delete"),
     ),
     "harness_validate_stop_passed": ({"validate": _met}, _stop_guard("keep")),
+    # J.7 — an alert-only Webhook (patch "webhook-events").
+    "harness_alert_only_webhook_skipped": ({}, ALERT_ONLY),
+    "harness_alert_only_webhook_run_failed": ({"llm": _llm_unauthorised}, ALERT_ONLY),
 }
 
 

@@ -12,6 +12,7 @@ from app.pipelines.catalog import (
     SCRAPE,
     WEBHOOK,
     ScrapeConfigV1,
+    WebhookConfigV1,
 )
 from app.pipelines.validator import PipelineValidationError, validate
 from app.settings import settings
@@ -418,7 +419,10 @@ def test_run_budget_shorter_than_its_blocks_rejected():
     needed = _needed(r6())
     found = one_problem({**r6(), "time_budget_seconds": needed - 1})
     assert found.startswith(f"time_budget_seconds {needed - 1} is shorter than its blocks need")
-    assert f"notify {WEBHOOK.timing(None).budget + BLOCK_OVERHEAD_SECONDS}" in found
+    assert (
+        f"notify {WEBHOOK.timing(WebhookConfigV1(url='https://h.example/')).budget + BLOCK_OVERHEAD_SECONDS}"
+        in found
+    )
 
 
 def test_run_budget_covering_its_blocks_accepted():
@@ -470,7 +474,7 @@ def test_only_scrape_blocks_get_the_long_queue_timer_and_a_host_wait():
 
 
 def test_webhook_ladder_matches_adr_15c():
-    timing = WEBHOOK.timing(None)
+    timing = WEBHOOK.timing(WebhookConfigV1(url="https://h.example/"))
     assert (timing.start_to_close, timing.maximum_attempts) == (20, 5)
     assert (timing.initial_interval, timing.backoff_coefficient, timing.maximum_interval) == (
         30,
@@ -773,3 +777,15 @@ def test_a_stop_that_deletes_needs_the_release_time_too():
 
     assert delete.need - keep.need == RELEASE_OUTPUTS_TIMING.budget
     assert delete.budget == keep.budget  # the Validate activity itself is unchanged
+
+
+def test_an_alert_only_webhook_needs_only_the_block_overhead():
+    from app.pipelines.catalog import BLOCK_OVERHEAD_SECONDS, WEBHOOK, WebhookConfigV1
+
+    url = "https://hooks.example.com/in"
+    alert_only = WEBHOOK.timing(WebhookConfigV1(url=url, events=["pipeline.failed"]))
+    both = WEBHOOK.timing(WebhookConfigV1(url=url, events=["pipeline.failed", "pipeline.result"]))
+    default = WEBHOOK.timing(WebhookConfigV1(url=url))
+
+    assert alert_only.need == BLOCK_OVERHEAD_SECONDS
+    assert both.need == default.need == default.budget + BLOCK_OVERHEAD_SECONDS

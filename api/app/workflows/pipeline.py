@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
         CATALOG,
         HOST_SLOT_SECONDS,
         RELEASE_OUTPUTS_TIMING,
+        WEBHOOK_RESULT_EVENT,
         InputBinding,
         RunInputValue,
         Timing,
@@ -63,9 +64,11 @@ RELEASE_RUN_OUTPUTS_ACTIVITY = "release_run_outputs"
 
 # ADR-012: a Validate's stop mode, its bound rule values and the stop path (ADR-014 §6, J.6).
 VALIDATE_STOP_PATCH = "validate-stop"
+# ADR-012: a Webhook block that only sends pipeline.failed is skipped on a succeeding run (J.7).
+WEBHOOK_EVENTS_PATCH = "webhook-events"
 
 # The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
-WEBHOOK_EVENT = "pipeline.result"
+WEBHOOK_EVENT = WEBHOOK_RESULT_EVENT
 
 # Raised non-retryable by an activity that finds its run cancelled (ADR-009 15d's fallback).
 RUN_CANCELLED_ERROR = "RunCancelled"
@@ -274,6 +277,20 @@ class PipelineWorkflow:
             block_type = CATALOG[block.type]
             input_ref = refs.get(block.input) if block.input else None
             verdict: ValidateVerdict | None = None
+            if (
+                isinstance(block, WebhookBlock)
+                and WEBHOOK_RESULT_EVENT not in block.config.events
+                and workflow.patched(WEBHOOK_EVENTS_PATCH)
+            ):
+                if self._cancel_requested:
+                    return await self._cancel(input.run_id)
+                # E1: it sends only when the run breaks, through webhook_deliveries (§8).
+                await self._mirror_block(
+                    input.run_id, block.id, "skipped", status_reason="alert_only"
+                )
+                assert input_ref is not None
+                refs[block.id] = input_ref
+                continue
             if self._cancel_requested or (
                 await self._mirror_block(input.run_id, block.id, "running", input_ref=input_ref)
                 != "running"
@@ -417,7 +434,7 @@ class PipelineWorkflow:
         self,
         run_id: str,
         block_id: str,
-        status: Literal["running", "waiting", "completed", "failed"],
+        status: Literal["running", "waiting", "completed", "failed", "skipped"],
         **fields: Any,
     ) -> RunStatus:
         return await self._finish(

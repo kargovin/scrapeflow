@@ -1469,15 +1469,20 @@ async def test_db_activities_on_a_missing_row_fail_without_retry(db_user):
 HOOK_URL = "https://hooks.example.com/in"
 
 
-def _with_webhook(secret: str | None = "secret-ciphertext") -> PipelineRunInput:
+def _with_webhook(
+    secret: str | None = "secret-ciphertext", events: list[str] | None = None
+) -> PipelineRunInput:
     stored = json.loads(json.dumps(DEFINITION))
+    config = {"url": HOOK_URL, "secret": None}
+    if events is not None:
+        config["events"] = events
     stored["blocks"].append(
         {
             "id": "notify",
             "type": "webhook",
             "input": "extract",
             "config_schema_version": 1,
-            "config": {"url": HOOK_URL, "secret": None},
+            "config": config,
             "secrets": {},
         }
     )
@@ -1493,6 +1498,46 @@ def _with_webhook(secret: str | None = "secret-ciphertext") -> PipelineRunInput:
 
 
 R6 = _with_webhook()
+
+
+ALERT_ONLY = _with_webhook(events=["pipeline.failed"])
+
+
+async def test_an_alert_only_webhook_is_skipped_on_a_succeeding_run_without_an_activity():
+    h = Harness()
+    result = await h.run(ALERT_ONLY)
+
+    assert result == LLM_PATH
+    assert h.delivered == []
+    assert h.calls[-2:] == [
+        MirrorBlockInput(
+            run_id="r1", block_id="notify", status="skipped", status_reason="alert_only"
+        ),
+        MirrorRunInput(run_id="r1", status="completed", result_path=LLM_PATH),
+    ]
+
+
+async def test_a_webhook_sending_both_events_still_delivers_the_result():
+    h = Harness()
+    await h.run(_with_webhook(events=["pipeline.failed", "pipeline.result"]))
+    assert len(h.delivered) == 1
+
+
+async def test_a_failure_before_an_alert_only_webhook_fails_the_run_as_any_failure_does():
+    async def llm(input):
+        raise ApplicationError("401 invalid key", type="LLMFailed", non_retryable=True)
+
+    h = Harness(llm=llm)
+    result = await h.run(ALERT_ONLY)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert h.delivered == []
+    assert h.calls[-1] == MirrorRunInput(
+        run_id="r1",
+        status="failed",
+        error="extract: LLMFailed: 401 invalid key",
+        failed_block_id="extract",
+    )
 
 
 async def test_webhook_delivers_the_last_content_blocks_object_and_passes_it_on():

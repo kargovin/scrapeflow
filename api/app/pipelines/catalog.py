@@ -115,6 +115,8 @@ class Timing:
     host_slot: int = 0
     # Time the run spends after the activity: a stop's release of stored outputs (ADR-014 §6).
     after: int = 0
+    # False: the block never calls its activity — an alert-only Webhook (ADR-014 §8d).
+    calls_activity: bool = True
 
     @property
     def budget(self) -> int:
@@ -132,6 +134,8 @@ class Timing:
     @property
     def need(self) -> int:
         """What the run budgets for the block: its budget, its host-slot wait, the DB overhead."""
+        if not self.calls_activity:
+            return BLOCK_OVERHEAD_SECONDS
         return self.budget + self.host_slot + self.after + BLOCK_OVERHEAD_SECONDS
 
 
@@ -295,6 +299,7 @@ class ValidateConfigV1(_Config):
 
 
 WEBHOOK_EVENTS = ("pipeline.result", "pipeline.failed")
+WEBHOOK_RESULT_EVENT = "pipeline.result"
 
 
 class WebhookConfigV1(_Config):
@@ -448,12 +453,13 @@ WEBHOOK = BlockType(
     produces=_pass_through,
     secret_fields=frozenset({"secret"}),
     # ADR-009 §15b/§15c: 10 s POST inside a ~20 s attempt; 30 s x10 capped at 7200 s, 5 attempts.
-    timing=lambda _config: Timing(
+    timing=lambda config: Timing(
         start_to_close=20,
         maximum_attempts=5,
         initial_interval=30,
         backoff_coefficient=10,
         maximum_interval=7200,
+        calls_activity=WEBHOOK_RESULT_EVENT in config.events,
     ),
 )
 

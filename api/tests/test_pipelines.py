@@ -24,7 +24,7 @@ from app.models.llm_keys import UserLLMKey
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.user import User
 from app.models.user_quota import UserQuota
-from app.pipelines.catalog import LLM_EXTRACT, WEBHOOK
+from app.pipelines.catalog import LLM_EXTRACT, WEBHOOK, WebhookConfigV1
 from app.pipelines.definition import parse_definition
 from app.settings import settings
 from app.workflows.client import get_temporal, get_temporal_or_none
@@ -892,7 +892,10 @@ async def test_a_waiting_webhook_bound_is_one_attempt_once_the_engine_is_told(
     untold = (await client.post(f"{url}/cancel", headers=headers)).json()
 
     assert told["still_running"] == ["notify"]
-    assert told["upper_bound_seconds"] == WEBHOOK.timing(None).start_to_close
+    assert (
+        told["upper_bound_seconds"]
+        == WEBHOOK.timing(WebhookConfigV1(url="https://h.example/")).start_to_close
+    )
     # Unreachable engine: the fallback waits out the backoff, up to the whole horizon.
     assert untold["upper_bound_seconds"] > 2.6 * 3600
 
