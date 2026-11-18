@@ -293,7 +293,6 @@ async def admin_list_jobs(
             run_created_at=run.created_at,
             status=run.status,
             result_path=run.result_path,
-            diff_detected=run.diff_detected,
             error=run.error,
             completed_at=run.completed_at,
         )
@@ -326,7 +325,6 @@ async def admin_get_job(
         run_created_at=run.created_at,
         status=run.status,
         result_path=run.result_path,
-        diff_detected=run.diff_detected,
         error=run.error,
         completed_at=run.completed_at,
     )

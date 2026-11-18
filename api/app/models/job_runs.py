@@ -35,10 +35,9 @@ class JobRun(Base):
         default="v2",
     )
     result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    diff_detected: Mapped[bool | None] = mapped_column(nullable=True)
-    diff_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # diff_detected, diff_summary and content_hash are unmapped and still in the table
+    # until Y.2's migration drops them; autogenerate proposes the drop until then.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    content_hash: Mapped[str | None] = mapped_column(VARCHAR(16), nullable=True)
     warnings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     # Pre-ledger marker (migration 3.18 → P8). Not written since P8; read only by the
     # legacy branch in core/ledger.py so a pre-cutover object is decremented once and

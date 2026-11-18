@@ -18,6 +18,7 @@ class CrawlCreate(BaseModel):
     engine: Engine = Engine.http
     webhook_url: AnyHttpUrl | None = None
     respect_robots: bool = True
+    # Refused when set (422); kept so the refusal is ours, not silently ignored.
     schedule_cron: str | None = None
 
     @field_validator("seed_url", mode="after")
@@ -58,7 +59,6 @@ class CrawlResponse(BaseModel):
     engine: str
     webhook_url: str | None
     respect_robots: bool
-    schedule_cron: str | None
     total_queued: int
     total_completed: int
     total_failed: int

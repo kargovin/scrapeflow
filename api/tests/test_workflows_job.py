@@ -9,7 +9,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import select, text
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -583,6 +583,14 @@ async def _row(run_id) -> JobRun:
         return await db.get(JobRun, run_id)
 
 
+async def _content_hash(run_id) -> str | None:
+    # Unmapped since Y.1; read the column directly until Y.2 drops it.
+    async with AsyncSessionLocal() as db:
+        return await db.scalar(
+            text("SELECT content_hash FROM job_runs WHERE id = :id"), {"id": run_id}
+        )
+
+
 async def _deliveries(run_id) -> list[WebhookDelivery]:
     async with AsyncSessionLocal() as db:
         return list(
@@ -672,7 +680,7 @@ async def test_record_charges_once_and_stores_the_content_hash(db_user):
         quota = await db.get(UserQuota, db_user.id)
     assert [(r.job_run_id, r.bytes) for r in rows] == [(run.id, 1234)]
     assert quota.storage_bytes_used == 1234
-    assert (await _row(run.id)).content_hash == HASH
+    assert await _content_hash(run.id) is None
 
 
 async def test_record_charges_every_object_of_the_stage(db_user):
@@ -931,7 +939,8 @@ async def test_a_job_run_completes_end_to_end_on_the_real_mirrors(db_user, worke
 
     assert await _run_real(run, scrape) == page
     row = await _row(run.id)
-    assert (row.status, row.result_path, row.content_hash) == ("completed", page, HASH)
+    assert (row.status, row.result_path) == ("completed", page)
+    assert await _content_hash(run.id) is None
     assert await _ledger([page]) == [page]
     # The real limiter: a lease in Redis while the scrape ran, gone after.
     assert held_during_scrape == [1]

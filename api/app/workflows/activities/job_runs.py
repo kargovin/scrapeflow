@@ -196,8 +196,6 @@ async def record_job_objects(input: RecordJobObjectsInput) -> str:
             await record_object(
                 db, user_id=user_id, object_key=obj.path, size=obj.size, job_run_id=run.id
             )
-        if input.content_hash is not None:
-            run.content_hash = input.content_hash
         await db.commit()
         return run.status
 

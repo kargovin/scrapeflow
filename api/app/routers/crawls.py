@@ -106,6 +106,11 @@ async def create_crawl(
     _: None = Depends(check_rate_limit),
     admit: Admit = Depends(check_crawl_quota),
 ) -> CrawlResponse:
+    if body.schedule_cron is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="scheduled crawls are not supported",
+        )
     seed_url = str(body.seed_url)
     loop = get_running_loop()
     await loop.run_in_executor(None, validate_no_ssrf, seed_url)
@@ -145,7 +150,6 @@ async def create_crawl(
         engine=body.engine.value,
         webhook_url=body.webhook_url,
         respect_robots=body.respect_robots,
-        schedule_cron=body.schedule_cron,
     )
     db.add(crawl)
     await db.commit()

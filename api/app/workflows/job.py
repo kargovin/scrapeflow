@@ -58,7 +58,7 @@ class JobLLM(BaseModel):
 class RecordJobObjectsInput(BaseModel):
     run_id: str
     objects: list[StoredObject]
-    # The scrape's; written to job_runs.content_hash.
+    # The scrape's; ignored since Y.1, still sent so the workflow body is unchanged.
     content_hash: str | None = None
 
 

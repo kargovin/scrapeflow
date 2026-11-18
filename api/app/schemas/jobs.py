@@ -152,6 +152,7 @@ class JobResponse(BaseModel):
     run_id: uuid.UUID
     # The run's own creation time; created_at is the job's.
     run_created_at: datetime | None = None
+    # Always null: jobs keep no change detection (ADR-016 §14).
     diff_detected: bool | None = None
     created_at: datetime
     updated_at: datetime

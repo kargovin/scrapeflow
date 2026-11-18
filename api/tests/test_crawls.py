@@ -53,6 +53,7 @@ async def test_create_crawl_creates_rows(client, auth_headers, bypass_ssrf, engi
     assert "id" in data
 
     assert data["dropped"] == {}
+    assert "schedule_cron" not in data
 
     crawl_id = uuid.UUID(data["id"])
     async with AsyncSessionLocal() as db:
@@ -85,6 +86,30 @@ async def test_create_crawl_whose_workflow_cannot_start_is_failed(
     assert (crawl.status, crawl.error) == ("failed", "could not start workflow: engine down")
     assert crawl.completed_at is not None
     assert [(d.event, d.payload["status"]) for d in deliveries] == [("crawl.failed", "failed")]
+
+
+async def test_create_crawl_with_a_schedule_is_refused(client, auth_headers, bypass_ssrf, engine):
+    seed = f"https://{uuid.uuid4().hex}.local/"
+    response = await client.post(
+        "/crawls", json={"seed_url": seed, "schedule_cron": "0 * * * *"}, headers=auth_headers
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "scheduled crawls are not supported"
+    async with AsyncSessionLocal() as db:
+        assert await db.scalar(select(Crawl.id).where(Crawl.seed_url == seed)) is None
+    engine.start.assert_not_awaited()
+
+
+async def test_create_crawl_with_a_null_schedule_is_accepted(
+    client, auth_headers, bypass_ssrf, engine
+):
+    seed = f"https://{uuid.uuid4().hex}.local/"
+    response = await client.post(
+        "/crawls", json={"seed_url": seed, "schedule_cron": None}, headers=auth_headers
+    )
+
+    assert response.status_code == 201
 
 
 async def test_create_crawl_ssrf_rejected(client, auth_headers):

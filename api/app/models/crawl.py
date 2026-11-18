@@ -32,7 +32,7 @@ class Crawl(Base):
     engine: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="http")
     webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     respect_robots: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-    schedule_cron: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # schedule_cron: unmapped, still in the table until Y.2's migration drops it.
     total_queued: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     total_completed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     total_failed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
