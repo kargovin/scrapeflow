@@ -168,7 +168,7 @@
 | P.1 | The Email block (its sending, test and alert rows shipped in M.14) | ⬜ |
 | P.2 | 🚀 Release P | ⬜ |
 | **Y** | **Job-lane leftovers** (ADR-016 §14) | |
-| Y.1 | Release A — stop using: crawl `schedule_cron` refused, `content_hash` unwritten, four columns unmapped (rides J-a) | ⬜ |
+| Y.1 | Release A — stop using: crawl `schedule_cron` refused, `content_hash` unwritten, four columns unmapped (rides J-a) | 🔧 **Built 2026-11-18** (`8774907`, local, unreleased) — ships with J.2 |
 | Y.2 | Release B — drop the four columns, delete `core/diff.py` (rides K) | ⬜ |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ✅ written 2026-10-29, owner review 2026-10-30; Architect pass ADR-014 Accepted 2026-11-18 |
@@ -3226,9 +3226,10 @@ step 0 is Y.1's: `SELECT count(*) FROM crawls WHERE schedule_cron IS NOT NULL` i
 `stop_reason`, `failed_block_id`, `rollback_deadline` (+ CHECKs). `webhook_deliveries` + `pipeline_run_id`
 (→ `pipeline_runs` CASCADE), `block_id`, both CHECKs widened, `UNIQUE (pipeline_run_id, block_id, event) WHERE
 pipeline_run_id IS NOT NULL`. Models. Standing autogenerate procedure (`pause api`), delete the dedup false
-positive.
+positive. ⚠️ **Also delete the four `drop_column`s autogenerate proposes** (`job_runs.content_hash`,
+`diff_detected`, `diff_summary`, `crawls.schedule_cron` — unmapped by Y.1, dropped by Y.2, not here).
 **Verify:** round trip up/down/up; both quota views still read (no view dropped or recreated — §5c);
-`alembic check` shows only the dedup false positive.
+`alembic check` shows only the dedup false positive and, until Y.2, Y.1's four unmapped columns.
 **Depends on:** —
 
 #### J.4 — Save-time config and typed run inputs
