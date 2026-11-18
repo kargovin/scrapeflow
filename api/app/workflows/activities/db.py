@@ -13,8 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.core import webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.core.ledger import objects_for_pipeline_run, record_object, release_objects
+from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
 from app.core.quota import storage_usage
 from app.models.pipeline import PipelineRun, PipelineRunBlock
@@ -142,8 +144,14 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
                 )
                 .values(status="skipped", status_reason=reason, reason_block_id=reason_block_id)
             )
+        # In the transaction that sets failed (ADR-014 §8a); never on a stop or a cancel.
+        alerts = input.status == "failed" and run.status == "failed"
+        if alerts:
+            alerts = await queue_failure_alerts(db, run) > 0
         await notify_run(db, run)
         await db.commit()
+        if alerts:
+            await webhook_delivery.start_pending(activity.client, db, pipeline_run_id=run.id)
         return run.status
 
 

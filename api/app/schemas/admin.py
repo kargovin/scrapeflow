@@ -25,11 +25,14 @@ class AdminUserDetailResponse(AdminUserResponse):
 
 class AdminWebhookDeliveryResponse(BaseModel):
     id: uuid.UUID
-    # Exactly one of the three owners; a crawl's row has no run.
+    # Exactly one of the four owners; a crawl's row and a pipeline alert have no job run.
     job_id: uuid.UUID | None = None
     batch_id: uuid.UUID | None = None
     crawl_id: uuid.UUID | None = None
     run_id: uuid.UUID | None = None
+    # A pipeline run's failure alert, and the block that sends it.
+    pipeline_run_id: uuid.UUID | None = None
+    block_id: str | None = None
     webhook_url: str
     payload: dict
     status: str

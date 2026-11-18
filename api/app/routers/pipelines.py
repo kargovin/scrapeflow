@@ -19,9 +19,11 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.auth.dependencies import auth_from_token, get_current_user
+from app.core import webhook_delivery
 from app.core.db import get_db
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.minio import get_minio
+from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
 from app.core.quota import admit
 from app.core.rate_limit import check_rate_limit
@@ -644,7 +646,11 @@ async def create_run(
         for block in run_blocks:
             block.status = "skipped"
             block.status_reason = "not_started"
+        alerts = await queue_failure_alerts(db, run)
         await db.commit()
+        if alerts:
+            # The engine is likely down: the sweep sends what this cannot start.
+            await webhook_delivery.start_pending(lambda: temporal, db, pipeline_run_id=run_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"run_id": str(run_id), "error": run.error},

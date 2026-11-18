@@ -340,6 +340,31 @@ async def test_start_failure_marks_the_run_failed(
     assert run.failed_block_id is None
 
 
+async def test_a_run_that_could_not_start_queues_its_failure_alert(
+    client, headers, key, db_user, temporal, resolves_to
+):
+    from app.models.webhook_delivery import WebhookDelivery
+
+    definition = recipe(key.id)
+    definition["blocks"][2]["config"]["events"] = ["pipeline.result", "pipeline.failed"]
+    pipeline = await _create(client, headers, definition)
+    temporal.start_workflow.side_effect = RuntimeError("engine down")
+    resp = await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)
+    assert resp.status_code == 503
+    [run] = await _runs(db_user.id)
+    async with AsyncSessionLocal() as db:
+        [alert] = (
+            await db.scalars(
+                select(WebhookDelivery).where(WebhookDelivery.pipeline_run_id == run.id)
+            )
+        ).all()
+    assert (alert.block_id, alert.event, alert.status) == ("notify", "pipeline.failed", "pending")
+    assert alert.payload["error"] == "could not start workflow: engine down"
+    assert alert.payload["failed_block_id"] is None
+    # Its start was tried too (and failed with the engine): the sweep sends it.
+    assert temporal.start_workflow.await_count == 2
+
+
 async def test_the_r6_recipe_runs_with_its_webhook_secret_and_pipeline_id(
     client, headers, key, db_user, temporal, resolves_to
 ):

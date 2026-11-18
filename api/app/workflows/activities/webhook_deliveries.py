@@ -1,4 +1,4 @@
-"""Job, batch and crawl webhooks — the deleted ``webhook_loop.py``'s attempt, one call per attempt (F.4).
+"""Job, batch, crawl and pipeline-alert webhooks — the deleted ``webhook_loop.py``'s attempt, one call per attempt (F.4).
 
 The wire contract is unchanged, byte for byte: the row's payload as JSON, HMAC-SHA256 over it with
 the job's or batch's secret (``b""`` when there is none — a crawl has none),
@@ -19,9 +19,11 @@ import structlog
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from app.core import webhook_delivery
 from app.core.db import AsyncSessionLocal
+from app.core.pipeline_alerts import alert_secret
 from app.core.security import validate_no_ssrf_core
 from app.models.batch import Batch
 from app.models.job import Job
@@ -61,16 +63,25 @@ def _apply_backoff(delivery: WebhookDelivery, error: str) -> None:
 
 
 async def _secret(db, delivery: WebhookDelivery) -> bytes:
-    encrypted = None
+    # One arm per owner: a missed arm would sign with b"" silently.
+    key = settings.llm_key_encryption_key
     if delivery.job_id:
         job = await db.get(Job, delivery.job_id)
         encrypted = job.webhook_secret if job else None
     elif delivery.batch_id:
         batch = await db.get(Batch, delivery.batch_id)
         encrypted = batch.webhook_secret if batch else None
+    elif delivery.crawl_id:
+        return b""
+    elif delivery.pipeline_run_id:
+        # Encrypted by routers/pipelines.py:_encrypt_secret, not with the jobs' key.
+        key = settings.credentials_encryption_key
+        encrypted = await alert_secret(db, delivery)
+    else:
+        raise ApplicationError(f"webhook delivery {delivery.id} has no owner", non_retryable=True)
     if encrypted is None:
         return b""
-    return Fernet(settings.llm_key_encryption_key).decrypt(encrypted.encode())
+    return Fernet(key).decrypt(encrypted.encode())
 
 
 @activity.defn(name=ATTEMPT_WEBHOOK_ACTIVITY)
