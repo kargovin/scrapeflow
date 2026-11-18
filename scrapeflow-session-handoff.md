@@ -33,7 +33,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Open bugs (BUG-004 → BUG-032) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
-| PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass complete — **ADR-014** + **ADR-015** Accepted 2026-11-18); **PRD-018** (Draft, owner review complete 2026-11-05; Architect pass → ADR-016 next) |
+| PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass complete — **ADR-014** + **ADR-015** Accepted 2026-11-18); **PRD-018** (Draft, owner review complete 2026-11-05; Architect pass drafted 2026-11-18 as **ADR-016**, Draft, not reviewed) |
 | Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
 | **Phase 4 implementation backlog — the ordered task list (Tech Lead, 2026-09-20)** | `docs/project/phase4-implementation-backlog.md` — groups A–I are ADR-009 §16's named steps; one task per session; 🚀 marks the release points; its status table is the tracker. **Eight open items at the bottom need Architect/owner answers before the tasks that cite them** |
@@ -135,6 +135,32 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 ---
 
 ## Current state — as of 2026-11-18 *(clock)*
+
+📐 **ADR-016 DRAFTED (2026-11-18, seventeenth session; docs only).** Owner: "start the ADR-016 architect pass".
+`docs/adr/ADR-016-monitors.md`, **Draft, not reviewed**. Answers PRD-018 OQ-1–14 and ADR-015's LLM-key carry. Read
+against code (pipeline/scheduled-job workflows, schedules, admission, mirrors, quota, ledger, catalog, run trigger,
+job permanent delete, LLM-key delete, admin stats, the views' pipeline arms, the LLM worker's Validate).
+- **Shape:** a Temporal Schedule per monitor (ADR-013's policy, copied), `admit_monitor_check` per firing
+  (checks before `lock_user`, meters, overlap in the DB as well as `SKIP`), the check a child `PipelineWorkflow`.
+  Baseline = one indexed query on `baseline_eligible` (written by the workflow with the outcome), newest by
+  `created_at`; fingerprints + baseline paths handed in `PipelineRunInput.monitor`, carried values as ordinary inputs
+  from the baseline's `captured_values`.
+- **Change gate:** rule `{"kind": "changed"}`, alone in a stop-mode Validate; SHA-256 of the input bytes in the
+  Validate activity; `on_stop_outputs` written explicitly at save (delete at the first gate).
+- **Diff + Capture** activities on the content queue, before their block is mirrored completed; summary ≤ 16 KiB,
+  full diff as a charged `diff.json`; never "no change".
+- **Self-pause** = `monitors.consecutive_failures` moved by the writer that ends a check; **`monitor_events`** = one
+  row per situation (count + first/last), which is also "notice once"; notices = event + `webhook_deliveries` row
+  once destinations exist.
+- **Approval (slice 2):** answer row-first (conditional), signal as wake-up, `resolve_approval` reads back; the run
+  deadline moves back by the wait; the tick closes on `check_settled` so `SKIP` stops dropping firings; supersede
+  at the later check's first gate.
+- **BUG-031 (slice 0):** run / pipeline / monitor-with-checks deletes, job lane's in-flight rule (cancel, delete now;
+  `record_storage` locks the run and drops objects of a gone run; mirrors read a gone run as cancelled).
+- **Escalations G1–G7** for the owner (counted skip episodes, LLM-key delete refused, refused firing = failed check,
+  no "monitor deleted" label, one Approval block + wait not budgeted, gate = lone `changed` rule, `diff_detected`
+  true on a change).
+- **Next (owner):** review ADR-016 section by section.
 
 📐 **ADR-015 REVIEWED; ADR-014 + ADR-015 ACCEPTED (2026-11-18, sixteenth session).** The owner reviewed
 `ADR-015-delivery-sinks.md` in **9 rounds** (plain-words walkthrough with examples per section; each round is a
@@ -1806,8 +1832,8 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Next: the Architect pass on PRD-018 → ADR-016** (OQ-1–14, plus two carries from ADR-015's review: an
-   LLM key deleted under a monitor, and notices via `webhook_deliveries.kind`). BUG-031 is Monitors' slice 0.
+0. **Next: the owner's review of ADR-016** (`docs/adr/ADR-016-monitors.md`, drafted 2026-11-18; G1–G7 to answer).
+   BUG-031 is Monitors' slice 0.
    Then build order: PRD-019 (ADR-014) before PRD-018; PRD-017 (ADR-015) in parallel. Also owed:
    - **Owner's deferred code reviews** — C.4–C.12, E.3–E.10, F.1–F.7.
    - **Backlog edits carried from PRD-018's review** — open item 10's answer (e); §3's crawl row "refused; not
@@ -1855,6 +1881,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-18 (ADR-016 draft close):** `develop` = ADR-016 commit on `217ffcf`, 8 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-015 review + acceptance close):** `develop` = `86bfae6`, 6 ahead of `origin/develop` (`b8c3900`), **not pushed** — includes BUG-024's fix `57bb301` (code, unreleased); `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-05 (PRD-018 review close):** `develop` = `a8a9b63`, 4 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched.
 - **2026-11-03 (ADR-014 review + ADR-012 acceptance close):** `develop` = `f51baba`, 2 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched.
@@ -2021,6 +2048,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-11-18 *(clock, seventeenth)* | **📐 ADR-016 drafted (Monitors, PRD-018's Architect pass), Draft.** Handoff staleness fixed first (`217ffcf`). PRD-018, ADR-014/015 and the code read; OQ-1–14 + the LLM-key carry answered; G1–G7 escalated | ADR-016 commit |
 | 2026-11-18 *(clock, sixteenth)* | **📐 ADR-015 owner review — 9 rounds, complete; ADR-014 + ADR-015 Accepted.** Plain-words walkthrough per section with examples, each claim checked against code; F1–F5 accepted; httpx `sni_hostname` pin tested; LLM-key deletion under a monitor carried to ADR-016. **🔧 BUG-024 fixed locally** (public unicast only, NAT64 judged as its IPv4; 37 tests, suite 783, mutation 4/4). **BUG-032 filed.** Owner's stance on Monitors/destinations saved to memory | `57bb301`, `86bfae6` + handoff refresh |
 | 2026-11-03 → 11-05 *(clock, fifteenth)* | **📝 PRD-018 owner review — 16 rounds, complete.** Read-in from the handoff; plain-words walkthrough per section with examples and illustrations, each claim checked against code (deleted result consumer, `diff.py`, `cleaner.py`, `pipeline.py`, `PipelineEditor.tsx`, job permanent delete, schedule admission, kill switch, settings). Baseline rule rebuilt (unchanged / pre-gate / expired / superseded never baseline), version+inputs fixed, change gate renamed, fingerprint not an input, start values, waiting-check comparison, notices once per situation, OQ-14 added; Q1 = (e) drops slice 3 and OQ-12; scheduled crawls not planned. Owner steer: simplify, move polish to "not yet" | `74aa2d9` + this closeout |
 | 2026-11-03 *(clock, fourteenth)* | **📝 ADR-014 owner review — 10 rounds, complete.** Owner asked for a todo list of owed reviews (design docs, ADR-012's text, four delegated code builds), then "adr 14 sec by sec". Each section checked against code: contracts' unknown-field handling, `rules.py`, the trigger and its input models (Pydantic coercion tested in the api container), the views (migration tested in a rolled-back transaction), `ledger.release_objects` / `delete_minio_object`, `_finish` and the cancel route, `webhook_deliveries` + both senders. Seven corrections, four new traps, E1–E6 answered; shared webhook send carried to ADR-015. **Then ADR-012 read in plain words, corrected ×4, retirement rule added, Accepted** | `94c2396` + this closeout |
