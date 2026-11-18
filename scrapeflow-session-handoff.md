@@ -30,10 +30,10 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Accepted 2026-10-27**; cap 20, paused not counted, catch-up 365 d) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-031) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-032) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
-| PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass drafted 2026-10-30 as **ADR-014** (Draft, owner review complete 2026-11-03) + **ADR-015** (Draft, not reviewed)); **PRD-018** (Draft, not reviewed, 2026-10-30) |
+| PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass complete — **ADR-014** + **ADR-015** Accepted 2026-11-18); **PRD-018** (Draft, owner review complete 2026-11-05; Architect pass → ADR-016 next) |
 | Feature scoping + engine comparison (redrawn 2026-09-08) | `docs/project/workflows-scoping.md` |
 | Change inventory + migration sequence (redrawn 2026-09-08) | `docs/project/temporal-full-migration.md` |
 | **Phase 4 implementation backlog — the ordered task list (Tech Lead, 2026-09-20)** | `docs/project/phase4-implementation-backlog.md` — groups A–I are ADR-009 §16's named steps; one task per session; 🚀 marks the release points; its status table is the tracker. **Eight open items at the bottom need Architect/owner answers before the tasks that cite them** |
@@ -1806,16 +1806,18 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Outstanding, in rough order
 
-0. **Group E — E.8 (eTLD+1 helper + per-host limiter)** next; ~~E.0~~ ✅ decided 2026-10-13 (backlog E.0). ~~**Group D — job cutover (D.1)**~~ ✅ released + flipped 2026-10-12. ~~C.12 click-through~~ ✅ (Preview/Download gap fixed, released `28c881b` — open a pipeline run → `view` the fetch step to see it); ~~release BUG-022's prompt fix~~ ✅ released `cf9d2fb`. ~~Owner runs the R6 gate~~ ✅ **PASS 2026-10-12** (PRD-016 R6 → *Gate result*). ~~C.14~~ 🚀 released 2026-10-12 (`1793c60`). ~~C.13~~ ✅ 2026-10-12 (ADR-012 Draft, `c86a9d9`). ~~Pick up C.13 in `phase4-implementation-backlog.md`~~. ~~C.9–C.12~~ ✅ 2026-10-11 (local, `5b14291`, `66abdeb`, `88e8024`, `c2590af`; built under delegation, no walkthrough). ~~C.8~~ ✅ 2026-10-11 (local, `d75c7b2`). ~~C.4–C.7~~ ✅ 2026-10-11 (local, `7f3b1d5` + MVP `e60658b` + safety net `4b230a3`; owner's code review deferred). ~~C.3~~ ✅ 2026-10-02 (local, `9fc7198`). ~~C.2~~ ✅ 2026-10-01 (local, `b5d0f94`, migration `9db1dcda44f7`). ~~C.1~~ ✅ 2026-10-01 (local, `9bdb3a5`, migration `cff9ec8fedbe`) — **Group C opened.** Read Group C's header and the open items at the backlog's foot (C.9, C.11, C.13 land inside Group C). ~~PyJWT bump~~ ✅ released 2026-09-30 (`6675f17`). **Owner: start Group C next session.** ~~B.9~~ ✅ 2026-09-30 — **Playwright port released** (`a11cce6`, infra `9ebb305`); **Group B complete**. ~~BUG-020~~ ✅ closed 2026-09-30. ~~B.8~~ ✅ 2026-09-30 (local, `c405124`). ~~B.7~~ ✅ 2026-09-30 — **LLM port released** (`1717032`, infra `3179f48`). ~~B.6~~ ✅ 2026-09-30 (`fa43db2`, `f2738fb`).
-   ~~B.5~~ ✅ + ~~B.4~~ ✅ + ~~B.3~~ ✅ 2026-09-29 — **Go port released** (`ef68942`, infra `e70fbe9`). ~~B.2~~ ✅ + ~~B.1~~ ✅ 2026-09-29 (local). ~~A.8~~ ✅ + ~~A.6~~ ✅ 2026-09-29 — **engine up released** (`ce614d8`, infra
-   `ddde657`). ~~**A.9**~~ ✅ (Temporal env on the API, infra `7ae6a9b`, verified in prod) — **Group A complete.** Postgres backups deferred post-migration (owner). **Per-task ordering: local → k8s → next task.**
-   ~~A.5~~ ✅ + ~~A.7~~ ✅ 2026-09-29 (local; `9a365d0`…`147f3fb`, unpushed). ~~A.4~~ ✅ both halves 2026-09-25 (infra
-   `cd7b36c`). ~~A.3~~ ✅ both halves 2026-09-25 (infra
-   `60b0aee`). ~~A.2~~ ✅ both halves 2026-09-22 (`a0008af`
-   app, `e8f32e1` infra). ~~A.1~~ ✅ both halves 2026-09-21 (`f8e99bf` app, `de903a2` infra). The
-   eight open items at the backlog's foot are owner/Architect calls; none blocks Group A.
+0. **Next: the Architect pass on PRD-018 → ADR-016** (OQ-1–14, plus two carries from ADR-015's review: an
+   LLM key deleted under a monitor, and notices via `webhook_deliveries.kind`). BUG-031 is Monitors' slice 0.
+   Then build order: PRD-019 (ADR-014) before PRD-018; PRD-017 (ADR-015) in parallel. Also owed:
+   - **Owner's deferred code reviews** — C.4–C.12, E.3–E.10, F.1–F.7.
+   - **Backlog edits carried from PRD-018's review** — open item 10's answer (e); §3's crawl row "refused; not
+     planned"; the `content_hash`/`diff_*` cleanup; D16's crawl refusal.
+   - **BUG-024's fix ships with the next api release** (`57bb301`, local).
+   - **Open bugs:** BUG-029 (Engine column), BUG-030 (webhook check vs connect — fixed by ADR-015's pinned
+     connect), BUG-031 (pipeline outputs never freed), BUG-032 (user URL can reach the node's own public IP).
+   ~~Implementation groups A–I~~ ✅ all done — I.2 released 2026-10-29 (`eea8344`); history in *Current state*.
 1. ~~**Write PRD-019 — conditional execution (layer A).**~~ ✅ **Written 2026-10-29, owner review complete
-   2026-10-30 (`c877c5f`); PRD-017 likewise (`afbc1e2`). Both await the Architect pass.** Numbered 2026-09-08 (owner's call) and given
+   2026-10-30 (`c877c5f`); PRD-017 likewise (`afbc1e2`). Architect pass complete: ADR-014 + ADR-015 Accepted 2026-11-18.** Numbered 2026-09-08 (owner's call) and given
    its `phase4-backlog.md` §2 row. It owes **four** things,
    all on that row: the Validate-precedent brief and the replay constraint (14c), the halt-early
    block B cannot build for itself (§4), and run-level failure notification (15f). ⚠️ **It sorts
@@ -1824,7 +1826,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
    this chain.
 2. ~~**Promote ADR-010**~~ ✅ **Accepted 2026-10-13.** ~~when convenient — it blocks nothing in the queue but is required before the
    batch-and-crawl cutover, and it opens the Schedule overlap policy (`phase4-backlog.md` §2
-   gotcha 6), which is genuinely undecided.~~ Overlap → `SKIP`, ADR-013 (Draft).
+   gotcha 6), which is genuinely undecided.~~ Overlap → `SKIP`, ADR-013 (Accepted 2026-10-27).
 3. ~~**The pre-migration queue's single release**~~ ✅ **RELEASED 2026-09-19 (`421cbfe`)** — see the
    release block in *Current state*. ~~Three owner-run production scripts~~ ✅ **all three run the
    same day**, each dry-run first, each idempotent on re-run. **Next: ADR-009 §16 *engine up*.**
@@ -1846,13 +1848,16 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 7. **BUG-018 — SPA token caching** (filed 2026-09-19, `19fd34e`). **Owner's call: after the
    Temporal pipeline.** Six frontend files; the writeup has the fix and what to capture.
 
-5. **Deferred — crw engine comparison** (`docs/guides/competitor-research.md` §crw). Pick up
-   **after the Temporal pipeline**: file §A's bugs (A1–A4 first), then fold §C's per-host limiter
-   and interactive/batch lanes into the batch-and-crawl cutover design before the task queues are
-   shaped. Nothing in it blocks the queue release.
+8. **Deferred — crw engine comparison** (`docs/guides/competitor-research.md` §crw). Pick up
+   **after the Temporal pipeline**: file §A's bugs (A1–A4 first). §C's two items were settled at
+   the batch-and-crawl cutover: the per-host limiter is built (E.8/E.9), and reserved
+   interactive/batch lanes were decided against for now (E.0, open item 4).
 
 ### Git / deploy state
 
+- **2026-11-18 (ADR-015 review + acceptance close):** `develop` = `86bfae6`, 6 ahead of `origin/develop` (`b8c3900`), **not pushed** — includes BUG-024's fix `57bb301` (code, unreleased); `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
+- **2026-11-05 (PRD-018 review close):** `develop` = `a8a9b63`, 4 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched.
+- **2026-11-03 (ADR-014 review + ADR-012 acceptance close):** `develop` = `f51baba`, 2 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched.
 - **2026-10-30 (Architect pass + PRD-018 draft close):** `develop` = `a5a4d84` + docs closeout, 4 ahead of `origin/develop` (`a563192`), **not pushed**; `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-10-30 (PRD-017 review close):** `develop` = `afbc1e2` + docs closeout, 2 ahead of `origin/develop` (`a563192`), **not pushed**; `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-10-28 (H.2 session close, verified after fetch):** `main` = `origin/main` = `cd5c60e` (deployed — api image; workers still `722f54b`); `develop` = this closeout, **1–2 ahead of `origin/develop` (docs only) — owner pushes**. Infra `main` = `origin/main` = `432e014`. Compose: api, workflow-worker, the three `-temporal` workers, Temporal, Postgres ×2, Redis, MinIO — no NATS; the `docker_nats_data` volume is still on disk. `tmp/` untracked, pre-existing.
@@ -2016,6 +2021,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-11-18 *(clock, sixteenth)* | **📐 ADR-015 owner review — 9 rounds, complete; ADR-014 + ADR-015 Accepted.** Plain-words walkthrough per section with examples, each claim checked against code; F1–F5 accepted; httpx `sni_hostname` pin tested; LLM-key deletion under a monitor carried to ADR-016. **🔧 BUG-024 fixed locally** (public unicast only, NAT64 judged as its IPv4; 37 tests, suite 783, mutation 4/4). **BUG-032 filed.** Owner's stance on Monitors/destinations saved to memory | `57bb301`, `86bfae6` + handoff refresh |
 | 2026-11-03 → 11-05 *(clock, fifteenth)* | **📝 PRD-018 owner review — 16 rounds, complete.** Read-in from the handoff; plain-words walkthrough per section with examples and illustrations, each claim checked against code (deleted result consumer, `diff.py`, `cleaner.py`, `pipeline.py`, `PipelineEditor.tsx`, job permanent delete, schedule admission, kill switch, settings). Baseline rule rebuilt (unchanged / pre-gate / expired / superseded never baseline), version+inputs fixed, change gate renamed, fingerprint not an input, start values, waiting-check comparison, notices once per situation, OQ-14 added; Q1 = (e) drops slice 3 and OQ-12; scheduled crawls not planned. Owner steer: simplify, move polish to "not yet" | `74aa2d9` + this closeout |
 | 2026-11-03 *(clock, fourteenth)* | **📝 ADR-014 owner review — 10 rounds, complete.** Owner asked for a todo list of owed reviews (design docs, ADR-012's text, four delegated code builds), then "adr 14 sec by sec". Each section checked against code: contracts' unknown-field handling, `rules.py`, the trigger and its input models (Pydantic coercion tested in the api container), the views (migration tested in a rolled-back transaction), `ledger.release_objects` / `delete_minio_object`, `_finish` and the cancel route, `webhook_deliveries` + both senders. Seven corrections, four new traps, E1–E6 answered; shared webhook send carried to ADR-015. **Then ADR-012 read in plain words, corrected ×4, retirement rule added, Accepted** | `94c2396` + this closeout |
 | 2026-10-30 *(clock, thirteenth)* | **📐 Architect pass drafted (ADR-014, ADR-015) + PRD-018 drafted by a PM subagent.** Owner asked whether the pass is a review or ADRs, and whether to wait for PRD-018 → ADRs now, Draft, acceptance held until PRD-018 is drafted; no PRD acceptance step. Read both PRDs, ADR-009 §4/§14/§15, ADR-012, `pipeline.py`, `db.py`, `webhook.py`, `catalog.py`, the Validate activity, the trigger, the views, `webhook_deliveries`, admin meters, infra (no NetworkPolicies). PM handshake (new endings) folded into ADR-014 §5. | `a5a4d84`, docs closeout |
