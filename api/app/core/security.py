@@ -4,6 +4,19 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException, status
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def is_public_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True only for a globally reachable unicast address.
+
+    A NAT64 address (``64:ff9b::a.b.c.d``) is judged as its IPv4 address: ``is_global`` alone calls
+    ``64:ff9b::10.0.0.1`` public.
+    """
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64:
+        ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return ip.is_global and not ip.is_multicast
+
 
 def validate_no_ssrf_core(url: str) -> None:
     """Core SSRF check — raises ValueError if the URL targets a private/internal address.
@@ -21,8 +34,7 @@ def validate_no_ssrf_core(url: str) -> None:
         raise ValueError("URL hostname could not be resolved") from exc
 
     for _family, _type, _proto, _canonname, sockaddr in results:
-        ip = ipaddress.ip_address(sockaddr[0])
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+        if not is_public_address(ipaddress.ip_address(sockaddr[0])):
             raise ValueError(f"URL resolves to a private address: {sockaddr[0]}")
 
 
