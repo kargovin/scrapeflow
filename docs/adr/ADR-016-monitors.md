@@ -1,8 +1,19 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; not reviewed. Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 1). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
+> **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
+> check 6: the refusal is on the blocks' *need* plus the allowance, and the check's ceiling is capped at the
+> maximum; as drafted, a version declaring the full 86,400 s could never be monitored. (2) §2c: a cron change on an
+> active monitor that the engine refuses is put back with a `503`, as for jobs. **`notify_on_overlap` moves to *not
+> yet*** (the history shows every overlap skip; the opt-in notice can come later). **§2c gains what the SPA and
+> admin screens need**: the run response's new columns, a diff read, a monitor filter on the run list, the
+> monitors using a pipeline, a jobs/monitors split of the schedule count, admin monitor reads, and
+> `monitors_paused_itself`. Owner asked where "check" comes from: PRD-018 D1 and review round 5 — a check is a
+> pipeline run a monitor started; a firing becomes a check only if admission lets it run. Pipeline-lane admin
+> metrics, missing today, go to the backlog (§4), not this ADR.
+
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
 review carried here: a scheduled check that fires after its LLM key was deleted (ADR-015 review round 3). Confirms
@@ -74,7 +85,6 @@ API  POST /monitors ──► monitors row (active) ──► Temporal Schedule 
 | `schedule_cron` | TEXT NOT NULL | editable; UTC, no more often than `schedule_min_interval_minutes` (5) |
 | `state` | VARCHAR(20), CHECK IN (`active`, `paused`, `paused_itself`) | §7 |
 | `consecutive_failures` | INTEGER NOT NULL DEFAULT 0 | §7 |
-| `notify_on_overlap` | BOOLEAN NOT NULL DEFAULT false | R6's opt-in "skipped — previous check still in progress" notice |
 | `created_at`, `updated_at` | TIMESTAMPTZ | |
 
 `notice_destination_id` (UUID → `destinations`) is **not** in this table until PRD-017's `destinations` table exists.
@@ -118,15 +128,30 @@ unchanged).
 |---|---|
 | `POST /monitors` | save-time checks (§2d); `lock_user`; the scheduled cap (§12); then the Schedule (§3) |
 | `GET /monitors`, `GET /monitors/{id}` | with state, next check (from the cron), the last check's outcome, and whether a newer pipeline version exists |
-| `PATCH /monitors/{id}` | **`name`, `schedule_cron`, `notify_on_overlap`** (and `notice_destination_id` once it exists). Any other field → `422` naming it (D15) |
+| `PATCH /monitors/{id}` | **`name`, `schedule_cron`** (and `notice_destination_id` once it exists). Any other field → `422` naming it (D15). A cron change on an active monitor re-arms it: if the engine refuses, the row is put back and the answer is `503` "the schedule was not changed" (the job lane's rule, `routers/jobs.py`) |
 | `POST /monitors/{id}/pause`, `/resume` | resume is checked against the cap like create; resume also resets `consecutive_failures` (D12) |
 | `POST /monitors/{id}/check` | Check now (§3d) |
 | `DELETE /monitors/{id}[?with_checks=true]` | §11 |
 | `GET /monitors/{id}/history` | checks (runs with `monitor_id`) and monitor events (§7b), newest first |
 | `GET /approvals`, `POST /pipelines/{pid}/runs/{rid}/approval` | slice 2 (§9) |
+| `GET /pipelines/{pid}/runs/{rid}` (and the admin read) | the run response gains `monitor_id`, `baseline_run_id`, `change_status`, `change_summary`, `carried_sources` — the run page's verdict, "compared with" link and where each carried value came from |
+| `GET /pipelines/{pid}/runs/{rid}/diff?block=` | the stored `diff.json` (§6a) for the run page's code-review diff. `?block=` on the result route returns a block's own output only, so the diff needs its own read |
+| `GET /pipelines/{pid}/runs?monitor_id=` | the run list filtered to one monitor's checks; each summary gains `monitor_id` and `change_status` |
+| `GET /pipelines/{pid}` | gains `monitors: [{id, name, state}]`, the monitors using it, so the delete refusal (§2a) is visible before it happens |
+| `GET /users/me/scheduled-jobs` | already counts monitors once §12 widens the count; gains a `jobs` / `monitors` split so the SPA can show "18 of 20 schedules: 12 jobs, 6 monitors" |
 
 Every route is owner-scoped with `404` for anyone else, as everywhere. `require_pipelines_enabled` guards create,
-resume and Check now. Reads never are. Admins get read-only routes beside the admin pipeline routes (R9).
+resume and Check now. Reads never are.
+
+**Admin** (R9, read-only): `GET /admin/monitors` (every user's, with the owner's email) and
+`GET /admin/monitors/{id}` with its history, beside the admin pipeline routes; the admin run reads gain the same
+columns as the user's. `OperationalStats` gains `active_monitors` and `monitors_paused_itself` (§12) — the second
+is the operator's count of monitors that broke and stopped themselves. Quota editing is unchanged:
+`scheduled_jobs_limit` now limits jobs and monitors together, and the SPA labels it "schedules".
+
+**Not here:** pipeline and monitor metrics over time (checks per day, LLM calls the change gate saved, skips).
+The admin statistics have no pipeline-lane numbers at all today; that gap predates monitors and is a backlog item
+of its own (`phase4-backlog.md` §4).
 
 ### 2d. Save-time checks (R1, D4, D7)
 
@@ -142,8 +167,12 @@ Refused with a `422` naming the problem, in this order:
 4. **The schedule** is valid cron and no more often than every 5 minutes.
 5. **D4.** If the version has an `llm_extract` block, a change gate (§5) must come before the first one in the
    chain. Otherwise the save is refused, naming the LLM block. A version with no LLM block saves, with a warning.
-6. **The run fits its ceiling.** The check's run ceiling is the version's resolved ceiling plus the monitor
-   allowance (§6c). It must not exceed `pipeline_max_run_seconds`, and the refusal names both numbers.
+6. **The run fits its ceiling.** The blocks' **need** plus the monitor allowance (§6c) must not exceed
+   `pipeline_max_run_seconds`; the refusal names both numbers. The check's ceiling is the version's resolved ceiling
+   plus the allowance, **capped** at `pipeline_max_run_seconds`. Not "the resolved ceiling plus the allowance": a
+   version may declare `time_budget_seconds` up to the maximum (`validator._budget_problems`), and would then never
+   be monitorable however little its blocks need. Need plus allowance fits under the cap, so every step keeps its
+   full budget.
 7. **The scheduled cap** (§12), on create and on resume.
 
 **Warnings**, which do not refuse the save, are returned as `warnings: [...]`: no LLM block and no change gate
@@ -500,7 +529,8 @@ monitor_events
   the row spans them all, and no firing in between did anything else.
 - `waiting_for_slot` is one row per firing that waits (`first_at` → `ended_at` when it is admitted or gives up). It
   is history only. `gave_up_waiting` is its own row and does send a notice.
-- `skipped_check_in_progress` sends a notice only when `notify_on_overlap` is set.
+- `skipped_check_in_progress` is history only. R6's opt-in notice for it is *not yet* (owner, review round 1): the
+  history already shows every such skip, and the opt-in can be added later without breaking anything.
 - The history the SPA shows (R9) is the monitor's checks and these rows, merged by time:
   *unchanged · unchanged · **changed → sent** · skipped ×216 (monthly runs, 1–22 Nov) · failed*. (§17,
   escalation G1: one counted row, not one line per firing.)
@@ -732,7 +762,7 @@ else delete the rows, commit, delete the Schedule (a monitor) best effort → 20
 | `quota_run_units` (monthly) | counts every `pipeline_runs` row | **none.** A check is a run (1 unit). A skipped firing is not a row. A storage-full or refused firing is a failed check (1 unit, as for jobs) |
 | `quota_active_submissions` (concurrency) | a pipeline run while a block is `running` | **none.** Approval waits, retry waits and the time between firings hold no slot. Diff and Capture run while their block is still `running` (§6a) |
 | The scheduled cap (`scheduled_jobs_usage`) | `jobs.schedule_status = 'active'` | **widened:** + `monitors.state = 'active'`. `check_scheduled_jobs_quota` gains `exclude_monitor_id`. The error shape is unchanged (`quota_type: "scheduled_jobs"`) |
-| `active_recurring_jobs`, `…_by_lane` | jobs only | **kept, and named for what they count.** A new `active_monitors` beside them (R9's "named for the lane") |
+| `active_recurring_jobs`, `…_by_lane` | jobs only | **kept, and named for what they count.** New `active_monitors` and `monitors_paused_itself` beside them (R9's "named for the lane") |
 | `job_lane_webhooks_*` | ADR-014 adds `pipeline_run_id IS NULL` | **+ `monitor_id IS NULL`**, when notices land (§8) |
 | Storage | the ledger | none. Diff objects are ledger rows on their block |
 

@@ -728,7 +728,7 @@ see its result.
   | **paused itself** | after the 5th failed check in a row (D12), naming the last failure |
   | **checks skipped — monthly runs used up** | **once**, when the first firing is skipped (ADR-010 §1), naming the date the limit resets |
   | **gave up waiting for a free slot** | when a firing's ADR-010 §1 wait reaches its 24-hour cap |
-  | **checks skipped — previous check still in progress** | only if the user opts in (a slow page would send it every time) |
+  | **checks skipped — previous check still in progress** | only if the user opts in (a slow page would send it every time) — **opt-in moved to *not yet*** (ADR-016 review round 1): history only for now |
 
   **A notice is sent once, when a situation starts, not on every firing.** An hourly monitor on the default plan
   (500 monthly runs) runs out in about three weeks; one "checks skipped until 1 Dec" message, not ~216. Waiting
