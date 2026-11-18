@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 9). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 10). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -60,6 +60,13 @@ until the owner's review accepts it.
 > **Review round 9 (owner, 2026-11-18): §10 Endings, §11 Storage.** Agreed, with one gap closed: admin user delete
 > removes the user's monitor Schedules best effort, as it does for job Schedules; the cascade alone would leave
 > each one firing into "stopped" for ever.
+>
+> **Review round 10 (owner, 2026-11-18): §12 Meters, §13 Keys and destinations, §14 Crawls and leftovers.** Agreed,
+> with two fixes. (1) §2d gains the check §13 relies on: the pinned version's LLM keys exist and are the user's,
+> under `lock_user` (a key can be deleted after the pipeline was saved). (2) §14's cleanup removes
+> `CrawlResponse.schedule_cron` in release A (stop using), before the column drop in release B; no caller of ours
+> reads it. §14 was walked through again with background (what `schedule_cron` promised, why scheduled crawls are
+> not planned, why two releases).
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -204,7 +211,10 @@ of its own (`phase4-backlog.md` §4).
 
 Refused with a `422` naming the problem, in this order:
 
-1. The pipeline is the user's and not deleted, and the version exists. Unknown → `404`.
+1. The pipeline is the user's and not deleted, and the version exists. Unknown → `404`. **The pinned version's
+   LLM keys exist and are the user's**, checked under `lock_user` (§13): a key can be deleted after the pipeline was
+   saved, since nothing protects the keys of a pipeline no monitor uses. Resume needs no re-check — the key cannot
+   be deleted while even a paused monitor uses it.
 2. **Inputs.** Every declared run input is in exactly one of `inputs` (a fixed value) or `carried`. A fixed value
    is checked by ADR-014 §4's strict per-type rule (a `number` is a JSON number, never `"100"` or `true`). A
    carried input must be of type `number` or `text`. Its `start` must be of that same type. Its `from_block` must be
@@ -901,6 +911,13 @@ whether they are active, paused or paused themselves.**
   `diff_summary`; remove `create_webhook_delivery`'s unused `diff` parameter and delete `core/diff.py` with it (§6a). No quota view reads any of these columns (checked against the
   views' column list in CLAUDE.md). The payload fields `diff_detected` / `diff_summary` on `job.*` events stay,
   always `null` (D17). That cleanup is a backlog item, not part of slice 1.
+- **The two releases, spelled out** (the api runs two replicas side by side during a rollout, I.2):
+  - **A — stop using:** stop writing `job_runs.content_hash`; stop storing and returning `crawls.schedule_cron`.
+    **`CrawlResponse.schedule_cron` is removed from the API's output here** — a small output change, read by no
+    caller of ours (the SPA uses `schedule_cron` on jobs only). Keeping it as a permanent `null` would keep a field
+    that means nothing, the problem the refusal fixes.
+  - **B — drop:** the migration drops the four columns; `core/diff.py` and `create_webhook_delivery`'s unused `diff`
+    parameter are deleted (§6a).
 
 ---
 
