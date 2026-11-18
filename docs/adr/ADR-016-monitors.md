@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 5). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 6). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -37,6 +37,14 @@ until the owner's review accepts it.
 > parameter and the type together. (2) A raw-HTML page diff reads poorly (minified HTML is a few long lines); the
 > docs point at R3's gate-after-Clean. "Step" reworded to "activity" where it meant one: Diff and Capture are
 > activities no block owns, run on the `content` task queue the LLM worker polls.
+>
+> **Review round 6 (owner, 2026-11-18): §7 Self-pause and the monitor's history.** Agreed, with three fixes. (1) The
+> counter moves only in the call that ends the check: the mirror and admission are retried, and a bump per retry
+> would pause a monitor after fewer than five real failures. (2) Every `monitor_events` write is under `lock_user`
+> (the pipelines-switched-off skip had been drawn before it). (3) Pausing closes any open situation, so a skip
+> after resuming sends one fresh notice. Owner asked what a notice is: a message about the monitor itself (paused
+> itself, monthly runs used up, gave up waiting), always in the SPA, also sent to the notice destination once one
+> exists; not a run's failure alert, not an approval message.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -231,10 +239,10 @@ A workflow-queue activity, the monitor-shaped twin of `admit_scheduled_run`. In 
 ```
 before the lock (network calls are not allowed inside it — lock_user's rule):
   read the monitor; not active / deleted               → "stopped"            (no event: the user did it)
-  PIPELINES_ENABLED is false                           → event skipped_pipelines_disabled
   parse the pinned version; SSRF-check its URLs        → failure → a failed check (below)
-lock_user(user)
+lock_user(user)                                          every monitor_events write happens under it (§7b)
   re-read the monitor under the lock; not active       → "stopped"
+  PIPELINES_ENABLED is false                           → event skipped_pipelines_disabled
   a check of this monitor is running and NOT waiting   → event skipped_check_in_progress (§3c)
     for an approval
   monthly_runs reached                                 → event skipped_monthly_runs (episode, §7b)
@@ -547,6 +555,11 @@ row is already the truth, so a Schedule left running fires into "stopped".
 - **Pause_on_failure stays `False`** on the Schedule: Temporal sees a `MonitorCheckWorkflow`, which succeeds even
   when its check fails, and in slice 2 it has often closed before its check ends (§9e). Only the row knows.
 - Resume (§2c) re-arms and resets the counter. A user pause or resume does not count as a check.
+- **The counter moves only in the call that ends the check** (owner, review round 6). `mirror_run_status` is an
+  activity and is retried when its reply is lost; a retry finds the run already terminal and changes nothing today
+  (`if run.status == "running"`). `monitor_check_ended` runs inside that branch, never after it, or each retry
+  adds another failure and a monitor pauses itself after fewer real failures than five. Admission's retry that finds
+  its run already inserted returns without touching the counter.
 
 ### 7b. Monitor events: one row per *situation*, not per firing
 
@@ -573,6 +586,10 @@ monitor_events
   next firing that does anything else (a check admitted, or a different skip) sets `ended_at` on the open row. So a
   month of skipped hourly firings is one row with `count = 216` and one notice. Every firing is still accounted for:
   the row spans them all, and no firing in between did anything else.
+- **Every event write happens under `lock_user`** (owner, review round 6): "find the open row, then bump it or
+  insert one" is a read followed by a write, and only the lock keeps two writers from both inserting.
+- **Pausing closes any open situation** (by the user, or by itself). A skip after resuming starts a new row and sends
+  one notice: the user has just resumed and should hear "still skipping".
 - `waiting_for_slot` is one row per firing that waits (`first_at` → `ended_at` when it is admitted or gives up). It
   is history only. `gave_up_waiting` is its own row and does send a notice.
 - `skipped_check_in_progress` is history only. R6's opt-in notice for it is *not yet* (owner, review round 1): the
@@ -972,6 +989,9 @@ Product-visible consequences of the design, each with a recommendation.
   - `record_storage` locks the run row and deletes its objects when the run is gone, and the mirrors read a
     missing run as cancelled. Otherwise a mid-flight delete leaves uncharged objects on disk, or fails the
     workflow (§11);
+  - `monitor_check_ended` runs only in the call that moves the run out of `running` — the mirror and admission are
+    retried, and a counter bumped on every retry pauses a monitor early (§7a);
+  - every `monitor_events` write happens under `lock_user`, and pausing closes any open situation (§7b);
   - all three writers of a check's outcome (`mirror_run_status`, the trigger's could-not-start branch, admission's
     failed checks) call `monitor_check_ended`, and the two that write `failed` before any workflow runs also call
     `queue_failure_alerts`, each in the transaction that writes the outcome (§3b, §7a);
