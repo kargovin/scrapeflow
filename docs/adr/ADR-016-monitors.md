@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 7). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 8). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -51,6 +51,11 @@ until the owner's review accepts it.
 > a knock-on of round 6: `mirror_run_status` writes `paused_itself` under `lock_user` but locks the run row first,
 > the reverse of §11's deletes; for a monitor check it takes the user lock first. A notice still retrying towards a
 > destination the user has since deleted fails with ADR-015 §2c's final "destination deleted" — accepted.
+>
+> **Review round 8 (owner, 2026-11-18): §9 The Approval block.** Agreed (walked through again in plain words with
+> an example: Priya's price push). Approval's catalog `Timing` covers only its two DB activities; the wait is
+> excluded (§9d). **G8 added and answered (a):** an approved run continues without re-asking for a slot, so
+> answering several approvals together can briefly exceed the concurrency limit. G5 agreed with §9.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -653,6 +658,8 @@ notice destination, a `webhook_deliveries` row written in the same transaction, 
   PRD-017's destinations (Q9), additively.
 - Save-time: not the first block, not the last (R5). **At most one Approval block per pipeline in slice 2**, so
   the budget rule below has one deadline to add. Several are additive later. (§17, escalation G5.)
+- **Its catalog `Timing` covers only its own database activities** (`request_approval`, `resolve_approval`), sized
+  like any DB step and counted in the run's need as every block's is. The wait is not in it (§9d).
 - `pipeline_run_blocks` gains `approval_deadline TIMESTAMPTZ`, `approval_answer VARCHAR(20) CHECK IN (approved,
   rejected, expired, superseded)`, `answered_at`, `answered_by UUID → users ON DELETE SET NULL`, and
   `superseded_by_run_id UUID → pipeline_runs ON DELETE SET NULL`.
@@ -689,6 +696,11 @@ PipelineWorkflow reaches Approval
   was executing, so nothing finishes first.
 - **No slot while waiting.** No block is `running` (the Approval block is `waiting`), so
   `quota_active_submissions` does not count the run (ADR-009 15a). The views do not change.
+- **On approve the run continues at once, without asking for a slot again** (G8, owner: option a). ADR-009 15a
+  accepted the same for a webhook retry resuming. A user who answers several approvals together can briefly run
+  more blocks than their concurrency limit — by at most the number answered, each run already admitted and charged
+  at its start. The usual placement (just before the delivery) makes the resumed tail a short send. Waiting for a
+  slot after approval is additive later if it is ever needed.
 - **History stays small.** A wait of 7 days is a timer, a signal and three activities, whatever its length. The
   workflow has no execution timeout (ADR-014 §7), and the namespace's 30-day retention only starts at close.
 
@@ -941,9 +953,10 @@ Product-visible consequences of the design, each with a recommendation.
 | **G2** | **Deleting an LLM key a monitor uses is refused**, naming the monitors (active, paused or paused itself). | **Accept.** It is ADR-015 §2c's rule for destinations, for the same 3 a.m. reason. |
 | **G3** | **A firing that is admitted but cannot run** (its URL now resolves to a private address; its version no longer parses) is a **failed check**: it costs one monthly run and counts towards self-pause. | **Accept.** This is what a storage-full firing already does. Otherwise a broken monitor never pauses. |
 | **G4** | A check cancelled because its monitor was deleted reads plain **"cancelled"**, with no "monitor deleted" label (Appendix A marked it tentative). | **Accept.** The monitor is gone, so nothing would show the label in context, and it would need a column for one case. |
-| **G5** | **At most one Approval block per pipeline** in slice 2, and **waiting for approval does not count against the run's time budget** (the deadline moves back by the wait). | **Accept.** It keeps R5's budget rule to two plain numbers. Several Approval blocks can be added later. |
+| **G5** | **At most one Approval block per pipeline** in slice 2, and **waiting for approval does not count against the run's time budget** (the deadline moves back by the wait). | **Accept.** It keeps R5's budget rule to two plain numbers. Several Approval blocks can be added later. ✅ **owner, round 8** (with §9) |
 | **G6** | A change gate is a Validate holding **only** the `changed` rule, set to stop, never reversed. | **Accept.** Each restriction can be lifted later without breaking a saved pipeline. |
 | **G7** | On a monitor check, the Webhook payload's old `diff_detected` field is **`true` on a change** (it is a constant `false` on pipelines today). `diff_summary` stays `null`, and the details are in the new `change` field. | **Accept.** A receiver still reading the old field must not be told "no change" about a change. |
+| **G8** | **After an approval, the run continues without asking for a concurrency slot again**, so answering several approvals together can briefly exceed the limit (by at most the number answered). | **(a) Accept**, over (b) refusing the approval when full or (c) waiting for a slot after it. ✅ **owner, round 8** |
 
 ---
 
