@@ -9,6 +9,7 @@ import {
 } from '../api'
 import { useApi } from '../lib/useApi'
 import { useLiveSocket } from '../lib/useLiveSocket'
+import { blockDetail, failedBlock, resultDeletedOnStop, verdictInWords } from '../lib/runText'
 import ErrorBox from '../components/ErrorBox'
 import LiveBadge from '../components/LiveBadge'
 import StatusPill, { runStatus } from '../components/StatusPill'
@@ -70,7 +71,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
   })
 
   const blockParam = viewing ? `?block=${encodeURIComponent(viewing)}` : ''
-  const showResult = viewing !== null || run?.status === 'completed'
+  const showResult = viewing !== null || (run?.status === 'completed' && !!run.result_path)
   const output = useQuery<PipelineRunResult>({
     queryKey: ['pipeline-run-output', mode, runId, viewing],
     queryFn: () => api.get(`${apiBase}/result${blockParam}`),
@@ -91,6 +92,8 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
 
   const status = runStatus(run)
   const cancelling = status === 'cancelling'
+  const stopper = run.blocks.find(b => b.block_id === run.stopped_at_block_id)
+  const brokeAt = failedBlock(run)
 
   return (
     <div>
@@ -116,8 +119,12 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
               ['Inputs', Object.keys(run.inputs).length ? JSON.stringify(run.inputs) : '—'],
               ['Started', new Date(run.created_at).toLocaleString()],
               ['Finished', run.finished_at ? new Date(run.finished_at).toLocaleString() : '—'],
-              ['Result', run.result_path ?? '—'],
-              ['Error', run.error ?? '—'],
+              ...(run.stopped_at_block_id
+                ? [['Stopped at', `${run.stopped_at_block_id}${stopper?.verdict ? ` — ${verdictInWords(stopper.verdict)}` : ''}`]]
+                : []),
+              ...(brokeAt ? [['Failed at', brokeAt]] : []),
+              ['Result', resultDeletedOnStop(run) ? 'result deleted when the run stopped' : (run.result_path ?? '—')],
+              [run.status === 'failed' ? 'Error' : 'Note', run.error ?? '—'],
             ] as [string, string][]
           ).map(([label, value]) => (
             <div key={label} className="px-4 py-3 sm:grid sm:grid-cols-4 sm:gap-4">
@@ -154,7 +161,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
         <table className="min-w-full divide-y divide-gray-200 text-sm">
           <thead className="bg-gray-50">
             <tr>
-              {['#', 'Step', 'Status', 'Took', 'Output', 'Error'].map(h => (
+              {['#', 'Step', 'Status', 'Took', 'Output', 'Details'].map(h => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
               ))}
             </tr>
@@ -183,12 +190,48 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
                     </span>
                   )}
                 </td>
-                <td className="px-4 py-3 text-gray-500 max-w-sm break-words">{b.error ?? '—'}</td>
+                <td className="px-4 py-3 text-gray-500 max-w-sm break-words">{blockDetail(b)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {run.alerts.length > 0 && (
+        <>
+          <h3 className="text-sm font-semibold text-gray-900 mb-2">Failure alerts</h3>
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  {['Sent by', 'Status', 'Attempts', 'Last error'].map(h => (
+                    <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {run.alerts.map(a => (
+                  <tr key={a.block_id}>
+                    <td className="px-4 py-3 text-gray-900">{a.block_id}</td>
+                    <td className="px-4 py-3">
+                      <StatusPill status={a.status === 'exhausted' ? 'failed' : a.status === 'delivered' ? 'completed' : 'pending'} />
+                      <span className="ml-2 text-xs text-gray-500">
+                        {a.status === 'exhausted'
+                          ? 'gave up'
+                          : a.status === 'delivered'
+                            ? `delivered ${new Date(a.delivered_at!).toLocaleString()}`
+                            : `next try ${new Date(a.next_attempt_at).toLocaleString()}`}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-500">{a.attempts}</td>
+                    <td className="px-4 py-3 text-gray-500 max-w-sm break-words">{a.last_error ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
       {showResult && (
         output.isLoading ? (

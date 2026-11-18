@@ -189,12 +189,45 @@ export interface PipelineRunSummary {
   version: number
   status: string
   cancel_requested_at: string | null
-  inputs: Record<string, string>
+  inputs: Record<string, RunInputValue>
   result_path: string | null
   error: string | null
   created_at: string
   finished_at: string | null
+  // How it ended (ADR-014 §5a): a stop is `completed` plus these two.
+  stopped_at_block_id: string | null
+  stop_reason: 'rule_not_met' | null
+  failed_block_id: string | null
+  rollback_deadline: string | null
   user_id?: string
+}
+
+export type RunInputValue = string | number
+
+export type BlockStatusReason =
+  | 'stopped'
+  | 'upstream_failed'
+  | 'cancelled'
+  | 'not_started'
+  | 'alert_only'
+  | 'not_recorded'
+
+// A stop-mode Validate's verdict; `rule` is as saved, so a bound value is {"$input": name}.
+export interface RunVerdict {
+  rule_index: number
+  rule: Record<string, unknown>
+  found: unknown
+  expected: unknown
+}
+
+export interface PipelineRunAlert {
+  block_id: string
+  status: 'pending' | 'delivered' | 'exhausted'
+  attempts: number
+  last_error: string | null
+  next_attempt_at: string
+  delivered_at: string | null
+  created_at: string
 }
 
 export type OutputState = 'none' | 'passed_through' | 'stored' | 'collected'
@@ -211,10 +244,14 @@ export interface PipelineRunBlock {
   started_at: string | null
   finished_at: string | null
   collected_at: string | null
+  status_reason: BlockStatusReason | null
+  reason_block_id: string | null
+  verdict: RunVerdict | null
 }
 
 export interface PipelineRun extends PipelineRunSummary {
   blocks: PipelineRunBlock[]
+  alerts: PipelineRunAlert[]
 }
 
 export interface PipelineRunResult {

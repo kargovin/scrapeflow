@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient, type Query } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
-import { type Pipeline, type PipelineRun, type PipelineRunSummary } from '../api'
+import { type Pipeline, type PipelineRun, type PipelineRunSummary, type RunInputValue } from '../api'
 import { useApi } from '../lib/useApi'
+import { stopLabel } from '../lib/runText'
 import ErrorBox from '../components/ErrorBox'
 import StatusPill, { runStatus } from '../components/StatusPill'
 
@@ -30,10 +31,23 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
       (query.state.data ?? []).some(r => r.status === 'running') ? 5_000 : false,
   })
 
+  const inputTypes: Record<string, string> = Object.fromEntries(
+    Object.entries(pipeline?.definition.inputs ?? {}).map(([n, d]) => [n, String(d.type ?? 'url')]),
+  )
+  // A number input is sent as a JSON number (ADR-014 §4); text that is not one goes as typed,
+  // and the trigger's 422 names the input.
+  const typedInputs = (): Record<string, RunInputValue> =>
+    Object.fromEntries(
+      Object.entries(inputs).map(([n, v]) => {
+        const number = inputTypes[n] === 'number' && v.trim() !== '' ? Number(v) : NaN
+        return [n, Number.isFinite(number) ? number : v]
+      }),
+    )
+
   const run = useMutation({
     mutationFn: () =>
       api.post<PipelineRun>(`/pipelines/${pipelineId}/runs`, {
-        inputs,
+        inputs: typedInputs(),
         version: version ? Number(version) : undefined,
       }),
     onSuccess: created => {
@@ -100,8 +114,9 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
           <div className="flex flex-wrap items-end gap-3">
             {inputNames.map(n => (
               <label key={n} className="text-xs text-gray-500">
-                {n}
+                {n} <span className="text-gray-400">({inputTypes[n]})</span>
                 <input
+                  inputMode={inputTypes[n] === 'number' ? 'decimal' : undefined}
                   value={inputs[n] ?? ''}
                   onChange={e => setInputs({ ...inputs, [n]: e.target.value })}
                   className="block mt-1 w-72 text-sm border border-gray-300 rounded px-2 py-1 text-gray-900"
@@ -149,7 +164,10 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
                   onClick={() => navigate(`${routeBase}/${pipelineId}/runs/${r.id}`)}
                   className="hover:bg-gray-50 cursor-pointer"
                 >
-                  <td className="px-4 py-3"><StatusPill status={runStatus(r)} /></td>
+                  <td className="px-4 py-3">
+                    <StatusPill status={runStatus(r)} />
+                    {stopLabel(r) && <span className="ml-2 text-xs text-gray-500">{stopLabel(r)}</span>}
+                  </td>
                   <td className="px-4 py-3 text-gray-500">v{r.version}</td>
                   <td className="px-4 py-3 text-gray-500">{new Date(r.created_at).toLocaleString()}</td>
                   <td className="px-4 py-3 text-gray-500">
