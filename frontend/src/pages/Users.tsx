@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@clerk/clerk-react'
-import { apiGet, apiPatch, type AdminUser, type UserQuota } from '../api'
+import { type AdminUser, type UserQuota } from '../api'
+import { useApi } from '../lib/useApi'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -12,11 +12,11 @@ function formatBytes(bytes: number): string {
 
 interface QuotaFormProps {
   userId: string
-  token: string
   onClose: () => void
 }
 
-function QuotaForm({ userId, token, onClose }: QuotaFormProps) {
+function QuotaForm({ userId, onClose }: QuotaFormProps) {
+  const api = useApi()
   const qc = useQueryClient()
   const [monthly, setMonthly] = useState('')
   const [concurrent, setConcurrent] = useState('')
@@ -25,12 +25,12 @@ function QuotaForm({ userId, token, onClose }: QuotaFormProps) {
 
   const { data: quota } = useQuery<UserQuota>({
     queryKey: ['quota', userId],
-    queryFn: () => apiGet(`/admin/users/${userId}/quota`, token),
+    queryFn: () => api.get(`/admin/users/${userId}/quota`),
   })
 
   const mutation = useMutation({
     mutationFn: (body: Record<string, number | null>) =>
-      apiPatch<UserQuota>(`/admin/users/${userId}/quota`, token, body),
+      api.patch<UserQuota>(`/admin/users/${userId}/quota`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['quota', userId] })
       onClose()
@@ -123,22 +123,15 @@ function QuotaForm({ userId, token, onClose }: QuotaFormProps) {
 }
 
 export default function Users() {
-  const { getToken } = useAuth()
+  const api = useApi()
   const [editingUserId, setEditingUserId] = useState<string | null>(null)
-
-  const { data: token } = useQuery({
-    queryKey: ['token'],
-    queryFn: () => getToken() as Promise<string>,
-    staleTime: 60_000,
-  })
 
   const { data: users, isLoading, isError } = useQuery<AdminUser[]>({
     queryKey: ['admin-users'],
-    queryFn: () => apiGet('/admin/users?limit=100', token!),
-    enabled: !!token,
+    queryFn: () => api.get('/admin/users?limit=100'),
   })
 
-  if (isLoading || !token) return <p className="text-sm text-gray-500">Loading users…</p>
+  if (isLoading) return <p className="text-sm text-gray-500">Loading users…</p>
   if (isError) return <p className="text-sm text-red-600">Failed to load users.</p>
 
   return (
@@ -181,10 +174,9 @@ export default function Users() {
           </tbody>
         </table>
       </div>
-      {editingUserId && token && (
+      {editingUserId && (
         <QuotaForm
           userId={editingUserId}
-          token={token}
           onClose={() => setEditingUserId(null)}
         />
       )}

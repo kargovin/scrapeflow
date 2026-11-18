@@ -1,11 +1,11 @@
 import { useState, lazy, Suspense } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@clerk/clerk-react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { apiGet, apiDelete, type Job } from '../api'
+import { type Job } from '../api'
 import { useLiveSocket } from '../lib/useLiveSocket'
 import LiveBadge from '../components/LiveBadge'
 import SchedulePanel from '../components/SchedulePanel'
+import { useApi } from '../lib/useApi'
 
 // Lazy — pulls Monaco + react-markdown into a separate chunk so the rest of the
 // admin panel (Users, Jobs list, Stats) doesn't download the editor.
@@ -24,7 +24,7 @@ const STATUS_COLOURS: Record<string, string> = {
 
 export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
   const { jobId } = useParams<{ jobId: string }>()
-  const { getToken } = useAuth()
+  const api = useApi()
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -34,21 +34,14 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
   const apiBase = isAdmin ? '/admin/jobs' : '/jobs'
   const routeBase = isAdmin ? '/app/admin/jobs' : '/app/dashboard/jobs'
 
-  const { data: token } = useQuery({
-    queryKey: ['token'],
-    queryFn: () => getToken() as Promise<string>,
-    staleTime: 60_000,
-  })
-
   const { data: job, isLoading, isError } = useQuery<Job>({
     queryKey: ['job', mode, jobId],
-    queryFn: () => apiGet(`${apiBase}/${jobId}`, token!),
-    enabled: !!token,
+    queryFn: () => api.get(`${apiBase}/${jobId}`),
   })
 
   // Admin: permanent delete (removes MinIO objects + DB row).
   const permanentDelete = useMutation({
-    mutationFn: () => apiDelete(`/jobs/${jobId}?permanent=true`, token!),
+    mutationFn: () => api.del(`/jobs/${jobId}?permanent=true`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['jobs'] })
       navigate(routeBase)
@@ -57,7 +50,7 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
 
   // User: soft cancel of an in-progress job.
   const cancelJob = useMutation({
-    mutationFn: () => apiDelete(`/jobs/${jobId}`, token!),
+    mutationFn: () => api.del(`/jobs/${jobId}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['job', mode, jobId] })
       qc.invalidateQueries({ queryKey: ['jobs'] })
@@ -78,7 +71,7 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
 
   if (!jobId) return null
 
-  if (isLoading || !token) {
+  if (isLoading) {
     return <p className="text-sm text-gray-500">Loading…</p>
   }
   if (isError || !job) {
@@ -144,7 +137,6 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
           outputFormat={job.output_format}
           status={status}
           resultPath={job.result_path}
-          token={token}
           mode={mode}
         />
       </Suspense>

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '@clerk/clerk-react'
-import { apiGet, apiPost, apiDelete, type ApiKey, type ApiKeyCreated } from '../api'
+import { type ApiKey, type ApiKeyCreated } from '../api'
+import { useApi } from '../lib/useApi'
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -22,17 +22,17 @@ function CopyButton({ text }: { text: string }) {
 }
 
 interface CreateModalProps {
-  token: string
   onClose: () => void
 }
 
-function CreateModal({ token, onClose }: CreateModalProps) {
+function CreateModal({ onClose }: CreateModalProps) {
+  const api = useApi()
   const qc = useQueryClient()
   const [name, setName] = useState('')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
 
   const mutation = useMutation({
-    mutationFn: () => apiPost<ApiKeyCreated>('/users/api-keys', token, { name }),
+    mutationFn: () => api.post<ApiKeyCreated>('/users/api-keys', { name }),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['api-keys'] })
       setCreatedKey(data.key)
@@ -107,24 +107,17 @@ function CreateModal({ token, onClose }: CreateModalProps) {
 }
 
 export default function ApiKeys() {
-  const { getToken } = useAuth()
+  const api = useApi()
   const qc = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
 
-  const { data: token } = useQuery({
-    queryKey: ['token'],
-    queryFn: () => getToken() as Promise<string>,
-    staleTime: 60_000,
-  })
-
   const { data: keys, isLoading, isError } = useQuery<ApiKey[]>({
     queryKey: ['api-keys'],
-    queryFn: () => apiGet<ApiKey[]>('/users/api-keys', token!),
-    enabled: !!token,
+    queryFn: () => api.get<ApiKey[]>('/users/api-keys'),
   })
 
   const revoke = useMutation({
-    mutationFn: (id: string) => apiDelete(`/users/api-keys/${id}`, token!),
+    mutationFn: (id: string) => api.del(`/users/api-keys/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['api-keys'] }),
   })
 
@@ -142,7 +135,7 @@ export default function ApiKeys() {
         </button>
       </div>
 
-      {isLoading || !token ? (
+      {isLoading ? (
         <p className="text-sm text-gray-500">Loading…</p>
       ) : isError ? (
         <p className="text-sm text-red-600">Failed to load API keys.</p>
@@ -193,8 +186,8 @@ export default function ApiKeys() {
         <p className="mt-2 text-xs text-red-600">{String(revoke.error)}</p>
       )}
 
-      {showCreate && token && (
-        <CreateModal token={token} onClose={() => setShowCreate(false)} />
+      {showCreate && (
+        <CreateModal onClose={() => setShowCreate(false)} />
       )}
     </div>
   )

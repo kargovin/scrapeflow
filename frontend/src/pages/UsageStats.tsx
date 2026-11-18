@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { useAuth } from '@clerk/clerk-react'
-import { apiGet, type AdminStats } from '../api'
+import { type AdminStats } from '../api'
+import { useApi } from '../lib/useApi'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -36,22 +36,15 @@ function Table({ rows }: { rows: [string, string | number][] }) {
 }
 
 export default function UsageStats() {
-  const { getToken } = useAuth()
-
-  const { data: token } = useQuery({
-    queryKey: ['token'],
-    queryFn: () => getToken() as Promise<string>,
-    staleTime: 60_000,
-  })
+  const api = useApi()
 
   const { data: stats, isLoading, isError } = useQuery<AdminStats>({
     queryKey: ['admin-stats'],
-    queryFn: () => apiGet('/admin/stats', token!),
-    enabled: !!token,
+    queryFn: () => api.get('/admin/stats'),
     refetchInterval: 30_000,
   })
 
-  if (isLoading || !token) return <p className="text-sm text-gray-500">Loading…</p>
+  if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (isError) return <p className="text-sm text-red-600">Failed to load stats.</p>
 
   const { operational: op, historical: hist } = stats!

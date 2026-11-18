@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useAuth } from '@clerk/clerk-react'
 import { useNavigate } from 'react-router-dom'
-import { apiGet, type Job, type AdminUser } from '../api'
+import { type Job, type AdminUser } from '../api'
 import { describeCron } from '../lib/cron'
 import type { Query } from '@tanstack/react-query'
+import { useApi } from '../lib/useApi'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 
@@ -18,7 +18,7 @@ const STATUS_COLOURS: Record<string, string> = {
 }
 
 export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
-  const { getToken } = useAuth()
+  const api = useApi()
   const navigate = useNavigate()
   const [offset, setOffset] = useState(0)
   const [statusFilter, setStatusFilter] = useState('')
@@ -30,18 +30,12 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
   const apiBase = isAdmin ? '/admin/jobs' : '/jobs'
   const routeBase = isAdmin ? '/app/admin/jobs' : '/app/dashboard/jobs'
 
-  const { data: token } = useQuery({
-    queryKey: ['token'],
-    queryFn: () => getToken() as Promise<string>,
-    staleTime: 60_000,
-  })
-
   // Admin-only: the user filter dropdown is populated from /admin/users, which a
   // regular user cannot call — so this query must not fire in user mode.
   const { data: users } = useQuery<AdminUser[]>({
     queryKey: ['admin-users'],
-    queryFn: () => apiGet('/admin/users?limit=200', token!),
-    enabled: !!token && isAdmin,
+    queryFn: () => api.get('/admin/users?limit=200'),
+    enabled: isAdmin,
     staleTime: 60_000,
   })
 
@@ -52,8 +46,7 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
 
   const { data: jobs, isLoading, isError } = useQuery<Job[]>({
     queryKey: ['jobs', mode, offset, statusFilter, userFilter, scheduledOnly],
-    queryFn: () => apiGet(`${apiBase}?${params}`, token!),
-    enabled: !!token,
+    queryFn: () => api.get(`${apiBase}?${params}`),
     refetchInterval: (query: Query<Job[]>) =>
       (query.state.data ?? []).some(j => !TERMINAL.has(j.status)) ? 5_000 : false,
   })
@@ -96,7 +89,7 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
         </div>
       </div>
 
-      {isLoading || !token ? (
+      {isLoading ? (
         <p className="text-sm text-gray-500">Loading…</p>
       ) : isError ? (
         <p className="text-sm text-red-600">Failed to load jobs.</p>

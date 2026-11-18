@@ -1,22 +1,23 @@
 import { useQuery } from '@tanstack/react-query'
-import { apiGet, type JobResult } from '../api'
+import { type JobResult } from '../api'
 import ContentViewer from './ContentViewer'
+import { useApi } from '../lib/useApi'
 
 interface Props {
   jobId: string
   outputFormat: string
   status: string
   resultPath: string | null
-  token: string
   mode: 'admin' | 'user'
 }
 
-export default function ResultViewer({ jobId, outputFormat, status, resultPath, token, mode }: Props) {
+export default function ResultViewer({ jobId, outputFormat, status, resultPath, mode }: Props) {
+  const api = useApi()
   const apiBase = mode === 'admin' ? '/admin/jobs' : '/jobs'
-  const enabled = status === 'completed' && !!resultPath && !!token
+  const enabled = status === 'completed' && !!resultPath
   const { data, isLoading, isError, error } = useQuery<JobResult>({
     queryKey: ['job-result', mode, jobId],
-    queryFn: () => apiGet(`${apiBase}/${jobId}/result`, token),
+    queryFn: () => api.get(`${apiBase}/${jobId}/result`),
     enabled,
   })
 
