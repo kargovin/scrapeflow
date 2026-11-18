@@ -1,6 +1,7 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 11). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; **owner review complete 2026-11-18 (12 rounds)**.
+Not Accepted. Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -72,6 +73,10 @@ until the owner's review accepts it.
 > slice-1 release gate drives 23 checks with Check now and one with a real firing (minutes, not 2 hours at the
 > 5-minute floor). (2) The LLM worker's half of slice 1 (the `changed` rule, Diff, Capture — additive) ships with
 > slice 0's release, so *workers first* holds by construction instead of needing a two-step push.
+>
+> **Review round 12 (owner, 2026-11-18): §17 Escalations, §18 Alternatives, §19 Consequences — review complete.**
+> G1, G2, G3, G4, G6 and G7 confirmed (each agreed with its section in rounds 2–10); G5 and G8 answered in round 8.
+> §18 and §19 agreed; §19's trap list carries every catch from rounds 1–11. **Owner review complete, 12 rounds.**
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -985,13 +990,13 @@ Product-visible consequences of the design, each with a recommendation.
 
 | # | Question | Recommendation |
 |---|---|---|
-| **G1** | The monitor's history shows a run of identical skips as **one counted line** ("skipped ×216 — monthly runs used up, 1–22 Nov"), not 216 lines. Every firing is still accounted for. The same row is what makes the notice go once. | **Accept.** 216 identical lines bury the checks R9 wants scannable. |
-| **G2** | **Deleting an LLM key a monitor uses is refused**, naming the monitors (active, paused or paused itself). | **Accept.** It is ADR-015 §2c's rule for destinations, for the same 3 a.m. reason. |
-| **G3** | **A firing that is admitted but cannot run** (its URL now resolves to a private address; its version no longer parses) is a **failed check**: it costs one monthly run and counts towards self-pause. | **Accept.** This is what a storage-full firing already does. Otherwise a broken monitor never pauses. |
-| **G4** | A check cancelled because its monitor was deleted reads plain **"cancelled"**, with no "monitor deleted" label (Appendix A marked it tentative). | **Accept.** The monitor is gone, so nothing would show the label in context, and it would need a column for one case. |
+| **G1** | The monitor's history shows a run of identical skips as **one counted line** ("skipped ×216 — monthly runs used up, 1–22 Nov"), not 216 lines. Every firing is still accounted for. The same row is what makes the notice go once. | **Accept.** 216 identical lines bury the checks R9 wants scannable. ✅ **owner, round 12** (agreed with its section, round 6) |
+| **G2** | **Deleting an LLM key a monitor uses is refused**, naming the monitors (active, paused or paused itself). | **Accept.** It is ADR-015 §2c's rule for destinations, for the same 3 a.m. reason. ✅ **owner, round 12** (agreed with its section, round 10) |
+| **G3** | **A firing that is admitted but cannot run** (its URL now resolves to a private address; its version no longer parses) is a **failed check**: it costs one monthly run and counts towards self-pause. | **Accept.** This is what a storage-full firing already does. Otherwise a broken monitor never pauses. ✅ **owner, round 12** (agreed with its section, round 2) |
+| **G4** | A check cancelled because its monitor was deleted reads plain **"cancelled"**, with no "monitor deleted" label (Appendix A marked it tentative). | **Accept.** The monitor is gone, so nothing would show the label in context, and it would need a column for one case. ✅ **owner, round 12** (agreed with its section, round 9) |
 | **G5** | **At most one Approval block per pipeline** in slice 2, and **waiting for approval does not count against the run's time budget** (the deadline moves back by the wait). | **Accept.** It keeps R5's budget rule to two plain numbers. Several Approval blocks can be added later. ✅ **owner, round 8** (with §9) |
-| **G6** | A change gate is a Validate holding **only** the `changed` rule, set to stop, never reversed. | **Accept.** Each restriction can be lifted later without breaking a saved pipeline. |
-| **G7** | On a monitor check, the Webhook payload's old `diff_detected` field is **`true` on a change** (it is a constant `false` on pipelines today). `diff_summary` stays `null`, and the details are in the new `change` field. | **Accept.** A receiver still reading the old field must not be told "no change" about a change. |
+| **G6** | A change gate is a Validate holding **only** the `changed` rule, set to stop, never reversed. | **Accept.** Each restriction can be lifted later without breaking a saved pipeline. ✅ **owner, round 12** (agreed with its section, round 4) |
+| **G7** | On a monitor check, the Webhook payload's old `diff_detected` field is **`true` on a change** (it is a constant `false` on pipelines today). `diff_summary` stays `null`, and the details are in the new `change` field. | **Accept.** A receiver still reading the old field must not be told "no change" about a change. ✅ **owner, round 12** (agreed with its section, round 5) |
 | **G8** | **After an approval, the run continues without asking for a concurrency slot again**, so answering several approvals together can briefly exceed the limit (by at most the number answered). | **(a) Accept**, over (b) refusing the approval when full or (c) waiting for a slot after it. ✅ **owner, round 8** |
 
 ---
