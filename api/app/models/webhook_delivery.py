@@ -24,6 +24,14 @@ class WebhookDelivery(Base):
     run_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("job_runs.id", ondelete="CASCADE"), nullable=True
     )
+    # A pipeline run's failure alert (ADR-014 §8b): the run, and the block that sends it.
+    pipeline_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "pipeline_runs.id", ondelete="CASCADE", name="fk_webhook_deliveries_pipeline_run_id"
+        ),
+        nullable=True,
+    )
+    block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     event: Mapped[str] = mapped_column(VARCHAR(50), nullable=False)
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
@@ -42,12 +50,25 @@ class WebhookDelivery(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "num_nonnulls(job_id, batch_id, crawl_id) = 1",
+            "num_nonnulls(job_id, batch_id, crawl_id, pipeline_run_id) = 1",
             name="ck_webhook_deliveries_job_or_batch_or_crawls",
         ),
         CheckConstraint(
-            "num_nonnulls(run_id, crawl_id) = 1",
+            "num_nonnulls(run_id, crawl_id, pipeline_run_id) = 1",
             name="ck_webhook_deliveries_run_or_crawl",
+        ),
+        CheckConstraint(
+            "(pipeline_run_id IS NULL) = (block_id IS NULL)",
+            name="ck_webhook_deliveries_pipeline_block",
+        ),
+        # A retried writer inserts nothing twice (ON CONFLICT DO NOTHING).
+        Index(
+            "uq_webhook_deliveries_pipeline_run_block_event",
+            "pipeline_run_id",
+            "block_id",
+            "event",
+            unique=True,
+            postgresql_where=text("pipeline_run_id IS NOT NULL"),
         ),
         Index(
             "idx_webhook_deliveries_status_next",

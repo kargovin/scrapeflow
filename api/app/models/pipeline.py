@@ -103,11 +103,31 @@ class PipelineRun(Base):
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How the run ended (ADR-014 §5a). A new stop_reason value widens its CHECK in a migration.
+    stopped_at_block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stop_reason: Mapped[str | None] = mapped_column(VARCHAR(30), nullable=True)
+    failed_block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set when rollback starts; while the run is running, non-null means "undoing deliveries".
+    rollback_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint(
             "status IN ('running', 'completed', 'failed', 'cancelled')",
             name="ck_pipeline_runs_status",
+        ),
+        CheckConstraint(
+            "stop_reason IS NULL OR stop_reason IN ('rule_not_met')",
+            name="ck_pipeline_runs_stop_reason",
+        ),
+        CheckConstraint(
+            "(stopped_at_block_id IS NULL) = (stop_reason IS NULL)",
+            name="ck_pipeline_runs_stop_reason_with_block",
+        ),
+        CheckConstraint(
+            "stopped_at_block_id IS NULL OR status = 'completed'",
+            name="ck_pipeline_runs_stopped_is_completed",
         ),
         UniqueConstraint("workflow_id", name="uq_pipeline_runs_workflow_id"),
         Index("idx_pipeline_runs_user_id_created_at", "user_id", "created_at"),
@@ -146,11 +166,37 @@ class PipelineRunBlock(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How the block ended (ADR-014 §5a). NULL status_reason on a skipped block = not recorded.
+    status_reason: Mapped[str | None] = mapped_column(VARCHAR(30), nullable=True)
+    reason_block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # A sink's delivery and its undo (PRD-017); first written in group M.
+    delivery: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    undo_status: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True)
+    undo_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
             "status IN ('pending', 'running', 'completed', 'failed', 'skipped', 'waiting')",
             name="ck_pipeline_run_blocks_status",
+        ),
+        CheckConstraint(
+            "status_reason IS NULL OR status_reason IN "
+            "('stopped', 'upstream_failed', 'cancelled', 'not_started', 'alert_only')",
+            name="ck_pipeline_run_blocks_status_reason",
+        ),
+        CheckConstraint(
+            "status_reason IS NULL OR status IN ('skipped', 'waiting')",
+            name="ck_pipeline_run_blocks_status_reason_status",
+        ),
+        CheckConstraint(
+            "undo_status IS NULL OR undo_status IN "
+            "('undoing', 'undone', 'undo_failed', 'kept', 'not_undoable')",
+            name="ck_pipeline_run_blocks_undo_status",
+        ),
+        CheckConstraint(
+            "undo_status IS NULL OR status = 'completed'",
+            name="ck_pipeline_run_blocks_undo_status_completed",
         ),
         CheckConstraint("position >= 0", name="ck_pipeline_run_blocks_position_nonnegative"),
         UniqueConstraint(
