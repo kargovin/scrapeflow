@@ -282,6 +282,8 @@ services:
     # Above LLM_GRACEFUL_SHUTDOWN_SECONDS (400): an in-flight call finishes before the kill.
     stop_grace_period: 420s
     restart: unless-stopped
+    # The pipeline gate's stand-in LLM endpoint (J.10).
+    networks: [default, crawl-fixture]
 
   # ── Go HTTP scraper worker ───────────────────────────────────────────────────
 
@@ -325,6 +327,18 @@ services:
         aliases: [internal.crawlfixture.com]
       crawl-fixture:
         aliases: [www.crawlfixture.com, docs.crawlfixture.com]
+
+  # The pipeline gate's shop, stand-in LLM and webhook receiver (J.10) — names on the public-range
+  # network, so the SSRF checks pass them as they would a real site.
+  pipeline-fixture:
+    image: python:3.12-alpine
+    profiles: [gate]
+    command: python -u /fixture/server.py
+    volumes:
+      - ../contracts/fixtures/pipeline-gate:/fixture:ro
+    networks:
+      crawl-fixture:
+        aliases: [shop.pipelinefixture.com, llm.pipelinefixture.com, hooks.pipelinefixture.com]
 
 networks:
   default:
