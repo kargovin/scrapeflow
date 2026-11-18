@@ -329,12 +329,15 @@ async def test_start_failure_marks_the_run_failed(
     assert run.error == "could not start workflow: engine down"
     assert run.finished_at is not None
     async with AsyncSessionLocal() as db:
-        statuses = (
-            await db.scalars(
-                select(PipelineRunBlock.status).where(PipelineRunBlock.pipeline_run_id == run.id)
+        blocks = (
+            await db.execute(
+                select(PipelineRunBlock.status, PipelineRunBlock.status_reason).where(
+                    PipelineRunBlock.pipeline_run_id == run.id
+                )
             )
         ).all()
-    assert statuses == ["skipped", "skipped"]
+    assert blocks == [("skipped", "not_started")] * 2
+    assert run.failed_block_id is None
 
 
 async def test_the_r6_recipe_runs_with_its_webhook_secret_and_pipeline_id(

@@ -16,6 +16,8 @@ async def notify_run(
     run: PipelineRun,
     block_id: str | None = None,
     block_status: str | None = None,
+    block_status_reason: str | None = None,
+    block_undo_status: str | None = None,
 ) -> None:
     """Queues a notification in the caller's transaction; delivered on its commit."""
     # Identifiers and absolute state only — never error text (11d: 8000-byte cap, at-least-once).
@@ -24,8 +26,12 @@ async def notify_run(
         "pipeline_id": str(run.pipeline_id),
         "status": run.status,
         "cancel_requested": run.cancel_requested_at is not None,
+        "stopped_at_block_id": run.stopped_at_block_id,
+        "rolling_back": run.status == "running" and run.rollback_deadline is not None,
         "block_id": block_id,
         "block_status": block_status,
+        "block_status_reason": block_status_reason,
+        "block_undo_status": block_undo_status,
     }
     await db.execute(
         text("SELECT pg_notify(:channel, :payload)"),

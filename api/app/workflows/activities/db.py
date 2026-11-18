@@ -27,6 +27,7 @@ from app.workflows.pipeline import (
     MirrorRunInput,
     RecordStorageInput,
     RunRef,
+    SkipReason,
     StorageUsage,
 )
 
@@ -66,6 +67,12 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
         elif input.status == "waiting":
             # Between attempts: holds no slot (ADR-009 15a); error is the attempt that failed.
             values = {"status": input.status, "error": input.error}
+        elif input.status == "skipped":
+            values = {
+                "status": input.status,
+                "status_reason": input.status_reason,
+                "reason_block_id": input.reason_block_id,
+            }
         else:
             # A block's outcome is a fact even on a cancelled run: its object exists and is charged.
             values = {
@@ -74,6 +81,8 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
                 "error": input.error,
                 "finished_at": now,
             }
+            if input.status == "completed":
+                values["verdict"] = input.verdict
         result = await db.execute(
             update(PipelineRunBlock)
             .where(
@@ -86,9 +95,20 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
             raise ApplicationError(
                 f"no block {input.block_id!r} in run {input.run_id}", non_retryable=True
             )
-        await notify_run(db, run, input.block_id, input.status)
+        await notify_run(db, run, input.block_id, input.status, input.status_reason)
         await db.commit()
         return run.status
+
+
+def _skip_reason(run: PipelineRun) -> tuple[SkipReason, str | None] | None:
+    """Why the run's pending blocks never run, read from what the run row holds."""
+    if run.status == "cancelled":
+        return "cancelled", None
+    if run.status == "failed":
+        return "upstream_failed", run.failed_block_id
+    if run.status == "completed" and run.stopped_at_block_id is not None:
+        return "stopped", run.stopped_at_block_id
+    return None
 
 
 @activity.defn(name=MIRROR_RUN_ACTIVITY)
@@ -103,14 +123,20 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
             # the storage-wall note.
             run.error = None if input.status == "cancelled" else input.error
             run.finished_at = datetime.now(UTC)
-        if run.status in ("failed", "cancelled"):
+            if input.status == "completed":
+                run.stopped_at_block_id = input.stopped_at_block_id
+                run.stop_reason = input.stop_reason
+            elif input.status == "failed":
+                run.failed_block_id = input.failed_block_id
+        if (skip := _skip_reason(run)) is not None:
+            reason, reason_block_id = skip
             await db.execute(
                 update(PipelineRunBlock)
                 .where(
                     PipelineRunBlock.pipeline_run_id == run.id,
                     PipelineRunBlock.status == "pending",
                 )
-                .values(status="skipped")
+                .values(status="skipped", status_reason=reason, reason_block_id=reason_block_id)
             )
         await notify_run(db, run)
         await db.commit()

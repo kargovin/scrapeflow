@@ -367,7 +367,10 @@ async def test_a_spent_run_budget_fails_the_block_before_it_starts():
     assert isinstance(result, WorkflowFailureError)
     assert h.scraped == []
     assert h.calls[-1] == MirrorRunInput(
-        run_id="r1", status="failed", error="fetch: the run's time budget is spent"
+        run_id="r1",
+        status="failed",
+        error="fetch: the run's time budget is spent",
+        failed_block_id="fetch",
     )
 
 
@@ -437,7 +440,12 @@ async def test_a_failed_block_fails_the_block_the_run_and_the_workflow():
         MirrorBlockInput(
             run_id="r1", block_id="extract", status="failed", error="LLMFailed: 401 invalid key"
         ),
-        MirrorRunInput(run_id="r1", status="failed", error="extract: LLMFailed: 401 invalid key"),
+        MirrorRunInput(
+            run_id="r1",
+            status="failed",
+            error="extract: LLMFailed: 401 invalid key",
+            failed_block_id="extract",
+        ),
     ]
 
 
@@ -470,7 +478,9 @@ async def test_an_unexpected_exception_fails_the_run_instead_of_hanging():
     assert h.calls == [
         MirrorBlockInput(run_id="r1", block_id="fetch", status="running"),
         MirrorBlockInput(run_id="r1", block_id="fetch", status="failed", error=error),
-        MirrorRunInput(run_id="r1", status="failed", error=f"fetch: {error}"),
+        MirrorRunInput(
+            run_id="r1", status="failed", error=f"fetch: {error}", failed_block_id="fetch"
+        ),
     ]
 
 
@@ -663,7 +673,9 @@ async def test_a_failed_rule_stops_the_run_before_the_llm_is_billed():
     message = "ValidationFailed: rules[1] (contains): 'Add to cart' not found"
     assert h.calls[-2:] == [
         MirrorBlockInput(run_id="r1", block_id="guard", status="failed", error=message),
-        MirrorRunInput(run_id="r1", status="failed", error=f"guard: {message}"),
+        MirrorRunInput(
+            run_id="r1", status="failed", error=f"guard: {message}", failed_block_id="guard"
+        ),
     ]
 
 
@@ -862,11 +874,229 @@ async def test_every_mirror_write_notifies_identifiers_and_status_only(db_user):
         payloads = [json.loads(await asyncio.wait_for(received.get(), 5)) for _ in range(2)]
     finally:
         await conn.close()
-    base = {"run_id": str(run.id), "pipeline_id": str(run.pipeline_id), "cancel_requested": False}
+    base = {
+        "run_id": str(run.id),
+        "pipeline_id": str(run.pipeline_id),
+        "cancel_requested": False,
+        "stopped_at_block_id": None,
+        "rolling_back": False,
+        "block_status_reason": None,
+        "block_undo_status": None,
+    }
     assert payloads == [
         {**base, "status": "running", "block_id": "fetch", "block_status": "failed"},
         {**base, "status": "failed", "block_id": None, "block_status": None},
     ]
+
+
+async def _reasons(run_id) -> dict[str, tuple[str, str | None, str | None]]:
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(
+                    PipelineRunBlock.block_id,
+                    PipelineRunBlock.status,
+                    PipelineRunBlock.status_reason,
+                    PipelineRunBlock.reason_block_id,
+                ).where(PipelineRunBlock.pipeline_run_id == run_id)
+            )
+        ).all()
+    return {b: (s, r, rb) for b, s, r, rb in rows}
+
+
+STOP_BLOCKS = (
+    ("fetch", "scrape", "completed"),
+    ("check", "validate", "completed"),
+    ("extract", "llm_extract", "pending"),
+    ("notify", "webhook", "pending"),
+)
+
+
+async def test_a_stopped_run_records_where_and_why_and_skips_the_rest_as_stopped(db_user):
+    run = await _run_rows(db_user.id, STOP_BLOCKS)
+    arg = MirrorRunInput(
+        run_id=str(run.id),
+        status="completed",
+        result_path=SCRAPE_PATH,
+        stopped_at_block_id="check",
+        stop_reason="rule_not_met",
+    )
+    assert await mirror_run_status(arg) == "completed"
+    assert await mirror_run_status(arg) == "completed"  # a retried activity
+
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PipelineRun, run.id)
+    assert (row.status, row.result_path, row.stopped_at_block_id, row.stop_reason) == (
+        "completed",
+        SCRAPE_PATH,
+        "check",
+        "rule_not_met",
+    )
+    assert row.failed_block_id is None
+    assert await _reasons(run.id) == {
+        "fetch": ("completed", None, None),
+        "check": ("completed", None, None),
+        "extract": ("skipped", "stopped", "check"),
+        "notify": ("skipped", "stopped", "check"),
+    }
+
+
+async def test_a_failed_run_records_its_block_and_skips_the_rest_as_upstream_failed(db_user):
+    run = await _run_rows(
+        db_user.id,
+        (
+            ("fetch", "scrape", "completed"),
+            ("extract", "llm_extract", "failed"),
+            ("notify", "webhook", "pending"),
+        ),
+    )
+    await mirror_run_status(
+        MirrorRunInput(
+            run_id=str(run.id), status="failed", error="extract: x", failed_block_id="extract"
+        )
+    )
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PipelineRun, run.id)
+    assert (row.status, row.failed_block_id, row.stopped_at_block_id) == (
+        "failed",
+        "extract",
+        None,
+    )
+    assert (await _reasons(run.id))["notify"] == ("skipped", "upstream_failed", "extract")
+
+
+async def test_a_cancelled_run_skips_the_rest_as_cancelled_whatever_the_workflow_reports(db_user):
+    # The workflow's mirror lands after the run is cancelled: the row's ending decides the reason.
+    run = await _run_rows(
+        db_user.id, (("fetch", "scrape", "completed"), ("extract", "llm_extract", "pending"))
+    )
+    await mirror_run_status(MirrorRunInput(run_id=str(run.id), status="cancelled"))
+    await mirror_run_status(
+        MirrorRunInput(
+            run_id=str(run.id), status="failed", error="extract: x", failed_block_id="extract"
+        )
+    )
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PipelineRun, run.id)
+    assert (row.status, row.failed_block_id) == ("cancelled", None)
+    assert (await _reasons(run.id))["extract"] == ("skipped", "cancelled", None)
+
+
+async def test_a_stop_reported_on_a_cancelled_run_is_not_recorded(db_user):
+    run = await _run_rows(db_user.id, STOP_BLOCKS, status="cancelled")
+    status = await mirror_run_status(
+        MirrorRunInput(
+            run_id=str(run.id),
+            status="completed",
+            stopped_at_block_id="check",
+            stop_reason="rule_not_met",
+        )
+    )
+    assert status == "cancelled"
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PipelineRun, run.id)
+    assert (row.stopped_at_block_id, row.stop_reason) == (None, None)
+    assert (await _reasons(run.id))["extract"] == ("skipped", "cancelled", None)
+
+
+async def test_a_run_that_completes_normally_skips_nothing(db_user):
+    run = await _run_rows(
+        db_user.id, (("fetch", "scrape", "completed"), ("notify", "webhook", "pending"))
+    )
+    await mirror_run_status(MirrorRunInput(run_id=str(run.id), status="completed"))
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PipelineRun, run.id)
+    assert (row.stopped_at_block_id, row.stop_reason, row.failed_block_id) == (None, None, None)
+    assert (await _reasons(run.id))["notify"] == ("pending", None, None)
+
+
+def test_a_stop_names_both_its_block_and_its_reason():
+    with pytest.raises(ValueError, match="go together"):
+        MirrorRunInput(run_id="r", status="completed", stopped_at_block_id="check")
+    with pytest.raises(ValueError, match="go together"):
+        MirrorRunInput(run_id="r", status="completed", stop_reason="rule_not_met")
+
+
+async def test_a_completed_block_records_its_verdict(db_user):
+    run = await _run_rows(db_user.id, (("check", "validate", "running"),))
+    verdict = {
+        "rule_index": 0,
+        "rule": {"kind": "compare", "path": "/price", "op": "lt", "value": 100, "negate": False},
+        "found": 120,
+        "expected": 100,
+    }
+    await mirror_block_status(
+        MirrorBlockInput(run_id=str(run.id), block_id="check", status="completed", verdict=verdict)
+    )
+    block = await _block(run.id, "check")
+    assert (block.status, block.verdict) == ("completed", verdict)
+
+
+async def test_a_block_mirrored_skipped_records_its_reason_and_notifies_it(db_user):
+    run = await _run_rows(
+        db_user.id, (("fetch", "scrape", "completed"), ("notify", "webhook", "pending"))
+    )
+    conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
+    received: asyncio.Queue = asyncio.Queue()
+    await conn.add_listener(PIPELINE_STATUS_CHANNEL, lambda *a: received.put_nowait(a[3]))
+    try:
+        await mirror_block_status(
+            MirrorBlockInput(
+                run_id=str(run.id), block_id="notify", status="skipped", status_reason="alert_only"
+            )
+        )
+        payload = json.loads(await asyncio.wait_for(received.get(), 5))
+    finally:
+        await conn.close()
+    block = await _block(run.id, "notify")
+    assert (block.status, block.status_reason, block.started_at, block.finished_at) == (
+        "skipped",
+        "alert_only",
+        None,
+        None,
+    )
+    assert (payload["block_id"], payload["block_status"], payload["block_status_reason"]) == (
+        "notify",
+        "skipped",
+        "alert_only",
+    )
+
+
+async def test_a_stopped_run_notifies_where_it_stopped(db_user):
+    run = await _run_rows(db_user.id, STOP_BLOCKS)
+    conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
+    received: asyncio.Queue = asyncio.Queue()
+    await conn.add_listener(PIPELINE_STATUS_CHANNEL, lambda *a: received.put_nowait(a[3]))
+    try:
+        await mirror_run_status(
+            MirrorRunInput(
+                run_id=str(run.id),
+                status="completed",
+                stopped_at_block_id="check",
+                stop_reason="rule_not_met",
+            )
+        )
+        payload = json.loads(await asyncio.wait_for(received.get(), 5))
+    finally:
+        await conn.close()
+    assert (payload["status"], payload["stopped_at_block_id"], payload["rolling_back"]) == (
+        "completed",
+        "check",
+        False,
+    )
+
+
+def test_mirror_inputs_recorded_before_j5_still_decode():
+    # Every recorded history holds these shapes; the new fields must default.
+    converter = pydantic_data_converter.payload_converter
+    old_run = converter.to_payloads([{"run_id": "r", "status": "failed", "error": "x: y"}])
+    old_block = converter.to_payloads(
+        [{"run_id": "r", "block_id": "x", "status": "completed", "output_ref": "o"}]
+    )
+    [run] = converter.from_payloads(old_run, [MirrorRunInput])
+    [block] = converter.from_payloads(old_block, [MirrorBlockInput])
+    assert (run.failed_block_id, run.stopped_at_block_id, run.stop_reason) == (None, None, None)
+    assert (block.verdict, block.status_reason, block.reason_block_id) == (None, None, None)
 
 
 async def test_record_storage_charges_once_and_reports_usage(db_user):
@@ -1023,6 +1253,7 @@ async def test_an_ssrf_refusal_fails_the_run_on_the_first_attempt():
         run_id="r1",
         status="failed",
         error="notify: WebhookBlocked: ssrf_blocked: URL resolves to a private address: 10.0.0.5",
+        failed_block_id="notify",
     )
 
 

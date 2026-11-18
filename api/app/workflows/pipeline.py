@@ -3,7 +3,7 @@ from collections.abc import Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError, CancelledError, RetryState
@@ -65,6 +65,9 @@ WEBHOOK_EVENT = "pipeline.result"
 RUN_CANCELLED_ERROR = "RunCancelled"
 
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
+# ADR-014 §5a; each list matches its CHECK in migration 4.10 — a new value widens both.
+SkipReason = Literal["stopped", "upstream_failed", "cancelled", "not_started", "alert_only"]
+StopReason = Literal["rule_not_met"]
 
 
 class LLMKey(BaseModel):
@@ -93,10 +96,15 @@ class PipelineRunInput(BaseModel):
 class MirrorBlockInput(BaseModel):
     run_id: str
     block_id: str
-    status: Literal["running", "waiting", "completed", "failed"]
+    status: Literal["running", "waiting", "completed", "failed", "skipped"]
     input_ref: str | None = None
     output_ref: str | None = None
     error: str | None = None
+    # skipped only.
+    status_reason: SkipReason | None = None
+    reason_block_id: str | None = None
+    # completed only: a stop-mode Validate's verdict, less its outcome.
+    verdict: dict[str, Any] | None = None
 
 
 class MirrorRunInput(BaseModel):
@@ -104,6 +112,18 @@ class MirrorRunInput(BaseModel):
     status: Literal["completed", "failed", "cancelled"]
     result_path: str | None = None
     error: str | None = None
+    # completed only: the block that ended the run early.
+    stopped_at_block_id: str | None = None
+    stop_reason: StopReason | None = None
+    # failed only.
+    failed_block_id: str | None = None
+
+    @model_validator(mode="after")
+    def _stop_names_block_and_reason(self) -> "MirrorRunInput":
+        # The CHECK would refuse it on every retry.
+        if (self.stopped_at_block_id is None) != (self.stop_reason is None):
+            raise ValueError("stopped_at_block_id and stop_reason go together")
+        return self
 
 
 class RecordStorageInput(BaseModel):
@@ -267,7 +287,9 @@ class PipelineWorkflow:
                     raise
                 message = _failure_message(exc, timing.maximum_attempts)
                 await self._mirror_block(input.run_id, block.id, "failed", error=message)
-                await self._mirror_run(input.run_id, "failed", error=f"{block.id}: {message}")
+                await self._mirror_run(
+                    input.run_id, "failed", error=f"{block.id}: {message}", failed_block_id=block.id
+                )
                 raise ApplicationError(f"{block.id}: {message}", non_retryable=True) from exc
 
             # ADR-009 §5: content blocks write an object; effect blocks pass their input on.

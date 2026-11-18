@@ -643,6 +643,7 @@ async def create_run(
         run.finished_at = datetime.now(UTC)
         for block in run_blocks:
             block.status = "skipped"
+            block.status_reason = "not_started"
         await db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
