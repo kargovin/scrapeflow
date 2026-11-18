@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 4). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 5). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -30,6 +30,13 @@ until the owner's review accepts it.
 > and the check fails; ADR-014's "unknown fields are ignored" covers fields, not a new rule kind. Workers first
 > still stands. (2) §5b: the stored config is a full dump with defaults, so "absent" is read from the submitted
 > JSON.
+>
+> **Review round 5 (owner, 2026-11-18): §6 What changed, carried values, the allowance.** Agreed, with one
+> correction and one note. (1) `core/diff.py` is not caller-less: `core/webhooks.py` imports `DiffResult` for
+> `create_webhook_delivery`'s unused `diff` parameter, so §14's cleanup removes the `compute_*` functions, the
+> parameter and the type together. (2) A raw-HTML page diff reads poorly (minified HTML is a few long lines); the
+> docs point at R3's gate-after-Clean. "Step" reworded to "activity" where it meant one: Diff and Capture are
+> activities no block owns, run on the `content` task queue the LLM worker polls.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -188,7 +195,7 @@ Refused with a `422` naming the problem, in this order:
    `pipeline_max_run_seconds`; the refusal names both numbers. The check's ceiling is the version's resolved ceiling
    plus the allowance, **capped** at `pipeline_max_run_seconds`. Not "the resolved ceiling plus the allowance": a
    version may declare `time_budget_seconds` up to the maximum (`validator._budget_problems`), and would then never
-   be monitorable however little its blocks need. Need plus allowance fits under the cap, so every step keeps its
+   be monitorable however little its blocks need. Need plus allowance fits under the cap, so every activity keeps its
    full budget.
 7. **The scheduled cap** (§12), on create and on resume.
 
@@ -452,6 +459,9 @@ writes the full comparison as an object, and returns a bounded summary.**
     compared item by item by position (R4).
   - **A guard on size:** above 50,000 lines a side, or past the activity's time limit, it returns *"too large to
     compare"*. `difflib` is quadratic in the worst case.
+  - **A diff of raw HTML reads poorly.** Minified HTML is often a few very long lines, so a gate placed straight
+    after Scrape gives "line 1 changed" and 200 characters of it. R3 already recommends the gate after Clean,
+    whose Markdown diffs line by line; the docs say so. Nothing is built for it.
 - **What it writes:** the full comparison as `history/{artifact_id}/diff.json` (ADR-011's stage naming; the
   artifact is the block that triggered it), recorded in the ledger like any object, so it is charged and freed with
   its run. It is capped at 1 MiB and marked cut beyond that. The run page's full diff reads this object. It never
@@ -472,8 +482,9 @@ writes the full comparison as an object, and returns a bounded summary.**
   workflow catches the final `ActivityError` and records `unavailable`. *Changed* is decided by the fingerprint.
   The diff only describes it.
 - **`core/diff.py` is not reused.** It returns line counts, compares top-level fields only, and reads an error as
-  "no change" (PRD-018 Background). The new code lives in the LLM worker. `diff.py` has no caller after D.2 and is
-  deleted with the job lane's change-detection columns (§14).
+  "no change" (PRD-018 Background). The new code lives in the LLM worker. Its two `compute_*` functions have no caller
+  since D.2; its `DiffResult` type is still imported by `core/webhooks.py` for `create_webhook_delivery`'s `diff`
+  parameter, which every caller leaves `None`. The cleanup (§14) removes all three together.
 
 **The webhook payload.** `WebhookInput` gains `monitor_id: str | None = None` and `change: dict | None = None`
 (additive). On a monitor check the Webhook block's payload gains `monitor_id` and `change`: `{status:
@@ -504,12 +515,12 @@ never from storage.**
 
 ### 6c. The monitor allowance in the run budget
 
-Diff and Capture are steps no pipeline block owns, so the catalog's per-block budgets do not cover them.
+Diff and Capture are activities no pipeline block owns, so the catalog's per-block budgets do not cover them.
 **Admission adds a monitor allowance to the check's run ceiling**: one Diff budget for the first gate, one per
 `llm_extract` block, and one Capture budget per distinct `from_block`. Each budget is computed with the catalog's
 `Timing` helper (`start_to_close` 120 s for Diff, 60 s for Capture, the workers' 3-attempt transient policy), plus
 `DB_ACTIVITY_SECONDS` for each extra mirror call. The monitor save refuses a version whose ceiling plus allowance
-exceeds `pipeline_max_run_seconds` (§2d). A hand-run has no allowance and runs neither step.
+exceeds `pipeline_max_run_seconds` (§2d). A hand-run has no allowance and runs neither activity.
 
 ---
 
@@ -838,7 +849,7 @@ whether they are active, paused or paused themselves.**
   finds stays ignored, as today: nothing has ever run it.
 - **The column is dropped later, in two releases** (unmap, then drop; the H.2 → I.1 pattern), **in the same cleanup
   as the job lane's leftovers**: stop writing `job_runs.content_hash`, then drop it and `job_runs.diff_detected` /
-  `diff_summary`, and delete `core/diff.py` (§6a). No quota view reads any of these columns (checked against the
+  `diff_summary`; remove `create_webhook_delivery`'s unused `diff` parameter and delete `core/diff.py` with it (§6a). No quota view reads any of these columns (checked against the
   views' column list in CLAUDE.md). The payload fields `diff_detected` / `diff_summary` on `job.*` events stay,
   always `null` (D17). That cleanup is a backlog item, not part of slice 1.
 
