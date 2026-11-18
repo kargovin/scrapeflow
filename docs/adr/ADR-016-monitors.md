@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 3). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 4). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -24,6 +24,12 @@ until the owner's review accepts it.
 > diff), present only while its `collected_at` is empty. Owner asked whether a check waiting for approval blocks a
 > new one: no, by design (PRD-018 R1, D10, Q3 = supersede) — at most one waits, it holds no slot, and only
 > *running* checks exclude each other; it is also why the newest baseline is chosen by start time.
+>
+> **Review round 4 (owner, 2026-11-18): §5 The change gate.** Agreed, with two corrections. (1) §5d: an old LLM
+> worker does not read every page as changed — its `rules` field is a closed union, so `changed` fails to decode
+> and the check fails; ADR-014's "unknown fields are ignored" covers fields, not a new rule kind. Workers first
+> still stands. (2) §5b: the stored config is a full dump with defaults, so "absent" is read from the submitted
+> JSON.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -367,6 +373,12 @@ save-time check writes the resolved value into the stored definition:** at the f
 `on_stop_outputs` is stored as `"delete"`, and at a later gate as `"keep"`. A pinned version therefore never
 depends on position logic at run time, and a user's explicit `keep` at the first gate is kept.
 
+**"Absent" is read from the submitted JSON, not from the parsed model.** The stored config is a full dump of the
+model, defaults included (`validator.py`: `config.model_dump(mode="json")`), so after ADR-014 every stored Validate
+carries `on_stop_outputs` explicitly and the parsed model cannot tell "left out" from "chose `keep`". The validator
+checks the raw block config for the key. An edit round-trips cleanly: the stored `"delete"` comes back in the
+resubmitted JSON.
+
 ### 5c. The fingerprint
 
 **SHA-256 of the gate's input object, byte for byte, computed by the Validate activity** (it reads the object
@@ -395,8 +407,9 @@ would make two different byte strings equal).
   hashed, and a storage read failure is the activity's ordinary transient error, retried as for any Validate.
 - Both contract copies (`activities/contracts.py`, `llm-worker/worker/contracts.py`) and
   `contracts/test_activity_contract.py` gain the fields. **The LLM worker is released first** (ADR-014 §2's note):
-  an old worker would drop `known_fingerprints` and read every page as changed. That is noisy and costly, but not
-  silent loss.
+  an old worker parses `rules` against its closed list of rule kinds (`list[Rule]`, a discriminated union), so a
+  `changed` rule fails to decode and **the check fails** at its gate. Loud, not silent. ADR-014 §2's "an old worker
+  ignores unknown fields" holds for new *fields* (`known_fingerprints`), not for a new rule *kind*.
 
 ### 5e. What the workflow does with the verdict
 
@@ -863,7 +876,7 @@ of §11), because activity code is not replayed. The new fields on `ValidateInpu
 |---|---|---|---|
 | — | D16's crawl refusal (§14) | none | api only, any time |
 | **0** | BUG-031 (§11) | none: the ledger, the FKs and the cascades exist | api only |
-| **1** | monitors (§2–§8, §10–§13), after PRD-019's build (ADR-014: stop mode, typed inputs, `when_unmet`) | `monitors`, `monitor_events`, the `pipeline_runs` and `pipeline_run_blocks` columns (§2b) | **LLM worker** (the `changed` rule, Diff, Capture) **→ api** (ADR-014 §2's order: an old worker would read every page as changed) |
+| **1** | monitors (§2–§8, §10–§13), after PRD-019's build (ADR-014: stop mode, typed inputs, `when_unmet`) | `monitors`, `monitor_events`, the `pipeline_runs` and `pipeline_run_blocks` columns (§2b) | **LLM worker** (the `changed` rule, Diff, Capture) **→ api** (ADR-014 §2's order: an old worker cannot decode the `changed` rule, so every check fails at its gate) |
 | **2** | Approval (§9) | the approval columns, the reason widenings | api only (the workflow worker is the api image) |
 | with PRD-017 | the notice destination, `webhook_deliveries` widened for monitors (§8) | `monitors.notice_destination_id`, the `webhook_deliveries` columns and CHECKs | whichever of the two ships second |
 
@@ -939,8 +952,8 @@ Product-visible consequences of the design, each with a recommendation.
     on a failed, cancelled, expired or superseded run (§4a);
   - newest baseline by **`created_at`**, not `finished_at` (§4b);
   - the fingerprint hashes the **bytes**, before the activity's UTF-8 decode with `errors="replace"` (§5c);
-  - the save-time check writes `on_stop_outputs` explicitly at every change gate. Do not change ADR-014's catalog
-    default (§5b);
+  - the save-time check writes `on_stop_outputs` explicitly at every change gate, deciding "absent" from the
+    submitted JSON — the stored config is a full dump with defaults. Do not change ADR-014's catalog default (§5b);
   - Diff and Capture run **before** their block is mirrored `completed`, or the run drops out of the concurrency
     view mid-check (§6a);
   - the Diff activity returns `baseline_gone` and "too large" as results. Only transient storage errors raise, and
