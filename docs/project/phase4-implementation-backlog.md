@@ -114,7 +114,7 @@
 | **J** | **Conditional execution** (PRD-019 · ADR-014 except §7) | |
 | J.1 | LLM worker: Validate stop mode, reverse rules (`negate`), three answers | ✅ Built 2026-11-18 (`045f598`; **released 2026-11-18** with J.2) |
 | J.2 | 🚀 Release J-a — workers first (J.1 + BUG-024 + Y.1) | ✅ **RELEASED 2026-11-18** (`main` `eea8344..036870c`; no infra change, no migration) — owner verified a job, a crawl, a fail-mode Validate run, the 422 and the 400 |
-| J.3 | Migration 4.10: block/run reason columns, `webhook_deliveries` widened for pipeline runs | ⬜ |
+| J.3 | Migration 4.10: block/run reason columns, `webhook_deliveries` widened for pipeline runs | 🔧 **Built 2026-11-18** (`0341771`, migration 4.10 `678c7e339d80`, local, unreleased) — ships with J.10 |
 | J.4 | Save-time config (`when_unmet`, `on_stop_outputs`, `negate`, `events`) + typed run inputs | ⬜ |
 | J.5 | Mirrors record skip reasons, verdict, stop, failed block; `notify_run` fields | ⬜ |
 | J.6 | Stop path in `PipelineWorkflow` (patch `validate-stop`) + `release_run_outputs` | ⬜ |
