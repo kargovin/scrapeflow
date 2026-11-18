@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 8). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 9). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -56,6 +56,10 @@ until the owner's review accepts it.
 > an example: Priya's price push). Approval's catalog `Timing` covers only its two DB activities; the wait is
 > excluded (§9d). **G8 added and answered (a):** an approved run continues without re-asking for a slot, so
 > answering several approvals together can briefly exceed the concurrency limit. G5 agreed with §9.
+>
+> **Review round 9 (owner, 2026-11-18): §10 Endings, §11 Storage.** Agreed, with one gap closed: admin user delete
+> removes the user's monitor Schedules best effort, as it does for job Schedules; the cascade alone would leave
+> each one firing into "stopped" for ever.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -838,7 +842,11 @@ else delete the rows, commit, delete the Schedule (a monitor) best effort → 20
 - Deleting a baseline makes the next check compare with the newest remaining eligible check (§4b). Other runs'
   `baseline_run_id` pointing at it become NULL (§2b).
 - Admin deletes: today admins have no pipeline delete. Admin user delete already releases everything through the
-  ledger (lane-blind). Nothing new is added for admins (R9: read-only).
+  ledger (lane-blind). Nothing new is added for admins (R9: read-only), with one exception:
+- **Admin user delete also deletes the user's monitor Schedules**, best effort, as it already does for job
+  Schedules (`schedules.forget`, `routers/admin.py`). The cascade removes the monitor rows; without this each
+  monitor's Schedule would fire for ever into "stopped" — harmless, and a permanent leak of Schedules and
+  workflows.
 
 ---
 
