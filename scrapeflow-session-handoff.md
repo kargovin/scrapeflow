@@ -136,8 +136,9 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-18 *(clock)*
 
-🚀 **J-a RELEASED (2026-11-18, nineteenth session).** Owner: "explain j1 with background" → "build it" → "commit it"
-→ "what is y1" → "build it" → runbook → owner pushed `main` and verified.
+🚀 **J-a RELEASED; 🔧 J.3 + J.4 BUILT (2026-11-18, nineteenth session).** Owner: "explain j1 with background" →
+"build it" → "commit it" → "what is y1" → "build it" → runbook → owner pushed `main` and verified → "explain j3 …
+in simpler words" → "build it" → J.4 the same → "close out".
 - **J.1 (`045f598`)** — `llm-worker/worker/rules.py` answers met / not met / cannot be checked; `negate` on every rule
   kind flips met ↔ not met, never "cannot be checked"; `ValidateInput.when_unmet` (`fail` default). Fail mode
   byte-identical (all 166 old worker tests unchanged). Stop mode: first rule not met → `ValidateVerdict{outcome,
@@ -156,11 +157,34 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
   to `036870c`. Owner verified: job `diff_detected: null`, crawl `completed`, fail-mode Validate run `failed` with
   the `'Sold out' not found` message, crawl `schedule_cron` → 422, `http://100.64.0.1/` job → 400 (BUG-024 closed in
   prod).
+- **J.3 (`0341771`, migration 4.10 `678c7e339d80`, local, unreleased — ships with J-b)** — `pipeline_run_blocks` +
+  `status_reason`/`reason_block_id`/`verdict`/`delivery`/`undo_status`/`undo_error`; `pipeline_runs` +
+  `stopped_at_block_id`/`stop_reason`/`failed_block_id`/`rollback_deadline`; `webhook_deliveries` + `pipeline_run_id`
+  (FK `fk_webhook_deliveries_pipeline_run_id`, CASCADE)/`block_id`, both owner CHECKs widened, partial unique
+  `uq_webhook_deliveries_pipeline_run_block_event`. **Two CHECKs beyond ADR-014's list (my call):** a stop names both
+  block and reason; `(pipeline_run_id IS NULL) = (block_id IS NULL)` (else a NULL block slips the unique index).
+  Autogenerate saw no CHECKs (hand-written) and proposed Y.1's four drops (deleted); the generated file was
+  root-owned — `docker compose run --rm --no-deps -T --entrypoint chown api <uid>:<gid> /app/migrations/versions/<f>`.
+  Downgrade deletes pipeline alert rows (the narrow CHECKs cannot hold them). `tests/test_run_endings_schema.py` 34
+  (each refusal asserts its constraint name); mutation 10/10; round trip ×2; views read.
+- **J.4 (`f5d550d`, local, unreleased — ships with J-b)** — `catalog.py`: `_Rule.negate: StrictBool`; `compare.value`
+  / `contains.text` bindable (`BindableScalar`/`BindableText`); `ValidateConfigV1.when_unmet`, `on_stop_outputs`
+  (**`None` default, refused with fail, a stop is stored as explicit `keep`** — my call: a `"keep"` default would make
+  every re-save of a fail block refuse itself); `WebhookConfigV1.events`; `Timing.after` (a delete-stop adds
+  `RELEASE_OUTPUTS_TIMING.budget`, 435 → 810 s need); `bindable_fields` is now a mapping `field → (holder → allowed
+  input types)`, with `rules[].value`/`rules[].text`. `validator.py`: `RunInputDeclaration.type` url/number/text; the
+  binding walk enters top-level lists and pairs each binding with its declared type; stop on the last block refused.
+  `definition.py`: `ParsedDefinition.inputs` is name → type; `input_value_problems` (JSON numbers only — `"100"`,
+  `true`, `null`, `NaN` refused; bound contains text 1–1000). Rules sent to the worker now carry `negate: false`.
+  39 new tests, suite 864, mutation 11/11, replay green. ⚠️ **Until J.6:** a bound rule saves but cannot run, and a
+  saved `when_unmet: "stop"` runs as fail (the workflow sends neither yet) — J-b ships them together.
 - **Memory:** `feedback_task_explanation_shape.md` — "explain <task>" = background + flow, what changes with
-  concrete examples, release reason, traps, then ask walkthrough or build.
-- **Git:** `develop` = `main` = `036870c` + this closeout (docs). **Deployed code is `036870c`.** Infra untouched.
-  Compose `api` (+ postgres) left running. `tmp/` untracked, not mine.
-- **Next:** **J.3** — migration 4.10 (block/run reason columns, `webhook_deliveries` widened for pipeline runs).
+  concrete examples, release reason, traps, then ask walkthrough or build; plain words by default.
+- **Git:** `main` = `036870c` (**deployed**). `develop` = `main` + the J-a release record, J.3, J.4 and this closeout
+  — **not pushed**. Infra untouched. Compose stopped. `tmp/` untracked, not mine.
+- **Next:** **J.5** — the mirror activities record how blocks and runs ended (activity code only, no patch). Then
+  J.6 (the workflow: substitute bindings, send `when_unmet`, the stop path), J.7–J.8 (failure alerts, BUG-030), J.9
+  (SPA, BUG-018/029), J.10 (release J-b).
 
 🧭 **TECH LEAD PASS — GROUPS J–P WRITTEN (2026-11-18, eighteenth session; docs only).** Owner: "assume the tech
 lead persona; read ADRs 14–16 and PRDs 17–19 and the bugs that can be fixed while coding these; build a backlog;
@@ -2134,7 +2158,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
-| 2026-11-18 *(clock, nineteenth)* | **🚀 J-a RELEASED.** J.1 (Validate three answers, `negate`, stop mode + verdict) and Y.1 (crawl `schedule_cron` refused, four columns unmapped) explained, built, mutation-checked; J.2 runbook; owner pushed `main` `eea8344..036870c` and verified all five checks; step 0 count 0 | `045f598`, `3308397`, `8774907`, `9b08d49`, `036870c`, closeout |
+| 2026-11-18 *(clock, nineteenth)* | **🚀 J-a RELEASED; J.3 + J.4 built.** J.1 (Validate three answers, `negate`, stop mode + verdict) and Y.1 (crawl `schedule_cron` refused, four columns unmapped) explained, built, mutation-checked; J.2 runbook; owner pushed `main` `eea8344..036870c` and verified all five checks; step 0 count 0. J.3 migration 4.10 (reason/verdict/undo columns, pipeline alert rows) and J.4 (stop/negate/events config, typed run inputs) explained, built, mutation-checked | `045f598`, `3308397`, `8774907`, `9b08d49`, `036870c`, `a929340`, `0341771`, `4b58bc7`, `f5d550d`, `a037a53`, closeout |
 | 2026-11-18 *(clock, seventeenth)* | **📐 ADR-016 drafted (Monitors, PRD-018's Architect pass), then 📝 owner review complete (12 rounds) and ✅ Accepted.** Handoff staleness fixed first (`217ffcf`). PRD-018, ADR-014/015 and the code read; OQ-1–14 + the LLM-key carry answered; ~20 corrections from code checks; G1–G8 answered; backlog row for pipeline admin stats | `217ffcf`, `defe073`, `574fd7a`…`dd8a984` (rounds 1–11), `2da69b7` (review complete), `9808684` (accepted), closeout |
 | 2026-11-18 *(clock, sixteenth)* | **📐 ADR-015 owner review — 9 rounds, complete; ADR-014 + ADR-015 Accepted.** Plain-words walkthrough per section with examples, each claim checked against code; F1–F5 accepted; httpx `sni_hostname` pin tested; LLM-key deletion under a monitor carried to ADR-016. **🔧 BUG-024 fixed locally** (public unicast only, NAT64 judged as its IPv4; 37 tests, suite 783, mutation 4/4). **BUG-032 filed.** Owner's stance on Monitors/destinations saved to memory | `57bb301`, `86bfae6` + handoff refresh |
 | 2026-11-03 → 11-05 *(clock, fifteenth)* | **📝 PRD-018 owner review — 16 rounds, complete.** Read-in from the handoff; plain-words walkthrough per section with examples and illustrations, each claim checked against code (deleted result consumer, `diff.py`, `cleaner.py`, `pipeline.py`, `PipelineEditor.tsx`, job permanent delete, schedule admission, kill switch, settings). Baseline rule rebuilt (unchanged / pre-gate / expired / superseded never baseline), version+inputs fixed, change gate renamed, fingerprint not an input, start values, waiting-check comparison, notices once per situation, OQ-14 added; Q1 = (e) drops slice 3 and OQ-12; scheduled crawls not planned. Owner steer: simplify, move polish to "not yet" | `74aa2d9` + this closeout |
