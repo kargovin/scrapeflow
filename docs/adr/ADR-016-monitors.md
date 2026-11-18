@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 6). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 7). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -45,6 +45,12 @@ until the owner's review accepts it.
 > after resuming sends one fresh notice. Owner asked what a notice is: a message about the monitor itself (paused
 > itself, monthly runs used up, gave up waiting), always in the SPA, also sent to the notice destination once one
 > exists; not a run's failure alert, not an approval message.
+>
+> **Review round 7 (owner, 2026-11-18): §8 Notices.** Agreed, with two fixes. (1) `webhook_delivery.pending()` gains
+> a `monitor_event_id` filter, or a notice's best-effort start finds no row and waits for the sweep. (2) Lock order,
+> a knock-on of round 6: `mirror_run_status` writes `paused_itself` under `lock_user` but locks the run row first,
+> the reverse of §11's deletes; for a monitor check it takes the user lock first. A notice still retrying towards a
+> destination the user has since deleted fails with ADR-015 §2c's final "destination deleted" — accepted.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -616,7 +622,9 @@ notice destination, a `webhook_deliveries` row written in the same transaction, 
   - `ck_webhook_deliveries_job_or_batch_or_crawls` → `num_nonnulls(job_id, batch_id, crawl_id, pipeline_run_id,
     monitor_id) = 1`;
   - `ck_webhook_deliveries_run_or_crawl` → `num_nonnulls(run_id, crawl_id, pipeline_run_id, monitor_id) = 1`;
-  - `UNIQUE (monitor_event_id) WHERE monitor_event_id IS NOT NULL`, so a retried writer inserts once.
+  - `UNIQUE (monitor_event_id) WHERE monitor_event_id IS NOT NULL`, so a retried writer inserts once;
+  - `webhook_delivery.pending()` gains a `monitor_event_id` filter (ADR-014 added `pipeline_run_id`), so the writer's
+    best-effort start finds the row; without it every notice waits for the 5-minute sweep.
 - The row carries `destination_id` and `kind` (`webhook` | `email`, ADR-015 §4). The attempt resolves the
   destination's URL or mail settings and its secret at each attempt (ADR-015 §2b). The delivery activity's
   explicit owner arms (ADR-014 §8b) gain **monitor → the destination's secret**. An unknown owner still raises.
@@ -626,6 +634,10 @@ notice destination, a `webhook_deliveries` row written in the same transaction, 
   to its event.
 - **Who writes it:** the same transaction that writes the event: admission (skips, give-up), `monitor_check_ended`
   (`paused_itself`). "Recorded" and "queued" become true together, as ADR-014 §8a requires for failure alerts.
+- **Lock order: the user first, then the run.** Every event write is under `lock_user` (§7b). `mirror_run_status`
+  locks the run row today (`_lock_run`); for a monitor check it takes `lock_user` **before** the run row, the order
+  admission and §11's deletes use. The opposite order can deadlock against a delete (Postgres aborts one side; the
+  mirror would retry), so it is avoided rather than absorbed.
 - **Run failures are not notices.** They keep PRD-019's *the run breaks* on the pipeline's own blocks (D13).
   Approval messages are not notices either: they go to the Approval block's destination (§9c).
 - Notices cost no quota: `webhook_deliveries` is in no view.
@@ -992,6 +1004,7 @@ Product-visible consequences of the design, each with a recommendation.
   - `monitor_check_ended` runs only in the call that moves the run out of `running` — the mirror and admission are
     retried, and a counter bumped on every retry pauses a monitor early (§7a);
   - every `monitor_events` write happens under `lock_user`, and pausing closes any open situation (§7b);
+  - for a monitor check, `mirror_run_status` takes `lock_user` before the run row — user then run, everywhere (§8);
   - all three writers of a check's outcome (`mirror_run_status`, the trigger's could-not-start branch, admission's
     failed checks) call `monitor_check_ended`, and the two that write `failed` before any workflow runs also call
     `queue_failure_alerts`, each in the transaction that writes the outcome (§3b, §7a);
