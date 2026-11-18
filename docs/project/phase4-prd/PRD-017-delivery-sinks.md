@@ -6,8 +6,9 @@ deliveries when a run fails partway.
 **Source:** `workflows-scoping.md` §C; `phase4-backlog.md` §2 (this PRD's row and its inherited commitment);
 ADR-009 §5 (effect blocks), §14b (the "succeeded, then undone" obligation), §15 / 15a–15e (a delivery is a step
 the run waits for).
-**Status:** **Draft — owner's section-by-section review complete (2026-10-30, 17 rounds).** Next: the Architect
-pass. Not Accepted.
+**Status:** Architect pass complete — [ADR-014](../../adr/ADR-014-block-outcomes-stop-rollback-alerts.md) (OQ-1/2)
+and [ADR-015](../../adr/ADR-015-delivery-sinks.md) (OQ-3–8) are **Accepted** (2026-11-18). Owner's review: 2026-10-30,
+17 rounds. Next consumer is the Tech Lead.
 **Last updated:** 2026-10-30 (review round 17: D10–D11 — owner review complete)
 
 > **Not blocked by PRD-019 (conditional execution), but coupled to it in one place.** Both PRDs add a new way

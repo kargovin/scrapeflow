@@ -1,11 +1,14 @@
 # ADR-014: Block Outcomes — Stopping Early, Rollback, and Failure Alerts
 
-**Status:** **Draft — owner's section-by-section review complete (2026-11-03, 10 rounds).** Acceptance held until
-PRD-018 (Monitors) is reviewed (owner, 2026-10-30), so Monitors' new endings can be checked against §5 while this
-is still editable.
+**Status:** **Accepted 2026-11-18** (owner) — after the owner's section-by-section review (2026-11-03, 10 rounds);
+acceptance was held until PRD-018 was reviewed (2026-11-05) and ADR-015 reviewed (2026-11-18). Implement against
+it; immutable from here (a change is a superseding ADR).
 **Date:** 2026-10-30
-**Last updated:** 2026-11-03 (review round 10: §11–§13 — owner review complete)
+**Last updated:** 2026-11-18 (Accepted; one line carried from PRD-018's review added to §7)
 
+> **At acceptance (owner, 2026-11-18).** One line carried from PRD-018's review (D9) is added to §7: an approval
+> request does not set `announced`. ADR-015 (Accepted the same day) answers the shared webhook send carried to it.
+>
 > **Review round 1 (owner, 2026-11-03): §1 The problem.** Agreed as drafted.
 >
 > **Review round 2 (owner, 2026-11-03): §2 The stop decision.** Decision agreed. The release-order warning was
@@ -345,6 +348,8 @@ failure (a block failed / time budget spent / storage accounting failed):
    mirror_run_status(failed, failed_block_id, error)     → also writes the failure alerts (§8)
 ```
 
+- **An approval request does not set `announced`** (PRD-018 D9). Asking a person to approve is not an
+  announcement of the result, so a run that fails after approval still rolls its deliveries back.
 - **The undo uses the location recorded at delivery** (`delivery` in workflow state and in the row), never the
   destination's current settings. Whether an undo reports "already gone" or "left in place" is the sink's own job,
   and ADR-015 defines it per kind.

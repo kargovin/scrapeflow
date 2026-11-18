@@ -2249,7 +2249,9 @@ NAT shared space, and **Tailscale assigns node addresses from it** — on a home
 those are internal hosts. Multicast (`224.0.0.0/4`) passes too (no practical fetch).
 **Discovered:** 2026-10-27, designing E.6's fixture network (by code reading, then confirmed in the api
 container on Python 3.12.14). **Not exploited, not reproduced against a real internal host.**
-**Status:** Open. **Not fixed** — it changes the front door for every lane, so it is the owner's call.
+**Status:** ✅ **Fixed locally 2026-11-18, unreleased** (owner, ADR-015 review round 5: "treat this project as to be
+used by others too"). `core/security.is_public_address`: refuse unless `is_global and not is_multicast`, with a
+NAT64 address judged as its IPv4 address. Every lane's check goes through it. ~~Open — the owner's call.~~
 
 ### What happens
 
@@ -2263,6 +2265,16 @@ IPv4-mapped loopback *are* refused.
 Refuse unless `ip.is_global and not ip.is_multicast` — an allow-list of public space rather than a
 deny-list of named private ranges. Check E.6's fixture subnet (`11.222.33.0/24`, `is_global` True)
 still passes. One test per range. Not dissolved by Temporal.
+
+### Fix (built 2026-11-18)
+
+The proposed rule alone had a hole: `is_global` calls the NAT64 address `64:ff9b::a00:1` (that is, `10.0.0.1`)
+**public**, and the old deny-list refused it. So a NAT64 address (`64:ff9b::/96`) is judged as its embedded IPv4
+address first. `::ffff:a.b.c.d` needs no unwrap on Python 3.12.14 (`is_global`/`is_multicast` already judge it by
+the IPv4 address); the tests pin that, so a Python that differs fails them. The old deny-list adds nothing beyond
+`is_global` and is gone. `api/tests/test_security.py`: 26 refused and 6 admitted addresses (E.6's `11.222.33.0/24`
+among the admitted), plus the check itself. Suite 783; mutation 4/4 (old rule, no multicast, no NAT64 unwrap,
+first answer only).
 
 ---
 
@@ -2430,6 +2442,36 @@ it frees intermediates, never the result.
 
 **Related:** BUG-019 (the cleanup that never ran); ADR-009 §8c (the retention promise this leaves unkept);
 P8 / the ledger (the 503 rule the fix must keep).
+
+---
+
+## BUG-032 — A user URL can target the node's own public address
+
+**Severity:** Low to medium by shape — depends on what listens on the node. Nothing known is exposed without
+credentials today (the kubelet on 10250 and the k3s API on 6443 both require authentication).
+**Discovered:** 2026-11-18, in the owner's ADR-015 review (round 6), designing the delivery worker's NetworkPolicy.
+By reasoning only — **not reproduced**.
+**Status:** 🔴 **OPEN — filed 2026-11-18; not fixed.**
+
+`core/security.is_public_address` admits any globally reachable address, and the k3s node's own public IP
+(production egress shows `139.99.121.44`) is one. A connection from a pod to its own node's IP is delivered to the
+host's network stack from the inside (the CNI bridge), not from the internet. Host firewalls commonly trust that
+path, because k3s needs pods to reach the node. So a job, batch, crawl or webhook URL such as
+`http://139.99.121.44:<port>/` can reach a port on the node that the internet cannot — any unauthenticated service
+bound to the host (a metrics exporter, a debug port) would answer.
+
+**What is not affected:** the private ranges, which the address check already refuses.
+
+**Fix (sketch):** a deny-list of the node's own addresses cannot live in code (it is per deployment). Use the same
+fence ADR-015 gives the delivery worker: a NetworkPolicy on the http, playwright and LLM workers allowing DNS,
+Temporal, MinIO and `0.0.0.0/0` **except** private, link-local, `100.64/10` **and the node's public IP(s)**. The
+workflow worker (webhooks) cannot take that policy — it must reach Postgres and Redis — so for webhooks an
+`EGRESS_DENY_CIDRS` setting read by `is_public_address` is the alternative. To verify first: from a worker pod, what
+the node's public IP answers on.
+
+**Related:** BUG-024 (the address rule), BUG-030 (check vs connect), ADR-015 §3–§4 (the delivery worker's
+NetworkPolicy excludes the node IP from slice 1).
+
 ---
 
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage

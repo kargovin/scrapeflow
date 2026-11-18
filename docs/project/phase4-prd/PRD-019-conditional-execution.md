@@ -12,7 +12,7 @@
 **Source:** `phase4-backlog.md` §2 (this PRD's row and its four obligations); ADR-009 §14 (why this is a
 separate layer-A PRD and not part of Monitors), §14c (the condition vocabulary is the hard part), §15f (failure
 notification was handed here).
-**Status:** **Draft — owner's section-by-section review complete (2026-10-30, 12 rounds).** Next: the Architect pass. Not Accepted.
+**Status:** Architect pass complete — [ADR-014](../../adr/ADR-014-block-outcomes-stop-rollback-alerts.md) is **Accepted** (2026-11-18). Owner's review: 2026-10-30, 12 rounds. Next consumer is the Tech Lead.
 **Last updated:** 2026-10-30 (review round 12: Open questions — owner review complete)
 
 > **Index order is not build order.** This PRD sorts after PRD-018 but is **written and built before it**.

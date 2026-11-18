@@ -134,7 +134,47 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-05 *(clock)*
+## Current state — as of 2026-11-18 *(clock)*
+
+📐 **ADR-015 REVIEWED; ADR-014 + ADR-015 ACCEPTED (2026-11-18, sixteenth session).** The owner reviewed
+`ADR-015-delivery-sinks.md` in **9 rounds** (plain-words walkthrough with examples per section; each round is a
+`Review round N` note at the top of the ADR). F1–F5 all accepted. Then **both ADRs Accepted** (owner: "accept
+all"), and ADR-014 gained its one carried line in §7: an approval request does not set `announced`.
+PRD-017 and PRD-019 now read *Architect pass complete*.
+- **Owner's stance for Monitors and destinations** (saved to memory): they won't use ScrapeFlow until all of
+  Phase 4 is in production and won't read the code until then. I write and test it. **No code is added only to
+  be removed later** (so no API refusal of a destination kind whose slice hasn't shipped). **Treat the project as
+  used by others**, whatever the owner's own setup.
+- **What the review changed** (checked against code):
+  - `last_test` moved to *not yet*. Destination checks are *exists and is yours* (404). The trigger checks
+    destinations **after** `admit()`'s lock. `ON DELETE CASCADE` on `pipeline_version_destinations`.
+  - Three test endpoints: unsaved form, save/edit (refuses on failure), saved.
+  - **httpx pin tested**: the `sni_hostname` extension plus `Host`, no custom transport. Every attempt resolves
+    afresh, IPs are tried in order, and a certificate mismatch is final. One `send_signed_post` serves both
+    webhook senders.
+  - Read-only MinIO user (chart values). The NetworkPolicy excludes `100.64/10` and the node's public IP. Email
+    alerts and notices go through `webhook_deliveries.kind` and `send_email` on the delivery queue.
+  - Postgres undo: 0 rows = undone. Versioned buckets keep older versions.
+  - Per-try DB writes are counted in sink budgets. Postgres SQLSTATE `08`/`53`/`57P0x`/`40001`/`40P01` are
+    temporary.
+  - Release order is infra → `main` → infra, because the new image has no tag yet.
+  - LLM-key deletion under a monitor (a trigger failing at 3 a.m.) is **carried to ADR-016**.
+- 🔧 **BUG-024 FIXED locally, unreleased** (owner: "make the fixes"). `core/security.is_public_address` admits
+  public unicast only (`is_global and not is_multicast`), with NAT64 judged as its IPv4 address; the proposed
+  rule alone admitted `64:ff9b::10.0.0.1`. Every lane goes through it. `api/tests/test_security.py` (37 tests).
+  Suite **783**; mutation **4/4**; ruff clean. Ships with the next api release.
+- 🐛 **BUG-032 filed**: a user URL can reach the node's own public IP (public, so the check admits it, and it
+  arrives from inside the machine). Every lane today. The delivery worker is fenced from slice 1; the scrape
+  lanes need the same fence later.
+- Compose was started to run the suite, then **stopped** (`docker compose stop`; nothing removed).
+- **Still carried from PRD-018's review:** the backlog items (open item 10's answer (e); §3's crawl row
+  "refused; not planned"; the `content_hash`/`diff_*` cleanup; D16's crawl refusal).
+- **Git at close:** `develop` = `a8a9b63` + two commits (the BUG-024 fix, then this review and acceptance), **6
+  ahead of `origin/develop` (`b8c3900`), not pushed**; `main` = `eea8344` (deployed, unchanged). Infra untouched.
+  `tmp/` untracked, not mine.
+- **Next (owner):** the **Architect pass on PRD-018 → ADR-016** (OQ-1–14, plus the LLM-key-deletion carry and
+  notices via `webhook_deliveries.kind`). BUG-031 is Monitors' slice 0. Deferred code reviews (C.4–C.12,
+  E.3–E.10, F.1–F.7) are still owed.
 
 📝 **PRD-018 REVIEWED (2026-11-03 → 2026-11-05, fifteenth session; docs only, nothing released).** Owner reviewed
 `PRD-018-monitors.md` section by section in **16 rounds** (Problem → R11, then the decisions table) — **Draft,
