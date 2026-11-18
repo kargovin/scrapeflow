@@ -1,6 +1,6 @@
 # ADR-016: Monitors — Schedules, the Baseline, the Change Gate, Approval
 
-**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 2). Implement nothing against it
+**Status:** **Draft** — written 2026-11-18 by the Architect persona; owner review in progress (round 3). Implement nothing against it
 until the owner's review accepts it.
 **Date:** 2026-11-18
 > **Review round 1 (owner, 2026-11-18): §1 The problem, §2 The data model.** Two corrections accepted. (1) §2d
@@ -18,6 +18,12 @@ until the owner's review accepts it.
 > writer** of a failed run (storage full, refused firing), outside ADR-014 §8a's two, so it calls
 > `queue_failure_alerts` and `monitor_check_ended` in its insert transaction — otherwise *the run breaks* stays
 > silent for exactly those failures. §7a's writer table and §19's trap updated.
+>
+> **Review round 3 (owner, 2026-11-18): §4 The baseline.** Agreed, with `baseline_outputs` keyed by the content
+> block that produced each object (the block feeding the gate for the page diff, the LLM block for the extraction
+> diff), present only while its `collected_at` is empty. Owner asked whether a check waiting for approval blocks a
+> new one: no, by design (PRD-018 R1, D10, Q3 = supersede) — at most one waits, it holds no slot, and only
+> *running* checks exclude each other; it is also why the newest baseline is chosen by start time.
 
 **Deciders:** @karthik
 **Resolves:** PRD-018's open questions OQ-1 to OQ-14 (OQ-12 was removed in the PRD's review), and the item ADR-015's
@@ -314,9 +320,15 @@ MonitorContext
   baseline_run_id         None on a first check
   waiting_run_id          slice 2: the check waiting for approval, if any (§9e)
   gates: {block_id: {baseline: sha256 | None, waiting: sha256 | None}}
-  baseline_outputs: {block_id: path}   the baseline's stored outputs that still exist (no collected_at),
-                                       for the diff (§6a)
+  baseline_outputs: {block_id: path}   keyed by the CONTENT block that produced the object (its output_ref),
+                                       only while that block's collected_at is empty — for the diff (§6a)
 ```
+
+**Which entry each diff reads.** A change gate stores nothing (it is an effect block), so the page it compares is
+the output of the content block that feeds it: the page diff looks up that block's id (`clean` in
+`scrape → clean → gate`). The extraction diff looks up the `llm_extract` block's own id. A copy deleted since
+(a later stop with *delete*, ADR-014 §6, which sets `collected_at`) has no entry, which §6a reports as
+`baseline_gone`.
 
 The carried values are **not** in `MonitorContext`. They are ordinary run inputs (D7), written into
 `pipeline_runs.inputs` like any input and visible on the run page. Admission fills each one from the baseline's
@@ -415,7 +427,7 @@ writes the full comparison as an object, and returns a bounded summary.**
   blocked its event loop, 2026-09-19), never workflow code (it needs storage).
 - **When:**
   - **page diff**: right after the first change gate answers "changed" with a baseline, comparing the gate's input
-    with the baseline gate's input (`baseline_outputs`);
+    with the baseline's output of the block that feeds the gate (`baseline_outputs`, §4c);
   - **extraction diff**: right after each `llm_extract` block whose block id has a baseline output, comparing the
     two extractions.
 
