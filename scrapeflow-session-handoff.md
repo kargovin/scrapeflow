@@ -6,7 +6,7 @@ scraping platform. Read @CLAUDE.md for the full architecture.
 ## Your role in this session
 
 ⚙️ **Mode since 2026-11-18: delegated build.** The owner is out of time and has handed over the build: work the
-implementation backlog in order (J.5 next) **without explaining first**, **one reviewable step per commit** (each
+implementation backlog in order (J.10 is the owner's release; K.1 next) **without explaining first**, **one reviewable step per commit** (each
 commit does one thing, with its tests, suites green; a task is usually several commits, never two tasks in one).
 Each task's *Built* note in the backlog and this file list its commits **in order**, so the owner can later replay
 the work step by step. Open calls: make them, mark them "my call", keep them reversible; ask only for product
