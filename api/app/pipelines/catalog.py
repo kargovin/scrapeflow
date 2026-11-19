@@ -14,7 +14,7 @@ import math
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import (
     AnyHttpUrl,
@@ -275,8 +275,23 @@ class MinLengthRule(_Rule):
     chars: int = Field(ge=1)
 
 
+class ChangedRule(_Rule):
+    """Met when the block's input differs from every earlier check's (ADR-016 §5a).
+
+    Any input: it compares the bytes. Saved only alone, in stop mode, not negated (§5a).
+    """
+
+    kind: Literal["changed"]
+
+
 Rule = Annotated[
-    JsonSchemaRule | PresentRule | TypeRule | CompareRule | ContainsRule | MinLengthRule,
+    JsonSchemaRule
+    | PresentRule
+    | TypeRule
+    | CompareRule
+    | ContainsRule
+    | MinLengthRule
+    | ChangedRule,
     Field(discriminator="kind"),
 ]
 JSON_RULES = frozenset({"json_schema", "present", "type", "compare"})
@@ -296,6 +311,21 @@ class ValidateConfigV1(_Config):
         if self.when_unmet == "stop" and self.on_stop_outputs is None:
             self.on_stop_outputs = "keep"
         return self
+
+
+def is_change_gate(config: BaseModel) -> bool:
+    return isinstance(config, ValidateConfigV1) and any(r.kind == "changed" for r in config.rules)
+
+
+class _HasConfig(Protocol):
+    id: str
+    config: Any
+
+
+def first_change_gate(blocks: Iterable[_HasConfig]) -> str | None:
+    """The first Validate in chain order holding a ``changed`` rule — the save-time check and
+    the workflow both derive it from the pinned block list (ADR-016 §5a)."""
+    return next((b.id for b in blocks if is_change_gate(b.config)), None)
 
 
 WEBHOOK_EVENTS = ("pipeline.result", "pipeline.failed")

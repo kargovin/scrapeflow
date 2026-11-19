@@ -789,3 +789,104 @@ def test_an_alert_only_webhook_needs_only_the_block_overhead():
 
     assert alert_only.need == BLOCK_OVERHEAD_SECONDS
     assert both.need == default.need == default.budget + BLOCK_OVERHEAD_SECONDS
+
+
+# --- L.3: the change gate (ADR-016 §5a, §5b) ----------------------------------------------
+
+CHANGED = {"kind": "changed"}
+
+
+def gate(id="gate", input="clean", **config):
+    return {
+        "id": id,
+        "type": "validate",
+        "input": input,
+        "config": {"rules": [CHANGED], "when_unmet": "stop", **config},
+    }
+
+
+def monitored(*gates):
+    """scrape -> clean -> gates... -> extract."""
+    blocks = [scrape(url="https://example.com"), clean(), *gates]
+    return {"blocks": [*blocks, llm(input=blocks[-1]["id"])]}
+
+
+def _outputs(definition) -> dict[str, str | None]:
+    stored = validate(definition).definition
+    return {
+        b["id"]: b["config"].get("on_stop_outputs")
+        for b in stored["blocks"]
+        if b["type"] == "validate"
+    }
+
+
+def test_a_change_gate_saves_and_reads_any_input():
+    validate(monitored(gate()))
+    validate(
+        {"blocks": [scrape(url="https://example.com"), gate(input="fetch"), llm(input="gate")]}
+    )
+
+
+def test_the_first_gate_left_out_deletes_and_a_later_one_keeps():
+    definition = monitored(gate(), gate(id="again", input="gate"))
+
+    assert _outputs(definition) == {"gate": "delete", "again": "keep"}
+
+
+def test_an_explicit_choice_at_a_gate_is_kept():
+    definition = monitored(
+        gate(on_stop_outputs="keep"), gate(id="again", input="gate", on_stop_outputs="delete")
+    )
+
+    assert _outputs(definition) == {"gate": "keep", "again": "delete"}
+
+
+def test_a_stored_gate_round_trips():
+    stored = validate(monitored(gate())).definition
+
+    assert validate(copy.deepcopy(stored)).definition == stored
+
+
+def test_the_first_gate_is_the_first_validate_holding_changed():
+    definition = monitored(
+        check(id="guard", input="clean"), gate(input="guard"), gate(id="again", input="gate")
+    )
+
+    outputs = _outputs(definition)
+    assert outputs["gate"] == "delete" and outputs["again"] == "keep"
+    assert outputs["guard"] is None  # an ordinary fail-mode Validate is untouched
+
+
+def test_the_first_gates_resolved_delete_reserves_the_release_time():
+    from app.pipelines.catalog import RELEASE_OUTPUTS_TIMING
+
+    deleting = validate(monitored(gate())).blocks[2].timing
+    keeping = validate(monitored(gate(on_stop_outputs="keep"))).blocks[2].timing
+
+    assert deleting.need - keeping.need == RELEASE_OUTPUTS_TIMING.budget
+
+
+def test_an_ordinary_stop_still_defaults_to_keep():
+    definition = monitored(
+        check(id="guard", input="clean", rules=[{"kind": "min_length", "chars": 1}])
+    )
+    definition["blocks"][2]["config"]["when_unmet"] = "stop"
+
+    assert _outputs(definition) == {"guard": "keep"}
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"when_unmet": "fail"}, "the changed rule needs when_unmet 'stop'"),
+        (
+            {"rules": [CHANGED, {"kind": "min_length", "chars": 1}]},
+            "the changed rule must be the only rule of its block",
+        ),
+        ({"rules": [{"kind": "changed", "negate": True}]}, "the changed rule cannot take negate"),
+    ],
+)
+def test_a_change_gate_is_alone_stops_and_is_not_reversed(config, message):
+    found = one_problem(monitored(gate(**config)))
+
+    assert found == f"block 'gate': {message}"

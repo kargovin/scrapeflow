@@ -543,6 +543,28 @@ async def test_patch_with_an_unchanged_definition_saves_no_version(client, heade
     assert len(await _stored(pipeline["id"])) == 1
 
 
+async def test_an_edit_round_trips_a_change_gates_stored_delete(client, headers, key):
+    definition = runnable(key.id)
+    definition["blocks"].insert(
+        1,
+        {
+            "id": "gate",
+            "type": "validate",
+            "input": "fetch",
+            "config": {"rules": [{"kind": "changed"}], "when_unmet": "stop"},
+        },
+    )
+    definition["blocks"][2]["input"] = "gate"
+    pipeline = await _create(client, headers, definition)
+    assert pipeline["definition"]["blocks"][1]["config"]["on_stop_outputs"] == "delete"
+
+    resp = await client.patch(
+        f"/pipelines/{pipeline['id']}", json={"definition": pipeline["definition"]}, headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["version"] == 1
+
+
 async def test_patch_keeps_secrets_a_kept_block_does_not_send(client, headers, key):
     definition = runnable(key.id)
     definition["blocks"][0]["config"] |= {"proxy_url": "http://p:8080", "cookies": [{"n": 1}]}

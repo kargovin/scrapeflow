@@ -24,7 +24,9 @@ from app.pipelines.catalog import (
     RunInputType,
     Timing,
     ValidateConfigV1,
+    first_change_gate,
     is_binding,
+    is_change_gate,
     run_need_seconds,
 )
 from app.settings import settings
@@ -323,6 +325,41 @@ def _stop_problems(parsed: list[ValidatedBlock]) -> list[Problem]:
     return []
 
 
+def _change_gate_problems(parsed: list[ValidatedBlock]) -> list[Problem]:
+    """ADR-016 §5a: a change gate holds only the changed rule, stops, and is never reversed."""
+    problems = []
+    for block in parsed:
+        if not is_change_gate(block.config):
+            continue
+        config = block.config
+        if config.when_unmet != "stop":
+            problems.append(Problem(block.id, "the changed rule needs when_unmet 'stop'"))
+        if len(config.rules) > 1:
+            problems.append(
+                Problem(block.id, "the changed rule must be the only rule of its block")
+            )
+        if any(r.kind == "changed" and r.negate for r in config.rules):
+            problems.append(Problem(block.id, "the changed rule cannot take negate"))
+    return problems
+
+
+def _resolve_gate_outputs(
+    blocks: list[BlockDefinition], parsed: list[ValidatedBlock]
+) -> list[ValidatedBlock]:
+    """ADR-016 §5b: at the first change gate an on_stop_outputs left out is stored as "delete",
+    at a later gate as "keep". Read from the submitted config — the parsed one is defaulted."""
+    first = first_change_gate(parsed)
+    given = {b.id: b.config.get("on_stop_outputs") is not None for b in blocks}
+    resolved = []
+    for block in parsed:
+        if is_change_gate(block.config) and not given.get(block.id, False):
+            value = "delete" if block.id == first else "keep"
+            config = block.config.model_copy(update={"on_stop_outputs": value})
+            block = ValidatedBlock(block.id, block.type, config, block.type.timing(config))
+        resolved.append(block)
+    return resolved
+
+
 def _webhook_problems(blocks: list[BlockDefinition]) -> list[Problem]:
     webhooks = [b for b in blocks if b.type == WEBHOOK.name]
     return [
@@ -394,6 +431,8 @@ def validate(raw: Any) -> ValidatedPipeline:
         problems += block_problems
         if validated is not None:
             parsed.append(validated)
+    problems += _change_gate_problems(parsed)
+    parsed = _resolve_gate_outputs(blocks, parsed)
     for name in sorted(set(declared) - used):
         problems.append(Problem(None, f"run input {name!r} is declared but no block uses it"))
 
