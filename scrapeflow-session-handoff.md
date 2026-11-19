@@ -145,6 +145,26 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-19 *(clock)*
 
+🔧 **K.1–K.3 + Y.2 BUILT; 📋 K.4 RUNBOOK READY (2026-11-19, twenty-first session; delegated build).** Owner: "read the
+handoff" → "build until k4; make sure to commit after each item is over". **Order to replay:**
+- **K.1** `04d98f1` — `DELETE /pipelines/{pid}/runs/{rid}` and `DELETE /pipelines/{pid}?permanent=true` (soft-deleted
+  pipelines included): cancel running runs (row, then engine best effort) → ledger release → 503 if any object is left →
+  rows. The permanent delete holds `lock_user` throughout (ADR-016 §11); the run trigger re-reads the pipeline under the
+  lock. `record_storage` takes `FOR KEY SHARE` on the run; on a deleted run it removes the objects it was given and
+  raises `RunCancelled`. Mirrors and `check_cancelled` read a deleted run as `cancelled`. `30efd8f` — SPA: **Delete
+  run** on the run page, **Delete permanently** on the pipeline page (not click-tested: Clerk).
+- **K.2** `2f436fc` — the `changed` rule (SHA-256 of the bytes before the decode), `known_fingerprints`,
+  `fingerprint`/`matched` on the verdict, both contracts; `_stop` records the two only when set.
+- **K.3** `7a67bfd` (Validate's JSON helpers public) + `0f86fe4` — `Diff` and `Capture` on the content queue
+  (`llm-worker/worker/changes.py`); contract shapes are my calls, listed in the backlog's K.3 row.
+- **Y.2** `8ddd7cc` — migration 4.11 `c23f1f27522b` drops `job_runs.content_hash`/`diff_detected`/`diff_summary` and
+  `crawls.schedule_cron`; `core/diff.py` and `create_webhook_delivery`'s `diff` parameter deleted.
+- **K.4** — runbook in the backlog's K.4 section (`362826e`): step 0 SQL + tags, push, migration check, a permanent
+  delete measured against the ledger, SPA deletes.
+- **Numbers:** API suite 952, worker 271, contracts 68; mutation K.1 8/8, K.2 6/6, K.3 8/8.
+- **Git:** `develop` ahead of `origin/develop`, **not pushed**; `main` = `origin/main` = `a10f698` (deployed). Compose up.
+- **Next:** **K.4 is the owner's** (runbook). Then **L.1** (one builder for a pipeline run's rows + input).
+
 🚀 **J-b RELEASED — GROUP J CLOSED (2026-11-19).** Owner ran the runbook: step 0 (`47a8f9f3f4e2`, 0 running runs,
 rollback tag `main-1795018861-036870c…`), pushed `main` `036870c..a10f698` (CI `44464377927`: `replay` + `build-api`),
 Flux rolled api 2/2 + workflow worker, `alembic_version` = `678c7e339d80`; API checks (`jb-stop`, `jb-alert`, an old
