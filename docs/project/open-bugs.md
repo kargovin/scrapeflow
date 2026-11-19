@@ -2414,7 +2414,7 @@ validated address. One helper used by both senders. Fold in BUG-024's `is_global
 
 **Severity:** Medium — storage only grows on the pipeline lane, and a user at the storage limit has no self-service way to free pipeline results.
 **Discovered:** 2026-10-30, in the owner's PRD-017 review (code reading).
-**Status:** 🔴 **OPEN — filed 2026-10-30; not fixed.**
+**Status:** 🔧 **FIXED LOCALLY 2026-11-19 (K.1, `04d98f1` + `30efd8f`), unreleased — ships with release K.** `DELETE /pipelines/{pid}/runs/{rid}` and `DELETE /pipelines/{pid}?permanent=true` release through the ledger with the 503 rule. Still open beside it: ADR-009 §8c's intermediate collection, and the nightly cleanup (BUG-019).
 
 Every object a pipeline run's blocks store is charged to the user through the ledger (`pipeline_run_block_id`),
 and nothing on the lane ever releases one:
