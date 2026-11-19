@@ -2,6 +2,9 @@
 
     shop.pipelinefixture.com   GET  /item?name=&price=&stock=in|out   a product page; price=null → none
                                GET  /broken                           503 (a Scrape that fails)
+                               GET  /watched/<key>                    a product page whose content the
+                               POST /_watched/<key>  {name,price,stock} gate sets (L.12: a monitor's
+                                                                      inputs are fixed for its life)
     llm.pipelinefixture.com    GET  /v1/models                        the LLM worker's warm-up probe
                                POST /v1/chat/completions              {"price", "in_stock", "name"} read off
                                                                       the page; "SLOW" in it → 8 s first
@@ -22,6 +25,8 @@ from urllib.parse import parse_qs, urlsplit
 LOCK = threading.Lock()
 CALLS: list[dict] = []
 POSTS: list[dict] = []
+WATCHED: dict[str, dict] = {}
+DEFAULT = {"name": "Blue Kettle", "price": "80", "stock": "in"}
 
 
 def page(name: str, price: str, stock: str) -> bytes:
@@ -63,6 +68,11 @@ class Handler(BaseHTTPRequestHandler):
         if host.startswith("shop."):
             if url.path == "/broken":
                 return self._send(503, b"down", "text/plain")
+            if url.path.startswith("/watched/"):
+                with LOCK:
+                    state = WATCHED.get(url.path.removeprefix("/watched/"), DEFAULT)
+                body = page(state["name"], state["price"], state["stock"])
+                return self._send(200, body, "text/html; charset=utf-8")
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             body = page(q.get("name", "Blue Kettle"), q.get("price", "80"), q.get("stock", "in"))
             return self._send(200, body, "text/html; charset=utf-8")
@@ -80,6 +90,10 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         host = self._host()
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if host.startswith("shop.") and url.path.startswith("/_watched/"):
+            with LOCK:
+                WATCHED[url.path.removeprefix("/_watched/")] = DEFAULT | json.loads(body)
+            return self._send(204)
         if host.startswith("llm.") and url.path == "/v1/chat/completions":
             prompt = json.loads(body)["messages"][-1]["content"]
             if "SLOW" in prompt:
