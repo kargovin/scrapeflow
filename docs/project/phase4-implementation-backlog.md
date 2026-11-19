@@ -126,7 +126,7 @@
 | K.1 | BUG-031: delete a run, delete a pipeline permanently; `record_storage` / mirror changes | 🔧 Built 2026-11-19 (`04d98f1` API + activities; `30efd8f` SPA), unreleased — ships with K.4. `record_storage` locks the run row `FOR KEY SHARE` before reading it; on a deleted run it removes the objects it was given (retryable if one stays) and raises `RunCancelled`, so the workflow ends `cancelled` through its existing path. The run trigger re-reads the pipeline after `admit` (under the user lock), so a trigger that waited on a permanent delete gets 404, not an FK error. **My calls:** a soft-deleted pipeline can be deleted permanently (the pipelines holding bytes today are soft-deleted; the SPA cannot reach one — use the API); the permanent delete holds `lock_user` through the MinIO deletes, as ADR-016 §11 draws it, against `lock_user`'s "no network calls" note — only that user's admissions wait. **Not verified here:** SPA click-through (Clerk). suite 951 (930 before), mutation 8/8 (one test added for the lock) |
 | K.2 | LLM worker: the `changed` rule + SHA-256 fingerprint | 🔧 Built 2026-11-19 (`2f436fc`), unreleased — ships with K.4; nothing sends the rule until L (the API's save-time catalog refuses it until L.3). The fingerprint is computed only when a `changed` rule is present (other verdicts keep `fingerprint: null`); `matched` checks `baseline` before `waiting`. `negate` is accepted on the rule like every kind (L.3 refuses it at save). **Beyond the task text:** `PipelineWorkflow._stop` leaves `fingerprint`/`matched` out of the recorded verdict when unset, so ordinary stops record the same JSON as before (an activity argument, not a command — no patch). Worker 243, contracts 53, API +1; mutation 6/6 on the worker |
 | K.3 | LLM worker: Diff + Capture activities | 🔧 Built 2026-11-19 (`7a67bfd` Validate's JSON helpers made public; `0f86fe4` the activities, `worker/changes.py`), unreleased — ships with K.4; called by nothing until L.8. **My calls (contract shapes):** `DiffInput{artifact_id, kind: page|extraction, baseline_path, current_path}`; `DiffOutput{summary, diff: StoredObject|None}` — `summary.status` is `ok`/`baseline_gone`/`unavailable` (the `change_summary` statuses; the activity returns `unavailable` with a `reason` for too large or not JSON, so L.8 records it as is); `CaptureInput{input_path, values: [{input, path, type: number|text}]}` → `{input: {value}|{missing}}`. An extraction's size guard is 50,000 values a side (the ADR's line guard, applied to values); the walk is iterative (no recursion limit). A non-finite number counts as missing (the trigger's rule). Sizes are measured as compact UTF-8 JSON. Worker 271, contracts 68; mutation 8/8 |
-| K.4 | 🚀 Release K (+ Y.2) | ⬜ |
+| K.4 | 🚀 Release K (+ Y.2) | 📋 Runbook ready 2026-11-19 (K.4 section below) — **owner's**: push, verify, record |
 | **L** | **Monitors** (slice 1 · ADR-016) | |
 | L.1 | One builder for a pipeline run's rows + input (`core/pipeline_trigger.py`) | ⬜ |
 | L.2 | Migration: `monitors`, `monitor_events`, check columns, block `fingerprint` | ⬜ |
@@ -169,7 +169,7 @@
 | P.2 | 🚀 Release P | ⬜ |
 | **Y** | **Job-lane leftovers** (ADR-016 §14) | |
 | Y.1 | Release A — stop using: crawl `schedule_cron` refused, `content_hash` unwritten, four columns unmapped (rides J-a) | ✅ Built 2026-11-18 (`8774907`; **released 2026-11-18** with J.2) — prod count of crawls with `schedule_cron`: **0** |
-| Y.2 | Release B — drop the four columns, delete `core/diff.py` (rides K) | ⬜ |
+| Y.2 | Release B — drop the four columns, delete `core/diff.py` (rides K) | 🔧 Built 2026-11-19 (`8ddd7cc`; migration 4.11 `c23f1f27522b`), unreleased — ships with K.4. Round trip clean; `alembic check` shows only the dedup false positive; `grep` finds no reader (the `ScrapeOutput.content_hash` contract field stays — workflow histories decode it). Three Y.1 tests that read the columns directly now assert the reads only |
 | **Docs track** (parallel; not on the critical path until named) | | |
 | X.1 | Write PRD-019 — before PRD-018; may be written during C | ✅ written 2026-10-29, owner review 2026-10-30; Architect pass ADR-014 Accepted 2026-11-18 |
 | X.2 | Promote ADR-010 — needed by E.0 | ✅ 2026-10-13 — Accepted after review; §1 monthly skips, §2 sitemap files gated + submitted-seed scope + drops counted |
@@ -3540,6 +3540,55 @@ nothing until L, so the image order inside this push does not matter — and L's
 construction (ADR-016 §16).
 **Verify:** owner — delete a pipeline run in prod and see storage drop; `alembic current` at head.
 **Depends on:** K.1–K.3, Y.2
+
+**Ships** (`main` `a10f698..develop`): `api/` + `frontend/` + `llm-worker/` — K.1 (`04d98f1`, `30efd8f`), K.2
+(`2f436fc`), K.3 (`7a67bfd`, `0f86fe4`), Y.2 (`8ddd7cc`, migration 4.11). CI: `replay` → `build-api`, and
+`build-llm-worker` beside them. Flux bumps `api`, `workflow-worker`, the cleanup CronJob and `llm-worker-temporal`. **Migration
+4.11 on api startup** drops four columns Y.1 unmapped in J-a; no view reads them. **No infra change.**
+
+**Rollout window** (one-line notes, owner's rule for Phase 4):
+- An old api pod ignores `?permanent=true` (a **soft** delete, 204) and answers a run delete `405` — make no delete
+  until `rollout status` says 2/2 on the new tag.
+- An old workflow-worker pod meeting a deleted run fails that run's workflow instead of ending it cancelled — harmless
+  (the row is gone); only a delete made during the window can cause it.
+- Old code runs fine on 4.11 (it maps none of the four columns); the LLM worker's new rule and activities are called by
+  nothing until L.
+
+**Runbook** (owner-run; `KEY=<an API key>`, `B=https://scrapeflow.govindappa.com`; SQL through your usual `psql` on the
+app DB):
+0. **Before (read-only, prod):**
+   - `SELECT version_num FROM alembic_version;` → expect `678c7e339d80` (4.10, J-b).
+   - `SELECT count(*) FROM crawls WHERE schedule_cron IS NOT NULL;` → record it (0 at J.2; the column goes).
+   - `kubectl -n scrapeflow get deploy scrapeflow-api -o jsonpath='{.spec.template.spec.containers[0].image}'` and the
+     same for `scrapeflow-llm-worker-temporal` → note both tags (expected `main-…-a10f698…` for the api and
+     `main-…-036870c…` for the LLM worker, J-a's): the rollback targets.
+   - The pipelines to delete in step 2 — J-b's test pipelines; a soft-deleted one is not listed by the API, and a
+     permanent delete takes it either way:
+     `SELECT id, name, deleted_at FROM pipelines WHERE name IN ('jb-stop','jb-alert','jb-number');`
+1. **Push `develop`, ff `main` to it, push.** Watch CI: `replay`, `build-api`, `build-llm-worker`.
+   `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → 2/2 on the new tag; the same for
+   `deploy/scrapeflow-workflow-worker` and `deploy/scrapeflow-llm-worker-temporal`. Then:
+   - `SELECT version_num FROM alembic_version;` → **`c23f1f27522b`**;
+   - `SELECT table_name, column_name FROM information_schema.columns WHERE (table_name, column_name) IN
+     (('job_runs','content_hash'),('job_runs','diff_detected'),('job_runs','diff_summary'),('crawls','schedule_cron'));`
+     → **0 rows**; `SELECT count(*) FROM quota_active_submissions;` returns.
+2. **Verify — a permanent delete frees exactly what the pipeline held.** For one pipeline id `P` from step 0:
+   - before: `SELECT count(*), coalesce(sum(so.bytes), 0) FROM storage_objects so JOIN pipeline_run_blocks b ON b.id =
+     so.pipeline_run_block_id JOIN pipeline_runs r ON r.id = b.pipeline_run_id WHERE r.pipeline_id = 'P';` → `N`, `X`;
+     `SELECT storage_bytes_used FROM user_quotas WHERE user_id = (SELECT user_id FROM pipelines WHERE id = 'P');` → `U`;
+   - `curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "X-API-Key: $KEY" "$B/pipelines/P?permanent=true"` → **`204`**;
+   - after: the first query → `0, 0`; `storage_bytes_used` → **`U − X`**; `SELECT count(*) FROM pipelines WHERE id = 'P';`
+     → `0`. Repeat for the other two (or leave one for step 3).
+   - A `503` names how many objects stayed; nothing was deleted — retry the same call.
+3. **SPA** (signed in, `/app/dashboard/pipelines`): run any pipeline once, open the run → **Delete run** → confirm → back
+   on the pipeline page, the run is gone. On a pipeline with runs → **Delete permanently** → confirm → back on the list,
+   it is gone.
+4. Record step 0's values and the results here; mark K.1–K.4 and Y.2 ✅ in the status table; BUG-031 closed (its §8c
+   collection note stays open).
+
+**Rollback:** prefer a forward fix. An image revert (api, workflow-worker, CronJob, `llm-worker-temporal` to step 0's tags) leaves
+4.11 applied — harmless, J-b's code maps none of the four columns. The revert loses only the deletes. Do not downgrade
+the migration: the columns would come back empty, and nothing reads them.
 
 ---
 
