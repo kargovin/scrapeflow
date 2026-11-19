@@ -2,20 +2,26 @@
 
 The API's trigger, a monitor's Check now and a monitor firing's admission all start runs; each
 builds them here, so a check and a hand-run cannot drift (P9's lesson, applied to pipelines).
-Pure: the caller adds the rows to its session and commits before it starts the workflow.
+``build_run`` is pure: the caller adds the rows to its session and commits before it starts the
+workflow. ``mark_not_started`` is what every caller does when that start fails.
 """
 
 import json
 import uuid
 from asyncio import get_running_loop
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import webhook_delivery
+from app.core.monitor_checks import after_commit, monitor_check_ended
+from app.core.pipeline_alerts import queue_failure_alerts
+from app.core.quota import lock_user
 from app.core.security import validate_no_ssrf
 from app.models.llm_keys import UserLLMKey
 from app.models.pipeline import PipelineRun, PipelineRunBlock, PipelineVersion
@@ -81,6 +87,40 @@ def run_urls(
             urls.append(str(block.config.url))
     urls += [k.base_url for k in keys.values() if k.base_url]
     return urls
+
+
+async def mark_not_started(
+    db: AsyncSession,
+    run: PipelineRun,
+    blocks: list[PipelineRunBlock],
+    exc: Exception,
+    get_client: Callable[[], Any],
+) -> None:
+    """The workflow could not start: the run fails, its blocks never ran, and — in the same
+    transaction — its failure alerts are queued and a monitor's check is counted (§7a)."""
+    if run.monitor_id is not None:
+        # User then run, as every writer of a monitor's state (ADR-016 §8).
+        await lock_user(run.user_id, db)
+    run.status = "failed"
+    run.error = f"could not start workflow: {exc}"
+    run.finished_at = datetime.now(UTC)
+    for block in blocks:
+        block.status = "skipped"
+        block.status_reason = "not_started"
+    alerts = await queue_failure_alerts(db, run)
+    ended = await monitor_check_ended(db, run)
+    await db.commit()
+    if alerts:
+        # The engine is likely down: the sweep sends what this cannot start.
+        await webhook_delivery.start_pending(get_client, db, pipeline_run_id=run.id)
+    await after_commit(_awaitable(get_client), ended)
+
+
+def _awaitable(get_client: Callable[[], Any]) -> Callable[[], Any]:
+    async def client():
+        return get_client()
+
+    return client
 
 
 @dataclass(frozen=True)

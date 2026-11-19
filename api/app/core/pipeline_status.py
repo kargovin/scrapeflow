@@ -28,6 +28,7 @@ async def notify_run(
         "cancel_requested": run.cancel_requested_at is not None,
         "stopped_at_block_id": run.stopped_at_block_id,
         "rolling_back": run.status == "running" and run.rollback_deadline is not None,
+        "change_status": run.change_status,
         "block_id": block_id,
         "block_status": block_status,
         "block_status_reason": block_status_reason,

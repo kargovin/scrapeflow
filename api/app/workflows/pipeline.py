@@ -80,6 +80,8 @@ RunStatus = Literal["running", "completed", "failed", "cancelled"]
 # ADR-014 §5a; each list matches its CHECK in migration 4.10 — a new value widens both.
 SkipReason = Literal["stopped", "upstream_failed", "cancelled", "not_started", "alert_only"]
 StopReason = Literal["rule_not_met"]
+# ADR-016 §2b; matches ck_pipeline_runs_change_status.
+ChangeStatus = Literal["first_check", "no_baseline", "changed", "unchanged"]
 
 
 class LLMKey(BaseModel):
@@ -117,6 +119,8 @@ class MirrorBlockInput(BaseModel):
     reason_block_id: str | None = None
     # completed only: a stop-mode Validate's verdict, less its outcome.
     verdict: dict[str, Any] | None = None
+    # completed only: a change gate's input, SHA-256 hex (ADR-016 §5e).
+    fingerprint: str | None = None
 
 
 class MirrorRunInput(BaseModel):
@@ -129,6 +133,11 @@ class MirrorRunInput(BaseModel):
     stop_reason: StopReason | None = None
     # failed only.
     failed_block_id: str | None = None
+    # A monitor check's, written with its outcome (ADR-016 §4a, §5e, §6).
+    baseline_eligible: bool = False
+    change_status: ChangeStatus | None = None
+    change_summary: dict[str, Any] | None = None
+    captured_values: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _stop_names_block_and_reason(self) -> "MirrorRunInput":

@@ -354,8 +354,11 @@ async def resume_monitor(
     if monitor.state != "active":
         await check_scheduled_jobs_quota(user.id, db, exclude_monitor_id=monitor.id)
         before = (monitor.state, monitor.consecutive_failures)
+        now = datetime.now(UTC)
         monitor.state, monitor.consecutive_failures = "active", 0
-        monitor.updated_at = datetime.now(UTC)
+        monitor.updated_at = now
+        # A self-pause's situation ends here; a skip after this starts a fresh one (§7b).
+        await monitor_events.close_open(db, monitor.id, now)
         await db.commit()
         try:
             await monitor_schedules.put(await lazy_client(request.app.state), monitor)

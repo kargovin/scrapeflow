@@ -17,9 +17,10 @@ from temporalio.exceptions import ApplicationError
 from app.core import webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.core.ledger import objects_for_pipeline_run, record_object, release_objects
+from app.core.monitor_checks import CheckEnded, after_commit, monitor_check_ended
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
-from app.core.quota import storage_usage
+from app.core.quota import lock_user, storage_usage
 from app.core.storage import delete_minio_object
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.models.storage_object import StorageObject
@@ -92,6 +93,7 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
             }
             if input.status == "completed":
                 values["verdict"] = input.verdict
+                values["fingerprint"] = input.fingerprint
         result = await db.execute(
             update(PipelineRunBlock)
             .where(
@@ -124,9 +126,20 @@ def _skip_reason(run: PipelineRun) -> tuple[SkipReason, str | None] | None:
 async def mirror_run_status(input: MirrorRunInput) -> str:
     """Moves a running run to a terminal status; returns the status the run now holds."""
     async with AsyncSessionLocal() as db:
+        # A monitor check may write a monitor event: the user's lock before the run row (§8).
+        owner = (
+            await db.execute(
+                select(PipelineRun.user_id, PipelineRun.monitor_id).where(
+                    PipelineRun.id == uuid.UUID(input.run_id)
+                )
+            )
+        ).one_or_none()
+        if owner is not None and owner.monitor_id is not None:
+            await lock_user(owner.user_id, db)
         run = await _lock_run(db, input.run_id)
         if run is None:
             return "cancelled"
+        ended = CheckEnded()
         if run.status == "running":
             run.status = input.status
             run.result_path = input.result_path if input.status == "completed" else None
@@ -139,6 +152,16 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
                 run.stop_reason = input.stop_reason
             elif input.status == "failed":
                 run.failed_block_id = input.failed_block_id
+            # Only ever on a completed run (§4a).
+            run.baseline_eligible = input.baseline_eligible and input.status == "completed"
+            if input.change_status is not None:
+                run.change_status = input.change_status
+            if input.change_summary is not None:
+                run.change_summary = input.change_summary
+            if input.captured_values is not None:
+                run.captured_values = input.captured_values
+            # Here and only here: a retried call finds the run terminal and moves nothing.
+            ended = await monitor_check_ended(db, run)
         if (skip := _skip_reason(run)) is not None:
             reason, reason_block_id = skip
             await db.execute(
@@ -157,7 +180,12 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
         await db.commit()
         if alerts:
             await webhook_delivery.start_pending(activity.client, db, pipeline_run_id=run.id)
+        await after_commit(_client, ended)
         return run.status
+
+
+async def _client():
+    return activity.client()
 
 
 @activity.defn(name=RECORD_STORAGE_ACTIVITY)

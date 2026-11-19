@@ -16,14 +16,18 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.auth.dependencies import auth_from_token, get_current_user
-from app.core import webhook_delivery
 from app.core.db import get_db
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import ReleaseOutcome, release_pipeline_run_objects
 from app.core.minio import get_minio
-from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
-from app.core.pipeline_trigger import build_run, encrypt_secret, owned_llm_keys, ssrf_check
+from app.core.pipeline_trigger import (
+    build_run,
+    encrypt_secret,
+    mark_not_started,
+    owned_llm_keys,
+    ssrf_check,
+)
 from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
 from app.models.monitor import Monitor
@@ -735,17 +739,7 @@ async def create_run(
         )
     except Exception as exc:
         logger.exception("pipeline_run_start_failed", run_id=str(run_id))
-        run.status = "failed"
-        run.error = f"could not start workflow: {exc}"
-        run.finished_at = datetime.now(UTC)
-        for block in run_blocks:
-            block.status = "skipped"
-            block.status_reason = "not_started"
-        alerts = await queue_failure_alerts(db, run)
-        await db.commit()
-        if alerts:
-            # The engine is likely down: the sweep sends what this cannot start.
-            await webhook_delivery.start_pending(lambda: temporal, db, pipeline_run_id=run_id)
+        await mark_not_started(db, run, run_blocks, exc, lambda: temporal)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"run_id": str(run_id), "error": run.error},
@@ -1021,6 +1015,7 @@ def _watch_message(pipeline_id: str, update: dict) -> dict:
         "cancel_requested": update.get("cancel_requested", False),
         "stopped_at_block_id": update.get("stopped_at_block_id"),
         "rolling_back": update.get("rolling_back", False),
+        "change_status": update.get("change_status"),
         "block_id": update.get("block_id"),
         "block_status": update.get("block_status"),
         "block_status_reason": update.get("block_status_reason"),
@@ -1066,6 +1061,7 @@ async def run_status_stream(
                 "cancel_requested": run.cancel_requested_at is not None,
                 "stopped_at_block_id": run.stopped_at_block_id,
                 "rolling_back": run.status == "running" and run.rollback_deadline is not None,
+                "change_status": run.change_status,
             }
             # Hours-long watches must not hold a pooled connection.
             await db.close()

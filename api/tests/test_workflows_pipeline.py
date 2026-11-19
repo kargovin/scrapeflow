@@ -1083,6 +1083,7 @@ async def test_every_mirror_write_notifies_identifiers_and_status_only(db_user):
         "cancel_requested": False,
         "stopped_at_block_id": None,
         "rolling_back": False,
+        "change_status": None,
         "block_status_reason": None,
         "block_undo_status": None,
     }

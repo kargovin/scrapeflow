@@ -496,6 +496,7 @@ def _pipeline_run(status: str, cancel_requested=False, stopped_at=None):
         cancel_requested_at=MagicMock() if cancel_requested else None,
         stopped_at_block_id=stopped_at,
         rollback_deadline=None,
+        change_status=None,
     )
 
 
@@ -556,6 +557,7 @@ async def test_pipeline_watch_already_terminal():
             "cancel_requested": False,
             "stopped_at_block_id": "guard",
             "rolling_back": False,
+            "change_status": None,
             "block_id": None,
             "block_status": None,
             "block_status_reason": None,

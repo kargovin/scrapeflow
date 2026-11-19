@@ -984,3 +984,31 @@ async def test_admin_user_delete_forgets_the_users_monitor_schedules(
     forgotten = {c.args[0] for c in temporal.get_schedule_handle.call_args_list}
     assert {f"monitor-schedule-{first['id']}", f"monitor-schedule-{second['id']}"} <= forgotten
     assert await _row(first["id"]) is None
+
+
+async def test_resuming_ends_the_self_pause_situation(client, headers, key, temporal):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Monitor)
+            .where(Monitor.id == uuid.UUID(monitor["id"]))
+            .values(state="paused_itself")
+        )
+        db.add(
+            MonitorEvent(
+                monitor_id=uuid.UUID(monitor["id"]), kind="paused_itself", first_at=now, last_at=now
+            )
+        )
+        await db.commit()
+
+    await client.post(f"/monitors/{monitor['id']}/resume", headers=headers)
+
+    async with AsyncSessionLocal() as db:
+        [event] = (
+            await db.scalars(
+                select(MonitorEvent).where(MonitorEvent.monitor_id == uuid.UUID(monitor["id"]))
+            )
+        ).all()
+    assert event.ended_at is not None
