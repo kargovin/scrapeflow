@@ -132,6 +132,7 @@ VALIDATE_RULES = [
     {"kind": "compare", "path": "/currency", "op": "ne", "value": None},
     {"kind": "contains", "text": "Add to cart"},
     {"kind": "min_length", "chars": 500},
+    {"kind": "changed"},
 ]
 VALIDATE_INPUT = api.ValidateInput(
     input_path=f"scrapeflow-results/history/{ARTIFACT_ID}/llm.json", rules=VALIDATE_RULES
@@ -214,6 +215,17 @@ def test_a_validate_input_recorded_before_stop_mode_still_decodes():
     assert received.rules[0].negate is False
 
 
+def test_llm_worker_reads_the_known_fingerprints():
+    known = {"baseline": "a" * 64, "waiting": "b" * 64}
+    sent = api.ValidateInput(
+        input_path="b/k", rules=[{"kind": "changed"}], when_unmet="stop", known_fingerprints=known
+    )
+    received = _decode(_encode(sent), llm.ValidateInput)
+
+    assert received.known_fingerprints == known
+    assert _decode(_encode(VALIDATE_INPUT), llm.ValidateInput).known_fingerprints == {}
+
+
 def test_llm_worker_refuses_an_unknown_rule_kind():
     with pytest.raises(ValidationError):
         _decode(
@@ -292,12 +304,27 @@ def test_api_parses_the_clean_output():
             rule={"kind": "json_schema", "schema": {"type": "object"}, "negate": True},
             found={"nested": [1, None, True]},
         ),
+        llm.ValidateVerdict(outcome="met", fingerprint="c" * 64),
+        llm.ValidateVerdict(
+            outcome="not_met",
+            rule_index=0,
+            rule={"kind": "changed", "negate": False},
+            fingerprint="c" * 64,
+            matched="baseline",
+        ),
     ],
 )
 def test_api_parses_the_validate_verdict(verdict):
     received = _decode(_encode(verdict), api.ValidateVerdict)
 
     assert received.model_dump() == verdict.model_dump()
+
+
+def test_a_verdict_recorded_before_the_changed_rule_still_decodes():
+    data = json.dumps({"outcome": "met", "rule_index": None, "rule": None})
+    received = _decode(data.encode(), api.ValidateVerdict)
+
+    assert (received.fingerprint, received.matched) == (None, None)
 
 
 def test_api_parses_fail_mode_s_none():

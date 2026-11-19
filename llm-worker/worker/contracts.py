@@ -85,21 +85,33 @@ class MinLengthRule(BaseModel):
     chars: int
 
 
+class ChangedRule(BaseModel):
+    """Met when the input's fingerprint equals none of ``known_fingerprints`` (ADR-016 §5d)."""
+
+    kind: Literal["changed"]
+    negate: bool = False
+
+
 Rule = Annotated[
     JsonSchemaRule
     | PresentRule
     | TypeRule
     | CompareRule
     | ContainsRule
-    | MinLengthRule,
+    | MinLengthRule
+    | ChangedRule,
     Field(discriminator="kind"),
 ]
+
+FingerprintOf = Literal["baseline", "waiting"]
 
 
 class ValidateInput(BaseModel):
     input_path: NonEmptyStr
     rules: list[Rule] = Field(min_length=1)
     when_unmet: Literal["fail", "stop"] = "fail"
+    # SHA-256 hex of earlier checks' gate inputs; read by a `changed` rule only.
+    known_fingerprints: dict[FingerprintOf, str] = {}
 
 
 class ValidateVerdict(BaseModel):
@@ -111,3 +123,6 @@ class ValidateVerdict(BaseModel):
     rule: dict[str, Any] | None = None
     found: Any = None
     expected: Any = None
+    # A `changed` rule's: SHA-256 hex of the input bytes, and which known one it equals.
+    fingerprint: str | None = None
+    matched: FingerprintOf | None = None

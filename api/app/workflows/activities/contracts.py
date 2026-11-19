@@ -88,6 +88,9 @@ class CleanOutput(BaseModel):
     result: StoredObject
 
 
+FingerprintOf = Literal["baseline", "waiting"]
+
+
 class ValidateInput(BaseModel):
     """Fail mode raises naming every rule not met; stop mode returns a ValidateVerdict.
 
@@ -98,6 +101,8 @@ class ValidateInput(BaseModel):
     # The Validate block's rules as the catalog dumps them (by alias: "schema").
     rules: list[dict[str, Any]] = Field(min_length=1)
     when_unmet: Literal["fail", "stop"] = "fail"
+    # SHA-256 hex of earlier checks' gate inputs; read by a `changed` rule only (ADR-016 §5d).
+    known_fingerprints: dict[FingerprintOf, str] = {}
 
 
 class ValidateVerdict(BaseModel):
@@ -109,6 +114,9 @@ class ValidateVerdict(BaseModel):
     rule: dict[str, Any] | None = None
     found: Any = None
     expected: Any = None
+    # A `changed` rule's: SHA-256 hex of the input bytes, and which known one it equals.
+    fingerprint: str | None = None
+    matched: FingerprintOf | None = None
 
 
 class DiscoverSitemapsInput(BaseModel):

@@ -769,6 +769,17 @@ async def test_a_stop_with_keep_ends_the_run_completed_at_the_validate():
     assert not any(isinstance(c, RunRef) for c in h.calls)
 
 
+async def test_a_stop_records_the_fingerprint_and_match_when_the_worker_sends_them():
+    async def unchanged(input):
+        return NOT_MET.model_copy(update={"fingerprint": "f" * 64, "matched": "baseline"})
+
+    h = Harness(validate=unchanged)
+    await h.run(_stop_guard("keep"))
+
+    [guard] = [c for c in h.calls if getattr(c, "verdict", None)]
+    assert guard.verdict == RECORDED_VERDICT | {"fingerprint": "f" * 64, "matched": "baseline"}
+
+
 async def test_a_stop_with_delete_releases_the_runs_outputs_then_ends_without_a_result():
     h = Harness(validate=_not_met)
     result = await h.run(_stop_guard("delete"))

@@ -1,7 +1,8 @@
 """Validate: check a block's input against declarative rules.
 
 Each rule answers met, not met, or cannot be checked (ADR-014 §3). ``negate`` flips met and
-not met; cannot be checked is never flipped.
+not met; cannot be checked is never flipped. A ``changed`` rule compares fingerprints, never
+the text, and is always checkable (ADR-016 §5d).
 """
 
 import json
@@ -12,9 +13,11 @@ from typing import Any, Literal
 from jsonschema import exceptions, validators
 
 from .contracts import (
+    ChangedRule,
     CompareRule,
     ContainsRule,
     JsonSchemaRule,
+    FingerprintOf,
     MinLengthRule,
     PresentRule,
     Rule,
@@ -30,12 +33,24 @@ Answer = Literal["met", "not_met", "unverifiable"]
 
 
 @dataclass(frozen=True)
+class Fingerprints:
+    """The input's, and the earlier checks' a `changed` rule compares it with."""
+
+    computed: str
+    known: dict[FingerprintOf, str]
+
+
+NO_FINGERPRINTS = Fingerprints(computed="", known={})
+
+
+@dataclass(frozen=True)
 class Result:
     answer: Answer
     # What fail mode reports; None when met.
     problem: str | None = None
     found: Any = None
     expected: Any = None
+    matched: FingerprintOf | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +62,7 @@ class _Base:
     negated_problem: str  # when met but negated
     found: Any = None
     expected: Any = None
+    matched: FingerprintOf | None = None
 
 
 class _Unverifiable(Exception):
@@ -124,7 +140,23 @@ def _bounded(v: Any) -> Any:
     return v if len(text) <= _FOUND_MAX else text[: _FOUND_MAX - 3] + "..."
 
 
-def _base(rule: Rule, text: str, doc: Any) -> _Base:
+def _base(rule: Rule, text: str, doc: Any, prints: Fingerprints) -> _Base:
+    if isinstance(rule, ChangedRule):
+        # "baseline" first: the order is fixed, not the map's.
+        matched = next(
+            (
+                k
+                for k in ("baseline", "waiting")
+                if prints.known.get(k) == prints.computed
+            ),
+            None,
+        )
+        return _Base(
+            met=matched is None,
+            problem=f"input is the same as the {matched}'s",
+            negated_problem="input changed",
+            matched=matched,
+        )
     if isinstance(rule, ContainsRule):
         return _Base(
             met=rule.text in text,
@@ -214,17 +246,19 @@ def _base(rule: Rule, text: str, doc: Any) -> _Base:
     )
 
 
-def _evaluate(rule: Rule, text: str, doc: Any, not_json: str | None) -> Result:
+def _evaluate(
+    rule: Rule, text: str, doc: Any, not_json: str | None, prints: Fingerprints
+) -> Result:
     if not_json is not None and isinstance(rule, _JSON_RULES):
         return Result("unverifiable", f"input is not JSON: {not_json}")
     try:
-        base = _base(rule, text, doc)
+        base = _base(rule, text, doc, prints)
     except _Unverifiable as exc:
         return Result("unverifiable", exc.problem, exc.found, exc.expected)
     if base.met != rule.negate:
-        return Result("met", None, base.found, base.expected)
+        return Result("met", None, base.found, base.expected, base.matched)
     problem = base.negated_problem if rule.negate else base.problem
-    return Result("not_met", problem, base.found, base.expected)
+    return Result("not_met", problem, base.found, base.expected, base.matched)
 
 
 def _parse(rules: list[Rule], text: str) -> tuple[Any, str | None]:
@@ -241,24 +275,28 @@ def label(index: int, rule: Rule) -> str:
     return f"rules[{index}] ({rule.kind}{', negate' if rule.negate else ''})"
 
 
-def failures(rules: list[Rule], text: str) -> list[str]:
+def failures(
+    rules: list[Rule], text: str, prints: Fingerprints = NO_FINGERPRINTS
+) -> list[str]:
     """Fail mode: one message per rule not met or not checkable; empty when every rule is met."""
     doc, not_json = _parse(rules, text)
     if not_json is not None:
         return [f"input is not JSON: {not_json}"]
     problems = []
     for i, rule in enumerate(rules):
-        result = _evaluate(rule, text, doc, None)
+        result = _evaluate(rule, text, doc, None, prints)
         if result.answer != "met":
             problems.append(f"{label(i, rule)}: {result.problem}")
     return problems
 
 
-def first_unmet(rules: list[Rule], text: str) -> tuple[int, Result] | None:
+def first_unmet(
+    rules: list[Rule], text: str, prints: Fingerprints = NO_FINGERPRINTS
+) -> tuple[int, Result] | None:
     """Stop mode: the first rule whose answer is not met or unverifiable; None when all are met."""
     doc, not_json = _parse(rules, text)
     for i, rule in enumerate(rules):
-        result = _evaluate(rule, text, doc, not_json)
+        result = _evaluate(rule, text, doc, not_json, prints)
         if result.answer != "met":
             return i, result
     return None

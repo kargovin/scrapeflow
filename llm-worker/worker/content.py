@@ -1,6 +1,7 @@
 """Clean and Validate — the Temporal activities on the content queue."""
 
 import asyncio
+import hashlib
 
 import structlog
 from miniopy_async import Minio
@@ -10,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 from .cleaner import clean_html
 from .contracts import (
     CLEAN_ACTIVITY,
+    ChangedRule,
     VALIDATE_ACTIVITY,
     CleanInput,
     CleanOutput,
@@ -18,7 +20,7 @@ from .contracts import (
     ValidateVerdict,
 )
 from .errors import TERMINAL, classify, describe
-from .rules import failures, first_unmet, label
+from .rules import NO_FINGERPRINTS, Fingerprints, failures, first_unmet, label
 from .storage import fetch_bytes, put
 
 log = structlog.get_logger()
@@ -40,12 +42,14 @@ class ContentActivities:
     def __init__(self, minio: Minio) -> None:
         self._minio = minio
 
-    async def _read(self, path: str) -> str:
+    async def _read_bytes(self, path: str) -> bytes:
         try:
-            data = await fetch_bytes(self._minio, path)
+            return await fetch_bytes(self._minio, path)
         except Exception as exc:
             raise _storage_error(exc) from exc
-        return data.decode("utf-8", errors="replace")
+
+    async def _read(self, path: str) -> str:
+        return (await self._read_bytes(path)).decode("utf-8", errors="replace")
 
     @activity.defn(name=CLEAN_ACTIVITY)
     async def clean(self, job: CleanInput) -> CleanOutput:
@@ -79,10 +83,16 @@ class ContentActivities:
     @activity.defn(name=VALIDATE_ACTIVITY)
     async def validate(self, job: ValidateInput) -> ValidateVerdict | None:
         """Fail mode: raise naming every rule not met. Stop mode: the first rule not met decides."""
-        text = await self._read(job.input_path)
+        data = await self._read_bytes(job.input_path)
+        # ⚠️ The bytes, before the decode: errors="replace" maps different bytes to one text.
+        prints = NO_FINGERPRINTS
+        if any(isinstance(r, ChangedRule) for r in job.rules):
+            computed = await asyncio.to_thread(lambda: hashlib.sha256(data).hexdigest())
+            prints = Fingerprints(computed=computed, known=job.known_fingerprints)
+        text = data.decode("utf-8", errors="replace")
         if job.when_unmet == "stop":
-            return await self._validate_stop(job, text)
-        problems = await asyncio.to_thread(failures, job.rules, text)
+            return await self._validate_stop(job, text, prints)
+        problems = await asyncio.to_thread(failures, job.rules, text, prints)
         if problems:
             log.info("validate_failed", path=job.input_path, problems=problems)
             raise ApplicationError(
@@ -91,11 +101,14 @@ class ContentActivities:
         log.info("validate_passed", path=job.input_path, rules=len(job.rules))
         return None
 
-    async def _validate_stop(self, job: ValidateInput, text: str) -> ValidateVerdict:
-        first = await asyncio.to_thread(first_unmet, job.rules, text)
+    async def _validate_stop(
+        self, job: ValidateInput, text: str, prints: Fingerprints
+    ) -> ValidateVerdict:
+        fingerprint = prints.computed or None
+        first = await asyncio.to_thread(first_unmet, job.rules, text, prints)
         if first is None:
             log.info("validate_passed", path=job.input_path, rules=len(job.rules))
-            return ValidateVerdict(outcome="met")
+            return ValidateVerdict(outcome="met", fingerprint=fingerprint)
         index, result = first
         rule = job.rules[index]
         if result.answer == "unverifiable":
@@ -111,4 +124,6 @@ class ContentActivities:
             rule=rule.model_dump(mode="json", by_alias=True),
             found=result.found,
             expected=result.expected,
+            fingerprint=fingerprint,
+            matched=result.matched,
         )

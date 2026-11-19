@@ -1,5 +1,6 @@
 """Unit tests for worker/cleaner.py, worker/rules.py and the content activities (C.8)."""
 
+import hashlib
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -497,10 +498,12 @@ async def test_clean_conversion_error_is_not_retryable():
     assert "RecursionError: too deep" in err.value.message
 
 
-async def _validate(rules, body: bytes, fetch=None, when_unmet=None):
+async def _validate(rules, body: bytes, fetch=None, when_unmet=None, known=None):
     job = {"input_path": _IN, "rules": rules}
     if when_unmet is not None:
         job["when_unmet"] = when_unmet
+    if known is not None:
+        job["known_fingerprints"] = known
     with patch("worker.content.fetch_bytes", new_callable=AsyncMock) as f:
         f.return_value = body
         f.side_effect = fetch
@@ -719,3 +722,92 @@ async def test_validate_stop_mode_found_and_expected_per_kind(
     out = await _validate([rule], body, when_unmet="stop")
 
     assert (out.outcome, out.found, out.expected) == ("not_met", found, expected)
+
+
+# ---------------------------------------------------------------------------
+# K.2 — the `changed` rule (ADR-016 §5c–§5d)
+# ---------------------------------------------------------------------------
+
+CHANGED = [{"kind": "changed"}]
+GATE_INPUT = b"<h1>Price: 39</h1>"
+GATE_INPUT_SHA = hashlib.sha256(GATE_INPUT).hexdigest()
+
+
+def test_two_byte_strings_that_decode_to_one_text_hash_differently():
+    a, b = b"caf\xe9", b"caf\xff"
+    assert a.decode("utf-8", errors="replace") == b.decode("utf-8", errors="replace")
+    assert hashlib.sha256(a).hexdigest() != hashlib.sha256(b).hexdigest()
+
+
+async def test_a_page_whose_bytes_differ_only_where_the_decode_hides_it_has_changed():
+    old, new = b"caf\xe9", b"caf\xff"
+    out = await _validate(
+        CHANGED,
+        new,
+        when_unmet="stop",
+        known={"baseline": hashlib.sha256(old).hexdigest()},
+    )
+
+    assert out.outcome == "met"
+    assert out.fingerprint == hashlib.sha256(new).hexdigest()
+
+
+async def test_no_known_fingerprint_is_met_and_still_returns_the_fingerprint():
+    out = await _validate(CHANGED, GATE_INPUT, when_unmet="stop")
+
+    assert out == ValidateVerdict(outcome="met", fingerprint=GATE_INPUT_SHA)
+
+
+@pytest.mark.parametrize("which", ["baseline", "waiting"])
+async def test_the_same_input_is_not_met_and_names_the_check_it_matches(which):
+    other = "baseline" if which == "waiting" else "waiting"
+    out = await _validate(
+        CHANGED,
+        GATE_INPUT,
+        when_unmet="stop",
+        known={which: GATE_INPUT_SHA, other: "0" * 64},
+    )
+
+    assert (out.outcome, out.rule_index, out.matched, out.fingerprint) == (
+        "not_met",
+        0,
+        which,
+        GATE_INPUT_SHA,
+    )
+    assert out.rule == {"kind": "changed", "negate": False}
+
+
+async def test_a_different_input_is_met_against_both_fingerprints():
+    out = await _validate(
+        CHANGED,
+        GATE_INPUT,
+        when_unmet="stop",
+        known={"baseline": "a" * 64, "waiting": "b" * 64},
+    )
+
+    assert (out.outcome, out.matched, out.fingerprint) == ("met", None, GATE_INPUT_SHA)
+
+
+async def test_a_changed_rule_never_cannot_be_checked_on_any_bytes():
+    body = b"\x00\xff not json, not utf-8"
+    out = await _validate(CHANGED, body, when_unmet="stop")
+
+    assert out.outcome == "met"
+    assert out.fingerprint == hashlib.sha256(body).hexdigest()
+
+
+async def test_a_rule_set_without_changed_computes_no_fingerprint():
+    out = await _validate(
+        [{"kind": "min_length", "chars": 1}], GATE_INPUT, when_unmet="stop"
+    )
+
+    assert out == ValidateVerdict(outcome="met")
+
+
+async def test_fail_mode_reports_an_unchanged_input():
+    with pytest.raises(ApplicationError) as err:
+        await _validate(CHANGED, GATE_INPUT, known={"baseline": GATE_INPUT_SHA})
+
+    assert (
+        err.value.message == "rules[0] (changed): input is the same as the baseline's"
+    )

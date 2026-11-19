@@ -396,7 +396,9 @@ class PipelineWorkflow:
         assert verdict.rule_index is not None
         # The rule as saved: a bound value stays a binding; `expected` holds what was compared.
         saved = block.config.rules[verdict.rule_index].model_dump(mode="json", by_alias=True)
-        recorded = verdict.model_dump(mode="json", exclude={"outcome"}) | {"rule": saved}
+        # The change gate's two fields only when set: other verdicts keep their recorded shape.
+        unset = {k for k in ("fingerprint", "matched") if getattr(verdict, k) is None}
+        recorded = verdict.model_dump(mode="json", exclude={"outcome"} | unset) | {"rule": saved}
         await self._mirror_block(
             input.run_id, block.id, "completed", output_ref=input_ref, verdict=recorded
         )
