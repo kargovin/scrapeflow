@@ -4,8 +4,8 @@ LLM worker — entry point.
   1. Load config from env vars (requires LLM_KEY_ENCRYPTION_KEY)
   2. Connect to Temporal
   3. Connect to MinIO, verify bucket exists
-  4. Poll the `llm` task queue for LLMExtract and the `content` queue for Clean and
-     Validate (no workflows)
+  4. Poll the `llm` task queue for LLMExtract and the `content` queue for Clean, Validate, Diff
+     and Capture (no workflows)
   5. On SIGTERM, wait up to llm_graceful_shutdown_seconds for in-flight calls
 """
 
@@ -75,7 +75,7 @@ async def run() -> None:
     content_worker = Worker(
         client,
         task_queue=CONTENT_QUEUE,
-        activities=[content.clean, content.validate],
+        activities=[content.clean, content.validate, content.diff, content.capture],
         max_concurrent_activities=settings.content_max_workers,
         graceful_shutdown_timeout=timedelta(
             seconds=settings.llm_graceful_shutdown_seconds

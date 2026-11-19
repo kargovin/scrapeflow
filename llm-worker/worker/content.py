@@ -1,4 +1,4 @@
-"""Clean and Validate — the Temporal activities on the content queue."""
+"""Clean, Validate, Diff and Capture — the Temporal activities on the content queue."""
 
 import asyncio
 import hashlib
@@ -8,13 +8,21 @@ from miniopy_async import Minio
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from .changes import CannotCompare, capture, extraction_diff, page_diff
 from .cleaner import clean_html
 from .contracts import (
+    CAPTURE_ACTIVITY,
     CLEAN_ACTIVITY,
+    DIFF_ACTIVITY,
+    CaptureInput,
+    CaptureOutput,
     ChangedRule,
     VALIDATE_ACTIVITY,
     CleanInput,
     CleanOutput,
+    DiffInput,
+    DiffOutput,
+    DiffSummary,
     StoredObject,
     ValidateInput,
     ValidateVerdict,
@@ -127,3 +135,56 @@ class ContentActivities:
             fingerprint=fingerprint,
             matched=result.matched,
         )
+
+    @activity.defn(name=DIFF_ACTIVITY)
+    async def diff(self, job: DiffInput) -> DiffOutput:
+        """Write history/{artifact_id}/diff.json; return its bounded summary (ADR-016 §6a).
+
+        A baseline copy that is gone and a comparison too large are results; only storage
+        errors raise.
+        """
+        try:
+            baseline = await fetch_bytes(self._minio, job.baseline_path)
+        except Exception as exc:
+            if getattr(exc, "code", None) == "NoSuchKey":
+                log.info("diff_baseline_gone", path=job.baseline_path)
+                return DiffOutput(
+                    summary=DiffSummary(status="baseline_gone", kind=job.kind)
+                )
+            raise _storage_error(exc) from exc
+        current = await self._read(job.current_path)
+        compare = page_diff if job.kind == "page" else extraction_diff
+        try:
+            summary, full = await asyncio.to_thread(
+                compare, baseline.decode("utf-8", errors="replace"), current
+            )
+        except CannotCompare as exc:
+            log.info("diff_unavailable", artifact_id=job.artifact_id, reason=str(exc))
+            return DiffOutput(
+                summary=DiffSummary(
+                    status="unavailable", kind=job.kind, reason=str(exc)
+                )
+            )
+        try:
+            path = await put(
+                self._minio,
+                f"history/{job.artifact_id}/diff.json",
+                full,
+                "application/json",
+            )
+        except Exception as exc:
+            raise _storage_error(exc) from exc
+        log.info(
+            "diff_completed",
+            artifact_id=job.artifact_id,
+            kind=job.kind,
+            truncated=summary.truncated,
+        )
+        return DiffOutput(summary=summary, diff=StoredObject(path=path, size=len(full)))
+
+    @activity.defn(name=CAPTURE_ACTIVITY)
+    async def capture(self, job: CaptureInput) -> CaptureOutput:
+        """Each carried input's value from the block's output (ADR-016 §6b)."""
+        text = await self._read(job.input_path)
+        values = await asyncio.to_thread(capture, job.values, text)
+        return CaptureOutput(values=values)

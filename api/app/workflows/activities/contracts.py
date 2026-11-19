@@ -119,6 +119,70 @@ class ValidateVerdict(BaseModel):
     matched: FingerprintOf | None = None
 
 
+DIFF_ACTIVITY = "Diff"
+CAPTURE_ACTIVITY = "Capture"
+
+
+class DiffInput(BaseModel):
+    """Compare the baseline's object with this check's (ADR-016 §6a). Content queue."""
+
+    # The block that triggered the diff: diff.json is written beside its output.
+    artifact_id: ArtifactId
+    kind: Literal["page", "extraction"]
+    baseline_path: Annotated[str, StringConstraints(min_length=1)]
+    current_path: Annotated[str, StringConstraints(min_length=1)]
+
+
+class PathChange(BaseModel):
+    path: str
+    change: Literal["added", "removed", "changed"]
+    old: Any = None
+    new: Any = None
+
+
+class DiffSummary(BaseModel):
+    """At most 16 KiB of JSON; what ``change_summary`` holds."""
+
+    status: Literal["ok", "baseline_gone", "unavailable"]
+    kind: Literal["page", "extraction"]
+    reason: str | None = None
+    lines: list[str] = []
+    lines_added: int = 0
+    lines_removed: int = 0
+    changes: list[PathChange] = []
+    paths_changed: int = 0
+    truncated: bool = False
+
+
+class DiffOutput(BaseModel):
+    summary: DiffSummary
+    # The full comparison, for the workflow to record on the block's ledger row.
+    diff: StoredObject | None = None
+
+
+class CarriedValue(BaseModel):
+    input: Annotated[str, StringConstraints(min_length=1)]
+    # RFC 6901, as Validate reads it.
+    path: str
+    type: Literal["number", "text"]
+
+
+class CaptureInput(BaseModel):
+    input_path: Annotated[str, StringConstraints(min_length=1)]
+    values: list[CarriedValue] = Field(min_length=1)
+
+
+class CapturedValue(BaseModel):
+    """Exactly one of the two is set (ADR-014 §4's strict types: a bool is not a number)."""
+
+    value: int | float | str | None = None
+    missing: str | None = None
+
+
+class CaptureOutput(BaseModel):
+    values: dict[str, CapturedValue]
+
+
 class DiscoverSitemapsInput(BaseModel):
     seed_url: str
 

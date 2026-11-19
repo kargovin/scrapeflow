@@ -126,3 +126,74 @@ class ValidateVerdict(BaseModel):
     # A `changed` rule's: SHA-256 hex of the input bytes, and which known one it equals.
     fingerprint: str | None = None
     matched: FingerprintOf | None = None
+
+
+# Must equal the API's DIFF_ACTIVITY and CAPTURE_ACTIVITY (both on CONTENT_QUEUE).
+DIFF_ACTIVITY = "Diff"
+CAPTURE_ACTIVITY = "Capture"
+
+
+class DiffInput(BaseModel):
+    """Compare the baseline's object with this check's (ADR-016 §6a)."""
+
+    # The block that triggered the diff: diff.json is written beside its output.
+    artifact_id: NonEmptyStr
+    kind: Literal["page", "extraction"]
+    baseline_path: NonEmptyStr
+    current_path: NonEmptyStr
+
+
+class PathChange(BaseModel):
+    path: str
+    change: Literal["added", "removed", "changed"]
+    # Each cut to 200 characters of JSON (then a string); absent on the side that has none.
+    old: Any = None
+    new: Any = None
+
+
+class DiffSummary(BaseModel):
+    """At most 16 KiB of JSON. ``unavailable`` here only means too large to compare."""
+
+    status: Literal["ok", "baseline_gone", "unavailable"]
+    kind: Literal["page", "extraction"]
+    reason: str | None = None
+    # page: unified diff lines (3 lines of context), each cut to 200 characters.
+    lines: list[str] = []
+    lines_added: int = 0
+    lines_removed: int = 0
+    # extraction: one entry per changed leaf, by position in lists.
+    changes: list[PathChange] = []
+    paths_changed: int = 0
+    # Something was left out: lines, paths, or characters of a value.
+    truncated: bool = False
+
+
+class DiffOutput(BaseModel):
+    summary: DiffSummary
+    # history/{artifact_id}/diff.json, for the workflow to record; None when nothing was compared.
+    diff: StoredObject | None = None
+
+
+class CarriedValue(BaseModel):
+    """One carried input read from the block's output (ADR-016 §6b)."""
+
+    input: NonEmptyStr
+    # RFC 6901, as Validate reads it.
+    path: str
+    type: Literal["number", "text"]
+
+
+class CaptureInput(BaseModel):
+    input_path: NonEmptyStr
+    values: list[CarriedValue] = Field(min_length=1)
+
+
+class CapturedValue(BaseModel):
+    """Exactly one of the two is set."""
+
+    value: int | float | str | None = None
+    missing: str | None = None
+
+
+class CaptureOutput(BaseModel):
+    values: dict[str, CapturedValue]

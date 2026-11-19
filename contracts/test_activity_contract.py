@@ -327,6 +327,76 @@ def test_a_verdict_recorded_before_the_changed_rule_still_decodes():
     assert (received.fingerprint, received.matched) == (None, None)
 
 
+def test_llm_worker_parses_the_diff_and_capture_inputs():
+    diff = api.DiffInput(
+        artifact_id=ARTIFACT_ID,
+        kind="extraction",
+        baseline_path="scrapeflow-results/history/b/llm.json",
+        current_path=f"scrapeflow-results/history/{ARTIFACT_ID}/llm.json",
+    )
+    assert _decode(_encode(diff), llm.DiffInput).model_dump() == diff.model_dump()
+    capture = api.CaptureInput(
+        input_path="b/k",
+        values=[
+            api.CarriedValue(input="last_price", path="/price", type="number"),
+            api.CarriedValue(input="title", path="/title", type="text"),
+        ],
+    )
+    assert _decode(_encode(capture), llm.CaptureInput).model_dump() == capture.model_dump()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        llm.DiffOutput(
+            summary=llm.DiffSummary(
+                status="ok",
+                kind="extraction",
+                changes=[
+                    llm.PathChange(path="/price", change="changed", old=10, new=8.5),
+                    llm.PathChange(path="/tags/2", change="added", new={"a": [True, None]}),
+                ],
+                paths_changed=2,
+            ),
+            diff=llm.StoredObject(path=f"scrapeflow-results/history/{ARTIFACT_ID}/diff.json", size=90),
+        ),
+        llm.DiffOutput(
+            summary=llm.DiffSummary(
+                status="ok", kind="page", lines=["@@ -1 +1 @@", "-a", "+b"], lines_added=1,
+                lines_removed=1, truncated=True,
+            ),
+            diff=llm.StoredObject(path="b/k", size=1),
+        ),
+        llm.DiffOutput(summary=llm.DiffSummary(status="baseline_gone", kind="page")),
+        llm.DiffOutput(
+            summary=llm.DiffSummary(status="unavailable", kind="page", reason="too large")
+        ),
+    ],
+)
+def test_api_parses_the_diff_output(output):
+    assert _decode(_encode(output), api.DiffOutput).model_dump() == output.model_dump()
+
+
+def test_api_parses_the_capture_output_keeping_number_and_text_apart():
+    output = llm.CaptureOutput(
+        values={
+            "n": llm.CapturedValue(value=3),
+            "f": llm.CapturedValue(value=39.5),
+            "t": llm.CapturedValue(value="3"),
+            "m": llm.CapturedValue(missing="'/p' is boolean, not a number"),
+        }
+    )
+    received = _decode(_encode(output), api.CaptureOutput)
+
+    assert received.model_dump() == output.model_dump()
+    assert type(received.values["n"].value) is int
+    assert type(received.values["t"].value) is str
+
+
+def test_the_content_queue_registers_diff_and_capture_under_the_api_s_names():
+    assert (llm.DIFF_ACTIVITY, llm.CAPTURE_ACTIVITY) == (api.DIFF_ACTIVITY, api.CAPTURE_ACTIVITY)
+
+
 def test_api_parses_fail_mode_s_none():
     # Every pre-J.1 history recorded Validate's result as null.
     [payload] = converter.to_payloads([None])
@@ -365,6 +435,9 @@ def test_api_rejects_a_null_list_from_go():
         (api.LLMInput, llm.LLMInput),
         (api.CleanInput, llm.CleanInput),
         (api.ValidateInput, llm.ValidateInput),
+        (api.DiffInput, llm.DiffInput),
+        (api.CaptureInput, llm.CaptureInput),
+        (api.CarriedValue, llm.CarriedValue),
     ],
 )
 def test_workers_accept_every_input_field_the_api_sends(producer, consumer):
@@ -433,6 +506,11 @@ def test_the_crawl_queue_registers_the_names_the_api_calls():
         (llm.StoredObject, api.StoredObject),
         (llm.CleanOutput, api.CleanOutput),
         (llm.ValidateVerdict, api.ValidateVerdict),
+        (llm.DiffOutput, api.DiffOutput),
+        (llm.DiffSummary, api.DiffSummary),
+        (llm.PathChange, api.PathChange),
+        (llm.CaptureOutput, api.CaptureOutput),
+        (llm.CapturedValue, api.CapturedValue),
     ],
 )
 def test_api_accepts_every_output_field_the_workers_send(producer, consumer):
