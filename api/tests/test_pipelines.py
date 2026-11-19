@@ -18,6 +18,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from app.core.db import AsyncSessionLocal
 from app.core.minio import get_minio
 from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
+from app.core.pipeline_trigger import build_run
 from app.core.quota import lock_user
 from app.main import app
 from app.models.llm_keys import UserLLMKey
@@ -1840,3 +1841,96 @@ async def test_a_run_triggered_during_a_permanent_delete_is_refused(
     assert (await asyncio.wait_for(trigger, 10)).status_code == 404
     temporal.start_workflow.assert_not_called()
     assert await _runs(db_user.id) == []
+
+
+# ---------------------------------------------------------------------------
+# L.1 — one builder for the rows and the input
+# ---------------------------------------------------------------------------
+
+
+def _everything(key_id):
+    """A bound URL, a stored proxy and cookies, an LLM key and a webhook secret."""
+    return {
+        "inputs": {"page": {"type": "url"}},
+        "blocks": [
+            {
+                "id": "fetch",
+                "type": "scrape",
+                "config": {
+                    "url": {"$input": "page"},
+                    "proxy_url": "http://u:p@proxy:8080",
+                    "cookies": [{"name": "s", "value": "v"}],
+                },
+            },
+            {
+                "id": "extract",
+                "type": "llm_extract",
+                "input": "fetch",
+                "config": {"llm_key_id": str(key_id), "model": "m", "output_schema": SCHEMA},
+            },
+            {
+                "id": "notify",
+                "type": "webhook",
+                "input": "extract",
+                "config": {"url": "https://example.com/hook", "secret": "whsec"},
+            },
+        ],
+    }
+
+
+def _row(obj, *columns):
+    return {c: getattr(obj, c) for c in columns}
+
+
+RUN_COLUMNS = ("id", "pipeline_id", "pipeline_version_id", "user_id", "status", "inputs")
+RUN_COLUMNS += ("workflow_id", "result_path", "error", "cancel_requested_at")
+BLOCK_COLUMNS = ("pipeline_run_id", "block_id", "position", "type", "status", "input_ref")
+
+
+async def test_the_trigger_and_the_builder_produce_equal_rows_and_input(
+    client, headers, key, db_user, temporal
+):
+    pipeline = await _create(client, headers, _everything(key.id))
+    inputs = {"page": "https://example.com/item"}
+    resp = await client.post(
+        f"/pipelines/{pipeline['id']}/runs", json={"inputs": inputs}, headers=headers
+    )
+    assert resp.status_code == 202, resp.text
+    run_id = uuid.UUID(resp.json()["id"])
+    sent = temporal.start_workflow.await_args.args[1]
+
+    async with AsyncSessionLocal() as db:
+        run = await db.get(PipelineRun, run_id)
+        rows = list(
+            await db.scalars(
+                select(PipelineRunBlock)
+                .where(PipelineRunBlock.pipeline_run_id == run_id)
+                .order_by(PipelineRunBlock.position)
+            )
+        )
+        version = await db.get(PipelineVersion, run.pipeline_version_id)
+        stored_key = await db.get(UserLLMKey, key.id)
+    parsed, secrets = parse_definition(version.definition)
+    built = build_run(
+        run_id=run_id,
+        user_id=db_user.id,
+        version=version,
+        parsed=parsed,
+        stored_secrets=secrets,
+        keys={str(key.id): stored_key},
+        inputs=inputs,
+    )
+
+    assert _row(built.run, *RUN_COLUMNS) == _row(run, *RUN_COLUMNS)
+    assert [_row(b, *BLOCK_COLUMNS) for b in built.blocks] == [
+        _row(r, *BLOCK_COLUMNS) for r in rows
+    ]
+    # Block row ids are minted per build; each input's artifact ids are its own rows'.
+    assert sent.artifact_ids == {r.block_id: str(r.id) for r in rows}
+    assert built.input.artifact_ids == {b.block_id: str(b.id) for b in built.blocks}
+    # The block stores its own proxy, so no build mints ciphertext (a default proxy would).
+    assert built.input.model_dump(exclude={"artifact_ids"}) == sent.model_dump(
+        exclude={"artifact_ids"}
+    )
+    assert set(sent.credentials) == {"fetch"} and set(sent.webhook_secrets) == {"notify"}
+    assert set(sent.llm_keys) == {str(key.id)}

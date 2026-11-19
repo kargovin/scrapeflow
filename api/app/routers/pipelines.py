@@ -1,13 +1,11 @@
 import asyncio
 import copy
-import json
 import uuid
 from asyncio import get_running_loop
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, status
 from miniopy_async import Minio
 from miniopy_async.error import S3Error
@@ -26,6 +24,7 @@ from app.core.ledger import ReleaseOutcome, release_pipeline_run_objects
 from app.core.minio import get_minio
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
+from app.core.pipeline_trigger import build_run, encrypt_secret
 from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
@@ -69,13 +68,8 @@ from app.schemas.pipelines import (
     PipelineVersionResponse,
 )
 from app.settings import settings
-from app.workflows.activities.contracts import Credentials
 from app.workflows.client import get_temporal, get_temporal_or_none
-from app.workflows.pipeline import (
-    LLMKey,
-    PipelineRunInput,
-    PipelineWorkflow,
-)
+from app.workflows.pipeline import PipelineWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
@@ -127,11 +121,6 @@ def _given_secrets(raw: dict[str, Any]) -> dict[str, set[str]]:
     return given
 
 
-def _encrypt_secret(value: Any) -> str:
-    plain = value if isinstance(value, str) else json.dumps(value)
-    return Fernet(settings.credentials_encryption_key).encrypt(plain.encode()).decode()
-
-
 def _store_secrets(
     validated: ValidatedPipeline,
     given: dict[str, set[str]],
@@ -150,7 +139,7 @@ def _store_secrets(
             if name in given.get(block["id"], set()):
                 value = getattr(parsed.config, name)
                 if value:
-                    secrets[name] = _encrypt_secret(value)
+                    secrets[name] = encrypt_secret(value)
             elif name in kept.get(block["id"], {}):
                 secrets[name] = kept[block["id"]][name]
             block["config"][name] = None
@@ -634,17 +623,6 @@ async def _version_to_run(
     return row[0], row[1]
 
 
-def _scrape_credentials(secrets: dict[str, str]) -> Credentials | None:
-    # As jobs resolve them: the block's proxy, else the platform default; cookies as stored.
-    proxy = secrets.get("proxy_url")
-    if proxy is None and settings.default_proxy_url:
-        proxy = _encrypt_secret(settings.default_proxy_url)
-    cookies = secrets.get("cookies")
-    if proxy is None and cookies is None:
-        return None
-    return Credentials(encrypted_proxy_url=proxy, encrypted_cookies=cookies)
-
-
 @router.post(
     "/{pipeline_id}/runs",
     response_model=PipelineRunResponse,
@@ -710,34 +688,16 @@ async def create_run(
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
 
-    credentials = {
-        b.id: c
-        for b in parsed.blocks
-        if isinstance(b, ScrapeBlock)
-        and (c := _scrape_credentials(stored_secrets.get(b.id, {}))) is not None
-    }
-
-    run_id = uuid.uuid4()
-    run = PipelineRun(
-        id=run_id,
-        pipeline_id=pipeline.id,
-        pipeline_version_id=version.id,
+    built = build_run(
+        run_id=uuid.uuid4(),
         user_id=user.id,
-        status="running",
+        version=version,
+        parsed=parsed,
+        stored_secrets=stored_secrets,
+        keys=keys,
         inputs=body.inputs,
-        workflow_id=f"pipeline-run-{run_id}",
     )
-    run_blocks = [
-        PipelineRunBlock(
-            id=uuid.uuid4(),
-            pipeline_run_id=run_id,
-            block_id=b.id,
-            position=i,
-            type=b.type,
-            status="pending",
-        )
-        for i, b in enumerate(parsed.blocks)
-    ]
+    run, run_blocks, run_id = built.run, built.blocks, built.run.id
     db.add(run)
     db.add_all(run_blocks)
     # Rows before the start: a run that failed to start is visible; a workflow without rows is not.
@@ -746,29 +706,7 @@ async def create_run(
     try:
         await temporal.start_workflow(
             PipelineWorkflow.run,
-            PipelineRunInput(
-                run_id=str(run_id),
-                pipeline_id=str(pipeline.id),
-                blocks=parsed.blocks,
-                time_budget_seconds=parsed.run_budget_seconds,
-                inputs=body.inputs,
-                artifact_ids={b.block_id: str(b.id) for b in run_blocks},
-                llm_keys={
-                    key_id: LLMKey(
-                        provider=k.provider,
-                        encrypted_api_key=k.encrypted_api_key,
-                        base_url=k.base_url,
-                    )
-                    for key_id, k in keys.items()
-                },
-                credentials=credentials,
-                webhook_secrets={
-                    b.id: secret
-                    for b in parsed.blocks
-                    if isinstance(b, WebhookBlock)
-                    and (secret := stored_secrets.get(b.id, {}).get("secret")) is not None
-                },
-            ),
+            built.input,
             id=run.workflow_id,
             task_queue=WORKFLOW_QUEUE,
             # The default is ALLOW_DUPLICATE.

@@ -60,7 +60,7 @@ async def _secret(db, delivery: WebhookDelivery) -> bytes:
     elif delivery.crawl_id:
         return b""
     elif delivery.pipeline_run_id:
-        # Encrypted by routers/pipelines.py:_encrypt_secret, not with the jobs' key.
+        # Encrypted by core/pipeline_trigger.encrypt_secret, not with the jobs' key.
         key = settings.credentials_encryption_key
         encrypted = await alert_secret(db, delivery)
     else:
