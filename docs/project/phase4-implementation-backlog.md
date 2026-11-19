@@ -3472,6 +3472,11 @@ Validate or an `events` list.
 **Step 1 (owner, 2026-11-19):** `main` ff `036870c..a10f698`, pushed. CI run `44464377927`: `replay`, `build-api` green;
 worker builds skipped. Flux rolled `api` (2/2) and `workflow-worker` to `a10f698`; `alembic_version` = `678c7e339d80`;
 `quota_active_submissions` reads. **Deployed code is `a10f698`.**
+**Step 2 (owner, 2026-11-19):** all as expected — `jb-stop` ended `completed`, stopped at `guard` (`rule_not_met`,
+verdict on `contains "Sold out"`), `notify` skipped/stopped, nothing at the receiver, the list carries the stop;
+`jb-alert` ended `failed` at `guard`, one signed `pipeline.failed` arrived, the run lists it delivered; a pipeline
+saved before today ran unchanged and an older run's skipped steps read `not_recorded`; `jb-number` refused `"100"`
+(422 naming `max_price`) and completed with `100`.
 
 **Rollback:** prefer a forward fix. An image revert (api, workflow-worker, CronJob to step 0's tag) leaves 4.10
 applied — harmless to the old code — but has two costs: a run that took a `validate-stop` or `webhook-events` path
