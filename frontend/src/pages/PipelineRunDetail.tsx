@@ -52,6 +52,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
   const runKey = ['pipeline-run', mode, runId]
   const [viewing, setViewing] = useState<string | null>(null)
   const [cancelInfo, setCancelInfo] = useState<PipelineRunCancel | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const { data: run, isLoading, isError } = useQuery<PipelineRun>({
     queryKey: runKey,
@@ -84,6 +85,14 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
     onSuccess: info => {
       setCancelInfo(info)
       qc.setQueryData(runKey, info.run)
+    },
+  })
+
+  const remove = useMutation({
+    mutationFn: () => api.del(`/pipelines/${pipelineId}/runs/${runId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['pipeline-runs', mode, pipelineId] })
+      navigate(`${routeBase}/${pipelineId}`)
     },
   })
 
@@ -271,6 +280,41 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
             {cancel.isPending ? 'Cancelling…' : 'Cancel run'}
           </button>
           <ErrorBox error={cancel.error} />
+        </div>
+      )}
+
+      {!isAdmin && (
+        <div className="mt-4 border border-red-200 rounded-lg p-4 bg-red-50">
+          <h3 className="text-sm font-semibold text-red-800 mb-1">Delete run</h3>
+          <p className="text-xs text-red-600 mb-3">
+            The run and every output it stored are deleted, and the storage is freed.
+            {run.status === 'running' && ' The run is cancelled first.'}
+          </p>
+          {!confirmDelete ? (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+            >
+              Delete
+            </button>
+          ) : (
+            <div className="flex gap-2">
+              <button
+                onClick={() => remove.mutate()}
+                disabled={remove.isPending}
+                className="px-3 py-1.5 text-sm bg-red-700 text-white rounded hover:bg-red-800 disabled:opacity-50"
+              >
+                {remove.isPending ? 'Deleting…' : 'Confirm delete'}
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
+              >
+                Keep
+              </button>
+            </div>
+          )}
+          <ErrorBox error={remove.error} />
         </div>
       )}
     </div>

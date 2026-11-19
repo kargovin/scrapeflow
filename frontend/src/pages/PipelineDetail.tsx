@@ -17,7 +17,7 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
   const routeBase = isAdmin ? '/app/admin/pipelines' : '/app/dashboard/pipelines'
   const [inputs, setInputs] = useState<Record<string, string>>({})
   const [version, setVersion] = useState('')
-  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<'soft' | 'permanent' | null>(null)
 
   const { data: pipeline, isLoading, isError } = useQuery<Pipeline>({
     queryKey: ['pipeline', mode, pipelineId],
@@ -57,7 +57,8 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
   })
 
   const remove = useMutation({
-    mutationFn: () => api.del(`/pipelines/${pipelineId}`),
+    mutationFn: (how: 'soft' | 'permanent') =>
+      api.del(`/pipelines/${pipelineId}${how === 'permanent' ? '?permanent=true' : ''}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['pipelines'] })
       navigate(routeBase)
@@ -194,26 +195,42 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
         <div className="border border-red-200 rounded-lg p-4 bg-red-50">
           <h3 className="text-sm font-semibold text-red-800 mb-1">Delete pipeline</h3>
           <p className="text-xs text-red-600 mb-3">
-            A pipeline with runs is kept for its runs and their results; its name stays taken.
+            Delete: a pipeline with runs is kept for its runs and their results; its name stays
+            taken. Delete permanently: every run and every stored result goes, and the storage is
+            freed; a run still going is cancelled.
           </p>
-          {!confirmDelete ? (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700"
-            >
-              Delete
-            </button>
+          {confirmDelete === null ? (
+            <div className="flex gap-2">
+              {!pipeline.deleted_at && (
+                <button
+                  onClick={() => setConfirmDelete('soft')}
+                  className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+                >
+                  Delete
+                </button>
+              )}
+              <button
+                onClick={() => setConfirmDelete('permanent')}
+                className="px-3 py-1.5 text-sm bg-red-700 text-white rounded hover:bg-red-800"
+              >
+                Delete permanently
+              </button>
+            </div>
           ) : (
             <div className="flex gap-2">
               <button
-                onClick={() => remove.mutate()}
+                onClick={() => remove.mutate(confirmDelete)}
                 disabled={remove.isPending}
                 className="px-3 py-1.5 text-sm bg-red-700 text-white rounded hover:bg-red-800 disabled:opacity-50"
               >
-                {remove.isPending ? 'Deleting…' : 'Confirm delete'}
+                {remove.isPending
+                  ? 'Deleting…'
+                  : confirmDelete === 'permanent'
+                    ? 'Confirm: delete every run and result'
+                    : 'Confirm delete'}
               </button>
               <button
-                onClick={() => setConfirmDelete(false)}
+                onClick={() => setConfirmDelete(null)}
                 className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
               >
                 Keep
