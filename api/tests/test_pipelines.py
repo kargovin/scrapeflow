@@ -1509,3 +1509,334 @@ async def test_a_failed_run_lists_its_alerts_for_its_owner_and_the_admin(
     admin = (await client.get(f"/admin{url}", headers=headers)).json()
     assert admin["alerts"] == run["alerts"]
     assert admin["failed_block_id"] == "fetch"
+
+
+# ---------------------------------------------------------------------------
+# K.1 — BUG-031: delete a run, delete a pipeline permanently (ADR-016 §11)
+# ---------------------------------------------------------------------------
+
+
+class RemovingMinio:
+    """remove_object succeeds unless the key is in ``fail``."""
+
+    def __init__(self):
+        self.fail: set[str] = set()
+        self.removed: list[str] = []
+
+    async def remove_object(self, bucket, key):
+        if f"{bucket}/{key}" in self.fail:
+            raise RuntimeError("minio down")
+        self.removed.append(f"{bucket}/{key}")
+
+
+@pytest.fixture
+def store():
+    fake = RemovingMinio()
+    app.dependency_overrides[get_minio] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_minio, None)
+
+
+async def _used(user_id) -> int:
+    async with AsyncSessionLocal() as db:
+        quota = await db.get(UserQuota, user_id)
+        return 0 if quota is None else quota.storage_bytes_used
+
+
+async def _charged_run(client, headers, key, temporal, pipeline_id=None, status="completed"):
+    """A run of the R6 recipe whose fetch and extract each hold one recorded object."""
+    from app.workflows.activities.contracts import StoredObject
+    from app.workflows.activities.db import record_storage
+    from app.workflows.pipeline import RecordStorageInput
+
+    if pipeline_id is None:
+        pipeline_id = (await _create(client, headers, recipe(key.id), name=uuid.uuid4().hex))["id"]
+    resp = await client.post(f"/pipelines/{pipeline_id}/runs", json={}, headers=headers)
+    assert resp.status_code == 202, resp.text
+    run_id = resp.json()["id"]
+    keys = {
+        "fetch": (f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html", 4000),
+        "extract": (f"scrapeflow-results/history/{uuid.uuid4()}/llm.json", 300),
+    }
+    for block_id, (path, size) in keys.items():
+        await record_storage(
+            RecordStorageInput(
+                run_id=run_id, block_id=block_id, objects=[StoredObject(path=path, size=size)]
+            )
+        )
+    if status != "running":
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                update(PipelineRun)
+                .where(PipelineRun.id == uuid.UUID(run_id))
+                .values(status=status, finished_at=datetime.now(UTC))
+            )
+            await db.commit()
+    return pipeline_id, run_id, [path for path, _ in keys.values()]
+
+
+async def _ledger_keys(paths) -> list[str]:
+    from app.models.storage_object import StorageObject
+
+    async with AsyncSessionLocal() as db:
+        return sorted(
+            (
+                await db.scalars(
+                    select(StorageObject.object_key).where(StorageObject.object_key.in_(paths))
+                )
+            ).all()
+        )
+
+
+async def test_deleting_a_run_frees_exactly_its_bytes_and_removes_its_rows(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline_id, run_id, paths = await _charged_run(client, headers, key, temporal)
+    _, other_run, other_paths = await _charged_run(client, headers, key, temporal, pipeline_id)
+    before = await _used(db_user.id)
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+
+    assert resp.status_code == 204, resp.text
+    assert sorted(store.removed) == sorted(paths)
+    assert await _used(db_user.id) == before - 4300
+    assert await _ledger_keys(paths) == []
+    async with AsyncSessionLocal() as db:
+        assert await db.get(PipelineRun, uuid.UUID(run_id)) is None
+        blocks = await db.scalar(
+            select(func.count())
+            .select_from(PipelineRunBlock)
+            .where(PipelineRunBlock.pipeline_run_id == uuid.UUID(run_id))
+        )
+        assert blocks == 0
+    # The other run and the pipeline are untouched.
+    assert await _ledger_keys(other_paths) == sorted(other_paths)
+    resp = await client.get(f"/pipelines/{pipeline_id}/runs/{other_run}", headers=headers)
+    assert resp.status_code == 200
+    assert (await client.get(f"/pipelines/{pipeline_id}", headers=headers)).status_code == 200
+    resp = await client.get(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+    assert resp.status_code == 404
+
+
+async def test_a_run_delete_that_cannot_remove_an_object_refuses_and_a_retry_completes(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline_id, run_id, paths = await _charged_run(client, headers, key, temporal)
+    before = await _used(db_user.id)
+    store.fail.add(paths[0])
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+
+    assert resp.status_code == 503
+    assert "1 stored objects could not be removed" in resp.json()["detail"]
+    # What was freed stays freed; the run and the object left keep their rows.
+    assert store.removed == [paths[1]]
+    assert await _used(db_user.id) == before - 300
+    assert await _ledger_keys(paths) == [paths[0]]
+    async with AsyncSessionLocal() as db:
+        assert await db.get(PipelineRun, uuid.UUID(run_id)) is not None
+
+    store.fail.clear()
+    resp = await client.delete(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+    assert resp.status_code == 204
+    assert await _used(db_user.id) == before - 4300
+    assert await _ledger_keys(paths) == []
+
+
+async def test_deleting_a_running_run_cancels_it_first(
+    client, headers, key, db_user, temporal, store, engine
+):
+    pipeline_id, run_id, _ = await _charged_run(client, headers, key, temporal, status="running")
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+
+    assert resp.status_code == 204
+    engine["client"].get_workflow_handle.assert_called_once_with(f"pipeline-run-{run_id}")
+    engine["client"].get_workflow_handle.return_value.cancel.assert_awaited_once()
+
+
+async def test_a_run_delete_with_the_engine_down_still_deletes(
+    client, headers, key, db_user, temporal, store, engine
+):
+    pipeline_id, run_id, _ = await _charged_run(client, headers, key, temporal, status="running")
+    engine["client"] = None
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+
+    assert resp.status_code == 204
+    async with AsyncSessionLocal() as db:
+        assert await db.get(PipelineRun, uuid.UUID(run_id)) is None
+
+
+async def test_a_refused_delete_of_a_running_run_keeps_the_cancel_request(
+    client, headers, key, db_user, temporal, store, engine
+):
+    pipeline_id, run_id, paths = await _charged_run(
+        client, headers, key, temporal, status="running"
+    )
+    store.fail.add(paths[0])
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+
+    assert resp.status_code == 503
+    async with AsyncSessionLocal() as db:
+        run = await db.get(PipelineRun, uuid.UUID(run_id))
+    assert run.cancel_requested_at is not None
+
+
+async def test_another_users_run_cannot_be_deleted(
+    client, headers, key, db_user, temporal, store, other_user
+):
+    pipeline_id, run_id, paths = await _charged_run(client, headers, key, temporal)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == uuid.UUID(run_id))
+            .values(user_id=other_user.id)
+        )
+        await db.execute(
+            update(Pipeline)
+            .where(Pipeline.id == uuid.UUID(pipeline_id))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}/runs/{run_id}", headers=headers)
+    assert resp.status_code == 404
+    resp = await client.delete(f"/pipelines/{pipeline_id}?permanent=true", headers=headers)
+    assert resp.status_code == 404
+    assert store.removed == []
+    assert await _ledger_keys(paths) == sorted(paths)
+
+
+async def test_a_run_is_deleted_only_under_its_own_pipeline(
+    client, headers, key, db_user, temporal, store
+):
+    _, run_id, _ = await _charged_run(client, headers, key, temporal)
+    other = await _create(client, headers, runnable(key.id), name="other")
+
+    resp = await client.delete(f"/pipelines/{other['id']}/runs/{run_id}", headers=headers)
+
+    assert resp.status_code == 404
+    assert store.removed == []
+
+
+async def test_a_permanent_delete_removes_every_run_its_objects_and_the_pipeline(
+    client, headers, key, db_user, temporal, store, engine
+):
+    pipeline_id, first, paths = await _charged_run(client, headers, key, temporal)
+    _, second, more = await _charged_run(
+        client, headers, key, temporal, pipeline_id, status="running"
+    )
+    before = await _used(db_user.id)
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}?permanent=true", headers=headers)
+
+    assert resp.status_code == 204, resp.text
+    assert sorted(store.removed) == sorted(paths + more)
+    assert await _used(db_user.id) == before - 8600
+    engine["client"].get_workflow_handle.assert_called_once_with(f"pipeline-run-{second}")
+    async with AsyncSessionLocal() as db:
+        assert await db.get(Pipeline, uuid.UUID(pipeline_id)) is None
+        assert await db.get(PipelineRun, uuid.UUID(first)) is None
+        assert await db.get(PipelineRun, uuid.UUID(second)) is None
+    assert await _stored(pipeline_id) == []
+
+
+async def test_a_soft_deleted_pipeline_can_be_deleted_permanently(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline_id, _, _ = await _charged_run(client, headers, key, temporal)
+    assert (await client.delete(f"/pipelines/{pipeline_id}", headers=headers)).status_code == 204
+    before = await _used(db_user.id)
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}?permanent=true", headers=headers)
+
+    assert resp.status_code == 204
+    assert await _used(db_user.id) == before - 4300
+    async with AsyncSessionLocal() as db:
+        assert await db.get(Pipeline, uuid.UUID(pipeline_id)) is None
+    # The name is free again.
+    pipeline = await _create(client, headers, recipe(key.id), name="p")
+    assert pipeline["id"] != pipeline_id
+
+
+async def test_a_permanent_delete_that_cannot_remove_an_object_deletes_nothing(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline_id, first, paths = await _charged_run(client, headers, key, temporal)
+    _, second, more = await _charged_run(client, headers, key, temporal, pipeline_id)
+    before = await _used(db_user.id)
+    store.fail.add(more[0])
+
+    resp = await client.delete(f"/pipelines/{pipeline_id}?permanent=true", headers=headers)
+
+    assert resp.status_code == 503
+    assert await _used(db_user.id) == before - 4300 - 300
+    assert await _ledger_keys(paths + more) == [more[0]]
+    async with AsyncSessionLocal() as db:
+        assert await db.get(Pipeline, uuid.UUID(pipeline_id)) is not None
+        assert await db.get(PipelineRun, uuid.UUID(first)) is not None
+        assert await db.get(PipelineRun, uuid.UUID(second)) is not None
+
+    store.fail.clear()
+    resp = await client.delete(f"/pipelines/{pipeline_id}?permanent=true", headers=headers)
+    assert resp.status_code == 204
+    assert await _used(db_user.id) == before - 8600
+
+
+async def test_a_run_waiting_on_the_users_lock_finds_its_pipeline_gone(
+    client, headers, key, db_user, temporal
+):
+    pipeline = await _create(client, headers, runnable(key.id))
+    async with AsyncSessionLocal() as holder:
+        await lock_user(db_user.id, holder)
+        trigger = asyncio.create_task(
+            client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)
+        )
+        await asyncio.sleep(0.5)
+        assert not trigger.done()
+        await holder.execute(
+            update(Pipeline)
+            .where(Pipeline.id == uuid.UUID(pipeline["id"]))
+            .values(deleted_at=datetime.now(UTC))
+        )
+        await holder.commit()
+
+    resp = await trigger
+    assert resp.status_code == 404
+    assert await _runs(db_user.id) == []
+    temporal.start_workflow.assert_not_called()
+
+
+async def test_a_run_triggered_during_a_permanent_delete_is_refused(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline_id, _, _ = await _charged_run(client, headers, key, temporal)
+    temporal.start_workflow.reset_mock()
+    removing, go_on = asyncio.Event(), asyncio.Event()
+    remove = store.remove_object
+
+    async def slow_remove(bucket, key):
+        removing.set()
+        await go_on.wait()
+        await remove(bucket, key)
+
+    store.remove_object = slow_remove
+    deleting = asyncio.create_task(
+        client.delete(f"/pipelines/{pipeline_id}?permanent=true", headers=headers)
+    )
+    try:
+        await asyncio.wait_for(removing.wait(), 10)
+        trigger = asyncio.create_task(
+            client.post(f"/pipelines/{pipeline_id}/runs", json={}, headers=headers)
+        )
+        await asyncio.sleep(0.5)
+        assert not trigger.done()
+    finally:
+        go_on.set()
+
+    assert (await asyncio.wait_for(deleting, 10)).status_code == 204
+    assert (await asyncio.wait_for(trigger, 10)).status_code == 404
+    temporal.start_workflow.assert_not_called()
+    assert await _runs(db_user.id) == []

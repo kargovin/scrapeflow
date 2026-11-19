@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -1350,7 +1350,8 @@ async def _stored_run(user_id):
 
 async def _used(user_id) -> int:
     async with AsyncSessionLocal() as db:
-        return (await db.get(UserQuota, user_id)).storage_bytes_used
+        quota = await db.get(UserQuota, user_id)
+        return 0 if quota is None else quota.storage_bytes_used
 
 
 async def _held(run_id) -> list[str]:
@@ -1447,19 +1448,176 @@ async def test_record_storage_charges_once_and_reports_usage(db_user):
     assert quota.storage_bytes_used == 1234
 
 
-async def test_db_activities_on_a_missing_row_fail_without_retry(db_user):
+async def test_db_activities_on_a_missing_block_fail_without_retry(db_user):
     run = await _run_rows(db_user.id)
     with pytest.raises(ApplicationError) as exc_info:
         await mirror_block_status(
             MirrorBlockInput(run_id=str(run.id), block_id="nope", status="completed")
         )
     assert exc_info.value.non_retryable
-    with pytest.raises(ApplicationError):
-        await mirror_run_status(MirrorRunInput(run_id=str(uuid.uuid4()), status="completed"))
-    with pytest.raises(ApplicationError):
+    with pytest.raises(ApplicationError) as exc_info:
         await record_storage(RecordStorageInput(run_id=str(run.id), block_id="nope", objects=[]))
-    with pytest.raises(ApplicationError):
-        await check_cancelled(RunRef(run_id=str(uuid.uuid4())))
+    assert exc_info.value.non_retryable
+
+
+# ---------------------------------------------------------------------------
+# K.1 — a run deleted while its workflow is still going (ADR-016 §11)
+# ---------------------------------------------------------------------------
+
+
+async def test_every_mirror_reads_a_deleted_run_as_cancelled():
+    gone = str(uuid.uuid4())
+    for status in ("running", "waiting", "completed", "failed", "skipped"):
+        reply = await mirror_block_status(
+            MirrorBlockInput(run_id=gone, block_id="fetch", status=status)
+        )
+        assert reply == "cancelled", status
+    for status in ("completed", "failed", "cancelled"):
+        assert await mirror_run_status(MirrorRunInput(run_id=gone, status=status)) == "cancelled"
+    assert await check_cancelled(RunRef(run_id=gone)) is True
+
+
+@pytest.fixture
+def fake_minio(monkeypatch):
+    fake = _FakeMinio()
+
+    async def get_fake():
+        return fake
+
+    monkeypatch.setattr("app.workflows.activities.db.get_minio", get_fake)
+    return fake
+
+
+async def test_record_storage_on_a_deleted_run_removes_the_objects_and_charges_nothing(
+    db_user, fake_minio
+):
+    key = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+    before = await _used(db_user.id)
+
+    with pytest.raises(ApplicationError) as exc_info:
+        await record_storage(
+            RecordStorageInput(
+                run_id=str(uuid.uuid4()),
+                block_id="fetch",
+                objects=[StoredObject(path=key, size=500)],
+            )
+        )
+
+    assert (exc_info.value.type, exc_info.value.non_retryable) == (RUN_CANCELLED_ERROR, True)
+    assert fake_minio.removed == [key]
+    assert await _used(db_user.id) == before
+    async with AsyncSessionLocal() as db:
+        assert await db.scalar(select(StorageObject).where(StorageObject.object_key == key)) is None
+
+
+async def test_an_object_of_a_deleted_run_that_cannot_be_removed_is_retried(db_user, fake_minio):
+    key = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+    fake_minio.fail.add(key)
+    arg = RecordStorageInput(
+        run_id=str(uuid.uuid4()), block_id="fetch", objects=[StoredObject(path=key, size=500)]
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        await record_storage(arg)
+    assert not exc_info.value.non_retryable
+    assert exc_info.value.type != RUN_CANCELLED_ERROR
+
+    fake_minio.fail.clear()
+    with pytest.raises(ApplicationError) as exc_info:
+        await record_storage(arg)
+    assert exc_info.value.type == RUN_CANCELLED_ERROR
+    assert fake_minio.removed == [key]
+
+
+async def test_a_record_waits_for_a_delete_holding_the_run_and_then_drops_its_object(
+    db_user, fake_minio
+):
+    """The interleave: the delete enumerated the ledger; a record arriving now must not leave
+    an uncharged object behind once the run's rows cascade away."""
+    run = await _run_rows(db_user.id)
+    key = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+    before = await _used(db_user.id)
+
+    async with AsyncSessionLocal() as deleter:
+        await deleter.execute(
+            select(PipelineRun.id).where(PipelineRun.id == run.id).with_for_update()
+        )
+        record = asyncio.create_task(
+            record_storage(
+                RecordStorageInput(
+                    run_id=str(run.id),
+                    block_id="fetch",
+                    objects=[StoredObject(path=key, size=700)],
+                )
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert not record.done()
+        await deleter.execute(delete(PipelineRun).where(PipelineRun.id == run.id))
+        await deleter.commit()
+
+    with pytest.raises(ApplicationError) as exc_info:
+        await record
+    assert exc_info.value.type == RUN_CANCELLED_ERROR
+    assert fake_minio.removed == [key]
+    assert await _used(db_user.id) == before
+    async with AsyncSessionLocal() as db:
+        assert await db.scalar(select(StorageObject).where(StorageObject.object_key == key)) is None
+
+
+async def test_a_run_deleted_mid_block_ends_the_workflow_cancelled_not_failed(db_user, fake_minio):
+    run = await _run_rows(
+        db_user.id, (("fetch", "scrape", "pending"), ("extract", "llm_extract", "pending"))
+    )
+    key = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+    started, release = asyncio.Event(), asyncio.Event()
+
+    @activity.defn(name=SCRAPE_ACTIVITY)
+    async def scrape(input: ScrapeInput) -> ScrapeOutput:
+        started.set()
+        await release.wait()
+        return ScrapeOutput.model_validate(
+            {"result": {"path": key, "size": 10}, "content_hash": "00c0ffee12345678"}
+        )
+
+    @activity.defn(name=LLM_EXTRACT_ACTIVITY)
+    async def llm(input: LLMInput) -> LLMOutput:
+        raise AssertionError("a deleted run must not start its next block")
+
+    async with await WorkflowEnvironment.start_time_skipping(
+        data_converter=pydantic_data_converter
+    ) as env:
+        async with (
+            Worker(
+                env.client,
+                task_queue=WORKFLOW_QUEUE,
+                workflows=[PipelineWorkflow],
+                activities=[
+                    mirror_block_status,
+                    mirror_run_status,
+                    record_storage,
+                    check_cancelled,
+                ],
+            ),
+            Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
+            Worker(env.client, task_queue=LLM_QUEUE, activities=[llm]),
+        ):
+            handle = await env.client.start_workflow(
+                PipelineWorkflow.run,
+                RUN_INPUT.model_copy(update={"run_id": str(run.id)}),
+                id=run.workflow_id,
+                task_queue=WORKFLOW_QUEUE,
+            )
+            await started.wait()
+            async with AsyncSessionLocal() as db:
+                await db.execute(delete(PipelineRun).where(PipelineRun.id == run.id))
+                await db.commit()
+            release.set()
+            assert await handle.result() is None
+
+    assert fake_minio.removed == [key]
+    async with AsyncSessionLocal() as db:
+        assert await db.scalar(select(StorageObject).where(StorageObject.object_key == key)) is None
 
 
 # ---------------------------------------------------------------------------

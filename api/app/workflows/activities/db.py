@@ -3,6 +3,7 @@
 Two writers own pipeline_runs.status (ADR-009 §11a): the API's cancel and these mirrors. A
 mirror never moves a run out of a terminal state it did not set, and never starts a block on a
 run whose cancel was requested. Every write notifies ``pipeline_status`` in its own transaction.
+A run deleted while its workflow is still going (ADR-016 §11) reads as ``cancelled``.
 """
 
 import uuid
@@ -19,6 +20,7 @@ from app.core.ledger import objects_for_pipeline_run, record_object, release_obj
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
 from app.core.quota import storage_usage
+from app.core.storage import delete_minio_object
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.models.storage_object import StorageObject
 from app.workflows.activities.job_runs import get_minio
@@ -29,6 +31,7 @@ from app.workflows.pipeline import (
     OUTPUTS_LEFT_ERROR,
     RECORD_STORAGE_ACTIVITY,
     RELEASE_RUN_OUTPUTS_ACTIVITY,
+    RUN_CANCELLED_ERROR,
     MirrorBlockInput,
     MirrorRunInput,
     RecordStorageInput,
@@ -38,13 +41,11 @@ from app.workflows.pipeline import (
 )
 
 
-async def _lock_run(db: AsyncSession, run_id: str) -> PipelineRun:
-    run = await db.scalar(
+async def _lock_run(db: AsyncSession, run_id: str) -> PipelineRun | None:
+    """None: the run was deleted."""
+    return await db.scalar(
         select(PipelineRun).where(PipelineRun.id == uuid.UUID(run_id)).with_for_update()
     )
-    if run is None:
-        raise ApplicationError(f"no run {run_id}", non_retryable=True)
-    return run
 
 
 def _cancel_requested(run: PipelineRun) -> bool:
@@ -56,6 +57,8 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
     """Writes the block's status; returns the run's. ``cancelled`` = the workflow must stop."""
     async with AsyncSessionLocal() as db:
         run = await _lock_run(db, input.run_id)
+        if run is None:
+            return "cancelled"
         if input.status == "running" and (run.status != "running" or _cancel_requested(run)):
             await notify_run(db, run)
             await db.commit()
@@ -122,6 +125,8 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
     """Moves a running run to a terminal status; returns the status the run now holds."""
     async with AsyncSessionLocal() as db:
         run = await _lock_run(db, input.run_id)
+        if run is None:
+            return "cancelled"
         if run.status == "running":
             run.status = input.status
             run.result_path = input.result_path if input.status == "completed" else None
@@ -158,23 +163,34 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
 @activity.defn(name=RECORD_STORAGE_ACTIVITY)
 async def record_storage(input: RecordStorageInput) -> StorageUsage:
     """Charges the block's objects to the run's owner; idempotent on object key (a retry is a
-    no-op). Returns the owner's usage after, so the workflow can see the wall (§8d)."""
+    no-op). Returns the owner's usage after, so the workflow can see the wall (§8d).
+
+    A deleted run: its objects are removed, not charged, and the block ends as cancelled.
+    """
     async with AsyncSessionLocal() as db:
-        row = (
-            await db.execute(
-                select(PipelineRun.user_id, PipelineRunBlock.id)
-                .join(PipelineRunBlock, PipelineRunBlock.pipeline_run_id == PipelineRun.id)
-                .where(
-                    PipelineRun.id == uuid.UUID(input.run_id),
-                    PipelineRunBlock.block_id == input.block_id,
-                )
+        # ⚠️ A delete enumerating the run's ledger rows waits for this, and this for it: without
+        # it a row inserted after the enumeration cascades away with its object still on disk.
+        user_id = await db.scalar(
+            select(PipelineRun.user_id)
+            .where(PipelineRun.id == uuid.UUID(input.run_id))
+            .with_for_update(read=True, key_share=True)
+        )
+        if user_id is None:
+            await db.rollback()
+            await _drop_unrecorded(input)
+            raise ApplicationError(
+                "the run was deleted", type=RUN_CANCELLED_ERROR, non_retryable=True
             )
-        ).one_or_none()
-        if row is None:
+        block_row_id = await db.scalar(
+            select(PipelineRunBlock.id).where(
+                PipelineRunBlock.pipeline_run_id == uuid.UUID(input.run_id),
+                PipelineRunBlock.block_id == input.block_id,
+            )
+        )
+        if block_row_id is None:
             raise ApplicationError(
                 f"no block {input.block_id!r} in run {input.run_id}", non_retryable=True
             )
-        user_id, block_row_id = row
         for obj in input.objects:
             await record_object(
                 db,
@@ -188,14 +204,23 @@ async def record_storage(input: RecordStorageInput) -> StorageUsage:
         return StorageUsage(used=used, limit=limit)
 
 
+async def _drop_unrecorded(input: RecordStorageInput) -> None:
+    minio = await get_minio()
+    left = [
+        obj.path
+        for obj in input.objects
+        if not await delete_minio_object(minio, obj.path, "deleted pipeline run")
+    ]
+    if left:
+        raise ApplicationError(f"{len(left)} objects of a deleted run could not be removed")
+
+
 @activity.defn(name=CHECK_CANCELLED_ACTIVITY)
 async def check_cancelled(input: RunRef) -> bool:
     """15d's fallback for a wait the workflow cannot otherwise interrupt (C.9's backoff)."""
     async with AsyncSessionLocal() as db:
         run = await db.get(PipelineRun, uuid.UUID(input.run_id))
-        if run is None:
-            raise ApplicationError(f"no run {input.run_id}", non_retryable=True)
-        return _cancel_requested(run)
+        return run is None or _cancel_requested(run)
 
 
 @activity.defn(name=RELEASE_RUN_OUTPUTS_ACTIVITY)

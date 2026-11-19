@@ -22,10 +22,11 @@ from app.auth.dependencies import auth_from_token, get_current_user
 from app.core import webhook_delivery
 from app.core.db import get_db
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
+from app.core.ledger import ReleaseOutcome, release_pipeline_run_objects
 from app.core.minio import get_minio
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
-from app.core.quota import admit
+from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
 from app.core.security import validate_no_ssrf
 from app.models.llm_keys import UserLLMKey
@@ -403,11 +404,20 @@ async def list_versions(
 @router.delete("/{pipeline_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_pipeline(
     pipeline_id: uuid.UUID,
+    permanent: bool = Query(default=False),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+    temporal: Client | None = Depends(get_temporal_or_none),
 ) -> Response:
-    """No runs: hard delete. Runs: soft delete — runs and their artifacts stay, the name is held."""
+    """No runs: hard delete. Runs: soft delete — runs and their artifacts stay, the name is held.
+
+    ``permanent``: every run, its stored objects and the pipeline go (ADR-016 §11) — a
+    soft-deleted pipeline included.
+    """
     user_id = user.id  # the rollback below expires every instance in the session
+    if permanent:
+        return await _delete_permanently(db, minio, temporal, user_id, pipeline_id)
     pipeline, _ = await _owned_pipeline(db, user_id, pipeline_id)
     has_runs = await db.scalar(select(exists().where(PipelineRun.pipeline_id == pipeline.id)))
     if not has_runs:
@@ -426,6 +436,79 @@ async def delete_pipeline(
     pipeline.updated_at = now
     await db.commit()
     logger.info("pipeline_deleted", pipeline_id=str(pipeline_id), mode="soft")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def _request_cancel(db: AsyncSession, temporal: Client | None, runs: list[PipelineRun]):
+    """Row first, then the engine, best effort: a run left without a row reads as cancelled."""
+    running = [r for r in runs if r.status == "running"]
+    now = datetime.now(UTC)
+    for run in running:
+        if run.cancel_requested_at is None:
+            run.cancel_requested_at = now
+            await notify_run(db, run)
+    if temporal is None:
+        return
+    for run in running:
+        try:
+            await temporal.get_workflow_handle(run.workflow_id).cancel()
+        except Exception as exc:
+            logger.warning("pipeline_run_cancel_not_sent", run_id=str(run.id), error=str(exc))
+
+
+async def _release_runs(
+    db: AsyncSession, minio: Minio, temporal: Client | None, runs: list[PipelineRun]
+) -> ReleaseOutcome:
+    """The caller holds each run row locked. Objects first; on any left, commits what was freed
+    and refuses — the rows' cascade would drop ledger rows for objects still on disk."""
+    await _request_cancel(db, temporal, runs)
+    outcome = ReleaseOutcome()
+    for run in runs:
+        outcome.merge(
+            await release_pipeline_run_objects(db, minio, run.id, "pipeline run on delete")
+        )
+    if outcome.failed:
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"{outcome.failed} stored objects could not be removed; nothing was deleted. Retry."
+            ),
+        )
+    return outcome
+
+
+async def _delete_permanently(
+    db: AsyncSession,
+    minio: Minio,
+    temporal: Client | None,
+    user_id: uuid.UUID,
+    pipeline_id: uuid.UUID,
+) -> Response:
+    # ⚠️ Held through the object deletes: a run admitted meanwhile would outlive its pipeline.
+    await lock_user(user_id, db)
+    pipeline = await db.scalar(
+        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == user_id)
+    )
+    if pipeline is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
+    runs = list(
+        await db.scalars(
+            select(PipelineRun).where(PipelineRun.pipeline_id == pipeline_id).with_for_update()
+        )
+    )
+    outcome = await _release_runs(db, minio, temporal, runs)
+    await db.execute(delete(PipelineRun).where(PipelineRun.pipeline_id == pipeline_id))
+    await db.execute(delete(Pipeline).where(Pipeline.id == pipeline_id))
+    await db.commit()
+    logger.info(
+        "pipeline_deleted",
+        pipeline_id=str(pipeline_id),
+        mode="permanent",
+        runs=len(runs),
+        objects_released=outcome.released,
+        bytes_freed=outcome.freed_bytes,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -618,6 +701,14 @@ async def create_run(
 
     # §8d: output size is unknowable up front, so refuse to start near the wall.
     await admit(user.id, db, headroom_bytes=settings.storage_headroom_bytes)
+    # Read again under the lock: a permanent delete holds it until the pipeline is gone.
+    if (
+        await db.scalar(
+            select(Pipeline.id).where(Pipeline.id == pipeline.id, Pipeline.deleted_at.is_(None))
+        )
+        is None
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
 
     credentials = {
         b.id: c
@@ -830,6 +921,32 @@ async def cancel_run(
         llm_billed=any(b.type == "llm_extract" and b.started_at for b in blocks),
         workflow_notified=workflow_notified,
     )
+
+
+@router.delete("/{pipeline_id}/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_run(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+    temporal: Client | None = Depends(get_temporal_or_none),
+) -> Response:
+    """The run, its stored objects, block rows and alerts (ADR-016 §11). A run still going is
+    cancelled and deleted now; what its workflow writes after this is dropped."""
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id).with_for_update())
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    outcome = await _release_runs(db, minio, temporal, [run])
+    await db.execute(delete(PipelineRun).where(PipelineRun.id == run_id))
+    await db.commit()
+    logger.info(
+        "pipeline_run_deleted",
+        run_id=str(run_id),
+        objects_released=outcome.released,
+        bytes_freed=outcome.freed_bytes,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------
