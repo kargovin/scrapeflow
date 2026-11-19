@@ -1794,7 +1794,7 @@ random)
 **Discovered:** 2026-09-19, owner's report after the queue release — "after some time the
 frontend shows failed to load in the job list and user list". Pre-existing; not introduced by the
 `react-router-dom` 6 → 7 or `clerk-backend-api` 6 → 7 bumps in that release.
-**Status:** 🔧 **FIXED locally 2026-11-19 (J.9, `4fc099f`), unreleased — ships with J-b.** `Jobs`, `JobDetail`, `Users`, `ApiKeys`, `UsageStats` and `ResultViewer` call `useApi()` (a fresh `getToken()` per request); no `['token']` query is left in the SPA. The *a page left open > 2 min keeps loading* check is J.10's (it needs a signed-in browser). *(Was: 🔴 Open — owner's call 2026-09-19: tabled until after the Temporal pipeline.)*
+**Status:** ✅ **FIXED and RELEASED 2026-11-19 (J.9, `4fc099f`, J-b `036870c..a10f698`)** — the two-minute check was not run at release; the owner reports a recurrence. Close it if none is seen. `Jobs`, `JobDetail`, `Users`, `ApiKeys`, `UsageStats` and `ResultViewer` call `useApi()` (a fresh `getToken()` per request); no `['token']` query is left in the SPA. The *a page left open > 2 min keeps loading* check is J.10's (it needs a signed-in browser). *(Was: 🔴 Open — owner's call 2026-09-19: tabled until after the Temporal pipeline.)*
 Not a Phase 4 item (backlog §4). Root cause read from the code; not yet confirmed against a
 captured 401 — the confirmation step is in *What to capture*.
 
@@ -2367,7 +2367,7 @@ columns — and apply it to the three lists (and `JobDetail`, which should show 
 
 **Severity:** Medium (security) — a blind SSRF from inside the cluster, for a signed-in user who controls a DNS name.
 **Discovered:** 2026-10-29, by the PRD-017 drafting subagent (code reading); confirmed against the code the same day.
-**Status:** 🔧 **FIXED locally 2026-11-19 (J.8), unreleased — ships with J-b (J.10).** `api/app/core/egress.py`:
+**Status:** ✅ **CLOSED 2026-11-19 — fixed in J.8 (`bac7a16`), released with J-b (`main` `036870c..a10f698`)**; the owner's breaks-only alert in prod went out through the pinned send. `api/app/core/egress.py`:
 `resolve_public` makes one lookup and refuses the name if any answer is not public unicast; `send_signed_post`
 pins the POST to a vetted IP (`Host` + the `sni_hostname` request extension, so the certificate is still checked
 against the name), tries the next vetted IP only after a refused or timed-out connect, and treats a certificate

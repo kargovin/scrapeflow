@@ -6,7 +6,7 @@ scraping platform. Read @CLAUDE.md for the full architecture.
 ## Your role in this session
 
 ⚙️ **Mode since 2026-11-18: delegated build.** The owner is out of time and has handed over the build: work the
-implementation backlog in order (J.10 is the owner's release; K.1 next) **without explaining first**, **one reviewable step per commit** (each
+implementation backlog in order (K.1 next) **without explaining first**, **one reviewable step per commit** (each
 commit does one thing, with its tests, suites green; a task is usually several commits, never two tasks in one).
 Each task's *Built* note in the backlog and this file list its commits **in order**, so the owner can later replay
 the work step by step. Open calls: make them, mark them "my call", keep them reversible; ask only for product
@@ -144,6 +144,13 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 ---
 
 ## Current state — as of 2026-11-19 *(clock)*
+
+🚀 **J-b RELEASED — GROUP J CLOSED (2026-11-19).** Owner ran the runbook: step 0 (`47a8f9f3f4e2`, 0 running runs,
+rollback tag `main-1795018861-036870c…`), pushed `main` `036870c..a10f698` (CI `44464377927`: `replay` + `build-api`),
+Flux rolled api 2/2 + workflow worker, `alembic_version` = `678c7e339d80`; API checks (`jb-stop`, `jb-alert`, an old
+pipeline, `jb-number`) and SPA checks all passed; BUG-018's two-minute check not run — owner reports a recurrence.
+BUG-030 closed. **Deployed code is `a10f698`.** Prod test pipelines `jb-stop`/`jb-alert`/`jb-number`: owner deletes.
+**Next: K.1** (BUG-031: delete a run, permanent pipeline delete; the mirrors read a missing run as `cancelled`).
 
 🔧 **J.5–J.9 BUILT, 🧪 J.10 GATE PASSED ON COMPOSE (2026-11-19, twentieth session; delegated build).** Owner: "read the
 handoff" → "start with j5 and build until j10". One reviewable step per commit; each task's *Built* note in the backlog
@@ -2029,6 +2036,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-19 (J-b release close):** `main` = `origin/main` = `a10f698` (**deployed**); `develop` = `main` + the release record commits, pushed by the owner up to `a10f698`, the rest **not pushed**. Infra: Flux's tag bumps only. Compose up with `pipeline-fixture`.
 - **2026-11-19 (J.5–J.10 delegated build close):** `develop` = `c595f41` + this closeout, 17 ahead of `origin/develop` (`f4ff446`), **not pushed**; `main` = `origin/main` = `036870c` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-016 accepted, session close):** `develop` = `9808684` (ADR-016 accepted) + this closeout, 22 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-015 review + acceptance close):** `develop` = `86bfae6`, 6 ahead of `origin/develop` (`b8c3900`), **not pushed** — includes BUG-024's fix `57bb301` (code, unreleased); `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
