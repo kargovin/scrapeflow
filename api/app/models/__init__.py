@@ -6,6 +6,7 @@ from app.models.job import Job  # noqa: F401
 from app.models.job_runs import JobRun  # noqa: F401
 from app.models.job_secrets import JobSecrets  # noqa: F401
 from app.models.llm_keys import UserLLMKey  # noqa: F401
+from app.models.monitor import Monitor, MonitorEvent  # noqa: F401
 from app.models.pipeline import (  # noqa: F401
     Pipeline,
     PipelineRun,

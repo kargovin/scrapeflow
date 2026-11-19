@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     VARCHAR,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -111,6 +112,26 @@ class PipelineRun(Base):
     rollback_deadline: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # A monitor's check (ADR-016 §2b). NULL monitor_id: a hand-run, or its monitor was deleted.
+    monitor_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("monitors.id", ondelete="SET NULL", name="fk_pipeline_runs_monitor_id"),
+        nullable=True,
+    )
+    baseline_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "pipeline_runs.id", ondelete="SET NULL", name="fk_pipeline_runs_baseline_run_id"
+        ),
+        nullable=True,
+    )
+    # The first change gate's verdict; NULL = the run has no change gate.
+    change_status: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True)
+    change_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    carried_sources: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    captured_values: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Written with the outcome by the workflow; a later writer never sets it (§4a).
+    baseline_eligible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -129,6 +150,11 @@ class PipelineRun(Base):
             "stopped_at_block_id IS NULL OR status = 'completed'",
             name="ck_pipeline_runs_stopped_is_completed",
         ),
+        CheckConstraint(
+            "change_status IS NULL OR change_status IN "
+            "('first_check', 'no_baseline', 'changed', 'unchanged')",
+            name="ck_pipeline_runs_change_status",
+        ),
         UniqueConstraint("workflow_id", name="uq_pipeline_runs_workflow_id"),
         Index("idx_pipeline_runs_user_id_created_at", "user_id", "created_at"),
         Index("idx_pipeline_runs_pipeline_id_created_at", "pipeline_id", "created_at"),
@@ -138,6 +164,14 @@ class PipelineRun(Base):
             "user_id",
             postgresql_where=text("status = 'running'"),
         ),
+        # The baseline lookup (§4b) and a monitor's history.
+        Index(
+            "idx_pipeline_runs_monitor_id_baseline",
+            "monitor_id",
+            text("created_at DESC"),
+            postgresql_where=text("baseline_eligible"),
+        ),
+        Index("idx_pipeline_runs_monitor_id_created_at", "monitor_id", text("created_at DESC")),
     )
 
     def __repr__(self) -> str:
@@ -174,6 +208,8 @@ class PipelineRunBlock(Base):
     delivery: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     undo_status: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True)
     undo_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A change gate's input, SHA-256 hex (ADR-016 §5c); outlives the stored copy.
+    fingerprint: Mapped[str | None] = mapped_column(VARCHAR(64), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
