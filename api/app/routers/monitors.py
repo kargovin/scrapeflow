@@ -11,14 +11,29 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
+from temporalio.common import WorkflowIDReusePolicy
 
 from app.auth.dependencies import get_current_user
 from app.core import monitor_events, monitor_schedules
 from app.core.db import get_db
 from app.core.minio import get_minio
-from app.core.monitors import ceiling_problems, gate_problems, input_problems, warnings
-from app.core.pipeline_trigger import llm_key_ids, owned_llm_keys, run_urls, ssrf_check
-from app.core.quota import check_scheduled_jobs_quota, lock_user
+from app.core.monitors import (
+    ceiling_problems,
+    find_baseline,
+    gate_problems,
+    input_problems,
+    prepare_check,
+    warnings,
+)
+from app.core.pipeline_trigger import (
+    build_run,
+    llm_key_ids,
+    mark_not_started,
+    owned_llm_keys,
+    run_urls,
+    ssrf_check,
+)
+from app.core.quota import admit, check_scheduled_jobs_quota, lock_user
 from app.core.rate_limit import check_rate_limit
 from app.models.monitor import Monitor
 from app.models.pipeline import Pipeline, PipelineRun, PipelineVersion
@@ -35,6 +50,7 @@ from app.routers.pipelines import (
     release_runs,
     request_cancel,
     require_pipelines_enabled,
+    run_response,
     unprocessable,
     version_to_run,
 )
@@ -45,7 +61,11 @@ from app.schemas.monitors import (
     MonitorResponse,
     MonitorUpdate,
 )
-from app.workflows.client import get_temporal_or_none, lazy_client
+from app.schemas.pipelines import PipelineRunResponse
+from app.settings import settings
+from app.workflows.client import get_temporal, get_temporal_or_none, lazy_client
+from app.workflows.pipeline import PipelineWorkflow
+from app.workflows.queues import WORKFLOW_QUEUE
 
 router = APIRouter(prefix="/monitors", tags=["monitors"])
 logger = structlog.get_logger()
@@ -413,3 +433,87 @@ async def delete_monitor(
         bytes_freed=released.freed_bytes if released else 0,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{monitor_id}/check",
+    response_model=PipelineRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def check_now(
+    monitor_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(check_rate_limit),
+    __: None = Depends(require_pipelines_enabled),
+    temporal: Client = Depends(get_temporal),
+) -> PipelineRunResponse:
+    """A check now (ADR-016 §3d): admission's rules, answered while the user waits, and the
+    run started directly — no firing, no Schedule ``trigger()`` (``SKIP`` would drop it
+    silently while a firing is open)."""
+    user_id = user.id
+    monitor = await owned_monitor(db, user_id, monitor_id)
+    version = await db.get(PipelineVersion, monitor.pipeline_version_id)
+    parsed = parse_pinned(version)
+    _, secrets = parse_definition(version.definition)
+    keys = await owned_llm_keys(db, user_id, llm_key_ids(parsed))
+    if problems := missing_key_problems(parsed, keys):
+        raise unprocessable(problems)
+    # Before the lock: DNS lookups.
+    for url in run_urls(parsed, monitor.inputs, keys):
+        await ssrf_check(url)
+
+    await lock_user(user_id, db)
+    running = await db.scalar(
+        select(PipelineRun.id).where(
+            PipelineRun.monitor_id == monitor.id, PipelineRun.status == "running"
+        )
+    )
+    if running is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "check_in_progress",
+                "message": "A check of this monitor is running; wait for it to end.",
+                "run_id": str(running),
+            },
+        )
+    # §8d's headroom, as any trigger.
+    await admit(user_id, db, headroom_bytes=settings.storage_headroom_bytes)
+    await db.refresh(monitor)
+    inputs, check = await prepare_check(db, monitor, parsed, await find_baseline(db, monitor.id))
+    built = build_run(
+        run_id=uuid.uuid4(),
+        user_id=user_id,
+        version=version,
+        parsed=parsed,
+        stored_secrets=secrets,
+        keys=keys,
+        inputs=inputs,
+        check=check,
+    )
+    run, blocks = built.run, built.blocks
+    db.add(run)
+    db.add_all(blocks)
+    # A check started ends whatever situation the monitor was in (§7b).
+    await monitor_events.close_open(db, monitor.id, datetime.now(UTC))
+    await db.commit()
+
+    try:
+        await temporal.start_workflow(
+            PipelineWorkflow.run,
+            built.input,
+            id=run.workflow_id,
+            task_queue=WORKFLOW_QUEUE,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+        )
+    except Exception as exc:
+        logger.exception("monitor_check_start_failed", run_id=str(run.id))
+        # Counted like any failed check, alerts queued, in one transaction (§7a).
+        await mark_not_started(db, run, blocks, exc, lambda: temporal)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"run_id": str(run.id), "error": run.error},
+        ) from None
+    logger.info("monitor_checked_now", monitor_id=str(monitor_id), run_id=str(run.id))
+    return run_response(run, version.version, blocks)

@@ -1012,3 +1012,158 @@ async def test_resuming_ends_the_self_pause_situation(client, headers, key, temp
             )
         ).all()
     assert event.ended_at is not None
+
+
+# --- L.9: Check now ------------------------------------------------------------------------
+
+
+async def test_check_now_starts_a_check_directly_with_its_monitor_context(
+    client, headers, key, temporal
+):
+    from app.workflows.pipeline import PipelineWorkflow
+
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as db:
+        db.add(
+            MonitorEvent(
+                monitor_id=uuid.UUID(monitor["id"]),
+                kind="skipped_monthly_runs",
+                first_at=now,
+                last_at=now,
+            )
+        )
+        await db.commit()
+
+    resp = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+
+    assert resp.status_code == 202, resp.text
+    run_id = resp.json()["id"]
+    [run] = await _runs(monitor["id"])
+    assert (str(run.id), run.status, run.inputs) == (run_id, "running", monitor["inputs"])
+    temporal.start_workflow.assert_awaited_once()
+    (fn, sent), kwargs = temporal.start_workflow.await_args
+    assert fn == PipelineWorkflow.run and kwargs["id"] == f"pipeline-run-{run_id}"
+    assert sent.monitor.monitor_id == monitor["id"] and sent.monitor.baseline_run_id is None
+    # No firing and no Schedule trigger.
+    temporal.get_schedule_handle.return_value.trigger.assert_not_called()
+    async with AsyncSessionLocal() as db:
+        [event] = (
+            await db.scalars(
+                select(MonitorEvent).where(MonitorEvent.monitor_id == uuid.UUID(monitor["id"]))
+            )
+        ).all()
+    assert event.ended_at is not None
+
+
+async def test_check_now_hands_over_the_newest_eligible_check(client, headers, key, temporal):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    baseline, _ = await _check_run(monitor)
+    async with AsyncSessionLocal() as db:
+        from app.models.pipeline import PipelineRun
+
+        await db.execute(
+            update(PipelineRun).where(PipelineRun.id == baseline).values(baseline_eligible=True)
+        )
+        await db.commit()
+
+    resp = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+
+    assert resp.status_code == 202
+    sent = temporal.start_workflow.await_args.args[1]
+    assert sent.monitor.baseline_run_id == str(baseline)
+
+
+async def test_check_now_is_refused_while_a_check_runs_and_a_firing_is_skipped(
+    client, headers, key, temporal
+):
+    from app.workflows.activities.monitor_checks import admit_monitor_check
+    from app.workflows.monitor_check import AdmitMonitorCheckInput
+
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    first = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+    assert first.status_code == 202
+
+    again = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+    assert again.status_code == 409
+    assert again.json()["detail"]["run_id"] == first.json()["id"]
+
+    firing = await admit_monitor_check(
+        AdmitMonitorCheckInput(monitor_id=monitor["id"], run_id=str(uuid.uuid4()))
+    )
+    assert firing.verdict == "skipped"
+    async with AsyncSessionLocal() as db:
+        [event] = (
+            await db.scalars(
+                select(MonitorEvent).where(MonitorEvent.monitor_id == uuid.UUID(monitor["id"]))
+            )
+        ).all()
+    assert event.kind == "skipped_check_in_progress"
+    assert len(await _runs(monitor["id"])) == 1
+
+
+async def test_a_check_now_that_could_not_start_is_a_counted_failed_check(
+    client, headers, key, temporal
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    temporal.start_workflow.side_effect = RuntimeError("engine down")
+
+    resp = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+
+    assert resp.status_code == 503
+    [run] = await _runs(monitor["id"])
+    assert (run.status, run.error) == ("failed", "could not start workflow: engine down")
+    assert (await _row(monitor["id"])).consecutive_failures == 1
+    from app.models.webhook_delivery import WebhookDelivery
+
+    async with AsyncSessionLocal() as db:
+        [alert] = (
+            await db.scalars(
+                select(WebhookDelivery).where(WebhookDelivery.pipeline_run_id == run.id)
+            )
+        ).all()
+    assert alert.event == "pipeline.failed"
+
+
+async def test_check_now_is_admitted_against_the_meters(client, headers, key, db_user, temporal):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    async with AsyncSessionLocal() as db:
+        db.add(UserQuota(user_id=db_user.id, concurrent_jobs_limit=0))
+        await db.commit()
+
+    resp = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["quota_type"] == "concurrent_jobs"
+    assert await _runs(monitor["id"]) == []
+
+
+async def test_check_now_is_owner_scoped_and_off_when_switched_off(
+    client, headers, key, temporal, other_user, monkeypatch
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    monkeypatch.setattr(settings, "pipelines_enabled", False)
+    assert (
+        await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+    ).status_code == 503
+    monkeypatch.setattr(settings, "pipelines_enabled", True)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Monitor)
+            .where(Monitor.id == uuid.UUID(monitor["id"]))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+
+    assert (
+        await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+    ).status_code == 404
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Monitor).where(Monitor.id == uuid.UUID(monitor["id"])))
+        await db.commit()
