@@ -30,8 +30,8 @@ from app.workflows.pipeline import (
 
 def build_payload(input: WebhookInput) -> dict:
     # The job lane's fields (core/webhooks.py) less job_id, plus the pipeline identifiers
-    # (PRD-016 R6's two payload exceptions). No change detection on this lane: constants.
-    return {
+    # (PRD-016 R6's two payload exceptions). Outside a monitor's check: constants.
+    payload = {
         "event": WEBHOOK_EVENT,
         "run_id": input.run_id,
         "pipeline_id": input.pipeline_id,
@@ -41,6 +41,13 @@ def build_payload(input: WebhookInput) -> dict:
         "diff_summary": None,
         "timestamp": input.timestamp,
     }
+    if input.monitor_id is not None:
+        # ADR-016 §6a, G7: a receiver reading the old field is never told "no change" about one.
+        change = input.change or {}
+        payload["diff_detected"] = change.get("status") == "changed"
+        payload["monitor_id"] = input.monitor_id
+        payload["change"] = input.change
+    return payload
 
 
 def _secret(encrypted: str | None) -> bytes:

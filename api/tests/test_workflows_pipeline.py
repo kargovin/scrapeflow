@@ -34,13 +34,21 @@ from app.pipelines.catalog import (
 from app.pipelines.definition import parse_definition
 from app.settings import settings
 from app.workflows.activities.contracts import (
+    CAPTURE_ACTIVITY,
     CLEAN_ACTIVITY,
+    DIFF_ACTIVITY,
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
     VALIDATE_ACTIVITY,
+    CapturedValue,
+    CaptureInput,
+    CaptureOutput,
     CleanInput,
     CleanOutput,
     Credentials,
+    DiffInput,
+    DiffOutput,
+    DiffSummary,
     LLMInput,
     LLMOutput,
     ScrapeInput,
@@ -166,6 +174,20 @@ async def _release_ok(input: RunRef) -> None:
     return None
 
 
+DIFF_PATH = "scrapeflow-results/history/a-gate/diff.json"
+
+
+async def _diff_ok(input: DiffInput) -> DiffOutput:
+    return DiffOutput(
+        summary=DiffSummary(status="ok", kind=input.kind, lines=["-old", "+new"], lines_added=1),
+        diff=StoredObject(path=f"scrapeflow-results/history/{input.artifact_id}/diff.json", size=9),
+    )
+
+
+async def _capture_ok(input: CaptureInput) -> CaptureOutput:
+    return CaptureOutput(values={v.input: CapturedValue(value=8) for v in input.values})
+
+
 async def _webhook_ok(input: WebhookInput) -> None:
     return None
 
@@ -183,6 +205,8 @@ class Harness:
         usage=None,
         slots=(),
         release_outputs=_release_ok,
+        diff=_diff_ok,
+        capture=_capture_ok,
     ):
         self.calls: list = []
         self.acquired: list[HostSlotInput] = []
@@ -206,6 +230,8 @@ class Harness:
         self._validate = validate
         self._webhook = webhook
         self._release_outputs = release_outputs
+        self._diff = diff
+        self._capture = capture
         self.release_info: list = []
 
     def activities(self):
@@ -271,9 +297,19 @@ class Harness:
             self.release_info.append(activity.info())
             return await self._release_outputs(input)
 
+        @activity.defn(name=DIFF_ACTIVITY)
+        async def diff(input: DiffInput) -> DiffOutput:
+            self.calls.append(input)
+            return await self._diff(input)
+
+        @activity.defn(name=CAPTURE_ACTIVITY)
+        async def capture(input: CaptureInput) -> CaptureOutput:
+            self.calls.append(input)
+            return await self._capture(input)
+
         workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
         workflow_queue.append(release_outputs)
-        return workflow_queue, scrape, llm, [clean, validate]
+        return workflow_queue, scrape, llm, [clean, validate, diff, capture]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
         db_activities, scrape, llm, content = self.activities()
@@ -1725,6 +1761,9 @@ async def test_webhook_delivers_the_last_content_blocks_object_and_passes_it_on(
         "result_path": LLM_PATH,
         "encrypted_secret": "secret-ciphertext",
         "maximum_attempts": 5,
+        # A hand-run: no monitor's fields.
+        "monitor_id": None,
+        "change": None,
     }
     assert h.calls[-3:] == [
         MirrorBlockInput(run_id="r1", block_id="notify", status="running", input_ref=LLM_PATH),

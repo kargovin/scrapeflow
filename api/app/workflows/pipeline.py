@@ -12,14 +12,18 @@ from temporalio.workflow import ActivityCancellationType
 with workflow.unsafe.imports_passed_through():
     from app.pipelines.catalog import (
         BLOCK_OVERHEAD_SECONDS,
+        CAPTURE_TIMING,
         CATALOG,
         DB_ACTIVITY_SECONDS,
+        DIFF_TIMING,
         HOST_SLOT_SECONDS,
         RELEASE_OUTPUTS_TIMING,
         WEBHOOK_RESULT_EVENT,
         InputBinding,
         RunInputValue,
         Timing,
+        first_change_gate,
+        is_change_gate,
     )
     from app.pipelines.definition import (
         CleanBlock,
@@ -32,13 +36,20 @@ with workflow.unsafe.imports_passed_through():
     from app.schemas.jobs import Engine
     from app.workflows import steps
     from app.workflows.activities.contracts import (
+        CAPTURE_ACTIVITY,
         CLEAN_ACTIVITY,
+        DIFF_ACTIVITY,
         LLM_EXTRACT_ACTIVITY,
         SCRAPE_ACTIVITY,
         VALIDATE_ACTIVITY,
+        CaptureInput,
+        CaptureOutput,
+        CarriedValue,
         CleanInput,
         CleanOutput,
         Credentials,
+        DiffInput,
+        DiffOutput,
         LLMInput,
         LLMOutput,
         ScrapeInput,
@@ -67,6 +78,8 @@ RELEASE_RUN_OUTPUTS_ACTIVITY = "release_run_outputs"
 VALIDATE_STOP_PATCH = "validate-stop"
 # ADR-012: a Webhook block that only sends pipeline.failed is skipped on a succeeding run (J.7).
 WEBHOOK_EVENTS_PATCH = "webhook-events"
+# ADR-012: a monitor's check, or a hand-run through a change gate (ADR-016 §15, L.8).
+MONITOR_CHECK_PATCH = "monitor-check"
 
 # The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
 WEBHOOK_EVENT = WEBHOOK_RESULT_EVENT
@@ -206,6 +219,9 @@ class WebhookInput(BaseModel):
     timestamp: str
     # The retry policy's; the last attempt mirrors no `waiting`.
     maximum_attempts: int
+    # A monitor's check only (ADR-016 §6a): which monitor, and {status, baseline_run_id, summary}.
+    monitor_id: str | None = None
+    change: dict[str, Any] | None = None
 
 
 # Three per block — running, record_storage, completed — must fit BLOCK_OVERHEAD_SECONDS.
@@ -296,6 +312,47 @@ def _failure_message(exc: Exception, maximum_attempts: int) -> str:
     return f"internal error: {type(exc).__name__}: {exc}"
 
 
+class _Check:
+    """What a monitor check, or a hand-run through a change gate, learns as it goes (§5e, §6)."""
+
+    def __init__(self, first_gate: str | None, monitor: "MonitorContext | None") -> None:
+        self.first_gate = first_gate
+        self.monitor = monitor
+        self.change_status: ChangeStatus | None = None
+        self.passed_first_gate = False
+        # The bounded diff summaries, by the block that triggered each.
+        self.summaries: dict[str, dict[str, Any]] = {}
+        self.captured: dict[str, dict[str, Any]] = {}
+
+    def known(self, block_id: str) -> dict[str, str]:
+        gate = self.monitor.gates.get(block_id) if self.monitor is not None else None
+        if gate is None:
+            return {}
+        return {k: v for k, v in (("baseline", gate.baseline), ("waiting", gate.waiting)) if v}
+
+    def run_fields(self, completed: bool = True) -> dict[str, Any]:
+        """What the run mirror writes with the outcome (§4a: only a completed check that passed
+        its first gate can be a baseline)."""
+        return {
+            "baseline_eligible": completed
+            and self.monitor is not None
+            and (self.first_gate is None or self.passed_first_gate),
+            "change_status": self.change_status,
+            "change_summary": self.summaries or None,
+            "captured_values": self.captured or None,
+        }
+
+    def change(self) -> dict[str, Any] | None:
+        """The Webhook payload's ``change``, once the first gate has let the run through."""
+        if self.monitor is None or self.change_status not in ("changed", "first_check"):
+            return None
+        return {
+            "status": self.change_status,
+            "baseline_run_id": self.monitor.baseline_run_id,
+            "summary": self.summaries or None,
+        }
+
+
 @workflow.defn
 class PipelineWorkflow:
     """Runs a pinned definition block by block; mirrors each status into the app DB.
@@ -307,6 +364,7 @@ class PipelineWorkflow:
 
     def __init__(self) -> None:
         self._cancel_requested = False
+        self._check: _Check | None = None
 
     @workflow.run
     async def run(self, input: PipelineRunInput) -> str | None:
@@ -314,6 +372,14 @@ class PipelineWorkflow:
         refs: dict[str, str] = {}
         result_path: str | None = None
         wall: str | None = None
+        first_gate = first_change_gate(input.blocks)
+        if (input.monitor is not None or first_gate is not None) and workflow.patched(
+            MONITOR_CHECK_PATCH
+        ):
+            self._check = _Check(first_gate, input.monitor)
+        check = self._check
+        # The content block whose object the next block reads: a gate's page diff compares it.
+        last_content: str | None = None
         for block in input.blocks:
             block_type = CATALOG[block.type]
             input_ref = refs.get(block.input) if block.input else None
@@ -366,6 +432,12 @@ class PipelineWorkflow:
                             StorageUsage,
                         )
                     )
+                # ⚠️ Before the block is mirrored completed: the run holds its slot only while
+                # a block is running (§6a).
+                if check is not None and verdict is not None and block.id == check.first_gate:
+                    await self._first_gate(input, block, verdict, input_ref, last_content, deadline)
+                if check is not None and check.monitor is not None and objects:
+                    await self._after_content(input, block, objects[0].path, deadline)
             except workflow.NondeterminismError:
                 # Code no longer matches history: the task retries until a deploy fixes it.
                 raise
@@ -380,7 +452,11 @@ class PipelineWorkflow:
                 message = _failure_message(exc, timing.maximum_attempts)
                 await self._mirror_block(input.run_id, block.id, "failed", error=message)
                 await self._mirror_run(
-                    input.run_id, "failed", error=f"{block.id}: {message}", failed_block_id=block.id
+                    input.run_id,
+                    "failed",
+                    error=f"{block.id}: {message}",
+                    failed_block_id=block.id,
+                    **(check.run_fields(completed=False) if check is not None else {}),
                 )
                 raise ApplicationError(f"{block.id}: {message}", non_retryable=True) from exc
 
@@ -394,6 +470,7 @@ class PipelineWorkflow:
             refs[block.id] = output_ref
             if block_type.kind == "content":
                 result_path = output_ref
+                last_content = block.id
             if wall is None and usage is not None and usage.used > usage.limit:
                 # §8d: the run finishes and is charged; the headroom buffer stops the next one.
                 wall = (
@@ -401,9 +478,20 @@ class PipelineWorkflow:
                     f"{usage.limit} bytes; the run completed and is charged. Delete results "
                     "to start new runs"
                 )
-            await self._mirror_block(input.run_id, block.id, "completed", output_ref=output_ref)
+            extra = {}
+            if check is not None and verdict is not None and verdict.fingerprint is not None:
+                extra["fingerprint"] = verdict.fingerprint
+            await self._mirror_block(
+                input.run_id, block.id, "completed", output_ref=output_ref, **extra
+            )
 
-        await self._mirror_run(input.run_id, "completed", result_path=result_path, error=wall)
+        await self._mirror_run(
+            input.run_id,
+            "completed",
+            result_path=result_path,
+            error=wall,
+            **(check.run_fields() if check is not None else {}),
+        )
         return result_path
 
     async def _finish(self, coro: Coroutine[Any, Any, Any], interruptible: bool = False) -> Any:
@@ -440,8 +528,12 @@ class PipelineWorkflow:
         # The change gate's two fields only when set: other verdicts keep their recorded shape.
         unset = {k for k in ("fingerprint", "matched") if getattr(verdict, k) is None}
         recorded = verdict.model_dump(mode="json", exclude={"outcome"} | unset) | {"rule": saved}
+        check = self._check
+        extra = {}
+        if check is not None and verdict.fingerprint is not None:
+            extra["fingerprint"] = verdict.fingerprint
         await self._mirror_block(
-            input.run_id, block.id, "completed", output_ref=input_ref, verdict=recorded
+            input.run_id, block.id, "completed", output_ref=input_ref, verdict=recorded, **extra
         )
         notes = [wall] if wall else []
         if block.config.on_stop_outputs == "delete":
@@ -470,6 +562,7 @@ class PipelineWorkflow:
             error="; ".join(notes) or None,
             stopped_at_block_id=block.id,
             stop_reason="rule_not_met",
+            **(check.run_fields() if check is not None else {}),
         )
         return result_path
 
@@ -492,7 +585,7 @@ class PipelineWorkflow:
         self,
         run_id: str,
         status: Literal["completed", "failed", "cancelled"],
-        **fields: str | None,
+        **fields: Any,
     ) -> RunStatus:
         return await self._finish(
             _db(MIRROR_RUN_ACTIVITY, MirrorRunInput(run_id=run_id, status=status, **fields), str)
@@ -504,6 +597,135 @@ class PipelineWorkflow:
         if self._cancel_requested:
             raise asyncio.CancelledError()
         return None
+
+    def _webhook_check_fields(self) -> dict[str, Any]:
+        check = self._check
+        if check is None or check.monitor is None:
+            return {}
+        return {"monitor_id": check.monitor.monitor_id, "change": check.change()}
+
+    async def _first_gate(
+        self,
+        input: PipelineRunInput,
+        block: ValidateBlock,
+        verdict: ValidateVerdict,
+        input_ref: str | None,
+        last_content: str | None,
+        deadline: datetime,
+    ) -> None:
+        """The first change gate's verdict is the run's change status (§5e); a change with a
+        baseline is compared at once (§6a)."""
+        check = self._check
+        assert check is not None
+        if verdict.outcome == "not_met":
+            check.change_status = "unchanged"
+            return
+        check.passed_first_gate = True
+        if not check.known(block.id):
+            check.change_status = "first_check" if check.monitor is not None else "no_baseline"
+            return
+        check.change_status = "changed"
+        assert check.monitor is not None and input_ref is not None
+        baseline = check.monitor.baseline_outputs.get(last_content or "")
+        if baseline is None:
+            # Collected since, or never stored: changed, the previous copy is no longer kept.
+            check.summaries[block.id] = {"status": "baseline_gone", "kind": "page"}
+            return
+        check.summaries[block.id] = await self._diff(
+            input, block.id, "page", baseline, input_ref, deadline
+        )
+
+    async def _after_content(
+        self, input: PipelineRunInput, block: RunBlock, path: str, deadline: datetime
+    ) -> None:
+        """A monitor check's extraction diff and carried-value capture (§6a, §6b)."""
+        check = self._check
+        assert check is not None and check.monitor is not None
+        monitor = check.monitor
+        baseline = monitor.baseline_outputs.get(block.id)
+        if isinstance(block, LLMExtractBlock) and baseline is not None:
+            check.summaries[block.id] = await self._diff(
+                input, block.id, "extraction", baseline, path, deadline
+            )
+        specs = [c for c in monitor.captures if c.from_block == block.id]
+        if not specs:
+            return
+        remaining_s = (deadline - workflow.now()).total_seconds()
+        try:
+            if remaining_s <= 0:
+                raise ApplicationError("the run's time budget is spent", non_retryable=True)
+            captured = await self._finish(
+                workflow.execute_activity(
+                    CAPTURE_ACTIVITY,
+                    CaptureInput(
+                        input_path=path,
+                        values=[
+                            CarriedValue(input=c.input, path=c.path, type=c.type) for c in specs
+                        ],
+                    ),
+                    task_queue=CONTENT_QUEUE,
+                    result_type=CaptureOutput,
+                    **_block_options(CAPTURE_TIMING, remaining_s),
+                )
+            )
+        except (ActivityError, ApplicationError) as exc:
+            # A capture never fails the check: the next check starts from the start value.
+            reason = (
+                f"could not be read: {exc.cause or exc}"
+                if isinstance(exc, ActivityError)
+                else str(exc)
+            )
+            for c in specs:
+                check.captured[c.input] = {"missing": reason}
+            return
+        for name, value in captured.values.items():
+            check.captured[name] = value.model_dump(mode="json", exclude_none=True)
+
+    async def _diff(
+        self,
+        input: PipelineRunInput,
+        block_id: str,
+        kind: Literal["page", "extraction"],
+        baseline_path: str,
+        current_path: str,
+        deadline: datetime,
+    ) -> dict[str, Any]:
+        """The bounded summary; the full diff is charged to ``block_id`` (§6a). Never fails the
+        check and never reads "no change": a final error is ``unavailable``."""
+        unavailable = {
+            "status": "unavailable",
+            "kind": kind,
+            "reason": "the comparison could not be computed",
+        }
+        remaining_s = (deadline - workflow.now()).total_seconds()
+        if remaining_s <= 0:
+            return unavailable
+        try:
+            out: DiffOutput = await self._finish(
+                workflow.execute_activity(
+                    DIFF_ACTIVITY,
+                    DiffInput(
+                        artifact_id=input.artifact_ids[block_id],
+                        kind=kind,
+                        baseline_path=baseline_path,
+                        current_path=current_path,
+                    ),
+                    task_queue=CONTENT_QUEUE,
+                    result_type=DiffOutput,
+                    **_block_options(DIFF_TIMING, remaining_s),
+                )
+            )
+        except ActivityError:
+            return unavailable
+        if out.diff is not None:
+            await self._finish(
+                _db(
+                    RECORD_STORAGE_ACTIVITY,
+                    RecordStorageInput(run_id=input.run_id, block_id=block_id, objects=[out.diff]),
+                    StorageUsage,
+                )
+            )
+        return out.summary.model_dump(mode="json")
 
     async def _scrape_in_host_slot(
         self,
@@ -614,6 +836,11 @@ class PipelineWorkflow:
                         input_path=input_ref,
                         rules=_bound_rules(block, input.inputs),
                         when_unmet=block.config.when_unmet,
+                        known_fingerprints=(
+                            self._check.known(block.id)
+                            if self._check is not None and is_change_gate(block.config)
+                            else {}
+                        ),
                     ),
                     task_queue=CONTENT_QUEUE,
                     result_type=ValidateVerdict | None,
@@ -647,6 +874,7 @@ class PipelineWorkflow:
                     encrypted_secret=input.webhook_secrets.get(block.id),
                     timestamp=workflow.now().isoformat(),
                     maximum_attempts=options["retry_policy"].maximum_attempts,
+                    **self._webhook_check_fields(),
                 ),
                 task_queue=WORKFLOW_QUEUE,
                 **options,

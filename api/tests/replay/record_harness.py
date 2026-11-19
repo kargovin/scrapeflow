@@ -9,6 +9,7 @@ import asyncio
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.workflows.activities.contracts import DiffOutput, DiffSummary
 from app.workflows.job import RECORD_JOB_OBJECTS_ACTIVITY, JobLLM
 from app.workflows.pipeline import OUTPUTS_LEFT_ERROR, RUN_CANCELLED_ERROR, StorageUsage
 from app.workflows.steps import HostSlot
@@ -20,6 +21,13 @@ from tests.test_workflows_crawl import Harness as CrawlHarness
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
 from tests.test_workflows_monitor_check import Harness as MonitorHarness
+from tests.test_workflows_monitor_pipeline import (
+    WITH_BASELINE,
+    _changed,
+    _context,
+    _monitored,
+    _same,
+)
 from tests.test_workflows_pipeline import (
     ALERT_ONLY,
     CLEAN_GUARD,
@@ -61,6 +69,24 @@ async def _llm_overloaded(input):
 BUSY = HostSlot(domain="example.com", wait_ms=1000)
 
 
+def _changed_then_same():
+    seen = []
+
+    async def validate(input):
+        seen.append(input)
+        return await (_changed if len(seen) == 1 else _same)(input)
+
+    return validate
+
+
+async def _diff_gone(input):
+    return DiffOutput(summary=DiffSummary(status="baseline_gone", kind=input.kind))
+
+
+async def _diff_broken(input):
+    raise ApplicationError("minio down", type="StorageTransient", non_retryable=True)
+
+
 def _cancel_while_waiting(h):
     async def during(handle):
         await h.asked.wait()
@@ -98,6 +124,26 @@ SCENARIOS = {
         _stop_guard("delete"),
     ),
     "harness_validate_stop_passed": ({"validate": _met}, _stop_guard("keep")),
+    # L.8 — a monitor's check (patch "monitor-check").
+    "harness_monitor_first_check": ({"validate": _changed}, _monitored(_context())),
+    "harness_monitor_changed_page_and_extraction": (
+        {"validate": _changed},
+        _monitored(WITH_BASELINE),
+    ),
+    "harness_monitor_unchanged_stop_delete": ({"validate": _same}, _monitored(WITH_BASELINE)),
+    "harness_monitor_later_gate_stop": (
+        {"validate": _changed_then_same()},
+        _monitored(WITH_BASELINE, later_gate=True),
+    ),
+    "harness_monitor_diff_baseline_gone": (
+        {"validate": _changed, "diff": _diff_gone},
+        _monitored(WITH_BASELINE),
+    ),
+    "harness_monitor_diff_unavailable": (
+        {"validate": _changed, "diff": _diff_broken},
+        _monitored(WITH_BASELINE),
+    ),
+    "harness_monitor_hand_run_no_baseline": ({"validate": _changed}, _monitored(None)),
     # J.7 — an alert-only Webhook (patch "webhook-events").
     "harness_alert_only_webhook_skipped": ({}, ALERT_ONLY),
     "harness_alert_only_webhook_run_failed": ({"llm": _llm_unauthorised}, ALERT_ONLY),
