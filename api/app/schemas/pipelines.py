@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.pipelines.catalog import RunInputValue
+from app.schemas.monitors import MonitorRef
 
 
 class PipelineCreate(BaseModel):
@@ -36,6 +37,8 @@ class PipelineResponse(BaseModel):
     definition: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    # Single-pipeline responses only (not the list): the monitors using it, which block its delete (ADR-016 §2a).
+    monitors: list[MonitorRef] | None = None
 
 
 class PipelineVersionResponse(BaseModel):

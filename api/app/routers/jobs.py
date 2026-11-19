@@ -94,7 +94,7 @@ def scheduled_filter(scheduled: bool):
     return Job.schedule_status.is_not(None) if scheduled else Job.schedule_status.is_(None)
 
 
-def _validate_cron(cron: str) -> None:
+def validate_cron(cron: str) -> None:
     if not croniter.is_valid(cron):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Invalid cron expression"
@@ -123,7 +123,7 @@ async def _apply_schedule_changes(job: Job, changes: dict, db: AsyncSession) -> 
                 )
             job.schedule_cron = job.schedule_status = job.schedule_lane = job.next_run_at = None
             return False
-        _validate_cron(cron)
+        validate_cron(cron)
         job.schedule_cron = cron
         if job.schedule_status is None:
             job.schedule_status = "active"
@@ -228,7 +228,7 @@ async def create_job(
 
     # validate cron exp and also validate min intervals constraint is not broken
     if body.schedule_cron:
-        _validate_cron(body.schedule_cron)
+        validate_cron(body.schedule_cron)
 
     # Generate a token and encrypt it using Fernet
     webhook_secret_plain: str | None = None

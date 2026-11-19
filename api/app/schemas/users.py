@@ -14,10 +14,15 @@ class UserResponse(BaseModel):
 
 
 class ScheduledJobsUsage(BaseModel):
-    """ADR-013's cap: active scheduled jobs against the limit (paused ones do not count)."""
+    """ADR-013's cap: active schedules against the limit (paused ones do not count).
+
+    Scheduled jobs and monitors share it (ADR-016 §12); ``active`` is their sum.
+    """
 
     active: int
     limit: int
+    jobs: int
+    monitors: int
 
 
 class ApiKeyCreate(BaseModel):

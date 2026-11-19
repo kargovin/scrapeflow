@@ -136,12 +136,12 @@ async def test_the_owner_sees_active_schedules_against_the_cap(client, headers, 
 
     body = (await client.get("/users/me/scheduled-jobs", headers=headers)).json()
 
-    assert body == {"active": 2, "limit": 7}
+    assert body == {"active": 2, "limit": 7, "jobs": 2, "monitors": 0}
 
 
 async def test_the_default_cap_applies_without_an_override(client, headers, db_user):
     body = (await client.get("/users/me/scheduled-jobs", headers=headers)).json()
-    assert body == {"active": 0, "limit": 20}
+    assert body == {"active": 0, "limit": 20, "jobs": 0, "monitors": 0}
 
 
 async def test_an_admin_reads_and_sets_the_scheduled_jobs_override(

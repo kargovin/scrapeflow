@@ -21,7 +21,7 @@ Limits come from the user_quotas row; NULL columns fall back to settings default
 admit()             — lock the user, then the 429 checks; every API site that inserts a run
 lock_user()         — the lock alone; scheduled-run admission takes it before is_quota_exceeded()
 check_user_quota()  — raises HTTP 429
-check_scheduled_jobs_quota() — ADR-013's cap on active scheduled jobs; 429, under lock_user()
+check_scheduled_jobs_quota() — ADR-013's cap on active schedules (jobs + monitors); 429, under lock_user()
 is_quota_exceeded() — returns bool; for scheduled-run admission (no HTTP context)
 check_storage_quota() — the job lane's storage wall (workflows/activities/job_runs.py)
 increment_storage_bytes() / decrement_storage_bytes()
@@ -39,6 +39,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.job import Job
+from app.models.monitor import Monitor
 from app.models.quota_views import quota_active_submissions, quota_run_units
 from app.models.user import User
 from app.models.user_quota import UserQuota
@@ -210,37 +211,61 @@ async def is_quota_exceeded(user_id: uuid.UUID, db: AsyncSession, quota_type: st
     return exceeded
 
 
-async def scheduled_jobs_usage(
-    user_id: uuid.UUID, db: AsyncSession, exclude_job_id: uuid.UUID | None = None
+async def scheduled_counts(
+    user_id: uuid.UUID,
+    db: AsyncSession,
+    exclude_job_id: uuid.UUID | None = None,
+    exclude_monitor_id: uuid.UUID | None = None,
 ) -> tuple[int, int]:
-    """(active schedules, limit) — every lane counts, a paused schedule does not (ADR-013 §5)."""
-    stmt = (
+    """(active scheduled jobs, active monitors) — paused ones do not count (ADR-013 §5)."""
+    jobs = (
         select(func.count())
         .select_from(Job)
         .where(Job.user_id == user_id, Job.schedule_status == "active")
     )
     if exclude_job_id is not None:
-        stmt = stmt.where(Job.id != exclude_job_id)
-    used = await db.scalar(stmt) or 0
-    quota_row = await db.get(UserQuota, user_id)
-    limit = (
-        quota_row.scheduled_jobs_limit
-        if quota_row and quota_row.scheduled_jobs_limit is not None
-        else settings.default_quota_scheduled_jobs
+        jobs = jobs.where(Job.id != exclude_job_id)
+    monitors = (
+        select(func.count())
+        .select_from(Monitor)
+        .where(Monitor.user_id == user_id, Monitor.state == "active")
     )
-    return used, limit
+    if exclude_monitor_id is not None:
+        monitors = monitors.where(Monitor.id != exclude_monitor_id)
+    return await db.scalar(jobs) or 0, await db.scalar(monitors) or 0
+
+
+async def scheduled_jobs_usage(
+    user_id: uuid.UUID,
+    db: AsyncSession,
+    exclude_job_id: uuid.UUID | None = None,
+    exclude_monitor_id: uuid.UUID | None = None,
+) -> tuple[int, int]:
+    """(active schedules, limit) — jobs and monitors share the cap (ADR-016 §12)."""
+    jobs, monitors = await scheduled_counts(user_id, db, exclude_job_id, exclude_monitor_id)
+    return jobs + monitors, await scheduled_jobs_limit(user_id, db)
+
+
+async def scheduled_jobs_limit(user_id: uuid.UUID, db: AsyncSession) -> int:
+    quota_row = await db.get(UserQuota, user_id)
+    if quota_row and quota_row.scheduled_jobs_limit is not None:
+        return quota_row.scheduled_jobs_limit
+    return settings.default_quota_scheduled_jobs
 
 
 async def check_scheduled_jobs_quota(
-    user_id: uuid.UUID, db: AsyncSession, exclude_job_id: uuid.UUID | None = None
+    user_id: uuid.UUID,
+    db: AsyncSession,
+    exclude_job_id: uuid.UUID | None = None,
+    exclude_monitor_id: uuid.UUID | None = None,
 ) -> None:
     """Raises 429 if one more active schedule would pass the user's cap (ADR-013 §2).
 
-    Every lane counts; a paused schedule does not. ``exclude_job_id`` is the job being armed, so
-    re-arming a job that already holds its place is not counted twice. The caller holds
-    ``lock_user`` and commits the arming in the same transaction.
+    Active scheduled jobs and active monitors count together; paused ones do not. The excluded
+    job or monitor is the one being armed, so one that already holds its place is not counted
+    twice. The caller holds ``lock_user`` and commits the arming in the same transaction.
     """
-    used, limit = await scheduled_jobs_usage(user_id, db, exclude_job_id)
+    used, limit = await scheduled_jobs_usage(user_id, db, exclude_job_id, exclude_monitor_id)
     if used + 1 > limit:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -248,8 +273,8 @@ async def check_scheduled_jobs_quota(
                 "error": "quota_exceeded",
                 "quota_type": "scheduled_jobs",
                 "message": (
-                    f"Active scheduled job limit reached ({used}/{limit}). "
-                    "Pause or remove a schedule to add another."
+                    f"Active schedule limit reached ({used}/{limit}); scheduled jobs and "
+                    "monitors count together. Pause or remove one to add another."
                 ),
                 "resets_at": None,
             },

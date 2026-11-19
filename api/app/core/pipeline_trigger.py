@@ -7,15 +7,20 @@ Pure: the caller adds the rows to its session and commits before it starts the w
 
 import json
 import uuid
+from asyncio import get_running_loop
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from cryptography.fernet import Fernet
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import validate_no_ssrf
 from app.models.llm_keys import UserLLMKey
 from app.models.pipeline import PipelineRun, PipelineRunBlock, PipelineVersion
-from app.pipelines.definition import ParsedDefinition, ScrapeBlock, WebhookBlock
+from app.pipelines.catalog import InputBinding
+from app.pipelines.definition import LLMExtractBlock, ParsedDefinition, ScrapeBlock, WebhookBlock
 from app.settings import settings
 from app.workflows.activities.contracts import Credentials
 from app.workflows.pipeline import LLMKey, PipelineRunInput
@@ -40,6 +45,42 @@ def scrape_credentials(secrets: Mapping[str, str]) -> Credentials | None:
     if proxy is None and cookies is None:
         return None
     return Credentials(encrypted_proxy_url=proxy, encrypted_cookies=cookies)
+
+
+async def ssrf_check(url: str) -> None:
+    """Raises the API's 400 on a private address. A DNS lookup: never under ``lock_user``."""
+    await get_running_loop().run_in_executor(None, validate_no_ssrf, url)
+
+
+def llm_key_ids(parsed: ParsedDefinition) -> set[uuid.UUID]:
+    return {b.config.llm_key_id for b in parsed.blocks if isinstance(b, LLMExtractBlock)}
+
+
+async def owned_llm_keys(
+    db: AsyncSession, user_id: uuid.UUID, key_ids: set[uuid.UUID]
+) -> dict[str, UserLLMKey]:
+    """The user's keys among ``key_ids``, by id as a string; another user's key is left out."""
+    if not key_ids:
+        return {}
+    owned = await db.scalars(
+        select(UserLLMKey).where(UserLLMKey.id.in_(key_ids), UserLLMKey.user_id == user_id)
+    )
+    return {str(k.id): k for k in owned}
+
+
+def run_urls(
+    parsed: ParsedDefinition, inputs: Mapping[str, Any], keys: Mapping[str, UserLLMKey]
+) -> list[str]:
+    """Every address a run reaches that the trigger checks for SSRF before it starts."""
+    urls = []
+    for block in parsed.blocks:
+        if isinstance(block, ScrapeBlock):
+            url = block.config.url
+            urls.append(str(inputs[url.input]) if isinstance(url, InputBinding) else str(url))
+        elif isinstance(block, WebhookBlock):
+            urls.append(str(block.config.url))
+    urls += [k.base_url for k in keys.values() if k.base_url]
+    return urls
 
 
 @dataclass(frozen=True)

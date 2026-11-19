@@ -1,7 +1,6 @@
 import asyncio
 import copy
 import uuid
-from asyncio import get_running_loop
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,11 +23,10 @@ from app.core.ledger import ReleaseOutcome, release_pipeline_run_objects
 from app.core.minio import get_minio
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
-from app.core.pipeline_trigger import build_run, encrypt_secret
+from app.core.pipeline_trigger import build_run, encrypt_secret, owned_llm_keys, ssrf_check
 from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
-from app.core.security import validate_no_ssrf
-from app.models.llm_keys import UserLLMKey
+from app.models.monitor import Monitor
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
@@ -53,6 +51,7 @@ from app.pipelines.validator import (
     ValidatedPipeline,
     validate,
 )
+from app.schemas.monitors import MonitorRef
 from app.schemas.pipelines import (
     OutputState,
     PipelineCreate,
@@ -88,7 +87,7 @@ def require_pipelines_enabled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _unprocessable(problems: list[Problem]) -> HTTPException:
+def unprocessable(problems: list[Problem]) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=[{"block_id": p.block_id, "message": p.message} for p in problems],
@@ -158,21 +157,6 @@ def _public_definition(stored: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-async def _ssrf_check(url: str) -> None:
-    await get_running_loop().run_in_executor(None, validate_no_ssrf, url)
-
-
-async def _owned_keys(
-    db: AsyncSession, user_id: uuid.UUID, key_ids: set[uuid.UUID]
-) -> dict[str, UserLLMKey]:
-    if not key_ids:
-        return {}
-    owned = await db.scalars(
-        select(UserLLMKey).where(UserLLMKey.id.in_(key_ids), UserLLMKey.user_id == user_id)
-    )
-    return {str(k.id): k for k in owned}
-
-
 async def _prepare_definition(
     raw: dict[str, Any], user: User, db: AsyncSession, previous: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -184,12 +168,12 @@ async def _prepare_definition(
     try:
         validated = validate(raw)
     except PipelineValidationError as exc:
-        raise _unprocessable(exc.problems) from None
+        raise unprocessable(exc.problems) from None
 
     key_ids = {
         b.config.llm_key_id for b in validated.blocks if isinstance(b.config, LLMExtractConfigV1)
     }
-    keys = await _owned_keys(db, user.id, key_ids)
+    keys = await owned_llm_keys(db, user.id, key_ids)
     if len(keys) != len(key_ids):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LLM Key not found")
 
@@ -199,10 +183,10 @@ async def _prepare_definition(
         if isinstance(config, ScrapeConfigV1 | WebhookConfigV1) and not isinstance(
             config.url, InputBinding
         ):
-            await _ssrf_check(str(config.url))
+            await ssrf_check(str(config.url))
     for key in keys.values():
         if key.base_url:
-            await _ssrf_check(key.base_url)
+            await ssrf_check(key.base_url)
 
     return _store_secrets(validated, given, previous)
 
@@ -306,7 +290,9 @@ async def create_pipeline(
         raise
 
     logger.info("pipeline_created", pipeline_id=str(pipeline.id), blocks=len(definition["blocks"]))
-    return pipeline_response(pipeline, version)
+    response = pipeline_response(pipeline, version)
+    response.monitors = []
+    return response
 
 
 @router.get("", response_model=list[PipelineResponse])
@@ -327,7 +313,16 @@ async def get_pipeline(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PipelineResponse:
-    return pipeline_response(*await _owned_pipeline(db, user.id, pipeline_id))
+    response = pipeline_response(*await _owned_pipeline(db, user.id, pipeline_id))
+    response.monitors = await monitors_using(db, pipeline_id)
+    return response
+
+
+async def monitors_using(db: AsyncSession, pipeline_id: uuid.UUID) -> list[MonitorRef]:
+    rows = await db.scalars(
+        select(Monitor).where(Monitor.pipeline_id == pipeline_id).order_by(Monitor.name)
+    )
+    return [MonitorRef(id=m.id, name=m.name, state=m.state) for m in rows]
 
 
 @router.patch("/{pipeline_id}", response_model=PipelineResponse)
@@ -354,7 +349,9 @@ async def update_pipeline(
             db.add(version)
             changed = True
     if not changed:
-        return pipeline_response(pipeline, version)
+        response = pipeline_response(pipeline, version)
+        response.monitors = await monitors_using(db, pipeline.id)
+        return response
 
     pipeline.updated_at = datetime.now(UTC)
     try:
@@ -365,7 +362,9 @@ async def update_pipeline(
             raise conflict from None
         raise
     logger.info("pipeline_updated", pipeline_id=str(pipeline.id), version=version.version)
-    return pipeline_response(pipeline, version)
+    response = pipeline_response(pipeline, version)
+    response.monitors = await monitors_using(db, pipeline.id)
+    return response
 
 
 @router.get("/{pipeline_id}/versions", response_model=list[PipelineVersionResponse])
@@ -598,7 +597,7 @@ async def run_alerts(db: AsyncSession, run_id: uuid.UUID) -> list[WebhookDeliver
     )
 
 
-async def _version_to_run(
+async def version_to_run(
     db: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID, version: int | None
 ) -> tuple[Pipeline, PipelineVersion]:
     if version is None:
@@ -638,7 +637,7 @@ async def create_run(
     temporal: Client = Depends(get_temporal),
 ) -> PipelineRunResponse:
     # The ownership check is the only tenant boundary (ADR-009 §12).
-    pipeline, version = await _version_to_run(db, user.id, pipeline_id, body.version)
+    pipeline, version = await version_to_run(db, user.id, pipeline_id, body.version)
 
     # Parse, do not re-validate: a pinned version keeps the rules of the day it was saved.
     try:
@@ -647,7 +646,7 @@ async def create_run(
         logger.error(
             "pipeline_version_unreadable", pipeline_version_id=str(version.id), error=str(exc)
         )
-        raise _unprocessable(
+        raise unprocessable(
             [Problem(b, f"this version cannot be run: {m}") for b, m in exc.problems]
         ) from None
 
@@ -656,26 +655,26 @@ async def create_run(
     problems += [Problem(None, f"unexpected run input {n!r}") for n in sorted(given - declared)]
     problems += [Problem(b, m) for b, m in input_value_problems(parsed, body.inputs)]
     if problems:
-        raise _unprocessable(problems)
+        raise unprocessable(problems)
 
     # The scrape workers do not check SSRF; this is the only check before the fetch.
     # The Webhook activity checks again on every attempt; this one fails the run up front.
     for block in parsed.blocks:
         if isinstance(block, ScrapeBlock):
             url = block.config.url
-            await _ssrf_check(
+            await ssrf_check(
                 str(body.inputs[url.input]) if isinstance(url, InputBinding) else str(url)
             )
         elif isinstance(block, WebhookBlock):
-            await _ssrf_check(str(block.config.url))
+            await ssrf_check(str(block.config.url))
 
     llm_blocks = [b for b in parsed.blocks if isinstance(b, LLMExtractBlock)]
-    keys = await _owned_keys(db, user.id, {b.config.llm_key_id for b in llm_blocks})
+    keys = await owned_llm_keys(db, user.id, {b.config.llm_key_id for b in llm_blocks})
     if missing := [b for b in llm_blocks if str(b.config.llm_key_id) not in keys]:
-        raise _unprocessable([Problem(b.id, "LLM key no longer exists") for b in missing])
+        raise unprocessable([Problem(b.id, "LLM key no longer exists") for b in missing])
     for key in keys.values():
         if key.base_url:
-            await _ssrf_check(key.base_url)
+            await ssrf_check(key.base_url)
 
     # §8d: output size is unknowable up front, so refuse to start near the wall.
     await admit(user.id, db, headroom_bytes=settings.storage_headroom_bytes)

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.api_key import generate_api_key, hash_api_key
 from app.auth.dependencies import get_current_user
 from app.core.db import get_db
-from app.core.quota import scheduled_jobs_usage
+from app.core.quota import scheduled_counts, scheduled_jobs_limit
 from app.core.security import validate_no_ssrf
 from app.models.api_key import ApiKey
 from app.models.llm_keys import UserLLMKey
@@ -42,8 +42,13 @@ async def get_me(user: User = Depends(get_current_user)):
 async def get_scheduled_jobs_usage(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> ScheduledJobsUsage:
-    active, limit = await scheduled_jobs_usage(user.id, db)
-    return ScheduledJobsUsage(active=active, limit=limit)
+    jobs, monitors = await scheduled_counts(user.id, db)
+    return ScheduledJobsUsage(
+        active=jobs + monitors,
+        limit=await scheduled_jobs_limit(user.id, db),
+        jobs=jobs,
+        monitors=monitors,
+    )
 
 
 @router.post("/api-keys", response_model=ApiKeyCreatedResponse, status_code=status.HTTP_201_CREATED)

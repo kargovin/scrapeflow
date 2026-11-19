@@ -13,6 +13,7 @@ with workflow.unsafe.imports_passed_through():
     from app.pipelines.catalog import (
         BLOCK_OVERHEAD_SECONDS,
         CATALOG,
+        DB_ACTIVITY_SECONDS,
         HOST_SLOT_SECONDS,
         RELEASE_OUTPUTS_TIMING,
         WEBHOOK_RESULT_EVENT,
@@ -167,7 +168,6 @@ class WebhookInput(BaseModel):
 
 
 # Three per block — running, record_storage, completed — must fit BLOCK_OVERHEAD_SECONDS.
-DB_ACTIVITY_SECONDS = 20
 assert 3 * DB_ACTIVITY_SECONDS <= BLOCK_OVERHEAD_SECONDS
 # A Scrape block's host-slot wait: the cap, its last acquire, the release.
 assert (

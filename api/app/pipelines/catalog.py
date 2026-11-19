@@ -59,6 +59,8 @@ HOST_SLOT_SECONDS = 660
 # Allowance per block for C.6's mirror and accounting activities around it. C.6's own timeouts
 # must fit inside this, or the run budget no longer composes.
 BLOCK_OVERHEAD_SECONDS = 60
+# One app-DB activity's whole budget (workflows/pipeline.py's _db); three fit a block's overhead.
+DB_ACTIVITY_SECONDS = 20
 
 
 # --- run-input bindings (ADR-009 §4) -------------------------------------------------------
@@ -501,3 +503,38 @@ CATALOG: Mapping[str, BlockType] = {
 def run_need_seconds(timings: Iterable[Timing]) -> int:
     """What a run needs when it declares no ceiling: every block's need."""
     return sum(t.need for t in timings)
+
+
+class _Block(Protocol):
+    id: str
+    type: Any
+    config: Any
+
+
+def _type_of(block: _Block) -> BlockType:
+    return block.type if isinstance(block.type, BlockType) else CATALOG[block.type]
+
+
+def block_outputs(blocks: Iterable[_Block]) -> dict[str, str]:
+    """Each block's output reference type, by id, along the chain."""
+    outputs: dict[str, str] = {}
+    ref: str | None = None
+    for block in blocks:
+        ref = _type_of(block).produces(block.config, ref)
+        outputs[block.id] = ref
+    return outputs
+
+
+# ADR-016 §6c: the two activities a monitor check runs that no block owns (content queue).
+DIFF_TIMING = _worker_retry(120)
+CAPTURE_TIMING = _worker_retry(60)
+
+
+def monitor_allowance_seconds(blocks: Iterable[_Block], capture_blocks: Iterable[str]) -> int:
+    """What a check needs beyond its blocks: a Diff at the first change gate and after each
+    llm_extract (each recording its diff.json), and a Capture per distinct ``from_block``."""
+    blocks = list(blocks)
+    diffs = int(first_change_gate(blocks) is not None)
+    diffs += sum(1 for b in blocks if _type_of(b) is LLM_EXTRACT)
+    captures = len(set(capture_blocks))
+    return diffs * (DIFF_TIMING.budget + DB_ACTIVITY_SECONDS) + captures * CAPTURE_TIMING.budget

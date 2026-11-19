@@ -1,0 +1,114 @@
+import uuid
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
+
+from app.pipelines.catalog import JsonPointer
+
+MonitorState = Literal["active", "paused", "paused_itself"]
+
+
+class CarriedInput(BaseModel):
+    """A run input each check takes from the previous check's output (ADR-016 §6b)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: str = Field(min_length=1)
+    # A content block of the pinned version whose output is an extraction or a JSON page.
+    from_block: str = Field(min_length=1)
+    path: JsonPointer
+    # The value until a check has captured one; of the input's type.
+    start: StrictInt | StrictFloat | StrictStr
+
+
+class MonitorCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    pipeline_id: uuid.UUID
+    # The version to pin, fixed for life; omitted = the latest.
+    version: int | None = Field(default=None, ge=1)
+    # Each declared run input is in exactly one of these two.
+    inputs: dict[str, Any] = {}
+    carried: list[CarriedInput] = []
+    schedule_cron: str = Field(min_length=1, max_length=200)
+
+
+# D15: a monitor's pipeline, version and inputs are fixed for its life.
+_FIXED = ("pipeline_id", "version", "pipeline_version_id", "inputs", "carried")
+
+
+class MonitorUpdate(BaseModel):
+    """Only the name and the schedule change; anything else is a new monitor."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    schedule_cron: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _only_name_and_schedule(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            fixed = sorted(k for k in data if k in _FIXED)
+            other = sorted(k for k in data if k not in _FIXED and k not in cls.model_fields)
+            if fixed:
+                raise ValueError(
+                    f"{', '.join(fixed)} cannot be changed: a monitor's pipeline, version and "
+                    "inputs are fixed for its life; create a new monitor instead"
+                )
+            if other:
+                raise ValueError(f"unknown fields: {', '.join(other)}")
+        return data
+
+    @model_validator(mode="after")
+    def _something(self) -> "MonitorUpdate":
+        if self.name is None and self.schedule_cron is None:
+            raise ValueError("send a name, a schedule_cron, or both")
+        return self
+
+
+class LastCheck(BaseModel):
+    run_id: uuid.UUID
+    status: str
+    change_status: str | None
+    stop_reason: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class MonitorResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    pipeline_id: uuid.UUID
+    pipeline_version_id: uuid.UUID
+    version: int
+    # The pipeline's newest version, when it is newer than the pinned one.
+    newer_version: int | None
+    inputs: dict[str, Any]
+    carried: list[dict[str, Any]]
+    schedule_cron: str
+    state: MonitorState
+    consecutive_failures: int
+    next_check_at: datetime | None
+    last_check: LastCheck | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MonitorCreatedResponse(MonitorResponse):
+    # ADR-016 §2d: what the save allowed but the user should know.
+    warnings: list[str] = []
+
+
+class MonitorRef(BaseModel):
+    id: uuid.UUID
+    name: str
+    state: MonitorState
