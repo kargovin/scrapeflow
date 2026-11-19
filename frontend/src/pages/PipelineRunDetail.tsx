@@ -10,6 +10,8 @@ import {
 import { useApi } from '../lib/useApi'
 import { useLiveSocket } from '../lib/useLiveSocket'
 import { blockDetail, failedBlock, resultDeletedOnStop, verdictInWords } from '../lib/runText'
+import { changeLabel, comparedWith } from '../lib/monitorText'
+import DiffView from '../components/DiffView'
 import ErrorBox from '../components/ErrorBox'
 import LiveBadge from '../components/LiveBadge'
 import StatusPill, { runStatus } from '../components/StatusPill'
@@ -143,6 +145,72 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
           ))}
         </dl>
       </div>
+
+      {run.change_status && (
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
+          <dl className="divide-y divide-gray-100">
+            {run.monitor_id && (
+              <div className="px-4 py-3 sm:grid sm:grid-cols-4 sm:gap-4">
+                <dt className="text-xs font-medium text-gray-500 uppercase">Monitor</dt>
+                <dd className="text-sm sm:col-span-3">
+                  <button
+                    onClick={() => navigate(`${isAdmin ? '/app/admin' : '/app/dashboard'}/monitors/${run.monitor_id}`)}
+                    className="text-indigo-600 hover:underline"
+                  >
+                    open the monitor
+                  </button>
+                </dd>
+              </div>
+            )}
+            <div className="px-4 py-3 sm:grid sm:grid-cols-4 sm:gap-4">
+              <dt className="text-xs font-medium text-gray-500 uppercase">Change</dt>
+              <dd className="text-sm text-gray-900 sm:col-span-3">
+                {changeLabel(run)}
+                {comparedWith(run) && (
+                  <span className="ml-1 text-gray-500">
+                    {run.change_status === 'unchanged' ? 'since' : 'compared with'}{' '}
+                    {run.baseline_run_id ? (
+                      <button
+                        onClick={() => navigate(`${routeBase}/${pipelineId}/runs/${run.baseline_run_id}`)}
+                        className="text-indigo-600 hover:underline"
+                      >
+                        the check of {run.baseline_run_id.slice(0, 8)}
+                      </button>
+                    ) : (
+                      comparedWith(run)
+                    )}
+                  </span>
+                )}
+                {run.change_status === 'unchanged' && run.result_path === null && (
+                  <span className="block text-xs text-gray-500">This check kept no copy: the page was the same.</span>
+                )}
+              </dd>
+            </div>
+            {run.carried_sources && Object.keys(run.carried_sources).length > 0 && (
+              <div className="px-4 py-3 sm:grid sm:grid-cols-4 sm:gap-4">
+                <dt className="text-xs font-medium text-gray-500 uppercase">Carried values</dt>
+                <dd className="text-sm text-gray-900 sm:col-span-3 space-y-1">
+                  {Object.entries(run.carried_sources).map(([name, source]) => (
+                    <div key={name}>
+                      <span className="font-mono">{name} = {JSON.stringify(run.inputs[name])}</span>
+                      <span className="ml-2 text-xs text-gray-500">
+                        {source.from === 'baseline'
+                          ? 'from the previous check'
+                          : `the start value — ${source.why ?? 'nothing to carry'}`}
+                      </span>
+                    </div>
+                  ))}
+                </dd>
+              </div>
+            )}
+          </dl>
+        </div>
+      )}
+
+      {run.change_summary &&
+        Object.entries(run.change_summary).map(([blockId, summary]) => (
+          <DiffView key={blockId} blockId={blockId} summary={summary} apiBase={apiBase} />
+        ))}
 
       {cancelling && (
         <div className="border border-orange-200 bg-orange-50 rounded-lg p-4 mb-6 text-sm text-orange-800">

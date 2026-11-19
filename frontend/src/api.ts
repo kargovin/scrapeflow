@@ -69,10 +69,12 @@ export interface UserQuota {
   updated_at: string
 }
 
-// ADR-013: active scheduled jobs against the user's cap.
+// ADR-013's cap, shared by scheduled jobs and monitors (ADR-016 §12); `active` is their sum.
 export interface ScheduledJobsUsage {
   active: number
   limit: number
+  jobs: number
+  monitors: number
 }
 
 export interface Job {
@@ -136,6 +138,8 @@ export interface AdminStats {
     active_recurring_jobs: number
     active_recurring_jobs_by_lane: Record<string, number>
     next_scheduled_run_at: string | null
+    active_monitors: number
+    monitors_paused_itself: number
   }
   historical: {
     jobs_today: number
@@ -180,6 +184,8 @@ export interface Pipeline {
   user_id?: string
   user_email?: string | null
   deleted_at?: string | null
+  // Single-pipeline reads: the monitors using it, which block its delete.
+  monitors?: MonitorRef[] | null
 }
 
 export interface PipelineRunSummary {
@@ -200,7 +206,12 @@ export interface PipelineRunSummary {
   failed_block_id: string | null
   rollback_deadline: string | null
   user_id?: string
+  // A monitor's check (ADR-016 §2b); null monitor_id = a hand-run, or its monitor is deleted.
+  monitor_id: string | null
+  change_status: ChangeStatus | null
 }
+
+export type ChangeStatus = 'first_check' | 'no_baseline' | 'changed' | 'unchanged'
 
 export type RunInputValue = string | number
 
@@ -218,6 +229,8 @@ export interface RunVerdict {
   rule: Record<string, unknown>
   found: unknown
   expected: unknown
+  // A change gate's: which earlier check's content this one matched.
+  matched?: 'baseline' | 'waiting' | null
 }
 
 export interface PipelineRunAlert {
@@ -252,6 +265,42 @@ export interface PipelineRunBlock {
 export interface PipelineRun extends PipelineRunSummary {
   blocks: PipelineRunBlock[]
   alerts: PipelineRunAlert[]
+  baseline_run_id: string | null
+  // The bounded diff summaries, by the block that triggered each.
+  change_summary: Record<string, DiffSummary> | null
+  carried_sources: Record<string, CarriedSource> | null
+}
+
+// ADR-016 §6a: a page diff's unified lines, or an extraction's changed paths.
+export interface DiffSummary {
+  status: 'ok' | 'baseline_gone' | 'unavailable'
+  kind: 'page' | 'extraction'
+  reason?: string | null
+  lines?: string[]
+  lines_added?: number
+  lines_removed?: number
+  changes?: PathChange[]
+  paths_changed?: number
+  truncated?: boolean
+}
+
+export interface PathChange {
+  path: string
+  change: 'added' | 'removed' | 'changed'
+  old: unknown
+  new: unknown
+}
+
+export interface CarriedSource {
+  from: 'baseline' | 'start'
+  run_id?: string
+  why?: string
+}
+
+export interface PipelineRunDiff {
+  block_id: string
+  diff_path: string
+  diff: DiffSummary
 }
 
 export interface PipelineRunResult {
@@ -341,4 +390,84 @@ export interface CrawlPage {
   error: string | null
   created_at: string
   completed_at: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Monitors (PRD-018 · ADR-016)
+// ---------------------------------------------------------------------------
+
+export type MonitorState = 'active' | 'paused' | 'paused_itself'
+
+export interface MonitorRef {
+  id: string
+  name: string
+  state: MonitorState
+}
+
+export interface CarriedInput {
+  input: string
+  from_block: string
+  path: string
+  start: number | string
+}
+
+export interface Monitor {
+  id: string
+  name: string
+  pipeline_id: string
+  pipeline_version_id: string
+  version: number
+  newer_version: number | null
+  inputs: Record<string, RunInputValue>
+  carried: CarriedInput[]
+  schedule_cron: string
+  state: MonitorState
+  consecutive_failures: number
+  next_check_at: string | null
+  last_check: {
+    run_id: string
+    status: string
+    change_status: ChangeStatus | null
+    stop_reason: string | null
+    created_at: string
+    finished_at: string | null
+  } | null
+  created_at: string
+  updated_at: string
+  // Admin routes only.
+  user_id?: string
+  user_email?: string | null
+}
+
+export interface MonitorCreated extends Monitor {
+  warnings: string[]
+}
+
+export type MonitorEventKind =
+  | 'skipped_monthly_runs'
+  | 'skipped_check_in_progress'
+  | 'skipped_pipelines_disabled'
+  | 'waiting_for_slot'
+  | 'gave_up_waiting'
+  | 'paused_itself'
+
+export interface MonitorEvent {
+  id: string
+  kind: MonitorEventKind
+  first_at: string
+  last_at: string
+  count: number
+  ended_at: string | null
+  detail: Record<string, unknown> | null
+}
+
+export interface MonitorHistoryItem {
+  type: 'check' | 'event'
+  at: string
+  check: PipelineRunSummary | null
+  event: MonitorEvent | null
+}
+
+export interface AdminMonitorDetail extends Monitor {
+  history: MonitorHistoryItem[]
 }

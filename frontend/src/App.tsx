@@ -15,12 +15,21 @@ import Batches from './pages/Batches'
 import BatchDetail from './pages/BatchDetail'
 import Crawls from './pages/Crawls'
 import CrawlDetail from './pages/CrawlDetail'
+import Monitors from './pages/Monitors'
+import MonitorDetail from './pages/MonitorDetail'
 
 // Monaco stays out of the main chunk (frontend asset rule).
 const PipelineEditor = lazy(() => import('./pages/PipelineEditor'))
+const MonitorEditor = lazy(() => import('./pages/MonitorEditor'))
+const loadingEditor = <p className="text-sm text-gray-500">Loading editor…</p>
 const editor = (
-  <Suspense fallback={<p className="text-sm text-gray-500">Loading editor…</p>}>
+  <Suspense fallback={loadingEditor}>
     <PipelineEditor />
+  </Suspense>
+)
+const monitorEditor = (
+  <Suspense fallback={loadingEditor}>
+    <MonitorEditor />
   </Suspense>
 )
 
@@ -30,6 +39,7 @@ const ADMIN_NAV = [
   { path: '/app/admin/batches', label: 'Batches' },
   { path: '/app/admin/crawls', label: 'Crawls' },
   { path: '/app/admin/pipelines', label: 'Pipelines' },
+  { path: '/app/admin/monitors', label: 'Monitors' },
   { path: '/app/admin/stats', label: 'Usage Stats' },
 ]
 
@@ -38,6 +48,7 @@ const USER_NAV = [
   { path: '/app/dashboard/batches', label: 'Batches' },
   { path: '/app/dashboard/crawls', label: 'Crawls' },
   { path: '/app/dashboard/pipelines', label: 'Pipelines' },
+  { path: '/app/dashboard/monitors', label: 'Monitors' },
   { path: '/app/dashboard/api-keys', label: 'API Keys' },
 ]
 
@@ -63,6 +74,8 @@ export default function App() {
               path="/app/admin/pipelines/:pipelineId/runs/:runId"
               element={<PipelineRunDetail mode="admin" />}
             />
+            <Route path="/app/admin/monitors" element={<Monitors mode="admin" />} />
+            <Route path="/app/admin/monitors/:monitorId" element={<MonitorDetail mode="admin" />} />
             <Route path="/app/admin/stats" element={<UsageStats />} />
           </Route>
         </Route>
@@ -84,6 +97,9 @@ export default function App() {
             path="/app/dashboard/pipelines/:pipelineId/runs/:runId"
             element={<PipelineRunDetail mode="user" />}
           />
+          <Route path="/app/dashboard/monitors" element={<Monitors mode="user" />} />
+          <Route path="/app/dashboard/monitors/new" element={monitorEditor} />
+          <Route path="/app/dashboard/monitors/:monitorId" element={<MonitorDetail mode="user" />} />
           <Route path="/app/dashboard/api-keys" element={<ApiKeys />} />
         </Route>
 

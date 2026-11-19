@@ -89,7 +89,8 @@ export default function SchedulePanel({ job, mode }: { job: Job; mode: 'admin' |
       )}
       {isUser && usage && (
         <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
-          Active schedules: {usage.active} of {usage.limit}. Paused schedules do not count.
+          Active schedules: {usage.active} of {usage.limit} ({usage.jobs} jobs, {usage.monitors}{' '}
+          monitors). Paused schedules do not count.
         </p>
       )}
       {capError && <p className="px-4 py-2 text-xs text-red-700 border-t border-red-100">{capError}</p>}

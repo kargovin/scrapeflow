@@ -43,12 +43,18 @@ export function ruleInWords(rule: Record<string, unknown>, expected?: unknown): 
     }
     case 'json_schema':
       return not ? 'does not match the schema' : 'matches the schema'
+    case 'changed':
+      return 'the content changed'
     default:
       return JSON.stringify(rule)
   }
 }
 
 export function verdictInWords(v: RunVerdict): string {
+  // A change gate (ADR-016 §5e): not met = the same content as an earlier check.
+  if (v.rule.kind === 'changed') {
+    return `unchanged — the same content as the ${v.matched === 'waiting' ? 'check waiting for approval' : 'last check'}`
+  }
   const rule = ruleInWords(v.rule, v.expected)
   const found = v.found === null || v.found === undefined ? '' : `; found ${shown(v.found)}`
   return `rule ${v.rule_index + 1} not met: ${rule}${found}`

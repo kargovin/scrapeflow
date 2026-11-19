@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { type Pipeline, type PipelineRun, type PipelineRunSummary, type RunInputValue } from '../api'
 import { useApi } from '../lib/useApi'
 import { stopLabel } from '../lib/runText'
+import { STATE_LABELS, changeLabel } from '../lib/monitorText'
 import ErrorBox from '../components/ErrorBox'
 import StatusPill, { runStatus } from '../components/StatusPill'
 
@@ -109,6 +110,39 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
         ))}
       </div>
 
+      <div className="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-gray-900">Monitors</h3>
+          {!isAdmin && !pipeline.deleted_at && (
+            <button
+              onClick={() => navigate(`/app/dashboard/monitors/new?pipeline=${pipelineId}`)}
+              className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50"
+            >
+              Monitor this pipeline
+            </button>
+          )}
+        </div>
+        {!pipeline.monitors?.length ? (
+          <p className="text-xs text-gray-500">
+            No monitor runs this pipeline. A monitor checks it on a schedule and tells you what changed.
+          </p>
+        ) : (
+          <ul className="text-sm space-y-1">
+            {pipeline.monitors.map(m => (
+              <li key={m.id}>
+                <button
+                  onClick={() => navigate(`${isAdmin ? '/app/admin' : '/app/dashboard'}/monitors/${m.id}`)}
+                  className="text-indigo-600 hover:underline"
+                >
+                  {m.name}
+                </button>
+                <span className="ml-2 text-xs text-gray-500">{STATE_LABELS[m.state]}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       {!isAdmin && (
         <div className="bg-white border border-gray-200 rounded-lg p-4 mb-6">
           <h3 className="text-sm font-semibold text-gray-900 mb-3">Run</h3>
@@ -167,7 +201,11 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
                 >
                   <td className="px-4 py-3">
                     <StatusPill status={runStatus(r)} />
-                    {stopLabel(r) && <span className="ml-2 text-xs text-gray-500">{stopLabel(r)}</span>}
+                    {changeLabel(r) && <span className="ml-2 text-xs text-gray-700">{changeLabel(r)}</span>}
+                    {stopLabel(r) && r.change_status !== 'unchanged' && (
+                      <span className="ml-2 text-xs text-gray-500">{stopLabel(r)}</span>
+                    )}
+                    {r.monitor_id && <span className="ml-2 text-xs text-gray-400" title="a monitor's check">⏱</span>}
                   </td>
                   <td className="px-4 py-3 text-gray-500">v{r.version}</td>
                   <td className="px-4 py-3 text-gray-500">{new Date(r.created_at).toLocaleString()}</td>
@@ -237,6 +275,11 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
               </button>
             </div>
           )}
+          {pipeline.monitors?.length ? (
+            <p className="mt-2 text-xs text-red-700">
+              Monitors use this pipeline, so it cannot be deleted until they are.
+            </p>
+          ) : null}
           <ErrorBox error={remove.error} />
         </div>
       )}

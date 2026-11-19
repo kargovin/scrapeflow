@@ -88,7 +88,7 @@ function QuotaForm({ userId, onClose }: QuotaFormProps) {
             />
           </label>
           <label className="block">
-            <span className="text-xs text-gray-600">Active scheduled jobs (blank = default 20)</span>
+            <span className="text-xs text-gray-600">Active schedules: jobs + monitors (blank = default 20)</span>
             <input
               type="number"
               value={scheduled}

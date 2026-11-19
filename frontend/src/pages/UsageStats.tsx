@@ -65,6 +65,8 @@ export default function UsageStats() {
                 : op.active_recurring_jobs
             }
           />
+          <Stat label="Active monitors" value={op.active_monitors} />
+          <Stat label="Monitors paused themselves" value={op.monitors_paused_itself} />
         </div>
       </div>
 
