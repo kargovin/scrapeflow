@@ -26,7 +26,7 @@ from .contracts import (
 
 _JSON_RULES = (JsonSchemaRule, PresentRule, TypeRule, CompareRule)
 _ORDERED = {"lt": operator.lt, "le": operator.le, "gt": operator.gt, "ge": operator.ge}
-_MISSING = object()
+MISSING = object()
 _FOUND_MAX = 200
 
 Answer = Literal["met", "not_met", "unverifiable"]
@@ -73,8 +73,8 @@ class _Unverifiable(Exception):
         self.expected = expected
 
 
-def _resolve(doc: Any, pointer: str) -> Any:
-    """RFC 6901; _MISSING when the path does not exist."""
+def resolve(doc: Any, pointer: str) -> Any:
+    """RFC 6901; MISSING when the path does not exist."""
     if pointer == "":
         return doc
     node = doc
@@ -90,15 +90,15 @@ def _resolve(doc: Any, pointer: str) -> Any:
         ):
             node = node[int(token)]
         else:
-            return _MISSING
+            return MISSING
     return node
 
 
-def _is_number(v: Any) -> bool:
+def is_number(v: Any) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool)
 
 
-def _json_type(v: Any) -> str:
+def json_type(v: Any) -> str:
     if v is None:
         return "null"
     if isinstance(v, bool):
@@ -116,17 +116,17 @@ def _json_type(v: Any) -> str:
 
 def _is_type(v: Any, expected: str) -> bool:
     if expected == "number":
-        return _is_number(v)
+        return is_number(v)
     if expected == "integer":
-        return _is_number(v) and float(v).is_integer()
-    return _json_type(v) == expected
+        return is_number(v) and float(v).is_integer()
+    return json_type(v) == expected
 
 
-def _equal(a: Any, b: Any) -> bool:
+def json_equal(a: Any, b: Any) -> bool:
     # JSON equality: 1 == 1.0, but true is not 1.
-    if _is_number(a) and _is_number(b):
+    if is_number(a) and is_number(b):
         return a == b
-    return _json_type(a) == _json_type(b) and a == b
+    return json_type(a) == json_type(b) and a == b
 
 
 def _show(v: Any) -> str:
@@ -190,10 +190,10 @@ def _base(rule: Rule, text: str, doc: Any, prints: Fingerprints) -> _Base:
             met=False, problem=message, negated_problem="", found=_bounded(message)
         )
 
-    value = _resolve(doc, rule.path)
+    value = resolve(doc, rule.path)
     missing = f"{rule.path!r} is missing"
     if isinstance(rule, PresentRule):
-        if value is _MISSING:
+        if value is MISSING:
             return _Base(met=False, problem=missing, negated_problem="")
         return _Base(
             met=True,
@@ -202,11 +202,11 @@ def _base(rule: Rule, text: str, doc: Any, prints: Fingerprints) -> _Base:
             found=_bounded(value),
         )
     if isinstance(rule, TypeRule):
-        if value is _MISSING:
+        if value is MISSING:
             return _Base(
                 met=False, problem=missing, negated_problem="", expected=rule.type
             )
-        found = _json_type(value)
+        found = json_type(value)
         return _Base(
             met=_is_type(value, rule.type),
             problem=f"{rule.path!r} is {found}, not {rule.type}",
@@ -216,17 +216,17 @@ def _base(rule: Rule, text: str, doc: Any, prints: Fingerprints) -> _Base:
         )
 
     expected = _bounded(rule.value)
-    if value is _MISSING:
+    if value is MISSING:
         raise _Unverifiable(missing, expected=expected)
     found = _bounded(value)
     if rule.op in _ORDERED:
-        if not _is_number(value):
+        if not is_number(value):
             raise _Unverifiable(
-                f"{rule.path!r} is {_json_type(value)}, not a number",
+                f"{rule.path!r} is {json_type(value)}, not a number",
                 found=found,
                 expected=expected,
             )
-        if not _is_number(rule.value):
+        if not is_number(rule.value):
             raise _Unverifiable(
                 f"value {_show(rule.value)} is not a number",
                 found=found,
@@ -234,7 +234,7 @@ def _base(rule: Rule, text: str, doc: Any, prints: Fingerprints) -> _Base:
             )
         ok = _ORDERED[rule.op](value, rule.value)
     else:
-        ok = _equal(value, rule.value) == (rule.op == "eq")
+        ok = json_equal(value, rule.value) == (rule.op == "eq")
     return _Base(
         met=ok,
         problem=f"{rule.path!r} is {_show(value)}; expected {rule.op} {_show(rule.value)}",
