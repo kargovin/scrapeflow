@@ -3586,6 +3586,15 @@ app DB):
 4. Record step 0's values and the results here; mark K.1–K.4 and Y.2 ✅ in the status table; BUG-031 closed (its §8c
    collection note stays open).
 
+**Step 0 (owner, 2026-11-19, taken after the push, before the rollout):** `alembic_version` = `678c7e339d80`; **0**
+crawls with a `schedule_cron`; **0** running pipeline runs; `jb-stop` `3a4861a4-6b30-40d7-90fb-8b869a0fbd15`, `jb-alert`
+`21ad8f7a-cc61-49f8-af73-505adf94a574`, `jb-number` `9bc81d49-4c51-42e6-a9cf-69aec147dc0e`, none soft-deleted.
+Rollback tags: api `main-1795065601-a10f698c4101ce563b55ffa05932a443cc606e02`, LLM worker
+`main-1795018842-036870c52f7f22c813f81619b655dd8d9496990e`.
+
+**Step 1 (owner, 2026-11-19):** `main` ff `a10f698..c46edb4`, pushed. CI run `44582316601`: `replay`, `build-api`,
+`build-llm-worker` green; http and playwright skipped.
+
 **Rollback:** prefer a forward fix. An image revert (api, workflow-worker, CronJob, `llm-worker-temporal` to step 0's tags) leaves
 4.11 applied — harmless, J-b's code maps none of the four columns. The revert loses only the deletes. Do not downgrade
 the migration: the columns would come back empty, and nothing reads them.
