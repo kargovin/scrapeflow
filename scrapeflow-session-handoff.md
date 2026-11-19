@@ -145,6 +145,13 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-19 *(clock)*
 
+🚀 **RELEASE K DONE — GROUP K CLOSED (2026-11-19).** Owner ran K.4: step 0 (`678c7e339d80`, 0 running runs, 0 crawl
+schedules; rollback tags api `…a10f698…`, llm-worker `…036870c…`), pushed `main` `a10f698..c46edb4` (CI `44582316601`:
+`replay`, `build-api`, `build-llm-worker`), rollout on `c46edb4` tags, `alembic_version` = `c23f1f27522b`, columns gone;
+`jb-stop` permanently deleted (4 objects, 1,468 bytes; usage 25,049,108 → 25,047,640, exact); SPA run delete and
+permanent delete passed. BUG-031 closed. **Deployed code is `c46edb4`.** **Next: L.1** (one builder for a pipeline
+run's rows + input, `core/pipeline_trigger.py`).
+
 🔧 **K.1–K.3 + Y.2 BUILT; 📋 K.4 RUNBOOK READY (2026-11-19, twenty-first session; delegated build).** Owner: "read the
 handoff" → "build until k4; make sure to commit after each item is over". **Order to replay:**
 - **K.1** `04d98f1` — `DELETE /pipelines/{pid}/runs/{rid}` and `DELETE /pipelines/{pid}?permanent=true` (soft-deleted
@@ -162,8 +169,8 @@ handoff" → "build until k4; make sure to commit after each item is over". **Or
 - **K.4** — runbook in the backlog's K.4 section (`362826e`): step 0 SQL + tags, push, migration check, a permanent
   delete measured against the ledger, SPA deletes.
 - **Numbers:** API suite 952, worker 271, contracts 68; mutation K.1 8/8, K.2 6/6, K.3 8/8.
-- **Git:** `develop` ahead of `origin/develop`, **not pushed**; `main` = `origin/main` = `a10f698` (deployed). Compose up.
-- **Next:** **K.4 is the owner's** (runbook). Then **L.1** (one builder for a pipeline run's rows + input).
+- **Git (at build close; superseded by the release entry above):** `main` was `a10f698`.
+- **Next (then):** K.4, the owner's.
 
 🚀 **J-b RELEASED — GROUP J CLOSED (2026-11-19).** Owner ran the runbook: step 0 (`47a8f9f3f4e2`, 0 running runs,
 rollback tag `main-1795018861-036870c…`), pushed `main` `036870c..a10f698` (CI `44464377927`: `replay` + `build-api`),
@@ -2055,6 +2062,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-19 (Release K close):** `main` = `origin/main` = `c46edb4` (**deployed**); `develop` = `main` + the release record commits, **not pushed**. Infra: Flux's tag bumps only. Compose up.
 - **2026-11-19 (J-b release close):** `main` = `origin/main` = `a10f698` (**deployed**); `develop` = `main` + the release record commits, pushed by the owner up to `a10f698`, the rest **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose --profile gate down`; volumes kept) — bring the gate fixture back with `docker compose --profile gate up -d pipeline-fixture`.
 - **2026-11-19 (J.5–J.10 delegated build close):** `develop` = `c595f41` + this closeout, 17 ahead of `origin/develop` (`f4ff446`), **not pushed**; `main` = `origin/main` = `036870c` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-016 accepted, session close):** `develop` = `9808684` (ADR-016 accepted) + this closeout, 22 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
