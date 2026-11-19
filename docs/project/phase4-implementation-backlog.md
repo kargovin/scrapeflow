@@ -3467,6 +3467,9 @@ Validate or an `events` list.
 4. Soft-delete the two test pipelines (`DELETE $B/pipelines/<id>`; their few KB stay charged — BUG-031, K.1). Record
    step 0's values and the results here; mark J.3–J.10 ✅ in the status table; BUG-018 and BUG-030 closed.
 
+**Step 0 (owner, 2026-11-19):** `alembic_version` = `47a8f9f3f4e2`; **0** running pipeline runs; `scrapeflow-api` on
+`k4rth/scrapeflow-api:main-1795018861-036870c52f7f22c813f81619b655dd8d9496990e` — the rollback target.
+
 **Rollback:** prefer a forward fix. An image revert (api, workflow-worker, CronJob to step 0's tag) leaves 4.10
 applied — harmless to the old code — but has two costs: a run that took a `validate-stop` or `webhook-events` path
 and is still open fails replay on the old workflow worker (it stays `running` until the new image returns), and the
