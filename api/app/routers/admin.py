@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.auth.dependencies import get_current_admin_user
-from app.core import schedules, webhook_delivery
+from app.core import monitor_schedules, schedules, webhook_delivery
 from app.core.db import get_db
 from app.core.dispatch import cancel_active_runs, cancel_workflows
 from app.core.ledger import release_run_objects, release_user_objects
@@ -22,6 +22,7 @@ from app.models.batch import Batch, BatchItem
 from app.models.crawl import Crawl
 from app.models.job import Job
 from app.models.job_runs import JobRun
+from app.models.monitor import Monitor
 from app.models.user import User
 from app.models.user_quota import UserQuota
 from app.models.webhook_delivery import WebhookDelivery
@@ -242,6 +243,11 @@ async def admin_delete_user(
                 )
             ).all()
         ),
+    )
+    # The cascade removes the monitors; their Schedules would fire into "stopped" for ever.
+    await monitor_schedules.forget(
+        lambda: lazy_client(request.app.state),
+        list((await db.scalars(select(Monitor.id).where(Monitor.user_id == user_id))).all()),
     )
     await db.delete(user)
     await db.commit()

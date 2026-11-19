@@ -406,7 +406,10 @@ async def delete_pipeline(
     user_id = user.id  # the rollback below expires every instance in the session
     if permanent:
         return await _delete_permanently(db, minio, temporal, user_id, pipeline_id)
+    # A monitor's create takes the lock too, so it cannot land between the check and the delete.
+    await lock_user(user_id, db)
     pipeline, _ = await _owned_pipeline(db, user_id, pipeline_id)
+    await refuse_if_monitored(db, pipeline.id)
     has_runs = await db.scalar(select(exists().where(PipelineRun.pipeline_id == pipeline.id)))
     if not has_runs:
         try:
@@ -417,7 +420,9 @@ async def delete_pipeline(
         except IntegrityError:
             # A run was inserted since the check; its FK refuses the delete.
             await db.rollback()
+            await lock_user(user_id, db)
             pipeline, _ = await _owned_pipeline(db, user_id, pipeline_id)
+            await refuse_if_monitored(db, pipeline.id)
 
     now = datetime.now(UTC)
     pipeline.deleted_at = now
@@ -427,7 +432,23 @@ async def delete_pipeline(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-async def _request_cancel(db: AsyncSession, temporal: Client | None, runs: list[PipelineRun]):
+async def refuse_if_monitored(db: AsyncSession, pipeline_id: uuid.UUID) -> None:
+    """ADR-016 §2a: 409 naming every monitor using the pipeline, whatever its state. The caller
+    holds ``lock_user``."""
+    monitors = await monitors_using(db, pipeline_id)
+    if monitors:
+        names = ", ".join(m.name for m in monitors)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "pipeline_in_use",
+                "message": f"Monitors use this pipeline: {names}. Delete them first.",
+                "monitors": [m.model_dump(mode="json") for m in monitors],
+            },
+        )
+
+
+async def request_cancel(db: AsyncSession, temporal: Client | None, runs: list[PipelineRun]):
     """Row first, then the engine, best effort: a run left without a row reads as cancelled."""
     running = [r for r in runs if r.status == "running"]
     now = datetime.now(UTC)
@@ -444,12 +465,12 @@ async def _request_cancel(db: AsyncSession, temporal: Client | None, runs: list[
             logger.warning("pipeline_run_cancel_not_sent", run_id=str(run.id), error=str(exc))
 
 
-async def _release_runs(
+async def release_runs(
     db: AsyncSession, minio: Minio, temporal: Client | None, runs: list[PipelineRun]
 ) -> ReleaseOutcome:
     """The caller holds each run row locked. Objects first; on any left, commits what was freed
     and refuses — the rows' cascade would drop ledger rows for objects still on disk."""
-    await _request_cancel(db, temporal, runs)
+    await request_cancel(db, temporal, runs)
     outcome = ReleaseOutcome()
     for run in runs:
         outcome.merge(
@@ -480,12 +501,13 @@ async def _delete_permanently(
     )
     if pipeline is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
+    await refuse_if_monitored(db, pipeline_id)
     runs = list(
         await db.scalars(
             select(PipelineRun).where(PipelineRun.pipeline_id == pipeline_id).with_for_update()
         )
     )
-    outcome = await _release_runs(db, minio, temporal, runs)
+    outcome = await release_runs(db, minio, temporal, runs)
     await db.execute(delete(PipelineRun).where(PipelineRun.pipeline_id == pipeline_id))
     await db.execute(delete(Pipeline).where(Pipeline.id == pipeline_id))
     await db.commit()
@@ -874,7 +896,7 @@ async def delete_run(
     run = await db.scalar(_owned_run(pipeline_id, run_id, user.id).with_for_update())
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    outcome = await _release_runs(db, minio, temporal, [run])
+    outcome = await release_runs(db, minio, temporal, [run])
     await db.execute(delete(PipelineRun).where(PipelineRun.id == run_id))
     await db.commit()
     logger.info(

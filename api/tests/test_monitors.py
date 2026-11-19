@@ -704,3 +704,283 @@ async def test_another_users_monitor_is_404_on_every_route(
     async with AsyncSessionLocal() as db:
         await db.execute(delete(Monitor).where(Monitor.id == uuid.UUID(monitor["id"])))
         await db.commit()
+
+
+# --- L.5: the deletes a monitor blocks or follows -----------------------------------------
+
+
+class RemovingMinio:
+    def __init__(self):
+        self.fail: set[str] = set()
+        self.removed: list[str] = []
+
+    async def remove_object(self, bucket, key):
+        if f"{bucket}/{key}" in self.fail:
+            raise RuntimeError("minio down")
+        self.removed.append(f"{bucket}/{key}")
+
+
+@pytest.fixture
+def store():
+    from app.core.minio import get_minio
+
+    fake = RemovingMinio()
+    app.dependency_overrides[get_minio] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_minio, None)
+
+
+async def _check_run(monitor: dict, status="completed", size=1000) -> tuple[uuid.UUID, str]:
+    """A check of ``monitor`` holding one recorded object on its fetch block."""
+    from app.models.pipeline import PipelineRun, PipelineRunBlock
+    from app.workflows.activities.contracts import StoredObject
+    from app.workflows.activities.db import record_storage
+    from app.workflows.pipeline import RecordStorageInput
+
+    row = await _row(monitor["id"])
+    run_id = uuid.uuid4()
+    async with AsyncSessionLocal() as db:
+        db.add(
+            PipelineRun(
+                id=run_id,
+                pipeline_id=row.pipeline_id,
+                pipeline_version_id=row.pipeline_version_id,
+                user_id=row.user_id,
+                status=status,
+                workflow_id=f"pipeline-run-{run_id}",
+                monitor_id=row.id,
+            )
+        )
+        db.add(
+            PipelineRunBlock(
+                pipeline_run_id=run_id,
+                block_id="fetch",
+                position=0,
+                type="scrape",
+                status="completed",
+            )
+        )
+        await db.commit()
+    path = f"scrapeflow-results/history/{uuid.uuid4()}/scrape.html"
+    await record_storage(
+        RecordStorageInput(
+            run_id=str(run_id), block_id="fetch", objects=[StoredObject(path=path, size=size)]
+        )
+    )
+    return run_id, path
+
+
+async def _used(user_id) -> int:
+    async with AsyncSessionLocal() as db:
+        quota = await db.get(UserQuota, user_id)
+        return 0 if quota is None else quota.storage_bytes_used
+
+
+async def _runs(monitor_id) -> list:
+    from app.models.pipeline import PipelineRun
+
+    async with AsyncSessionLocal() as db:
+        return list(
+            await db.scalars(
+                select(PipelineRun).where(PipelineRun.monitor_id == uuid.UUID(monitor_id))
+            )
+        )
+
+
+async def test_a_pipeline_a_monitor_uses_cannot_be_deleted_in_either_mode(
+    client, headers, key, temporal, store
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    active = await _monitor(client, headers, _body(pipeline, name="a"))
+    paused = await _monitor(client, headers, _body(pipeline, name="b"))
+    await client.post(f"/monitors/{paused['id']}/pause", headers=headers)
+    url = f"/pipelines/{pipeline['id']}"
+
+    for query in ("", "?permanent=true"):
+        resp = await client.delete(url + query, headers=headers)
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "pipeline_in_use"
+        assert [(m["name"], m["state"]) for m in detail["monitors"]] == [
+            ("a", "active"),
+            ("b", "paused"),
+        ]
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(Pipeline, uuid.UUID(pipeline["id"]))).deleted_at is None
+
+    for monitor in (active, paused):
+        assert (
+            await client.delete(f"/monitors/{monitor['id']}", headers=headers)
+        ).status_code == 204
+    assert (await client.delete(url, headers=headers)).status_code == 204
+
+
+async def test_a_pipeline_with_runs_a_monitor_uses_is_not_soft_deleted(
+    client, headers, key, temporal, store
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    await _check_run(monitor)
+
+    resp = await client.delete(f"/pipelines/{pipeline['id']}", headers=headers)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["monitors"][0]["id"] == monitor["id"]
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(Pipeline, uuid.UUID(pipeline["id"]))).deleted_at is None
+
+
+async def test_an_llm_key_a_monitor_uses_cannot_be_deleted(client, headers, key, db_user, temporal):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Monitor)
+            .where(Monitor.id == uuid.UUID(monitor["id"]))
+            .values(state="paused_itself")
+        )
+        await db.commit()
+    spare = await _llm_key(db_user.id)
+    # A key only a plain pipeline uses deletes as before.
+    unmonitored = await _llm_key(db_user.id)
+    await _pipeline(client, headers, gated(unmonitored.id), name="plain")
+
+    resp = await client.delete(f"/users/llm-keys/{key.id}", headers=headers)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["monitors"] == [
+        {"id": monitor["id"], "name": "prices", "state": "paused_itself"}
+    ]
+    for free in (spare, unmonitored):
+        assert (
+            await client.delete(f"/users/llm-keys/{free.id}", headers=headers)
+        ).status_code == 200
+    await client.delete(f"/monitors/{monitor['id']}", headers=headers)
+    assert (await client.delete(f"/users/llm-keys/{key.id}", headers=headers)).status_code == 200
+
+
+async def test_the_llm_key_delete_waits_for_the_users_lock(client, headers, key, db_user):
+    import asyncio
+
+    from app.core.quota import lock_user
+
+    async with AsyncSessionLocal() as holder:
+        await lock_user(db_user.id, holder)
+        task = asyncio.create_task(client.delete(f"/users/llm-keys/{key.id}", headers=headers))
+        await asyncio.sleep(1)
+        assert not task.done(), "the key delete did not wait for the user's lock"
+        await holder.rollback()
+    assert (await asyncio.wait_for(task, timeout=10)).status_code == 200
+
+
+async def test_a_plain_delete_cancels_the_running_check_and_keeps_the_checks(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    done, _ = await _check_run(monitor)
+    running, _ = await _check_run(monitor, status="running")
+    used = await _used(db_user.id)
+
+    resp = await client.delete(f"/monitors/{monitor['id']}", headers=headers)
+
+    assert resp.status_code == 204
+    assert await _row(monitor["id"]) is None
+    from app.models.pipeline import PipelineRun
+
+    async with AsyncSessionLocal() as db:
+        kept = {
+            r.id: r
+            for r in await db.scalars(
+                select(PipelineRun).where(PipelineRun.id.in_([done, running]))
+            )
+        }
+    assert set(kept) == {done, running}
+    assert all(r.monitor_id is None for r in kept.values())
+    assert kept[running].cancel_requested_at is not None
+    temporal.get_workflow_handle.assert_called_with(f"pipeline-run-{running}")
+    temporal.get_schedule_handle.return_value.delete.assert_awaited()
+    assert temporal.get_schedule_handle.call_args.args[0] == f"monitor-schedule-{monitor['id']}"
+    assert store.removed == [] and await _used(db_user.id) == used
+
+
+async def test_a_delete_with_checks_frees_exactly_their_bytes(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    other = await _monitor(client, headers, _body(pipeline, name="other"))
+    paths = [(await _check_run(monitor, size=s))[1] for s in (1000, 2500)]
+    await _check_run(other, size=700)
+    used = await _used(db_user.id)
+
+    resp = await client.delete(f"/monitors/{monitor['id']}?with_checks=true", headers=headers)
+
+    assert resp.status_code == 204
+    assert sorted(store.removed) == sorted(paths)
+    assert await _used(db_user.id) == used - 3500
+    assert await _runs(monitor["id"]) == []
+    assert len(await _runs(other["id"])) == 1
+
+
+async def test_a_delete_with_checks_that_cannot_remove_an_object_deletes_nothing(
+    client, headers, key, db_user, temporal, store
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    await _check_run(monitor, size=1000)
+    _, second = await _check_run(monitor, size=2000)
+    store.fail.add(second)
+    used = await _used(db_user.id)
+
+    resp = await client.delete(f"/monitors/{monitor['id']}?with_checks=true", headers=headers)
+
+    assert resp.status_code == 503
+    assert await _row(monitor["id"]) is not None
+    assert len(await _runs(monitor["id"])) == 2
+    # What was freed stays freed.
+    assert await _used(db_user.id) == used - 1000
+    store.fail.clear()
+    assert (
+        await client.delete(f"/monitors/{monitor['id']}?with_checks=true", headers=headers)
+    ).status_code == 204
+    assert await _used(db_user.id) == used - 3000
+
+
+async def test_another_users_monitor_cannot_be_deleted(client, headers, key, temporal, other_user):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Monitor)
+            .where(Monitor.id == uuid.UUID(monitor["id"]))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+
+    assert (await client.delete(f"/monitors/{monitor['id']}", headers=headers)).status_code == 404
+    assert await _row(monitor["id"]) is not None
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Monitor).where(Monitor.id == uuid.UUID(monitor["id"])))
+        await db.commit()
+
+
+async def test_admin_user_delete_forgets_the_users_monitor_schedules(
+    client, headers, key, db_user, temporal, store, monkeypatch
+):
+    from app.auth.dependencies import get_current_admin_user
+
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    first = await _monitor(client, headers, _body(pipeline, name="a"))
+    second = await _monitor(client, headers, _body(pipeline, name="b"))
+    admin = MagicMock(id=uuid.uuid4())
+    app.dependency_overrides[get_current_admin_user] = lambda: admin
+    try:
+        resp = await client.delete(f"/admin/users/{db_user.id}")
+    finally:
+        app.dependency_overrides.pop(get_current_admin_user, None)
+
+    assert resp.status_code == 204
+    forgotten = {c.args[0] for c in temporal.get_schedule_handle.call_args_list}
+    assert {f"monitor-schedule-{first['id']}", f"monitor-schedule-{second['id']}"} <= forgotten
+    assert await _row(first["id"]) is None

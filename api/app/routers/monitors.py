@@ -5,14 +5,17 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from miniopy_async import Minio
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client
 
 from app.auth.dependencies import get_current_user
 from app.core import monitor_events, monitor_schedules
 from app.core.db import get_db
+from app.core.minio import get_minio
 from app.core.monitors import ceiling_problems, gate_problems, input_problems, warnings
 from app.core.pipeline_trigger import llm_key_ids, owned_llm_keys, run_urls, ssrf_check
 from app.core.quota import check_scheduled_jobs_quota, lock_user
@@ -28,7 +31,13 @@ from app.pipelines.definition import (
 )
 from app.pipelines.validator import Problem
 from app.routers.jobs import validate_cron
-from app.routers.pipelines import require_pipelines_enabled, unprocessable, version_to_run
+from app.routers.pipelines import (
+    release_runs,
+    request_cancel,
+    require_pipelines_enabled,
+    unprocessable,
+    version_to_run,
+)
 from app.schemas.monitors import (
     LastCheck,
     MonitorCreate,
@@ -36,7 +45,7 @@ from app.schemas.monitors import (
     MonitorResponse,
     MonitorUpdate,
 )
-from app.workflows.client import lazy_client
+from app.workflows.client import get_temporal_or_none, lazy_client
 
 router = APIRouter(prefix="/monitors", tags=["monitors"])
 logger = structlog.get_logger()
@@ -362,3 +371,42 @@ async def resume_monitor(
         logger.info("monitor_resumed", monitor_id=str(monitor_id))
     [response] = await monitor_responses(db, [monitor])
     return response
+
+
+@router.delete("/{monitor_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_monitor(
+    monitor_id: uuid.UUID,
+    request: Request,
+    with_checks: bool = Query(default=False),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+    temporal: Client | None = Depends(get_temporal_or_none),
+) -> Response:
+    """ADR-016 §11. A running check is cancelled. Plain: the checks stay as ordinary runs of the
+    pipeline. ``with_checks``: every check, its stored objects and rows go too (503 if an object
+    cannot be removed: nothing is deleted)."""
+    await lock_user(user.id, db)
+    monitor = await owned_monitor(db, user.id, monitor_id, lock=True)
+    checks = list(
+        await db.scalars(
+            select(PipelineRun).where(PipelineRun.monitor_id == monitor.id).with_for_update()
+        )
+    )
+    released = None
+    if with_checks:
+        released = await release_runs(db, minio, temporal, checks)
+        await db.execute(delete(PipelineRun).where(PipelineRun.monitor_id == monitor.id))
+    else:
+        await request_cancel(db, temporal, checks)
+    await db.execute(delete(Monitor).where(Monitor.id == monitor.id))
+    await db.commit()
+    await monitor_schedules.forget(_temporal(request), [monitor_id])
+    logger.info(
+        "monitor_deleted",
+        monitor_id=str(monitor_id),
+        checks=len(checks),
+        with_checks=with_checks,
+        bytes_freed=released.freed_bytes if released else 0,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

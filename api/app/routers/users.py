@@ -11,11 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.api_key import generate_api_key, hash_api_key
 from app.auth.dependencies import get_current_user
 from app.core.db import get_db
-from app.core.quota import scheduled_counts, scheduled_jobs_limit
+from app.core.quota import lock_user, scheduled_counts, scheduled_jobs_limit
 from app.core.security import validate_no_ssrf
 from app.models.api_key import ApiKey
 from app.models.llm_keys import UserLLMKey
+from app.models.monitor import Monitor
+from app.models.pipeline import PipelineVersion
 from app.models.user import User
+from app.schemas.monitors import MonitorRef
 from app.schemas.users import (
     ApiKeyCreate,
     ApiKeyCreatedResponse,
@@ -165,15 +168,44 @@ async def get_llm_keys(user: User = Depends(get_current_user), db: AsyncSession 
     ]
 
 
+async def monitors_using_key(
+    db: AsyncSession, user_id: uuid.UUID, key_id: uuid.UUID
+) -> list[MonitorRef]:
+    """The user's monitors whose pinned version has a block naming the key, any state."""
+    uses_key = PipelineVersion.definition.contains(
+        {"blocks": [{"config": {"llm_key_id": str(key_id)}}]}
+    )
+    rows = await db.scalars(
+        select(Monitor)
+        .join(PipelineVersion, PipelineVersion.id == Monitor.pipeline_version_id)
+        .where(Monitor.user_id == user_id, uses_key)
+        .order_by(Monitor.name)
+    )
+    return [MonitorRef(id=m.id, name=m.name, state=m.state) for m in rows]
+
+
 @router.delete("/llm-keys/{llm_key_id}", response_model=LLMKeyResponse)
 async def delete_llm_keys(
     llm_key_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # A monitor's create takes the lock too (ADR-016 §13).
+    await lock_user(user.id, db)
     llm_key = await db.get(UserLLMKey, llm_key_id)
     if llm_key is None or llm_key.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="LLM Key not found")
+    monitors = await monitors_using_key(db, user.id, llm_key_id)
+    if monitors:
+        names = ", ".join(m.name for m in monitors)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "llm_key_in_use",
+                "message": f"Monitors use this key: {names}. Delete them first.",
+                "monitors": [m.model_dump(mode="json") for m in monitors],
+            },
+        )
 
     await db.execute(delete(UserLLMKey).where(UserLLMKey.id == llm_key_id))
     await db.commit()
