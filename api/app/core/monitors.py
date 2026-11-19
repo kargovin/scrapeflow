@@ -1,11 +1,19 @@
-"""What a monitor is allowed to be (ADR-016 §2d) and what its checks are given (§6c).
+"""What a monitor is allowed to be (ADR-016 §2d) and what its checks are given (§4, §6).
 
-Pure apart from settings: the routes and the firing's admission read the rows and call these.
+The save-time checks are pure apart from settings; ``prepare_check`` reads the database only, so
+admission and Check now call it under ``lock_user``.
 """
 
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.pipeline_trigger import CheckSetup
+from app.models.monitor import Monitor
+from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.pipelines.catalog import (
     CATALOG,
     EXTRACTION,
@@ -13,12 +21,14 @@ from app.pipelines.catalog import (
     PAGE_JSON,
     block_outputs,
     first_change_gate,
+    is_change_gate,
     monitor_allowance_seconds,
     run_need_seconds,
 )
 from app.pipelines.definition import ParsedDefinition, WebhookBlock, input_value_problems
 from app.pipelines.validator import Problem
 from app.settings import settings
+from app.workflows.pipeline import CaptureSpec, GateFingerprints, MonitorContext
 
 CARRIABLE_TYPES = ("number", "text")
 CARRIABLE_OUTPUTS = (EXTRACTION, PAGE_JSON)
@@ -137,3 +147,77 @@ def warnings(parsed: ParsedDefinition) -> list[str]:
             "events, or a failing monitor is visible only on its page"
         )
     return found
+
+
+# --- a check's setup: found at admission, handed to the check (§4, §6b) -------------------
+
+
+async def find_baseline(db: AsyncSession, monitor_id: uuid.UUID) -> PipelineRun | None:
+    """The newest eligible check, by start (§4b) — a fresh lookup every time; DB only."""
+    return await db.scalar(
+        select(PipelineRun)
+        .where(PipelineRun.monitor_id == monitor_id, PipelineRun.baseline_eligible)
+        .order_by(PipelineRun.created_at.desc())
+        .limit(1)
+    )
+
+
+def _carried_value(
+    parsed: ParsedDefinition, entry: Mapping[str, Any], baseline: PipelineRun | None
+) -> tuple[Any, dict[str, Any]]:
+    """The value a carried input takes this check, and where it came from (§6b)."""
+    name = entry["input"]
+    start = {"from": "start"}
+    if baseline is None:
+        return entry["start"], start | {"why": "no earlier check to carry from"}
+    captured = (baseline.captured_values or {}).get(name)
+    if not isinstance(captured, dict) or ("value" not in captured and "missing" not in captured):
+        return entry["start"], start | {"why": "the baseline captured no value"}
+    if captured.get("missing") is not None:
+        return entry["start"], start | {"why": f"the baseline's value: {captured['missing']}"}
+    value = captured["value"]
+    if input_value_problems(parsed, {name: value}):
+        kind = parsed.inputs.get(name)
+        return entry["start"], start | {"why": f"the baseline's value is not a valid {kind}"}
+    return value, {"from": "baseline", "run_id": str(baseline.id)}
+
+
+async def prepare_check(
+    db: AsyncSession, monitor: Monitor, parsed: ParsedDefinition, baseline: PipelineRun | None
+) -> tuple[dict[str, Any], CheckSetup]:
+    """The check's run inputs and its setup. Reads the database only: run under the lock."""
+    gates: dict[str, GateFingerprints] = {}
+    outputs: dict[str, str] = {}
+    if baseline is not None:
+        gate_ids = {b.id for b in parsed.blocks if is_change_gate(b.config)}
+        for row in await db.scalars(
+            select(PipelineRunBlock).where(PipelineRunBlock.pipeline_run_id == baseline.id)
+        ):
+            if row.block_id in gate_ids and row.fingerprint is not None:
+                gates[row.block_id] = GateFingerprints(baseline=row.fingerprint)
+            block_type = CATALOG.get(row.type)
+            stored = row.output_ref is not None and row.collected_at is None
+            if stored and block_type is not None and block_type.kind == "content":
+                outputs[row.block_id] = row.output_ref
+
+    inputs = dict(monitor.inputs)
+    sources: dict[str, Any] = {}
+    for entry in monitor.carried:
+        inputs[entry["input"]], sources[entry["input"]] = _carried_value(parsed, entry, baseline)
+
+    context = MonitorContext(
+        monitor_id=str(monitor.id),
+        baseline_run_id=str(baseline.id) if baseline is not None else None,
+        gates=gates,
+        baseline_outputs=outputs,
+        captures=[
+            CaptureSpec(
+                input=c["input"],
+                from_block=c["from_block"],
+                path=c["path"],
+                type=parsed.inputs[c["input"]],
+            )
+            for c in monitor.carried
+        ],
+    )
+    return inputs, CheckSetup(context, sources, check_ceiling_seconds(parsed, monitor.carried))

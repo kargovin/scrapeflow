@@ -29,7 +29,7 @@ from app.pipelines.catalog import InputBinding
 from app.pipelines.definition import LLMExtractBlock, ParsedDefinition, ScrapeBlock, WebhookBlock
 from app.settings import settings
 from app.workflows.activities.contracts import Credentials
-from app.workflows.pipeline import LLMKey, PipelineRunInput
+from app.workflows.pipeline import LLMKey, MonitorContext, PipelineRunInput
 
 
 def workflow_id(run_id: object) -> str:
@@ -124,6 +124,16 @@ def _awaitable(get_client: Callable[[], Any]) -> Callable[[], Any]:
 
 
 @dataclass(frozen=True)
+class CheckSetup:
+    """A monitor's check, as admission or Check now prepared it (ADR-016 §4, §6)."""
+
+    context: MonitorContext
+    carried_sources: dict[str, Any]
+    # The version's ceiling plus the monitor allowance, capped (§2d check 6).
+    ceiling_seconds: int
+
+
+@dataclass(frozen=True)
 class BuiltRun:
     run: PipelineRun
     blocks: list[PipelineRunBlock]
@@ -139,6 +149,7 @@ def build_run(
     stored_secrets: Mapping[str, Mapping[str, str]],
     keys: Mapping[str, UserLLMKey],
     inputs: dict[str, Any],
+    check: CheckSetup | None = None,
 ) -> BuiltRun:
     """The run row (``running``), one ``pending`` row per block, and the workflow's input.
 
@@ -153,6 +164,13 @@ def build_run(
         inputs=inputs,
         workflow_id=workflow_id(run_id),
     )
+    if check is not None:
+        context = check.context
+        run.monitor_id = uuid.UUID(context.monitor_id)
+        run.baseline_run_id = (
+            uuid.UUID(context.baseline_run_id) if context.baseline_run_id else None
+        )
+        run.carried_sources = check.carried_sources
     blocks = [
         PipelineRunBlock(
             id=uuid.uuid4(),
@@ -164,12 +182,26 @@ def build_run(
         )
         for i, b in enumerate(parsed.blocks)
     ]
-    run_input = PipelineRunInput(
-        run_id=str(run_id),
-        pipeline_id=str(version.pipeline_id),
+    return BuiltRun(run, blocks, run_input(run, blocks, parsed, stored_secrets, keys, check))
+
+
+def run_input(
+    run: PipelineRun,
+    blocks: list[PipelineRunBlock],
+    parsed: ParsedDefinition,
+    stored_secrets: Mapping[str, Mapping[str, str]],
+    keys: Mapping[str, UserLLMKey],
+    check: CheckSetup | None = None,
+) -> PipelineRunInput:
+    """The workflow's input for rows already built — also how a retried admission rebuilds it."""
+    return PipelineRunInput(
+        run_id=str(run.id),
+        pipeline_id=str(run.pipeline_id),
         blocks=parsed.blocks,
-        time_budget_seconds=parsed.run_budget_seconds,
-        inputs=inputs,
+        time_budget_seconds=(
+            check.ceiling_seconds if check is not None else parsed.run_budget_seconds
+        ),
+        inputs=run.inputs,
         artifact_ids={b.block_id: str(b.id) for b in blocks},
         llm_keys={
             key_id: LLMKey(
@@ -189,5 +221,5 @@ def build_run(
             if isinstance(b, WebhookBlock)
             and (secret := stored_secrets.get(b.id, {}).get("secret")) is not None
         },
+        monitor=check.context if check is not None else None,
     )
-    return BuiltRun(run, blocks, run_input)

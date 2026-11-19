@@ -19,6 +19,7 @@ from tests.test_workflows_crawl import SITE, Frontier, _sitemaps, crawl_input
 from tests.test_workflows_crawl import Harness as CrawlHarness
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
+from tests.test_workflows_monitor_check import Harness as MonitorHarness
 from tests.test_workflows_pipeline import (
     ALERT_ONLY,
     CLEAN_GUARD,
@@ -218,6 +219,18 @@ SCHEDULED_SCENARIOS = {
 }
 
 
+# L.7 — MonitorCheckWorkflow's first shape (no patch): admission verdicts in turn, the child.
+MONITOR_SCENARIOS = {
+    "harness_monitor_check_admitted": (["admitted"], "completed"),
+    "harness_monitor_check_skipped_monthly": (["skipped"], "completed"),
+    "harness_monitor_check_waited_then_admitted": (["waiting", "waiting", "admitted"], "completed"),
+    "harness_monitor_check_gave_up": (["waiting_unless_last"], "completed"),
+    # Admission records the switched-off skip; the workflow's shape is a skip's.
+    "harness_monitor_check_pipelines_disabled": (["skipped"], "completed"),
+    "harness_monitor_check_failed": (["admitted"], "failed"),
+}
+
+
 async def main() -> None:
     runs = [(name, Harness, kwargs, run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
     runs += [(name, JobHarness, kwargs, None) for name, kwargs in JOB_SCENARIOS.items()]
@@ -247,6 +260,14 @@ async def main() -> None:
         if path.exists():
             continue
         h = ScheduledHarness(verdicts, child=child)
+        await h.run()
+        path.write_text(h.history.to_json() + "\n")
+        print(path)
+    for name, (verdicts, child) in MONITOR_SCENARIOS.items():
+        path = HISTORIES / f"{name}.json"
+        if path.exists():
+            continue
+        h = MonitorHarness(verdicts, child=child)
         await h.run()
         path.write_text(h.history.to_json() + "\n")
         print(path)

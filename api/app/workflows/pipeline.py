@@ -91,6 +91,36 @@ class LLMKey(BaseModel):
     base_url: str | None = None
 
 
+class GateFingerprints(BaseModel):
+    """Earlier checks' fingerprints of one change gate's input (ADR-016 §4c)."""
+
+    baseline: str | None = None
+    # Slice 2: the check waiting for approval.
+    waiting: str | None = None
+
+
+class CaptureSpec(BaseModel):
+    """A carried input: what Capture reads from ``from_block``'s output (§6b)."""
+
+    input: str
+    from_block: str
+    path: str
+    type: Literal["number", "text"]
+
+
+class MonitorContext(BaseModel):
+    """What admission found for a monitor's check; the check never looks anything up (§4)."""
+
+    monitor_id: str
+    baseline_run_id: str | None = None
+    waiting_run_id: str | None = None
+    # By change-gate block id.
+    gates: dict[str, GateFingerprints] = {}
+    # The baseline's stored object per content block, while still stored — for Diff (§6a).
+    baseline_outputs: dict[str, str] = {}
+    captures: list[CaptureSpec] = []
+
+
 class PipelineRunInput(BaseModel):
     run_id: str
     pipeline_id: str
@@ -105,6 +135,8 @@ class PipelineRunInput(BaseModel):
     credentials: dict[str, Credentials] = {}
     # Webhook blocks' signing secrets as Fernet ciphertext (credentials key), by block id.
     webhook_secrets: dict[str, str] = {}
+    # A monitor's check; None for a hand-run.
+    monitor: MonitorContext | None = None
 
 
 class MirrorBlockInput(BaseModel):

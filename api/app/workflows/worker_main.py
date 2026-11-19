@@ -39,6 +39,7 @@ from app.workflows.activities.job_runs import (
     read_llm_settings,
     record_job_objects,
 )
+from app.workflows.activities.monitor_checks import admit_monitor_check
 from app.workflows.activities.schedules import admit_scheduled_run
 from app.workflows.activities.webhook import deliver_webhook
 from app.workflows.activities.webhook_deliveries import (
@@ -50,6 +51,7 @@ from app.workflows.client import connect
 from app.workflows.crawl import CrawlWorkflow
 from app.workflows.hello import HelloWorkflow, say_hello
 from app.workflows.job import JobWorkflow
+from app.workflows.monitor_check import MonitorCheckWorkflow
 from app.workflows.pipeline import PipelineWorkflow
 from app.workflows.probe import LLMProbeWorkflow, ScrapeProbeWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
@@ -81,6 +83,7 @@ async def main() -> None:
             BatchWorkflow,
             CrawlWorkflow,
             ScheduledJobWorkflow,
+            MonitorCheckWorkflow,
             WebhookDeliveryWorkflow,
             WebhookSweepWorkflow,
         ],
@@ -107,6 +110,7 @@ async def main() -> None:
             record_crawl_page,
             finish_crawl,
             admit_scheduled_run,
+            admit_monitor_check,
             attempt_webhook_delivery,
             sweep_pending_webhooks,
         ],
