@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_admin_user, get_current_user
 from app.core import monitor_events, monitor_schedules
 from app.core.db import get_db
 from app.core.minio import get_minio
@@ -35,7 +35,7 @@ from app.core.pipeline_trigger import (
 )
 from app.core.quota import admit, check_scheduled_jobs_quota, lock_user
 from app.core.rate_limit import check_rate_limit
-from app.models.monitor import Monitor
+from app.models.monitor import Monitor, MonitorEvent
 from app.models.pipeline import Pipeline, PipelineRun, PipelineVersion
 from app.models.user import User
 from app.pipelines.definition import (
@@ -51,13 +51,19 @@ from app.routers.pipelines import (
     request_cancel,
     require_pipelines_enabled,
     run_response,
+    run_summary,
+    runs_select,
     unprocessable,
     version_to_run,
 )
 from app.schemas.monitors import (
+    AdminMonitorDetail,
+    AdminMonitorResponse,
     LastCheck,
     MonitorCreate,
     MonitorCreatedResponse,
+    MonitorEventResponse,
+    MonitorHistoryItem,
     MonitorResponse,
     MonitorUpdate,
 )
@@ -517,3 +523,99 @@ async def check_now(
         ) from None
     logger.info("monitor_checked_now", monitor_id=str(monitor_id), run_id=str(run.id))
     return run_response(run, version.version, blocks)
+
+
+async def monitor_history(
+    db: AsyncSession, monitor_id: uuid.UUID, limit: int
+) -> list[MonitorHistoryItem]:
+    """Checks and situations merged by time, newest first (R9); a run of identical skipped
+    firings is one counted line (G1)."""
+    checks = (
+        await db.execute(runs_select().where(PipelineRun.monitor_id == monitor_id).limit(limit))
+    ).all()
+    events = await db.scalars(
+        select(MonitorEvent)
+        .where(MonitorEvent.monitor_id == monitor_id)
+        .order_by(MonitorEvent.first_at.desc())
+        .limit(limit)
+    )
+    items = [
+        MonitorHistoryItem(type="check", at=run.created_at, check=run_summary(run, version))
+        for run, version in checks
+    ]
+    items += [
+        MonitorHistoryItem(
+            type="event",
+            at=e.first_at,
+            event=MonitorEventResponse.model_validate(e, from_attributes=True),
+        )
+        for e in events
+    ]
+    return sorted(items, key=lambda i: i.at, reverse=True)[:limit]
+
+
+@router.get("/{monitor_id}/history", response_model=list[MonitorHistoryItem])
+async def get_monitor_history(
+    monitor_id: uuid.UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[MonitorHistoryItem]:
+    monitor = await owned_monitor(db, user.id, monitor_id)
+    return await monitor_history(db, monitor.id, limit)
+
+
+# ---------------------------------------------------------------------------
+# Admin (R9: read-only)
+# ---------------------------------------------------------------------------
+
+admin_router = APIRouter(prefix="/admin/monitors", tags=["admin"])
+
+
+async def _admin_responses(db: AsyncSession, rows) -> list[AdminMonitorResponse]:
+    monitors = [m for m, _ in rows]
+    emails = {m.id: email for m, email in rows}
+    return [
+        AdminMonitorResponse(**r.model_dump(), user_id=m.user_id, user_email=emails[m.id])
+        for m, r in zip(monitors, await monitor_responses(db, monitors), strict=True)
+    ]
+
+
+@admin_router.get("", response_model=list[AdminMonitorResponse])
+async def admin_list_monitors(
+    user_id: uuid.UUID | None = Query(default=None),
+    state: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[AdminMonitorResponse]:
+    stmt = select(Monitor, User.email).join(User, User.id == Monitor.user_id)
+    if user_id is not None:
+        stmt = stmt.where(Monitor.user_id == user_id)
+    if state is not None:
+        stmt = stmt.where(Monitor.state == state)
+    stmt = stmt.order_by(Monitor.created_at.desc()).limit(limit).offset(offset)
+    return await _admin_responses(db, (await db.execute(stmt)).all())
+
+
+@admin_router.get("/{monitor_id}", response_model=AdminMonitorDetail)
+async def admin_get_monitor(
+    monitor_id: uuid.UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    _admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+) -> AdminMonitorDetail:
+    row = (
+        await db.execute(
+            select(Monitor, User.email)
+            .join(User, User.id == Monitor.user_id)
+            .where(Monitor.id == monitor_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Monitor not found")
+    [response] = await _admin_responses(db, [row])
+    return AdminMonitorDetail(
+        **response.model_dump(), history=await monitor_history(db, monitor_id, limit)
+    )

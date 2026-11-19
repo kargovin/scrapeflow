@@ -5,7 +5,16 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.pipelines.catalog import RunInputValue
-from app.schemas.monitors import MonitorRef
+
+MonitorState = Literal["active", "paused", "paused_itself"]
+# ADR-016 §2b; the first change gate's verdict.
+ChangeStatus = Literal["first_check", "no_baseline", "changed", "unchanged"]
+
+
+class MonitorRef(BaseModel):
+    id: uuid.UUID
+    name: str
+    state: MonitorState
 
 
 class PipelineCreate(BaseModel):
@@ -113,6 +122,9 @@ class PipelineRunSummary(BaseModel):
     failed_block_id: str | None = None
     # Non-null while running = undoing deliveries (PRD-017).
     rollback_deadline: datetime | None = None
+    # A monitor's check (ADR-016 §2b); null monitor_id = a hand-run, or its monitor was deleted.
+    monitor_id: uuid.UUID | None = None
+    change_status: ChangeStatus | None = None
 
 
 class PipelineRunAlert(BaseModel):
@@ -130,6 +142,21 @@ class PipelineRunAlert(BaseModel):
 class PipelineRunResponse(PipelineRunSummary):
     blocks: list[PipelineRunBlockResponse]
     alerts: list[PipelineRunAlert] = []
+    # The check this one was compared with; null with a change_status other than first_check
+    # (and no_baseline) = compared with a check since deleted.
+    baseline_run_id: uuid.UUID | None = None
+    # The bounded diff summaries, by the block that triggered each (ADR-016 §6a).
+    change_summary: dict[str, Any] | None = None
+    # Each carried input: {from: baseline|start, run_id | why}.
+    carried_sources: dict[str, Any] | None = None
+
+
+class PipelineRunDiffResponse(BaseModel):
+    """The full comparison a check stored for one block (ADR-016 §6a)."""
+
+    block_id: str
+    diff_path: str
+    diff: Any
 
 
 class AdminPipelineRunSummary(PipelineRunSummary):

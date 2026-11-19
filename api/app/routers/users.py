@@ -18,7 +18,7 @@ from app.models.llm_keys import UserLLMKey
 from app.models.monitor import Monitor
 from app.models.pipeline import PipelineVersion
 from app.models.user import User
-from app.schemas.monitors import MonitorRef
+from app.schemas.pipelines import MonitorRef
 from app.schemas.users import (
     ApiKeyCreate,
     ApiKeyCreatedResponse,

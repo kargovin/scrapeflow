@@ -11,6 +11,7 @@ from app.models.pipeline import Pipeline, PipelineRun
 from app.models.user import User
 from app.routers.pipelines import (
     latest_version_select,
+    load_run_diff,
     load_run_result,
     pipeline_response,
     run_alerts,
@@ -23,6 +24,7 @@ from app.schemas.pipelines import (
     AdminPipelineResponse,
     AdminPipelineRunResponse,
     AdminPipelineRunSummary,
+    PipelineRunDiffResponse,
     PipelineRunResultResponse,
 )
 
@@ -87,6 +89,7 @@ async def _admin_run(db: AsyncSession, pipeline_id: uuid.UUID, run_id: uuid.UUID
 async def admin_list_runs(
     pipeline_id: uuid.UUID,
     run_status: str | None = Query(default=None, alias="status"),
+    monitor_id: uuid.UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     _admin: User = Depends(get_current_admin_user),
@@ -95,6 +98,8 @@ async def admin_list_runs(
     stmt = runs_select().where(PipelineRun.pipeline_id == pipeline_id)
     if run_status is not None:
         stmt = stmt.where(PipelineRun.status == run_status)
+    if monitor_id is not None:
+        stmt = stmt.where(PipelineRun.monitor_id == monitor_id)
     rows = (await db.execute(stmt.limit(limit).offset(offset))).all()
     return [
         AdminPipelineRunSummary(**run_summary(run, version).model_dump(), user_id=run.user_id)
@@ -127,3 +132,16 @@ async def admin_get_run_result(
 ) -> PipelineRunResultResponse:
     run, _ = await _admin_run(db, pipeline_id, run_id)
     return await load_run_result(db, minio, run, block)
+
+
+@router.get("/{pipeline_id}/runs/{run_id}/diff", response_model=PipelineRunDiffResponse)
+async def admin_get_run_diff(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    block: str = Query(),
+    _admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+) -> PipelineRunDiffResponse:
+    run, _ = await _admin_run(db, pipeline_id, run_id)
+    return await load_run_diff(db, minio, run, block)

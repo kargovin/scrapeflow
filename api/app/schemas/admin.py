@@ -72,6 +72,10 @@ class OperationalStats(BaseModel):
     active_recurring_jobs_by_lane: dict[str, int]
     # v1 from its clock column, v2 from the cron (core/schedules.next_run).
     next_scheduled_run_at: datetime | None
+    # ADR-016 §12: monitors share the scheduled cap with jobs but are counted on their own.
+    active_monitors: int = 0
+    # Monitors that broke and stopped themselves (five failed checks in a row).
+    monitors_paused_itself: int = 0
 
 
 class HistoricalStats(BaseModel):

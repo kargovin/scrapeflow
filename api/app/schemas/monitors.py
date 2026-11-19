@@ -13,8 +13,9 @@ from pydantic import (
 )
 
 from app.pipelines.catalog import JsonPointer
+from app.schemas.pipelines import MonitorRef, MonitorState, PipelineRunSummary
 
-MonitorState = Literal["active", "paused", "paused_itself"]
+__all__ = ["MonitorRef", "MonitorState"]
 
 
 class CarriedInput(BaseModel):
@@ -108,7 +109,42 @@ class MonitorCreatedResponse(MonitorResponse):
     warnings: list[str] = []
 
 
-class MonitorRef(BaseModel):
+MonitorEventKind = Literal[
+    "skipped_monthly_runs",
+    "skipped_check_in_progress",
+    "skipped_pipelines_disabled",
+    "waiting_for_slot",
+    "gave_up_waiting",
+    "paused_itself",
+]
+
+
+class MonitorEventResponse(BaseModel):
+    """One situation (ADR-016 §7b): identical firings are one row with a count."""
+
     id: uuid.UUID
-    name: str
-    state: MonitorState
+    kind: MonitorEventKind
+    first_at: datetime
+    last_at: datetime
+    count: int
+    # Null while the situation is still going on.
+    ended_at: datetime | None
+    detail: dict[str, Any] | None
+
+
+class MonitorHistoryItem(BaseModel):
+    """A check or a situation, newest first; exactly one of the two is set."""
+
+    type: Literal["check", "event"]
+    at: datetime
+    check: PipelineRunSummary | None = None
+    event: MonitorEventResponse | None = None
+
+
+class AdminMonitorResponse(MonitorResponse):
+    user_id: uuid.UUID
+    user_email: str | None
+
+
+class AdminMonitorDetail(AdminMonitorResponse):
+    history: list[MonitorHistoryItem]

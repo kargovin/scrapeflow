@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -32,6 +33,7 @@ from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
 from app.models.monitor import Monitor
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
+from app.models.storage_object import StorageObject
 from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
 from app.pipelines.catalog import (
@@ -55,8 +57,8 @@ from app.pipelines.validator import (
     ValidatedPipeline,
     validate,
 )
-from app.schemas.monitors import MonitorRef
 from app.schemas.pipelines import (
+    MonitorRef,
     OutputState,
     PipelineCreate,
     PipelineResponse,
@@ -64,6 +66,7 @@ from app.schemas.pipelines import (
     PipelineRunBlockResponse,
     PipelineRunCancelResponse,
     PipelineRunCreate,
+    PipelineRunDiffResponse,
     PipelineRunResponse,
     PipelineRunResultResponse,
     PipelineRunSummary,
@@ -563,6 +566,8 @@ def run_summary(run: PipelineRun, version: int) -> PipelineRunSummary:
         stop_reason=run.stop_reason,
         failed_block_id=run.failed_block_id,
         rollback_deadline=run.rollback_deadline,
+        monitor_id=run.monitor_id,
+        change_status=run.change_status,
     )
 
 
@@ -574,6 +579,9 @@ def run_response(
 ) -> PipelineRunResponse:
     return PipelineRunResponse(
         **run_summary(run, version).model_dump(),
+        baseline_run_id=run.baseline_run_id,
+        change_summary=run.change_summary,
+        carried_sources=run.carried_sources,
         alerts=[
             PipelineRunAlert(
                 block_id=a.block_id,
@@ -922,6 +930,7 @@ async def list_runs(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     run_status: str | None = Query(default=None, alias="status"),
+    monitor_id: uuid.UUID | None = Query(default=None, description="One monitor's checks"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[PipelineRunSummary]:
@@ -930,6 +939,8 @@ async def list_runs(
     )
     if run_status is not None:
         stmt = stmt.where(PipelineRun.status == run_status)
+    if monitor_id is not None:
+        stmt = stmt.where(PipelineRun.monitor_id == monitor_id)
     rows = (await db.execute(stmt.limit(limit).offset(offset))).all()
     return [run_summary(run, version) for run, version in rows]
 
@@ -1000,6 +1011,55 @@ async def get_run_result(
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return await load_run_result(db, minio, run, block)
+
+
+async def load_run_diff(
+    db: AsyncSession, minio: Minio, run: PipelineRun, block_id: str
+) -> PipelineRunDiffResponse:
+    """The ``diff.json`` a check stored on ``block_id`` (ADR-016 §6a); it is never recomputed —
+    the baseline's copy may be gone. The caller has authorized ``run``."""
+    path = await db.scalar(
+        select(StorageObject.object_key)
+        .join(PipelineRunBlock, PipelineRunBlock.id == StorageObject.pipeline_run_block_id)
+        .where(
+            PipelineRunBlock.pipeline_run_id == run.id,
+            PipelineRunBlock.block_id == block_id,
+            StorageObject.object_key.like("%/diff.json"),
+        )
+    )
+    if path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="This block stored no comparison"
+        )
+    bucket, _, key = path.partition("/")
+    try:
+        response = await minio.get_object(bucket, key)
+        content = await response.read()
+        response.close()
+        await response.release()
+    except S3Error as exc:
+        if exc.code != "NoSuchKey":
+            raise
+        logger.error("pipeline_diff_missing", run_id=str(run.id), path=path)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="The stored comparison is missing"
+        ) from None
+    return PipelineRunDiffResponse(block_id=block_id, diff_path=path, diff=json.loads(content))
+
+
+@router.get("/{pipeline_id}/runs/{run_id}/diff", response_model=PipelineRunDiffResponse)
+async def get_run_diff(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    block: str = Query(description="The block whose comparison to read: a gate or an LLM block"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+) -> PipelineRunDiffResponse:
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id))
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return await load_run_diff(db, minio, run, block)
 
 
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})

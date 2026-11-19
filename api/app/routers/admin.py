@@ -566,7 +566,14 @@ async def _build_operational_stats(
     now = datetime.now(UTC)
     next_runs = [t for t in (schedules.next_run(job, now) for job in active_schedules) if t]
 
+    monitor_states = select(Monitor.state, func.count()).group_by(Monitor.state)
+    if user_id is not None:
+        monitor_states = monitor_states.where(Monitor.user_id == user_id)
+    by_state = dict((await db.execute(monitor_states)).all())
+
     return OperationalStats(
+        active_monitors=by_state.get("active", 0),
+        monitors_paused_itself=by_state.get("paused_itself", 0),
         jobs_running=jobs_running,
         jobs_pending=jobs_pending,
         jobs_by_engine=jobs_by_engine,

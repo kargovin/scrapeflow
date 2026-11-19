@@ -1167,3 +1167,223 @@ async def test_check_now_is_owner_scoped_and_off_when_switched_off(
     async with AsyncSessionLocal() as db:
         await db.execute(delete(Monitor).where(Monitor.id == uuid.UUID(monitor["id"])))
         await db.commit()
+
+
+# --- L.10: reads and admin -----------------------------------------------------------------
+
+
+class _Body:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def read(self):
+        return self.data
+
+    def close(self):
+        pass
+
+    async def release(self):
+        pass
+
+
+class ReadingMinio:
+    def __init__(self, objects: dict[str, bytes]):
+        self.objects = objects
+
+    async def get_object(self, bucket, key):
+        from miniopy_async.error import S3Error
+
+        path = f"{bucket}/{key}"
+        if path not in self.objects:
+            raise S3Error("NoSuchKey", "gone", path, "r", "h", MagicMock())
+        return _Body(self.objects[path])
+
+
+@pytest.fixture
+def admin():
+    from app.auth.dependencies import get_current_admin_user
+
+    app.dependency_overrides[get_current_admin_user] = lambda: MagicMock(id=uuid.uuid4())
+    yield
+    app.dependency_overrides.pop(get_current_admin_user, None)
+
+
+async def _checked(client, headers, key):
+    """A monitor with one finished check that changed, compared with an earlier one."""
+    from app.models.pipeline import PipelineRun
+
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    baseline, _ = await _check_run(monitor)
+    run_id, _ = await _check_run(monitor)
+    summary = {"gate": {"status": "ok", "kind": "page", "lines": ["-a", "+b"]}}
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == run_id)
+            .values(
+                baseline_run_id=baseline,
+                change_status="changed",
+                change_summary=summary,
+                carried_sources={"last_price": {"from": "start", "why": "no earlier check"}},
+            )
+        )
+        await db.commit()
+    return pipeline, monitor, baseline, run_id, summary
+
+
+async def test_a_checks_read_carries_its_verdict_and_where_it_came_from(
+    client, headers, key, temporal, admin
+):
+    pipeline, monitor, baseline, run_id, summary = await _checked(client, headers, key)
+
+    for url in (
+        f"/pipelines/{pipeline['id']}/runs/{run_id}",
+        f"/admin/pipelines/{pipeline['id']}/runs/{run_id}",
+    ):
+        body = (await client.get(url, headers=headers)).json()
+        assert body["monitor_id"] == monitor["id"]
+        assert (body["baseline_run_id"], body["change_status"]) == (str(baseline), "changed")
+        assert body["change_summary"] == summary
+        assert body["carried_sources"]["last_price"]["from"] == "start"
+
+
+async def test_the_run_list_filters_to_one_monitors_checks(client, headers, key, temporal):
+    pipeline, monitor, _, run_id, _ = await _checked(client, headers, key)
+    other = await _monitor(client, headers, _body(pipeline, name="other"))
+    await _check_run(other)
+    url = f"/pipelines/{pipeline['id']}/runs"
+
+    everything = (await client.get(url, headers=headers)).json()
+    mine = (await client.get(url, params={"monitor_id": monitor["id"]}, headers=headers)).json()
+
+    assert len(everything) == 3 and len(mine) == 2
+    assert {r["monitor_id"] for r in mine} == {monitor["id"]}
+    assert next(r for r in mine if r["id"] == str(run_id))["change_status"] == "changed"
+
+
+async def test_the_diff_read_returns_the_stored_comparison(
+    client, headers, key, temporal, admin, other_user
+):
+    from app.core.minio import get_minio
+    from app.workflows.activities.contracts import StoredObject
+    from app.workflows.activities.db import record_storage
+    from app.workflows.pipeline import RecordStorageInput
+
+    pipeline, _, _, run_id, _ = await _checked(client, headers, key)
+    path = f"scrapeflow-results/history/{uuid.uuid4()}/diff.json"
+    await record_storage(
+        RecordStorageInput(
+            run_id=str(run_id), block_id="fetch", objects=[StoredObject(path=path, size=20)]
+        )
+    )
+    store = ReadingMinio({path: b'{"lines": ["-a", "+b"]}'})
+    app.dependency_overrides[get_minio] = lambda: store
+    try:
+        url = f"/pipelines/{pipeline['id']}/runs/{run_id}/diff"
+        resp = await client.get(url, params={"block": "fetch"}, headers=headers)
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "block_id": "fetch",
+            "diff_path": path,
+            "diff": {"lines": ["-a", "+b"]},
+        }
+        admin_url = f"/admin/pipelines/{pipeline['id']}/runs/{run_id}/diff"
+        assert (await client.get(admin_url, params={"block": "fetch"})).status_code == 200
+        # A block that stored no comparison, and a comparison gone from storage.
+        assert (
+            await client.get(url, params={"block": "clean"}, headers=headers)
+        ).status_code == 404
+        store.objects.clear()
+        resp = await client.get(url, params={"block": "fetch"}, headers=headers)
+        assert (resp.status_code, resp.json()["detail"]) == (
+            404,
+            "The stored comparison is missing",
+        )
+        # Another user's run: 404 before storage is read.
+        from app.models.pipeline import PipelineRun
+
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                update(PipelineRun).where(PipelineRun.id == run_id).values(user_id=other_user.id)
+            )
+            await db.commit()
+        assert (
+            await client.get(url, params={"block": "fetch"}, headers=headers)
+        ).status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_minio, None)
+
+
+async def test_the_history_merges_checks_and_counted_situations_newest_first(
+    client, headers, key, temporal, admin, other_user
+):
+    _, monitor, baseline, run_id, _ = await _checked(client, headers, key)
+    later = datetime.now(UTC) + timedelta(minutes=1)
+    async with AsyncSessionLocal() as db:
+        db.add(
+            MonitorEvent(
+                monitor_id=uuid.UUID(monitor["id"]),
+                kind="skipped_monthly_runs",
+                first_at=later,
+                last_at=later + timedelta(days=21),
+                count=216,
+                ended_at=later + timedelta(days=21, minutes=5),
+                detail={"resets_at": "2026-12-01T00:00:00+00:00"},
+            )
+        )
+        await db.commit()
+
+    history = (await client.get(f"/monitors/{monitor['id']}/history", headers=headers)).json()
+
+    assert [i["type"] for i in history] == ["event", "check", "check"]
+    assert (history[0]["event"]["kind"], history[0]["event"]["count"]) == (
+        "skipped_monthly_runs",
+        216,
+    )
+    assert [i["check"]["id"] for i in history[1:]] == [str(run_id), str(baseline)]
+    assert history[1]["check"]["change_status"] == "changed"
+    limited = await client.get(f"/monitors/{monitor['id']}/history?limit=1", headers=headers)
+    assert [i["type"] for i in limited.json()] == ["event"]
+
+    detail = (await client.get(f"/admin/monitors/{monitor['id']}")).json()
+    assert detail["user_email"] is not None and len(detail["history"]) == 3
+    listed = (await client.get("/admin/monitors", params={"state": "active"})).json()
+    assert monitor["id"] in [m["id"] for m in listed]
+    assert (await client.get(f"/admin/monitors/{uuid.uuid4()}")).status_code == 404
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Monitor)
+            .where(Monitor.id == uuid.UUID(monitor["id"]))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+    assert (
+        await client.get(f"/monitors/{monitor['id']}/history", headers=headers)
+    ).status_code == 404
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Monitor).where(Monitor.id == uuid.UUID(monitor["id"])))
+        await db.commit()
+
+
+async def test_operational_stats_count_active_and_self_paused_monitors(
+    client, headers, key, db_user, temporal, admin
+):
+    pipeline = await _pipeline(client, headers, gated(key.id))
+    await _monitor(client, headers, _body(pipeline, name="a"))
+    broken = await _monitor(client, headers, _body(pipeline, name="b"))
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Monitor)
+            .where(Monitor.id == uuid.UUID(broken["id"]))
+            .values(state="paused_itself")
+        )
+        await db.commit()
+
+    stats = (await client.get(f"/admin/stats/users/{db_user.id}")).json()
+
+    assert (
+        stats["operational"]["active_monitors"],
+        stats["operational"]["monitors_paused_itself"],
+    ) == (1, 1)
