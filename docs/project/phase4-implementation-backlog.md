@@ -3593,7 +3593,10 @@ Rollback tags: api `main-1795065601-a10f698c4101ce563b55ffa05932a443cc606e02`, L
 `main-1795018842-036870c52f7f22c813f81619b655dd8d9496990e`.
 
 **Step 1 (owner, 2026-11-19):** `main` ff `a10f698..c46edb4`, pushed. CI run `44582316601`: `replay`, `build-api`,
-`build-llm-worker` green; http and playwright skipped.
+`build-llm-worker` green; http and playwright skipped. Rolled out: api
+`main-1795110955-c46edb46f783f216eee40cbaf57a5b2ae6252e7d`, LLM worker
+`main-1795110937-c46edb46f783f216eee40cbaf57a5b2ae6252e7d`; `alembic_version` = **`c23f1f27522b`**; the four columns
+gone (0 rows); `quota_active_submissions` reads (0).
 
 **Rollback:** prefer a forward fix. An image revert (api, workflow-worker, CronJob, `llm-worker-temporal` to step 0's tags) leaves
 4.11 applied — harmless, J-b's code maps none of the four columns. The revert loses only the deletes. Do not downgrade
