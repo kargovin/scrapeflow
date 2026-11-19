@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.diff import DiffResult
 from app.models.batch import Batch
 from app.models.crawl import Crawl
 from app.models.job import Job
@@ -26,14 +25,12 @@ async def create_webhook_delivery(
     run_id: uuid.UUID,
     event: str,
     minio_path: str | None,
-    diff: DiffResult | None = None,
     error: str | None = None,
 ) -> None:
     """Add a pending WebhookDelivery row to the session.
 
     event      — "job.completed" or "job.failed"
     minio_path — history/ path of the result; None for failed events
-    diff       — DiffResult from compute_text_diff / compute_json_diff; None on first run
     error      — error message; only included in the payload when event="job.failed"
 
     Uses ON CONFLICT DO NOTHING against idx_webhook_deliveries_dedup so a retried
@@ -44,8 +41,9 @@ async def create_webhook_delivery(
         "job_id": str(job.id),
         "run_id": str(run_id),
         "result_path": minio_path,
-        "diff_detected": diff.detected if diff is not None else None,
-        "diff_summary": diff.summary if diff is not None else None,
+        # Jobs keep no change detection (ADR-016 §14); the fields stay, always null.
+        "diff_detected": None,
+        "diff_summary": None,
         "timestamp": datetime.now(UTC).isoformat(),
     }
     if error is not None:

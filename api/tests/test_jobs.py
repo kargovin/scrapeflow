@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select
 
 from app.core.db import AsyncSessionLocal
 from app.main import app
@@ -99,16 +99,10 @@ async def test_get_job_own(client, auth_headers, mock_temporal):
 
 
 async def test_job_reads_show_no_change_detection(client, auth_headers, mock_temporal):
-    """diff_detected is always null, even on a run row that still holds a value."""
+    """diff_detected is always null (ADR-016 §14)."""
     created = (
         await client.post("/jobs", json={"url": "https://example.com"}, headers=auth_headers)
     ).json()
-    async with AsyncSessionLocal() as db:
-        await db.execute(
-            text("UPDATE job_runs SET diff_detected = true WHERE id = :id"),
-            {"id": uuid.UUID(created["run_id"])},
-        )
-        await db.commit()
 
     one = (await client.get(f"/jobs/{created['id']}", headers=auth_headers)).json()
     [listed] = [
