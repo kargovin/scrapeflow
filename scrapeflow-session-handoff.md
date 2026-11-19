@@ -174,8 +174,7 @@ status table lists its commits and my calls. **Order to replay:**
 - **J.10** `ac3c1ef` — the gate harness (fixture: shop + stand-in LLM + receiver; `scripts/pipeline_gate.py`; four
   compose histories). 42/42; worker kill and could-not-start by hand. Runbook in the backlog's J.10 section.
 - **Numbers:** suite 930, replay 51, mutation checks per task (all killed after two tests were tightened).
-- **Git:** `main` = `036870c` (deployed, unchanged). `develop` = 16 ahead of `origin/develop` + this closeout, **not
-  pushed**. Infra untouched. Compose up, with `pipeline-fixture` (profile `gate`). `tmp/` untracked, not mine.
+- **Git (at build close; superseded by the release entry above):** `main` was `036870c`; `develop` 16 ahead, not pushed.
 - **Next:** **J.10 is the owner's** — the runbook (push `develop`, ff `main`, migration 4.10 on startup, SPA checks).
   Then **K.1** (BUG-031: delete a run, permanent pipeline delete; the mirrors read a missing run as `cancelled`).
 
@@ -2036,7 +2035,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
-- **2026-11-19 (J-b release close):** `main` = `origin/main` = `a10f698` (**deployed**); `develop` = `main` + the release record commits, pushed by the owner up to `a10f698`, the rest **not pushed**. Infra: Flux's tag bumps only. Compose up with `pipeline-fixture`.
+- **2026-11-19 (J-b release close):** `main` = `origin/main` = `a10f698` (**deployed**); `develop` = `main` + the release record commits, pushed by the owner up to `a10f698`, the rest **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose --profile gate down`; volumes kept) — bring the gate fixture back with `docker compose --profile gate up -d pipeline-fixture`.
 - **2026-11-19 (J.5–J.10 delegated build close):** `develop` = `c595f41` + this closeout, 17 ahead of `origin/develop` (`f4ff446`), **not pushed**; `main` = `origin/main` = `036870c` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-016 accepted, session close):** `develop` = `9808684` (ADR-016 accepted) + this closeout, 22 ahead of `origin/develop` (`b8c3900`), **not pushed**; `main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
 - **2026-11-18 (ADR-015 review + acceptance close):** `develop` = `86bfae6`, 6 ahead of `origin/develop` (`b8c3900`), **not pushed** — includes BUG-024's fix `57bb301` (code, unreleased); `main` = `origin/main` = `eea8344` (deployed). Infra untouched. `tmp/` untracked, pre-existing.
