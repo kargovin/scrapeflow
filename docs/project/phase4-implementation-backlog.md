@@ -3860,6 +3860,12 @@ monitors; `quota_active_submissions` reads.
 **Step 3 (owner, 2026-11-20):** two scheduled firings — `first_check` (kept copy), then `unchanged` (stopped at
 `gate`, no copy); **one** webhook message.
 
+**Step 4 (owner, 2026-11-20):** `l-changing` (httpbin `/uuid`): three Check nows, three messages — 511 bytes
+(`first_check`, no summary), then 839 and 839 (`changed`, each with the uuid diff). The checks ran one after another
+(a check takes ~4 s; the second found the first as its baseline, so it had finished), so the 409 was not reached there.
+Re-run on `l-slow` (httpbin `/delay/8`): **`202` then `409`** `check_in_progress`. ⚠️ Runbook note: Check now's
+overlap test needs a slow page.
+
 **Rollback:** prefer a forward fix. Before an image revert (api, workflow-worker, CronJob to step 0's tag), **delete
 every monitor** (their Schedules would fire into a workflow type the old worker does not have). The revert leaves 4.12
 applied — harmless, K's code maps none of its tables or columns. Do not downgrade the migration.
