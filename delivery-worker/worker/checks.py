@@ -61,7 +61,8 @@ async def test_webhook(inp: DestinationTestInput) -> DestinationTestOutput:
         return DestinationTestOutput(checks=[_failed("address", "URL has an invalid port")])
 
     try:
-        await egress.tls_handshake(host, port)
+        async with asyncio.timeout(TEST_SECONDS):
+            await egress.tls_handshake(host, port)
     except egress.EgressBlocked as exc:
         return DestinationTestOutput(checks=[_failed("address", str(exc))])
     except egress.CertificateMismatch as exc:

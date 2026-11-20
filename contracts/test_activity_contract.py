@@ -664,6 +664,7 @@ def test_the_delivery_worker_registers_the_names_and_queue_the_api_calls():
     assert delivery.DELIVER_BUCKET_ACTIVITY == api.DELIVER_BUCKET_ACTIVITY
     assert delivery.UNDO_BUCKET_ACTIVITY == api.UNDO_BUCKET_ACTIVITY
     assert delivery.TEST_SMTP_ACTIVITY == api.TEST_SMTP_ACTIVITY
+    assert delivery.TEST_POSTGRES_ACTIVITY == api.TEST_POSTGRES_ACTIVITY
     assert delivery.SEND_EMAIL_ACTIVITY == api.SEND_EMAIL_ACTIVITY
 
 

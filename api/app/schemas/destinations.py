@@ -196,32 +196,54 @@ def display_host(url: str) -> str:
 Name = Annotated[str, Field(min_length=1, max_length=100)]
 
 
-class _Create(_Strict):
-    name: Name
-
-
-class BucketCreate(_Create):
+class BucketForm(_Strict):
     kind: Literal["bucket"]
     address: BucketAddress
     secret: BucketSecret
+    # Optional on a test (the SPA sends the form it is about to save); required to create.
+    name: Name | None = None
 
 
-class PostgresCreate(_Create):
+class PostgresForm(_Strict):
     kind: Literal["postgres"]
     address: PostgresAddress
     secret: LoginSecret
+    name: Name | None = None
 
 
-class SmtpCreate(_Create):
+class SmtpForm(_Strict):
     kind: Literal["smtp"]
     address: SmtpAddress
     secret: LoginSecret
+    name: Name | None = None
 
 
-class WebhookCreate(_Create):
+class WebhookForm(_Strict):
     kind: Literal["webhook"]
     address: WebhookAddress = Field(default_factory=WebhookAddress)
     secret: WebhookSecret
+    name: Name | None = None
+
+
+DestinationForm = Annotated[
+    BucketForm | PostgresForm | SmtpForm | WebhookForm, Field(discriminator="kind")
+]
+
+
+class BucketCreate(BucketForm):
+    name: Name
+
+
+class PostgresCreate(PostgresForm):
+    name: Name
+
+
+class SmtpCreate(SmtpForm):
+    name: Name
+
+
+class WebhookCreate(WebhookForm):
+    name: Name
 
 
 DestinationCreate = Annotated[
@@ -251,6 +273,25 @@ class DestinationResponse(BaseModel):
     display_host: str
     created_at: datetime
     updated_at: datetime
+
+
+class DestinationCheck(BaseModel):
+    check: str
+    outcome: Literal["passed", "failed", "warning"]
+    message: str | None = None
+
+
+class DestinationTestResult(BaseModel):
+    """ADR-015 §2d: each check run, in order; a failed check ends the test. Never stored."""
+
+    # No check failed: a warning (a bucket that refused the delete) still saves.
+    passed: bool
+    checks: list[DestinationCheck]
+
+
+class DestinationSavedResponse(DestinationResponse):
+    # None: an edit that changed neither the address nor the secret runs no test.
+    test: DestinationTestResult | None = None
 
 
 class AdminDestinationResponse(DestinationResponse):

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import ssl
 
@@ -83,3 +84,15 @@ async def test_the_wrong_kind_is_final():
     with pytest.raises(ApplicationError) as exc:
         await _run(_input("https://hooks.example.com/", kind="bucket"))
     assert (exc.value.type, exc.value.non_retryable) == ("DestinationKind", True)
+
+
+async def test_a_handshake_past_the_test_deadline_is_a_tls_failure(monkeypatch):
+    async def slow(host, port, context=None):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(egress, "tls_handshake", slow)
+    monkeypatch.setattr(checks, "TEST_SECONDS", 0.05)
+    assert await _run(_input("https://hooks.example.com/in")) == [
+        ("address", "passed", None),
+        ("tls", "failed", "could not connect to hooks.example.com:443 (TimeoutError)"),
+    ]

@@ -232,6 +232,7 @@ TEST_BUCKET_ACTIVITY = "TestBucket"
 DELIVER_BUCKET_ACTIVITY = "DeliverBucket"
 UNDO_BUCKET_ACTIVITY = "UndoBucket"
 TEST_SMTP_ACTIVITY = "TestSmtp"
+TEST_POSTGRES_ACTIVITY = "TestPostgres"
 SEND_EMAIL_ACTIVITY = "SendEmail"
 
 # One attempt's start_to_close (ADR-015 §6); the worker gives up a few seconds sooner.

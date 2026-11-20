@@ -15,6 +15,7 @@ from temporalio.worker import Replayer
 
 from app.workflows.batch import BatchWorkflow
 from app.workflows.crawl import CrawlWorkflow
+from app.workflows.destination_test import DestinationTestWorkflow
 from app.workflows.job import JobWorkflow
 from app.workflows.monitor_check import MonitorCheckWorkflow
 from app.workflows.pipeline import PipelineWorkflow
@@ -39,6 +40,7 @@ async def test_history_replays_on_current_code(path: Path):
             CrawlWorkflow,
             ScheduledJobWorkflow,
             MonitorCheckWorkflow,
+            DestinationTestWorkflow,
             WebhookDeliveryWorkflow,
             WebhookSweepWorkflow,
         ],

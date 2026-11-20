@@ -14,6 +14,14 @@ from app.workflows.job import RECORD_JOB_OBJECTS_ACTIVITY, JobLLM
 from app.workflows.pipeline import OUTPUTS_LEFT_ERROR, RUN_CANCELLED_ERROR, StorageUsage
 from app.workflows.steps import HostSlot
 from tests.replay.export_history import HISTORIES
+from tests.test_destination_tests import (
+    BUCKET_DELETE_REFUSED,
+    BUCKET_PASSED,
+    SMTP_LOGIN_FAILED,
+    _secret_unreadable,
+    form_input,
+)
+from tests.test_destination_tests import Harness as DestinationTestHarness
 from tests.test_email_deliveries import Harness as EmailHarness
 from tests.test_email_deliveries import _final, _transient
 from tests.test_workflows_batch import Harness as BatchHarness
@@ -287,6 +295,22 @@ EMAIL_SCENARIOS = {
 }
 
 
+async def _test_overruns(input):
+    await asyncio.sleep(3600)
+
+
+# M.5 — DestinationTestWorkflow: what the delivery queue answers, and the kind tested.
+DESTINATION_TEST_SCENARIOS = {
+    "harness_destination_test_bucket_passed": (BUCKET_PASSED, "bucket"),
+    "harness_destination_test_delete_warning": (BUCKET_DELETE_REFUSED, "bucket"),
+    "harness_destination_test_smtp_login_failed": (SMTP_LOGIN_FAILED, "smtp"),
+    "harness_destination_test_raised": (_secret_unreadable, "webhook"),
+    "harness_destination_test_postgres_not_registered": (BUCKET_PASSED, "postgres"),
+    # Real time: the test server fires start_to_close after the full 25 s.
+    "harness_destination_test_timed_out": (_test_overruns, "bucket"),
+}
+
+
 async def main() -> None:
     runs = [(name, Harness, kwargs, run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
     runs += [(name, JobHarness, kwargs, None) for name, kwargs in JOB_SCENARIOS.items()]
@@ -333,6 +357,14 @@ async def main() -> None:
             continue
         h = EmailHarness(sends)
         await h.run()
+        path.write_text(h.history.to_json() + "\n")
+        print(path)
+    for name, (play, kind) in DESTINATION_TEST_SCENARIOS.items():
+        path = HISTORIES / f"{name}.json"
+        if path.exists():
+            continue
+        h = DestinationTestHarness(play)
+        await h.run(form_input(kind))
         path.write_text(h.history.to_json() + "\n")
         print(path)
     for name, (setup, batch_input) in BATCH_SCENARIOS.items():

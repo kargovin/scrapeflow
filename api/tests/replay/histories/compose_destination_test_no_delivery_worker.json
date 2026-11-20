@@ -1,0 +1,231 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-11-20T17:27:08.058552257Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "taskId": "14680445",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "DestinationTestWorkflow"
+        },
+        "taskQueue": {
+          "name": "workflow",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJraW5kIjoic210cCIsImFkZHJlc3MiOnsiaG9zdCI6Im1haWwuZGVzdGZpeHR1cmUuY29tIiwicG9ydCI6MjU4NywidGxzX21vZGUiOiJzdGFydHRscyIsImZyb20iOiJhbGVydHNAZXhhbXBsZS5vcmciLCJ0byI6WyJvcHNAZXhhbXBsZS5vcmciXSwiY2FfY2VydGlmaWNhdGUiOiItLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS1cbk1JSUJaekNDQVE2Z0F3SUJBZ0lVVHdpSGNsUThJU1NKWERDQ3MwRzVLV3J1MzVNd0NnWUlLb1pJemowRUF3SXdcbkVqRVFNQTRHQTFVRUF3d0hkR1Z6ZENCallUQWVGdzB5TmpFeE1qQXhOekl3TlRGYUZ3MHlOakV4TWpBeE9ESTFcbk5URmFNQkl4RURBT0JnTlZCQU1NQjNSbGMzUWdZMkV3V1RBVEJnY3Foa2pPUFFJQkJnZ3Foa2pPUFFNQkJ3TkNcbkFBUzhBYXRLbXNPbHQvVTdGUGpZeG9TYzQzbWt2T3FOck1ESlM2aFJCUTY1V1BPM2Y1UERFQlRuWmJjV2pLVUZcbkx0VTV4VEQ0UElqMTZmTmIvckVCNWhZbW8wSXdRREFQQmdOVkhSTUJBZjhFQlRBREFRSC9NQTRHQTFVZER3RUJcbi93UUVBd0lCaGpBZEJnTlZIUTRFRmdRVUxLb0l2ZDkzamdLRG5sVlZxS0ZIQXdKTUkxa3dDZ1lJS29aSXpqMEVcbkF3SURSd0F3UkFJZ1JuTXpycnk5UlFDQzFZZ0paNGF6NStSY2NSblYwdGI1M0lBSnJURDVDYUlDSUF1VVlXblFcblRvTEprdzJRNHQ3RWUyVUhTR3ZuR1RlVnY1dytYWXIwZlVvQVxuLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLVxuIn0sImVuY3J5cHRlZF9zZWNyZXQiOiJnQUFBQUFCckFJTHNpM2xTcDhOWWNEUElUM21fVzhQVzNrMHlHZFF4MXl3OEtIVElyLW5xVFk4cExYTXloTl9RblRGSG1rOUd3ODJlVVRvcmctaVdwT1R6a2lITXhoVkNkdDllX08taGRSQklFNVhNa0VsSW1ER1VCR1NxLXpiYmNkSHRTZzJjSmdUayJ9"
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "60s",
+        "workflowRunTimeout": "60s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "01a1f9ff-6a1a-7868-8c6f-e1caa397981f",
+        "identity": "16116@477c7d626eb2",
+        "firstExecutionRunId": "01a1f9ff-6a1a-7868-8c6f-e1caa397981f",
+        "attempt": 1,
+        "workflowExecutionExpirationTime": "2026-11-20T17:28:08.058Z",
+        "firstWorkflowTaskBackoff": "0s",
+        "workflowId": "destination-test-dce5cabd-e8f3-41e6-8293-10004fdb4bac",
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-11-20T17:27:08.058621701Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "14680446",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "workflow",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-11-20T17:27:08.080839432Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "14680452",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "1@4b3b3dc2dbcb",
+        "requestId": "55ceb18d-9c96-4e2a-9add-e360d2969a69",
+        "historySizeBytes": "1218",
+        "workerVersion": {
+          "buildId": "50b81a4fc3fa875faf700ed1d54aa3af"
+        }
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-11-20T17:27:08.099020220Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "14680456",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "startedEventId": "3",
+        "identity": "1@4b3b3dc2dbcb",
+        "workerVersion": {
+          "buildId": "50b81a4fc3fa875faf700ed1d54aa3af"
+        },
+        "sdkMetadata": {
+          "coreUsedFlags": [
+            2,
+            3,
+            1
+          ],
+          "sdkName": "temporal-python",
+          "sdkVersion": "1.33.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-11-20T17:27:08.099076254Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "14680457",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "1",
+        "activityType": {
+          "name": "TestSmtp"
+        },
+        "taskQueue": {
+          "name": "delivery",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJraW5kIjoic210cCIsImFkZHJlc3MiOnsiaG9zdCI6Im1haWwuZGVzdGZpeHR1cmUuY29tIiwicG9ydCI6MjU4NywidGxzX21vZGUiOiJzdGFydHRscyIsImZyb20iOiJhbGVydHNAZXhhbXBsZS5vcmciLCJ0byI6WyJvcHNAZXhhbXBsZS5vcmciXSwiY2FfY2VydGlmaWNhdGUiOiItLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS1cbk1JSUJaekNDQVE2Z0F3SUJBZ0lVVHdpSGNsUThJU1NKWERDQ3MwRzVLV3J1MzVNd0NnWUlLb1pJemowRUF3SXdcbkVqRVFNQTRHQTFVRUF3d0hkR1Z6ZENCallUQWVGdzB5TmpFeE1qQXhOekl3TlRGYUZ3MHlOakV4TWpBeE9ESTFcbk5URmFNQkl4RURBT0JnTlZCQU1NQjNSbGMzUWdZMkV3V1RBVEJnY3Foa2pPUFFJQkJnZ3Foa2pPUFFNQkJ3TkNcbkFBUzhBYXRLbXNPbHQvVTdGUGpZeG9TYzQzbWt2T3FOck1ESlM2aFJCUTY1V1BPM2Y1UERFQlRuWmJjV2pLVUZcbkx0VTV4VEQ0UElqMTZmTmIvckVCNWhZbW8wSXdRREFQQmdOVkhSTUJBZjhFQlRBREFRSC9NQTRHQTFVZER3RUJcbi93UUVBd0lCaGpBZEJnTlZIUTRFRmdRVUxLb0l2ZDkzamdLRG5sVlZxS0ZIQXdKTUkxa3dDZ1lJS29aSXpqMEVcbkF3SURSd0F3UkFJZ1JuTXpycnk5UlFDQzFZZ0paNGF6NStSY2NSblYwdGI1M0lBSnJURDVDYUlDSUF1VVlXblFcblRvTEprdzJRNHQ3RWUyVUhTR3ZuR1RlVnY1dytYWXIwZlVvQVxuLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLVxuIn0sImVuY3J5cHRlZF9zZWNyZXQiOiJnQUFBQUFCckFJTHNpM2xTcDhOWWNEUElUM21fVzhQVzNrMHlHZFF4MXl3OEtIVElyLW5xVFk4cExYTXloTl9RblRGSG1rOUd3ODJlVVRvcmctaVdwT1R6a2lITXhoVkNkdDllX08taGRSQklFNVhNa0VsSW1ER1VCR1NxLXpiYmNkSHRTZzJjSmdUayJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "60s",
+        "scheduleToStartTimeout": "4s",
+        "startToCloseTimeout": "25s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "4",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s",
+          "maximumAttempts": 1
+        },
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-11-20T17:27:12.103935982Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT",
+      "taskId": "14680462",
+      "activityTaskTimedOutEventAttributes": {
+        "failure": {
+          "message": "activity ScheduleToStart timeout",
+          "source": "Server",
+          "timeoutFailureInfo": {
+            "timeoutType": "TIMEOUT_TYPE_SCHEDULE_TO_START"
+          }
+        },
+        "scheduledEventId": "5",
+        "retryState": "RETRY_STATE_TIMEOUT"
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-11-20T17:27:12.103975315Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "14680463",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "1@4b3b3dc2dbcb-d821e5b3198c416cb500c6b0d871244e",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "workflow"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-11-20T17:27:12.134971307Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "14680467",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "7",
+        "identity": "1@4b3b3dc2dbcb",
+        "requestId": "562dc43d-6310-4348-9ee7-18e02474ef74",
+        "historySizeBytes": "2642",
+        "workerVersion": {
+          "buildId": "50b81a4fc3fa875faf700ed1d54aa3af"
+        }
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-11-20T17:27:12.175810459Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "14680471",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "7",
+        "startedEventId": "8",
+        "identity": "1@4b3b3dc2dbcb",
+        "workerVersion": {
+          "buildId": "50b81a4fc3fa875faf700ed1d54aa3af"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-11-20T17:27:12.175888444Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED",
+      "taskId": "14680472",
+      "workflowExecutionFailedEventAttributes": {
+        "failure": {
+          "message": "no delivery worker took the test; try again",
+          "stackTrace": "  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 2750, in _run_top_level_workflow_function\n    await coro\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 1153, in run_workflow\n    result = await self._inbound.execute_workflow(input)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 3144, in execute_workflow\n    return await input.run_fn(*args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/destination_test.py\", line 64, in run\n    return DestinationTestOutput(checks=[failed_test(input.kind, exc.cause)])\n                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/app/workflows/destination_test.py\", line 71, in failed_test\n    raise ApplicationError(\n",
+          "cause": {
+            "message": "Activity task timed out",
+            "cause": {
+              "message": "activity ScheduleToStart timeout",
+              "source": "Server",
+              "timeoutFailureInfo": {
+                "timeoutType": "TIMEOUT_TYPE_SCHEDULE_TO_START"
+              }
+            },
+            "activityFailureInfo": {
+              "scheduledEventId": "5",
+              "activityType": {
+                "name": "TestSmtp"
+              },
+              "activityId": "1",
+              "retryState": "RETRY_STATE_TIMEOUT"
+            }
+          },
+          "applicationFailureInfo": {
+            "type": "DestinationTestUnavailable",
+            "nonRetryable": true
+          }
+        },
+        "retryState": "RETRY_STATE_RETRY_POLICY_NOT_SET",
+        "workflowTaskCompletedEventId": "9"
+      }
+    }
+  ]
+}

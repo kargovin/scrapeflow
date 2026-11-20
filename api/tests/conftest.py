@@ -20,10 +20,21 @@ from app.models.user import User
 from app.routers.batch import check_batch_quota
 from app.routers.crawls import check_crawl_quota
 from app.routers.jobs import check_job_quota
+from app.workflows.activities.contracts import CheckResult, DestinationTestOutput
 
 
 async def _admit_all() -> None:
     return None
+
+
+def passed_test(*args, **kwargs) -> DestinationTestOutput:
+    """What the fake Temporal client's execute_workflow answers: a destination test that passed."""
+    return DestinationTestOutput(
+        checks=[
+            CheckResult(check="address", outcome="passed"),
+            CheckResult(check="tls", outcome="passed"),
+        ]
+    )
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session", scope="session")
@@ -145,6 +156,8 @@ def mock_temporal():
     client = MagicMock()
     client.start_workflow = AsyncMock()
     client.create_schedule = AsyncMock()
+    # The one workflow the API waits for: the destination test (M.5).
+    client.execute_workflow = AsyncMock(side_effect=passed_test)
     schedule = MagicMock()
     for name in ("update", "delete", "pause", "unpause", "describe"):
         setattr(schedule, name, AsyncMock())

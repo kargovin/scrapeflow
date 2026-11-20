@@ -1,0 +1,197 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-11-20T17:24:40.348Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "DestinationTestWorkflow"
+        },
+        "taskQueue": {
+          "name": "workflow"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJraW5kIjoid2ViaG9vayIsImFkZHJlc3MiOnt9LCJlbmNyeXB0ZWRfc2VjcmV0IjoiZ0FBQUFBQnJBSUpZWXFDdzhKZVlpQUlXQTZjOUZjZ2YweFg0TnA4SXZNczJEZ3VzOGJvVy1KVk5MY0ltaHZITFZDcTVMc0F4U3pZcjlHSHpSZENQajF3SGszRmY2VkFOUmJ2MThyNzNQbklNOTg5b1p6Q3hDclpJaGVUd2Fod3ZLbldaTmppSnF4eGxaNjFjVjVZNzFEM2dzb19JM2ZTOEpfVkFob0FENHB2YUQxeWhUcElrNUljbTlRVkVuUFh5ZW4wemNqT2xnSVlxNTdDRkZ6TzJVc2dDWklFc0k4YWljcUUybXZRYkxvd1d5QzRYLTRzSXdHcz0ifQ=="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "315360000s",
+        "workflowRunTimeout": "315360000s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "04da3b2a-2efa-43d2-a5b9-4d76b1684ea5",
+        "identity": "15865@477c7d626eb2",
+        "firstExecutionRunId": "04da3b2a-2efa-43d2-a5b9-4d76b1684ea5",
+        "attempt": 1,
+        "firstWorkflowTaskBackoff": "0s",
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-11-20T17:24:40.348Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "workflow"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-11-20T17:24:40.349Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "15865@477c7d626eb2",
+        "historySizeBytes": "558"
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-11-20T17:24:40.373Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "15865@477c7d626eb2",
+        "binaryChecksum": "4e7d8e13fad1217639ead312a1a96176",
+        "sdkMetadata": {
+          "coreUsedFlags": [
+            3,
+            1,
+            2
+          ],
+          "sdkName": "temporal-python",
+          "sdkVersion": "1.33.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-11-20T17:24:40.373Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "1",
+        "activityType": {
+          "name": "TestWebhook"
+        },
+        "taskQueue": {
+          "name": "delivery",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJraW5kIjoid2ViaG9vayIsImFkZHJlc3MiOnt9LCJlbmNyeXB0ZWRfc2VjcmV0IjoiZ0FBQUFBQnJBSUpZWXFDdzhKZVlpQUlXQTZjOUZjZ2YweFg0TnA4SXZNczJEZ3VzOGJvVy1KVk5MY0ltaHZITFZDcTVMc0F4U3pZcjlHSHpSZENQajF3SGszRmY2VkFOUmJ2MThyNzNQbklNOTg5b1p6Q3hDclpJaGVUd2Fod3ZLbldaTmppSnF4eGxaNjFjVjVZNzFEM2dzb19JM2ZTOEpfVkFob0FENHB2YUQxeWhUcElrNUljbTlRVkVuUFh5ZW4wemNqT2xnSVlxNTdDRkZ6TzJVc2dDWklFc0k4YWljcUUybXZRYkxvd1d5QzRYLTRzSXdHcz0ifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "4s",
+        "startToCloseTimeout": "25s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "3",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s",
+          "maximumAttempts": 1
+        },
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-11-20T17:24:40.373Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "5",
+        "identity": "15865@477c7d626eb2",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-11-20T17:24:40.380Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_FAILED",
+      "activityTaskFailedEventAttributes": {
+        "failure": {
+          "message": "the destination's secret cannot be read",
+          "stackTrace": "  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 351, in _handle_start_activity_task\n    result = await self._execute_activity(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 681, in _execute_activity\n    return await impl.execute_activity(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 889, in execute_activity\n    return await input.fn(*input.args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/tests/test_destination_tests.py\", line 115, in webhook\n    return await answer(TEST_WEBHOOK_ACTIVITY, inp)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/tests/test_destination_tests.py\", line 102, in answer\n    return await self.play(inp)\n           ^^^^^^^^^^^^^^^^^^^^\n\n  File \"/app/tests/test_destination_tests.py\", line 85, in _secret_unreadable\n    raise ApplicationError(\n",
+          "applicationFailureInfo": {
+            "type": "DestinationSecret",
+            "nonRetryable": true
+          }
+        },
+        "scheduledEventId": "5",
+        "startedEventId": "6",
+        "identity": "15865@477c7d626eb2",
+        "retryState": "RETRY_STATE_NON_RETRYABLE_FAILURE"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-11-20T17:24:40.380Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "workflow"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-11-20T17:24:40.381Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "15865@477c7d626eb2",
+        "historySizeBytes": "2361"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-11-20T17:24:40.386Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "15865@477c7d626eb2",
+        "binaryChecksum": "4e7d8e13fad1217639ead312a1a96176",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-11-20T17:24:40.386Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+      "workflowExecutionCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJjaGVja3MiOlt7ImNoZWNrIjoidGVzdCIsIm91dGNvbWUiOiJmYWlsZWQiLCJtZXNzYWdlIjoidGhlIGRlc3RpbmF0aW9uJ3Mgc2VjcmV0IGNhbm5vdCBiZSByZWFkIn1dfQ=="
+            }
+          ]
+        },
+        "workflowTaskCompletedEventId": "9"
+      }
+    }
+  ]
+}

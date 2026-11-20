@@ -2,6 +2,7 @@
 404. No read returns the secret; a webhook's URL is shown by its host only."""
 
 import uuid
+from typing import Any, NamedTuple
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -9,9 +10,11 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client
 
 from app.auth.dependencies import get_current_admin_user, get_current_user
 from app.core.db import get_db
+from app.core.destination_tests import refuse_failed, run_test
 from app.core.destinations import decrypt_secret, encrypt_secret, pipelines_using, runs_using
 from app.core.pipeline_trigger import ssrf_check
 from app.core.quota import lock_user
@@ -22,13 +25,17 @@ from app.schemas.destinations import (
     KIND_MODELS,
     AdminDestinationResponse,
     DestinationCreate,
+    DestinationForm,
     DestinationKind,
     DestinationResponse,
+    DestinationSavedResponse,
+    DestinationTestResult,
     DestinationUpdate,
     display_host,
     endpoint_url,
     stored,
 )
+from app.workflows.client import get_temporal, get_temporal_or_none
 
 router = APIRouter(prefix="/destinations", tags=["destinations"])
 admin_router = APIRouter(prefix="/admin/destinations", tags=["admin"])
@@ -66,13 +73,23 @@ async def _commit(db: AsyncSession) -> None:
         raise
 
 
-async def _apply(destination: Destination, address: BaseModel, secret: BaseModel) -> None:
-    """Checks the address (a DNS lookup) and writes address, secret and display host."""
-    url = endpoint_url(destination.kind, address, secret)
+class _Checked(NamedTuple):
+    address: dict[str, Any]
+    encrypted_secret: str
+    display_host: str
+
+
+async def _checked(kind: str, address: BaseModel, secret: BaseModel) -> _Checked:
+    """Checks the address (a DNS lookup); the address and secret as they would be stored."""
+    url = endpoint_url(kind, address, secret)
     await ssrf_check(url)
-    destination.address = stored(address)
-    destination.encrypted_secret = encrypt_secret(stored(secret))
-    destination.display_host = display_host(url)
+    return _Checked(stored(address), encrypt_secret(stored(secret)), display_host(url))
+
+
+def _apply(destination: Destination, form: _Checked) -> None:
+    destination.address = form.address
+    destination.encrypted_secret = form.encrypted_secret
+    destination.display_host = form.display_host
 
 
 def _parse(model: type[BaseModel], data: dict, field: str) -> BaseModel:
@@ -89,20 +106,37 @@ def _parse(model: type[BaseModel], data: dict, field: str) -> BaseModel:
         ) from None
 
 
-@router.post("", response_model=DestinationResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/test", response_model=DestinationTestResult)
+async def test_destination_form(
+    body: DestinationForm,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    temporal: Client = Depends(get_temporal),
+    _: None = Depends(check_rate_limit),
+) -> DestinationTestResult:
+    """An unsaved form: each check reported, nothing stored (ADR-015 §2d)."""
+    form = await _checked(body.kind, body.address, body.secret)
+    return await run_test(temporal, db, body.kind, form.address, form.encrypted_secret)
+
+
+@router.post("", response_model=DestinationSavedResponse, status_code=status.HTTP_201_CREATED)
 async def create_destination(
     body: DestinationCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    temporal: Client = Depends(get_temporal),
     _: None = Depends(check_rate_limit),
-) -> DestinationResponse:
+) -> DestinationSavedResponse:
+    form = await _checked(body.kind, body.address, body.secret)
+    result = await run_test(temporal, db, body.kind, form.address, form.encrypted_secret)
+    refuse_failed(result)
     destination = Destination(user_id=user.id, name=body.name, kind=body.kind)
-    await _apply(destination, body.address, body.secret)
+    _apply(destination, form)
     db.add(destination)
     await _commit(db)
     await db.refresh(destination)
     logger.info("destination_created", destination_id=str(destination.id), kind=destination.kind)
-    return _response(destination)
+    return DestinationSavedResponse(**_response(destination).model_dump(), test=result)
 
 
 @router.get("", response_model=list[DestinationResponse])
@@ -127,23 +161,45 @@ async def get_destination(
     return _response(await _owned(db, user.id, destination_id))
 
 
-@router.patch("/{destination_id}", response_model=DestinationResponse)
+@router.post("/{destination_id}/test", response_model=DestinationTestResult)
+async def test_destination(
+    destination_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    temporal: Client = Depends(get_temporal),
+    _: None = Depends(check_rate_limit),
+) -> DestinationTestResult:
+    """A saved destination, as stored; nothing is stored (ADR-015 §2a)."""
+    destination = await _owned(db, user.id, destination_id)
+    return await run_test(
+        temporal, db, destination.kind, destination.address, destination.encrypted_secret
+    )
+
+
+@router.patch("/{destination_id}", response_model=DestinationSavedResponse)
 async def update_destination(
     destination_id: uuid.UUID,
     body: DestinationUpdate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    temporal: Client | None = Depends(get_temporal_or_none),
     _: None = Depends(check_rate_limit),
-) -> DestinationResponse:
+) -> DestinationSavedResponse:
     destination = await _owned(db, user.id, destination_id)
-    if body.name is not None:
-        destination.name = body.name
+    form, result = None, None
     if body.address is not None or body.secret is not None:
         address_model, secret_model = KIND_MODELS[destination.kind]
         address = _parse(address_model, {**destination.address, **(body.address or {})}, "address")
         secret = decrypt_secret(destination.encrypted_secret)
         secret = _parse(secret_model, {**secret, **(body.secret or {})}, "secret")
-        await _apply(destination, address, secret)
+        form = await _checked(destination.kind, address, secret)
+        result = await run_test(temporal, db, destination.kind, form.address, form.encrypted_secret)
+        refuse_failed(result)
+    # Only after the test: run_test commits the session before its wait.
+    if body.name is not None:
+        destination.name = body.name
+    if form is not None:
+        _apply(destination, form)
     await _commit(db)
     await db.refresh(destination)
     logger.info(
@@ -152,7 +208,7 @@ async def update_destination(
         address=body.address is not None,
         secret=body.secret is not None,
     )
-    return _response(destination)
+    return DestinationSavedResponse(**_response(destination).model_dump(), test=result)
 
 
 @router.delete("/{destination_id}", status_code=status.HTTP_204_NO_CONTENT)

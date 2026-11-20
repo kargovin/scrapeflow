@@ -50,6 +50,7 @@ from app.workflows.activities.webhook_deliveries import (
 from app.workflows.batch import BatchWorkflow
 from app.workflows.client import connect
 from app.workflows.crawl import CrawlWorkflow
+from app.workflows.destination_test import DestinationTestWorkflow
 from app.workflows.hello import HelloWorkflow, say_hello
 from app.workflows.job import JobWorkflow
 from app.workflows.monitor_check import MonitorCheckWorkflow
@@ -85,6 +86,7 @@ async def main() -> None:
             CrawlWorkflow,
             ScheduledJobWorkflow,
             MonitorCheckWorkflow,
+            DestinationTestWorkflow,
             WebhookDeliveryWorkflow,
             WebhookSweepWorkflow,
         ],
