@@ -16,6 +16,7 @@ from temporalio import activity
 
 from app.core import monitor_events, webhook_delivery
 from app.core.db import AsyncSessionLocal
+from app.core.destinations import reference_problems
 from app.core.monitor_checks import after_commit, monitor_check_ended
 from app.core.monitors import find_baseline, prepare_check
 from app.core.pipeline_alerts import queue_failure_alerts
@@ -31,6 +32,7 @@ from app.core.quota import _first_of_next_month, is_quota_exceeded, lock_user
 from app.core.security import validate_no_ssrf_core
 from app.models.monitor import Monitor, MonitorEvent
 from app.models.pipeline import PipelineRun, PipelineRunBlock, PipelineVersion
+from app.pipelines.catalog import destination_refs
 from app.pipelines.definition import DefinitionUnreadable, LLMExtractBlock, parse_definition
 from app.settings import settings
 from app.workflows.monitor_check import (
@@ -70,14 +72,24 @@ async def _cannot_run(monitor: Monitor, version: PipelineVersion | None, db: Asy
 
 
 async def _missing_keys(db: AsyncSession, monitor: Monitor, parsed) -> str | None:
-    """§13: a key deleted anyway (outside the API's interlock) is a failed check."""
+    """§13: a key or destination deleted anyway (outside the API's interlock) is a failed check."""
     keys = await owned_llm_keys(db, monitor.user_id, llm_key_ids(parsed))
     missing = [
         b.id
         for b in parsed.blocks
         if isinstance(b, LLMExtractBlock) and str(b.config.llm_key_id) not in keys
     ]
-    return f"{missing[0]}: LLM key no longer exists" if missing else None
+    if missing:
+        return f"{missing[0]}: LLM key no longer exists"
+    # Under the lock, as the trigger (ADR-015 §2c).
+    gone, wrong_kind = await reference_problems(
+        db, monitor.user_id, destination_refs(parsed.blocks)
+    )
+    if gone:
+        return f"{gone[0]}: destination no longer exists"
+    if wrong_kind:
+        return f"{wrong_kind[0][0]}: {wrong_kind[0][1]}"
+    return None
 
 
 async def _fail_check(

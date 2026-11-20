@@ -35,6 +35,10 @@ from pydantic import (
 
 from app.models.job import OutputFormat
 from app.schemas.jobs import Engine, PlaywrightOptions, validate_page_actions
+from app.workflows.activities.contracts import (
+    BUCKET_DELIVER_ATTEMPT_SECONDS,
+    BUCKET_UNDO_ATTEMPT_SECONDS,
+)
 
 # Reference types: what a block's output object holds (ADR-009 §5 — types of reference, not
 # payload). A page keeps the format Scrape wrote it in.
@@ -119,6 +123,10 @@ class Timing:
     after: int = 0
     # False: the block never calls its activity — an alert-only Webhook (ADR-014 §8d).
     calls_activity: bool = True
+    # A workflow-driven loop's own DB activities (ADR-015 §4, §6): before every try
+    # (load_destination), and between tries (mirror waiting, mirror running).
+    db_per_try: int = 0
+    db_between_tries: int = 0
 
     @property
     def budget(self) -> int:
@@ -134,11 +142,29 @@ class Timing:
         return self.maximum_attempts * per_attempt + math.ceil(waits)
 
     @property
+    def loop_db(self) -> int:
+        """The DB activities a workflow-driven loop runs around its tries, at their limit."""
+        tries = self.maximum_attempts
+        return (tries * self.db_per_try + (tries - 1) * self.db_between_tries) * DB_ACTIVITY_SECONDS
+
+    @property
     def need(self) -> int:
         """What the run budgets for the block: its budget, its host-slot wait, the DB overhead."""
         if not self.calls_activity:
             return BLOCK_OVERHEAD_SECONDS
-        return self.budget + self.host_slot + self.after + BLOCK_OVERHEAD_SECONDS
+        return self.budget + self.host_slot + self.after + self.loop_db + BLOCK_OVERHEAD_SECONDS
+
+
+def _delivery_retry(start_to_close: int, **extra: int) -> Timing:
+    # ADR-009 §15b/§15c, every delivery and undo (ADR-015 §6): 30 s x10 capped at 7200 s, 5 tries.
+    return Timing(
+        start_to_close=start_to_close,
+        maximum_attempts=5,
+        initial_interval=30,
+        backoff_coefficient=10,
+        maximum_interval=7200,
+        **extra,
+    )
 
 
 def _worker_retry(start_to_close: int, heartbeat: int | None = None, **extra: int) -> Timing:
@@ -335,9 +361,12 @@ WEBHOOK_RESULT_EVENT = "pipeline.result"
 
 
 class WebhookConfigV1(_Config):
-    url: AnyHttpUrl
+    """``url`` (+ ``secret``) inline, or a saved webhook destination — exactly one (ADR-015 §2b)."""
+
+    url: AnyHttpUrl | None = None
     # HMAC-SHA256 key for X-ScrapeFlow-Signature; none signs with b"" (the header is always sent).
     secret: str | None = Field(default=None, max_length=500)
+    destination_id: uuid.UUID | None = None
     events: list[Literal["pipeline.result", "pipeline.failed"]] = Field(
         default_factory=lambda: ["pipeline.result"], min_length=1
     )
@@ -349,12 +378,34 @@ class WebhookConfigV1(_Config):
             raise ValueError("each event may be listed once")
         return v
 
+    @model_validator(mode="after")
+    def _one_target(self) -> "WebhookConfigV1":
+        if (self.url is None) == (self.destination_id is None):
+            raise ValueError("give either url (with an optional secret) or destination_id")
+        if self.destination_id is not None and self.secret is not None:
+            raise ValueError("secret goes with url; a webhook destination holds its own")
+        return self
+
     @field_serializer("url")
-    def _url(self, v: AnyHttpUrl) -> str:
-        return str(v)
+    def _url(self, v: AnyHttpUrl | None) -> str | None:
+        return None if v is None else str(v)
+
+
+class BucketConfigV1(_Config):
+    # A bucket destination; the key under its prefix is the run's and the block's (ADR-015 §5).
+    destination_id: uuid.UUID
 
 
 # --- the catalog ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Sink:
+    """A block that delivers outside ScrapeFlow (PRD-017 R1, R2)."""
+
+    reversible: bool
+    # The undo's timing, reversible only: one undo, as rollback runs it (ADR-014 §7, ADR-015 §6).
+    undo: Timing | None = None
 
 
 @dataclass(frozen=True)
@@ -378,6 +429,9 @@ class BlockType:
     secret_fields: frozenset[str] = frozenset()
     # Extra save-time checks that need the input's reference type; returns problem messages.
     check_input: Callable[[Any, str], list[str]] = field(default=lambda _config, _ref: [])
+    sink: Sink | None = None
+    # The destination kind a config's ``destination_id`` must name (ADR-015 §2b).
+    destination_kind: str | None = None
 
     @property
     def current_version(self) -> int:
@@ -485,18 +539,29 @@ WEBHOOK = BlockType(
     produces=_pass_through,
     secret_fields=frozenset({"secret"}),
     # ADR-009 §15b/§15c: 10 s POST inside a ~20 s attempt; 30 s x10 capped at 7200 s, 5 attempts.
-    timing=lambda config: Timing(
-        start_to_close=20,
-        maximum_attempts=5,
-        initial_interval=30,
-        backoff_coefficient=10,
-        maximum_interval=7200,
-        calls_activity=WEBHOOK_RESULT_EVENT in config.events,
+    timing=lambda config: _delivery_retry(20, calls_activity=WEBHOOK_RESULT_EVENT in config.events),
+    sink=Sink(reversible=False),
+    destination_kind="webhook",
+)
+
+# ADR-015 §6: one try = load_destination + the attempt; a retry adds mirror waiting and running.
+BUCKET_UNDO_TIMING = _delivery_retry(BUCKET_UNDO_ATTEMPT_SECONDS, db_per_try=1)
+
+BUCKET = BlockType(
+    name="bucket",
+    kind="effect",
+    config_versions={1: BucketConfigV1},
+    consumes=ALL_REFS,
+    produces=_pass_through,
+    timing=lambda _config: _delivery_retry(
+        BUCKET_DELIVER_ATTEMPT_SECONDS, db_per_try=1, db_between_tries=2
     ),
+    sink=Sink(reversible=True, undo=BUCKET_UNDO_TIMING),
+    destination_kind="bucket",
 )
 
 CATALOG: Mapping[str, BlockType] = {
-    t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK)
+    t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK, BUCKET)
 }
 
 
@@ -513,6 +578,35 @@ class _Block(Protocol):
 
 def _type_of(block: _Block) -> BlockType:
     return block.type if isinstance(block.type, BlockType) else CATALOG[block.type]
+
+
+def rollback_reserve(blocks: Iterable[_Block]) -> tuple[int, int]:
+    """(seconds, undos): every reversible sink's undo at its limit, newest first (ADR-015 §6).
+
+    An undo's need includes BLOCK_OVERHEAD_SECONDS, for its undo-status mirrors.
+    """
+    undos = [s.undo for b in blocks if (s := _type_of(b).sink) and s.reversible and s.undo]
+    return sum(u.need for u in undos), len(undos)
+
+
+def announces(block: _Block) -> bool:
+    """An irreversible sink that sends on a run's way through — not an alert-only Webhook."""
+    block_type = _type_of(block)
+    sink = block_type.sink
+    return (
+        sink is not None and not sink.reversible and block_type.timing(block.config).calls_activity
+    )
+
+
+def destination_refs(blocks: Iterable[_Block]) -> list[tuple[str, uuid.UUID, str]]:
+    """(block id, destination id, the kind it must be) for each block naming a destination."""
+    refs = []
+    for block in blocks:
+        kind = _type_of(block).destination_kind
+        destination_id = getattr(block.config, "destination_id", None)
+        if kind is not None and destination_id is not None:
+            refs.append((block.id, destination_id, kind))
+    return refs
 
 
 def block_outputs(blocks: Iterable[_Block]) -> dict[str, str]:

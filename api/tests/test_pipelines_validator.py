@@ -7,10 +7,14 @@ import pytest
 from app.pipelines import validator
 from app.pipelines.catalog import (
     BLOCK_OVERHEAD_SECONDS,
+    BUCKET,
+    BUCKET_UNDO_TIMING,
     CATALOG,
+    DB_ACTIVITY_SECONDS,
     LLM_EXTRACT,
     SCRAPE,
     WEBHOOK,
+    BucketConfigV1,
     ScrapeConfigV1,
     WebhookConfigV1,
 )
@@ -18,6 +22,7 @@ from app.pipelines.validator import PipelineValidationError, validate
 from app.settings import settings
 
 KEY_ID = "7b1c1d5e-0000-4000-8000-000000000001"
+DEST_ID = "7b1c1d5e-0000-4000-8000-0000000000d1"
 SCHEMA = {"type": "object", "properties": {"title": {"type": "string"}}}
 
 
@@ -36,6 +41,15 @@ def llm(id="extract", input="fetch"):
 
 def webhook(id="notify", input="extract", url="https://example.com/hook"):
     return {"id": id, "type": "webhook", "input": input, "config": {"url": url}}
+
+
+def bucket(id="store", input="extract", destination_id=DEST_ID):
+    return {
+        "id": id,
+        "type": "bucket",
+        "input": input,
+        "config": {"destination_id": destination_id},
+    }
 
 
 def clean(id="clean", input="fetch"):
@@ -231,7 +245,7 @@ def test_malformed_schema_does_not_hide_later_checks():
     # The block still parses, so the budget and type walk run in the same save.
     block = llm()
     block["config"]["output_schema"] = {"type": "object", "required": "title"}
-    found = problems(pipeline(scrape(), block, webhook(), webhook(id="again", input="notify")))
+    found = problems(pipeline(scrape(), block, webhook(), bucket(input="notify")))
     assert len(found) == 2
 
 
@@ -381,13 +395,12 @@ def test_the_bindable_fields_are_scrape_url_and_two_rule_fields():
     }
 
 
-# --- at most one Webhook (PRD-016 R2) ------------------------------------------------------
+# --- several webhooks (PRD-017 R4) ----------------------------------------------------------
 
 
-def test_second_webhook_rejected_and_names_layer_c():
-    found = one_problem(pipeline(scrape(), llm(), webhook(), webhook(id="again", input="notify")))
-    assert found.startswith("block 'again': a pipeline may have at most one webhook block")
-    assert "layer C" in found
+def test_several_webhooks_are_accepted():
+    result = validate(pipeline(scrape(), llm(), webhook(), webhook(id="again", input="notify")))
+    assert [b.id for b in result.blocks] == ["fetch", "extract", "notify", "again"]
 
 
 # --- limits --------------------------------------------------------------------------------
@@ -890,3 +903,203 @@ def test_a_change_gate_is_alone_stops_and_is_not_reversed(config, message):
     found = one_problem(monitored(gate(**config)))
 
     assert found == f"block 'gate': {message}"
+
+
+# --- M.6: the bucket sink, sink order, webhook destinations, the rollback reserve -----------
+# PRD-017 R1, R2, R4, R6; ADR-015 §2b, §6.
+
+
+def hook_to(destination_id=DEST_ID, id="notify", input="store", **config):
+    return {
+        "id": id,
+        "type": "webhook",
+        "input": input,
+        "config": {"destination_id": destination_id, **config},
+    }
+
+
+@pytest.mark.parametrize(
+    "first", [scrape(), scrape(output_format="markdown"), scrape(output_format="json")]
+)
+def test_a_bucket_takes_any_input_and_passes_it_on(first):
+    for chain in ([first, bucket(input="fetch")], [first, llm(), bucket()]):
+        result = validate(pipeline(*chain))
+        store = result.blocks[-1]
+        assert store.type is BUCKET
+        assert store.config.destination_id.hex == DEST_ID.replace("-", "")
+        assert result.definition["blocks"][-1]["config"] == {"destination_id": DEST_ID}
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({}, "config.destination_id: Field required"),
+        ({"destination_id": "nope"}, "config.destination_id: Input should be a valid UUID"),
+        ({"destination_id": DEST_ID, "prefix": "x"}, "config.prefix: Extra inputs"),
+    ],
+)
+def test_a_bucket_needs_a_destination_and_nothing_else(config, expected):
+    block = {"id": "store", "type": "bucket", "input": "extract", "config": config}
+    assert one_problem(pipeline(scrape(), llm(), block)).startswith(f"block 'store': {expected}")
+
+
+def test_a_webhook_takes_a_destination_instead_of_a_url():
+    result = validate(pipeline(scrape(), llm(), hook_to(input="extract")))
+    stored = result.definition["blocks"][-1]["config"]
+    assert stored["destination_id"] == DEST_ID
+    assert (stored["url"], stored["secret"]) == (None, None)
+    assert validate(copy.deepcopy(result.definition)).definition == result.definition
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({}, "give either url (with an optional secret) or destination_id"),
+        (
+            {"url": "https://example.com/hook", "destination_id": DEST_ID},
+            "give either url (with an optional secret) or destination_id",
+        ),
+        (
+            {"destination_id": DEST_ID, "secret": "s"},
+            "secret goes with url; a webhook destination holds its own",
+        ),
+    ],
+)
+def test_a_webhook_takes_exactly_one_target(config, expected):
+    block = {"id": "notify", "type": "webhook", "input": "extract", "config": config}
+    assert one_problem(pipeline(scrape(), llm(), block)) == f"block 'notify': config: {expected}"
+
+
+def test_an_inline_webhook_stored_before_m6_still_parses():
+    from app.pipelines.definition import parse_definition
+
+    stored = validate(r6()).definition
+    del stored["blocks"][-1]["config"]["destination_id"]
+    parsed, _ = parse_definition(stored)
+    assert str(parsed.blocks[-1].config.url) == "https://example.com/hook"
+    assert parsed.blocks[-1].config.destination_id is None
+
+
+def test_reversible_sinks_first_then_irreversible_ones():
+    validate(
+        pipeline(
+            scrape(), llm(), bucket(), bucket(id="again", input="store"), hook_to(input="again")
+        )
+    )
+    validate(pipeline(scrape(), llm(), bucket(), hook_to(), webhook(id="also", input="notify")))
+
+
+def test_a_bucket_after_a_webhook_is_refused_naming_both():
+    found = one_problem(
+        pipeline(
+            scrape(), llm(), bucket(), webhook(input="store"), bucket(id="late", input="notify")
+        )
+    )
+    assert found == (
+        "block 'late': bucket 'late' cannot follow webhook 'notify': if 'late' failed, "
+        "'notify' could not be undone; put every bucket before the first webhook"
+    )
+
+
+def test_every_bucket_after_the_first_webhook_is_refused():
+    found = problems(
+        pipeline(
+            scrape(),
+            llm(),
+            webhook(),
+            bucket(id="b1", input="notify"),
+            check(id="v", input="b1", rules=[{"kind": "present", "path": "/title"}]),
+            bucket(id="b2", input="v"),
+        )
+    )
+    assert [f.split(":")[0] for f in found] == ["block 'b1'", "block 'b2'"]
+    assert all("cannot follow webhook 'notify'" in f for f in found)
+
+
+def test_a_bucket_after_an_alert_only_webhook_is_accepted():
+    # It sends nothing on the way through, so nothing is announced before the bucket.
+    alert = webhook(input="extract")
+    alert["config"]["events"] = ["pipeline.failed"]
+    validate(pipeline(scrape(), llm(), alert, bucket(input="notify")))
+
+
+def test_the_bucket_timing_is_the_delivery_ladder_plus_its_loop_writes():
+    timing = BUCKET.timing(BucketConfigV1(destination_id=DEST_ID))
+    assert (timing.start_to_close, timing.schedule_to_start, timing.maximum_attempts) == (60, 60, 5)
+    assert timing.budget == 5 * (60 + 60) + 30 + 300 + 3000 + 7200
+    # A load before each of 5 tries; waiting + running between them (ADR-015 §6: 13 writes).
+    assert timing.loop_db == 13 * DB_ACTIVITY_SECONDS
+    assert timing.need == timing.budget + 13 * DB_ACTIVITY_SECONDS + BLOCK_OVERHEAD_SECONDS
+    assert timing.budget < 3.1 * 3600
+
+    undo = BUCKET_UNDO_TIMING
+    assert (undo.start_to_close, undo.maximum_attempts) == (30, 5)
+    assert undo.need == 5 * (60 + 30) + 10530 + 5 * DB_ACTIVITY_SECONDS + BLOCK_OVERHEAD_SECONDS
+
+
+def test_the_catalog_says_which_blocks_are_sinks_and_which_can_be_undone():
+    sinks = {name: t.sink for name, t in CATALOG.items() if t.sink is not None}
+    assert {n: s.reversible for n, s in sinks.items()} == {"bucket": True, "webhook": False}
+    assert sinks["bucket"].undo is BUCKET_UNDO_TIMING
+    assert sinks["webhook"].undo is None
+    assert {n: t.destination_kind for n, t in CATALOG.items() if t.destination_kind} == {
+        "bucket": "bucket",
+        "webhook": "webhook",
+    }
+
+
+def _forward(definition) -> int:
+    return sum(b.timing.need for b in validate(definition).blocks)
+
+
+def test_prd_017s_worked_example_fits_with_its_reserve():
+    # scrape -> extract -> bucket -> bucket -> webhook (the second sink stands in for slice 2's db).
+    worked = pipeline(
+        scrape(), llm(), bucket(), bucket(id="again", input="store"), hook_to(input="again")
+    )
+    result = validate(worked)
+    forward = _forward(worked)
+    assert result.run_budget_seconds == forward
+    assert 9.5 * 3600 < forward < 11 * 3600
+    reserve = 2 * BUCKET_UNDO_TIMING.need
+    assert 6 * 3600 < reserve < 6.5 * 3600
+    assert forward + reserve <= settings.pipeline_max_run_seconds
+
+
+def test_the_reserve_is_refused_with_the_hours_message(monkeypatch):
+    definition = pipeline(
+        scrape(),
+        bucket(input="fetch"),
+        bucket(id="b2", input="store"),
+        bucket(id="b3", input="b2"),
+        hook_to(input="b3"),
+        hook_to(id="again", input="notify"),
+    )
+    with monkeypatch.context() as m:
+        m.setattr(settings, "pipeline_max_run_seconds", 10**6)
+        forward = _forward(definition)
+    reserve = 3 * BUCKET_UNDO_TIMING.need
+
+    found = one_problem(definition)
+
+    hours = lambda s: f"{s / 3600:.1f}".removesuffix(".0") + " h"  # noqa: E731
+    assert forward <= settings.pipeline_max_run_seconds < forward + reserve
+    assert found.startswith(
+        f"blocks need {hours(forward + reserve)} ({hours(forward)} of blocks + "
+        f"{hours(reserve)} to undo 3 deliveries); the limit is 24 h — "
+    )
+    assert found.endswith(f" + {reserve} s against 86400 s")
+
+
+def test_a_declared_budget_leaves_room_for_the_reserve(monkeypatch):
+    definition = pipeline(scrape(), llm(), bucket(), hook_to())
+    forward = _forward(definition)
+    reserve = BUCKET_UNDO_TIMING.need
+    monkeypatch.setattr(settings, "pipeline_max_run_seconds", forward + reserve)
+
+    assert validate({**definition, "time_budget_seconds": forward}).run_budget_seconds == forward
+    found = one_problem({**definition, "time_budget_seconds": forward + 1})
+    assert found == (
+        f"time_budget_seconds {forward + 1} plus {reserve} s to undo 1 delivery is over the "
+        f"limit of {forward + reserve} s"
+    )

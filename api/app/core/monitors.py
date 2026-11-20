@@ -23,6 +23,7 @@ from app.pipelines.catalog import (
     first_change_gate,
     is_change_gate,
     monitor_allowance_seconds,
+    rollback_reserve,
     run_need_seconds,
 )
 from app.pipelines.definition import ParsedDefinition, WebhookBlock, input_value_problems
@@ -108,26 +109,30 @@ def allowance_seconds(parsed: ParsedDefinition, carried: list[Mapping[str, Any]]
 
 
 def ceiling_problems(parsed: ParsedDefinition, carried: list[Mapping[str, Any]]) -> list[Problem]:
-    """§2d check 6: the blocks' need plus the monitor allowance fits the maximum."""
+    """§2d check 6: the blocks' need plus the monitor allowance — plus the rollback reserve
+    (ADR-015 §6) — fits the maximum."""
     need = run_need_seconds(CATALOG[b.type].timing(b.config) for b in parsed.blocks)
     allowance = allowance_seconds(parsed, carried)
+    reserve, _ = rollback_reserve(parsed.blocks)
     limit = settings.pipeline_max_run_seconds
-    if need + allowance <= limit:
+    if need + allowance + reserve <= limit:
         return []
+    undo = f", plus {reserve} s to undo its deliveries" if reserve else ""
     return [
         Problem(
             None,
-            f"the blocks need {need} s and a monitor check needs {allowance} s more; "
+            f"the blocks need {need} s and a monitor check needs {allowance} s more{undo}; "
             f"the limit is {limit} s",
         )
     ]
 
 
 def check_ceiling_seconds(parsed: ParsedDefinition, carried: list[Mapping[str, Any]]) -> int:
-    """A check's run ceiling: the version's plus the allowance, capped at the maximum (§2d 6)."""
+    """A check's run ceiling: the version's plus the allowance, capped at the maximum less the
+    rollback reserve (§2d 6) — the undo runs past the run's deadline."""
     return min(
         parsed.run_budget_seconds + allowance_seconds(parsed, carried),
-        settings.pipeline_max_run_seconds,
+        settings.pipeline_max_run_seconds - rollback_reserve(parsed.blocks)[0],
     )
 
 

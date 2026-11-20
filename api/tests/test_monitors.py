@@ -456,6 +456,43 @@ async def test_the_blocks_need_plus_the_allowance_must_fit_the_limit(
     ).status_code == 201
 
 
+def test_the_rollback_reserve_counts_against_a_checks_ceiling(monkeypatch):
+    from app.core.monitors import allowance_seconds, ceiling_problems, check_ceiling_seconds
+    from app.pipelines.catalog import BUCKET_UNDO_TIMING, CATALOG, run_need_seconds
+    from app.pipelines.definition import parse_definition
+    from app.pipelines.validator import validate
+
+    stored = validate(
+        {
+            "blocks": [
+                {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com"}},
+                {
+                    "id": "store",
+                    "type": "bucket",
+                    "input": "fetch",
+                    "config": {"destination_id": str(uuid.uuid4())},
+                },
+            ]
+        }
+    ).definition
+    parsed, _ = parse_definition(stored)
+    need = run_need_seconds(CATALOG[b.type].timing(b.config) for b in parsed.blocks)
+    allowance = allowance_seconds(parsed, [])
+    reserve = BUCKET_UNDO_TIMING.need
+
+    monkeypatch.setattr(settings, "pipeline_max_run_seconds", need + allowance + reserve - 1)
+    assert [p.message for p in ceiling_problems(parsed, [])] == [
+        f"the blocks need {need} s and a monitor check needs {allowance} s more, plus "
+        f"{reserve} s to undo its deliveries; the limit is {need + allowance + reserve - 1} s"
+    ]
+    monkeypatch.setattr(settings, "pipeline_max_run_seconds", need + allowance + reserve)
+    assert ceiling_problems(parsed, []) == []
+    # The check's deadline leaves the reserve free: the undo runs past it.
+    stored["time_budget_seconds"] = need + reserve
+    parsed, _ = parse_definition(stored)
+    assert check_ceiling_seconds(parsed, []) == need + allowance
+
+
 async def _scheduled_jobs(user_id, count):
     async with AsyncSessionLocal() as db:
         db.add_all(

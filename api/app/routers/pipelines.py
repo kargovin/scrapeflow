@@ -18,6 +18,7 @@ from temporalio.common import WorkflowIDReusePolicy
 
 from app.auth.dependencies import auth_from_token, get_current_user
 from app.core.db import get_db
+from app.core.destinations import reference_problems
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
 from app.core.ledger import ReleaseOutcome, release_pipeline_run_objects
 from app.core.minio import get_minio
@@ -31,6 +32,7 @@ from app.core.pipeline_trigger import (
 )
 from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
+from app.models.destination import PipelineVersionDestination
 from app.models.monitor import Monitor
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.storage_object import StorageObject
@@ -42,6 +44,7 @@ from app.pipelines.catalog import (
     LLMExtractConfigV1,
     ScrapeConfigV1,
     WebhookConfigV1,
+    destination_refs,
 )
 from app.pipelines.definition import (
     DefinitionUnreadable,
@@ -141,12 +144,14 @@ def _store_secrets(
     stored = copy.deepcopy(validated.definition)
     for block, parsed in zip(stored["blocks"], validated.blocks, strict=True):
         secrets: dict[str, str] = {}
+        # A block moved to a destination keeps no inline secret.
+        keeps = getattr(parsed.config, "destination_id", None) is None
         for name in sorted(parsed.type.secret_fields):
             if name in given.get(block["id"], set()):
                 value = getattr(parsed.config, name)
                 if value:
                     secrets[name] = encrypt_secret(value)
-            elif name in kept.get(block["id"], {}):
+            elif keeps and name in kept.get(block["id"], {}):
                 secrets[name] = kept[block["id"]][name]
             block["config"][name] = None
         block["secrets"] = secrets
@@ -164,10 +169,40 @@ def _public_definition(stored: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+async def check_destinations(db: AsyncSession, user_id: uuid.UUID, blocks: Any) -> set[uuid.UUID]:
+    """Every destination the blocks name is the user's (404) and of the block's kind (ADR-015
+    §2b). The caller holds ``lock_user``, as a destination delete does. Returns their ids."""
+    refs = destination_refs(blocks)
+    missing, wrong_kind = await reference_problems(db, user_id, refs)
+    if missing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Destination not found")
+    if wrong_kind:
+        raise unprocessable([Problem(b, m) for b, m in wrong_kind])
+    return {destination_id for _, destination_id, _ in refs}
+
+
+def _new_version(
+    pipeline_id: uuid.UUID, number: int, prepared: tuple[dict[str, Any], set[uuid.UUID]]
+) -> tuple[PipelineVersion, list[PipelineVersionDestination]]:
+    """A version and its ``pipeline_version_destinations`` rows (the delete-in-use check's).
+
+    ⚠️ No relationship orders the inserts: flush the version before adding the rows.
+    """
+    definition, destination_ids = prepared
+    version = PipelineVersion(
+        id=uuid.uuid4(), pipeline_id=pipeline_id, version=number, definition=definition
+    )
+    return version, [
+        PipelineVersionDestination(pipeline_version_id=version.id, destination_id=d)
+        for d in sorted(destination_ids)
+    ]
+
+
 async def _prepare_definition(
     raw: dict[str, Any], user: User, db: AsyncSession, previous: dict[str, Any] | None
-) -> dict[str, Any]:
-    """Validates a submitted definition and returns what to store as a new version."""
+) -> tuple[dict[str, Any], set[uuid.UUID]]:
+    """Validates a submitted definition: what to store as a new version, and the destinations
+    it names. With any named, returns holding ``lock_user`` — the caller commits under it."""
     for block in _raw_blocks(raw):
         block.pop("secrets", None)  # GET's read-only list; a round trip sends it back
     _assign_block_ids(raw)
@@ -187,15 +222,22 @@ async def _prepare_definition(
     # Fail at save on what is known now; the trigger checks again (DNS can change).
     for block in validated.blocks:
         config = block.config
-        if isinstance(config, ScrapeConfigV1 | WebhookConfigV1) and not isinstance(
-            config.url, InputBinding
+        if (
+            isinstance(config, ScrapeConfigV1 | WebhookConfigV1)
+            and config.url is not None
+            and not isinstance(config.url, InputBinding)
         ):
             await ssrf_check(str(config.url))
     for key in keys.values():
         if key.base_url:
             await ssrf_check(key.base_url)
 
-    return _store_secrets(validated, given, previous)
+    destination_ids: set[uuid.UUID] = set()
+    if destination_refs(validated.blocks):
+        # After the DNS lookups: none under the lock. A destination delete takes it too.
+        await lock_user(user.id, db)
+        destination_ids = await check_destinations(db, user.id, validated.blocks)
+    return _store_secrets(validated, given, previous), destination_ids
 
 
 # ---------------------------------------------------------------------------
@@ -282,13 +324,15 @@ async def create_pipeline(
             },
         )
 
-    definition = await _prepare_definition(body.definition, user, db, previous=None)
+    prepared = await _prepare_definition(body.definition, user, db, previous=None)
 
-    # IDs generated here so both INSERTs run inside commit(), where the IntegrityError is caught.
+    # IDs generated here so every INSERT runs inside commit(), where the IntegrityError is caught.
     pipeline = Pipeline(id=uuid.uuid4(), user_id=user.id, name=body.name)
-    version = PipelineVersion(pipeline_id=pipeline.id, version=1, definition=definition)
+    version, references = _new_version(pipeline.id, 1, prepared)
     db.add_all([pipeline, version])
     try:
+        await db.flush()
+        db.add_all(references)
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
@@ -296,7 +340,9 @@ async def create_pipeline(
             raise conflict from None
         raise
 
-    logger.info("pipeline_created", pipeline_id=str(pipeline.id), blocks=len(definition["blocks"]))
+    logger.info(
+        "pipeline_created", pipeline_id=str(pipeline.id), blocks=len(version.definition["blocks"])
+    )
     response = pipeline_response(pipeline, version)
     response.monitors = []
     return response
@@ -343,16 +389,15 @@ async def update_pipeline(
 ) -> PipelineResponse:
     pipeline, version = await _owned_pipeline(db, user.id, pipeline_id)
     changed = False
+    references: list[PipelineVersionDestination] = []
     if body.name is not None and body.name != pipeline.name:
         pipeline.name = body.name
         changed = True
     if body.definition is not None:
-        definition = await _prepare_definition(body.definition, user, db, version.definition)
+        prepared = await _prepare_definition(body.definition, user, db, version.definition)
         # An unchanged definition is not a new version.
-        if definition != version.definition:
-            version = PipelineVersion(
-                pipeline_id=pipeline.id, version=version.version + 1, definition=definition
-            )
+        if prepared[0] != version.definition:
+            version, references = _new_version(pipeline.id, version.version + 1, prepared)
             db.add(version)
             changed = True
     if not changed:
@@ -362,6 +407,8 @@ async def update_pipeline(
 
     pipeline.updated_at = datetime.now(UTC)
     try:
+        await db.flush()
+        db.add_all(references)
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
@@ -699,7 +746,7 @@ async def create_run(
             await ssrf_check(
                 str(body.inputs[url.input]) if isinstance(url, InputBinding) else str(url)
             )
-        elif isinstance(block, WebhookBlock):
+        elif isinstance(block, WebhookBlock) and block.config.url is not None:
             await ssrf_check(str(block.config.url))
 
     llm_blocks = [b for b in parsed.blocks if isinstance(b, LLMExtractBlock)]
@@ -720,6 +767,8 @@ async def create_run(
         is None
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
+    # Under the lock, so a destination delete cannot land between this and the insert (§2c).
+    await check_destinations(db, user.id, parsed.blocks)
 
     built = build_run(
         run_id=uuid.uuid4(),

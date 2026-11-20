@@ -83,7 +83,8 @@ def run_urls(
         if isinstance(block, ScrapeBlock):
             url = block.config.url
             urls.append(str(inputs[url.input]) if isinstance(url, InputBinding) else str(url))
-        elif isinstance(block, WebhookBlock):
+        elif isinstance(block, WebhookBlock) and block.config.url is not None:
+            # A destination's URL was checked at its save; each attempt checks it again.
             urls.append(str(block.config.url))
     urls += [k.base_url for k in keys.values() if k.base_url]
     return urls

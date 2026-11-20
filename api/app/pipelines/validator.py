@@ -17,16 +17,17 @@ from app.pipelines.catalog import (
     CATALOG,
     SCRAPE,
     VALIDATE,
-    WEBHOOK,
     BlockType,
     JsonSchemaRule,
     LLMExtractConfigV1,
     RunInputType,
     Timing,
     ValidateConfigV1,
+    announces,
     first_change_gate,
     is_binding,
     is_change_gate,
+    rollback_reserve,
     run_need_seconds,
 )
 from app.settings import settings
@@ -360,24 +361,45 @@ def _resolve_gate_outputs(
     return resolved
 
 
-def _webhook_problems(blocks: list[BlockDefinition]) -> list[Problem]:
-    webhooks = [b for b in blocks if b.type == WEBHOOK.name]
-    return [
-        Problem(
-            b.id,
-            "a pipeline may have at most one webhook block; delivering one result to several "
-            "destinations is the job of delivery sinks (layer C), coming as their own capability",
-        )
-        for b in webhooks[1:]
-    ]
+def _sink_order_problems(parsed: list[ValidatedBlock]) -> list[Problem]:
+    """PRD-017 R2 (D3): no reversible sink after one that has already sent something."""
+    problems = []
+    announcer: ValidatedBlock | None = None
+    for block in parsed:
+        sink = block.type.sink
+        if sink is None:
+            continue
+        if sink.reversible and announcer is not None:
+            problems.append(
+                Problem(
+                    block.id,
+                    f"{block.type.name} {block.id!r} cannot follow {announcer.type.name} "
+                    f"{announcer.id!r}: if {block.id!r} failed, {announcer.id!r} could not be "
+                    "undone; put every bucket before the first webhook",
+                )
+            )
+        elif announcer is None and announces(block):
+            announcer = block
+    return problems
+
+
+def _hours(seconds: int) -> str:
+    return f"{seconds / 3600:.1f}".removesuffix(".0") + " h"
+
+
+def _deliveries(n: int) -> str:
+    return "1 delivery" if n == 1 else f"{n} deliveries"
 
 
 def _budget_problems(
     declared: int | None, parsed: list[ValidatedBlock]
 ) -> tuple[int, list[Problem]]:
-    """PRD-016 R4: budgets compose. The run ceiling must cover every block's own budget."""
+    """PRD-016 R4: budgets compose. The run ceiling must cover every block's own budget, plus
+    the time to undo every reversible sink (PRD-017 R6; ADR-015 §6) — the undo is never cut by
+    the run's deadline, so its reserve sits on top of it."""
     needed = run_need_seconds(b.timing for b in parsed)
     breakdown = " + ".join(f"{b.id} {b.timing.need}" for b in parsed)
+    reserve, undos = rollback_reserve(parsed)
     ceiling = settings.pipeline_max_run_seconds
     problems = []
     if declared is not None and declared < needed:
@@ -388,13 +410,20 @@ def _budget_problems(
                 f"{needed} s ({breakdown})",
             )
         )
-    if needed > ceiling:
+    if needed + reserve > ceiling:
+        if reserve:
+            message = (
+                f"blocks need {_hours(needed + reserve)} ({_hours(needed)} of blocks + "
+                f"{_hours(reserve)} to undo {_deliveries(undos)}); the limit is {_hours(ceiling)}"
+                f" — {needed} s ({breakdown}) + {reserve} s against {ceiling} s"
+            )
+        else:
+            message = f"blocks need {needed} s ({breakdown}); the limit is {ceiling} s"
+        problems.append(Problem(None, message))
+    elif declared is not None and declared + reserve > ceiling:
+        undo = f" plus {reserve} s to undo {_deliveries(undos)}" if reserve else ""
         problems.append(
-            Problem(None, f"blocks need {needed} s ({breakdown}); the limit is {ceiling} s")
-        )
-    elif declared is not None and declared > ceiling:
-        problems.append(
-            Problem(None, f"time_budget_seconds {declared} is over the limit of {ceiling} s")
+            Problem(None, f"time_budget_seconds {declared}{undo} is over the limit of {ceiling} s")
         )
     return (declared if declared is not None else needed), problems
 
@@ -438,11 +467,11 @@ def validate(raw: Any) -> ValidatedPipeline:
 
     starting = _starting_block_problems(blocks)
     chain = _chain_problems(blocks)
-    problems += starting + chain + _webhook_problems(blocks)
+    problems += starting + chain
 
     run_budget = 0
     if len(parsed) == len(blocks) and not starting and not chain:
-        problems += _type_problems(parsed) + _stop_problems(parsed)
+        problems += _type_problems(parsed) + _stop_problems(parsed) + _sink_order_problems(parsed)
         run_budget, budget_problems = _budget_problems(definition.time_budget_seconds, parsed)
         problems += budget_problems
 

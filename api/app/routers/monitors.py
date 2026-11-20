@@ -47,6 +47,7 @@ from app.pipelines.definition import (
 from app.pipelines.validator import Problem
 from app.routers.jobs import validate_cron
 from app.routers.pipelines import (
+    check_destinations,
     release_runs,
     request_cancel,
     require_pipelines_enabled,
@@ -486,6 +487,7 @@ async def check_now(
         )
     # §8d's headroom, as any trigger.
     await admit(user_id, db, headroom_bytes=settings.storage_headroom_bytes)
+    await check_destinations(db, user_id, parsed.blocks)
     await db.refresh(monitor)
     inputs, check = await prepare_check(db, monitor, parsed, await find_baseline(db, monitor.id))
     built = build_run(

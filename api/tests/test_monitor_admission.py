@@ -455,6 +455,38 @@ async def test_a_deleted_llm_key_is_a_failed_check_never_a_skip(db_user):
     assert run.error == "extract: LLM key no longer exists"
 
 
+async def test_a_destination_deleted_anyway_is_a_failed_check(db_user):
+    from app.models.destination import Destination
+
+    monitor = await _monitor(db_user.id)
+    async with AsyncSessionLocal() as db:
+        destination = Destination(
+            user_id=db_user.id, name="b", kind="bucket", encrypted_secret="x", display_host="h"
+        )
+        db.add(destination)
+        await db.flush()
+        version = await db.get(PipelineVersion, monitor.pipeline_version_id)
+        blocks = [dict(b) for b in version.definition["blocks"]]
+        store = {
+            "id": "store",
+            "type": "bucket",
+            "input": "moved",
+            "config_schema_version": 1,
+            "config": {"destination_id": str(destination.id)},
+        }
+        blocks[-1] = {**blocks[-1], "input": "store"}
+        version.definition = {**version.definition, "blocks": [*blocks[:-1], store, blocks[-1]]}
+        await db.commit()
+        # Outside the API's interlock: nothing refers to it in pipeline_version_destinations.
+        await db.delete(destination)
+        await db.commit()
+
+    assert (await _admit(monitor))[0].verdict == "failed"
+
+    [run] = await _runs(monitor)
+    assert run.error == "store: destination no longer exists"
+
+
 async def test_a_url_now_private_is_a_failed_check(db_user, resolves_to):
     monitor = await _monitor(db_user.id)
     resolves_to("10.0.0.5")
