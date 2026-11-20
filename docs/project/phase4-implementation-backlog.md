@@ -3846,6 +3846,11 @@ read>`; SQL through your usual `psql` on the app DB):
    *Usage Stats* shows the two monitor counts (admin). Not click-tested here: Clerk.
 7. Record step 0's values and the results here; mark L.1–L.12 ✅ in the status table.
 
+**Step 0 (owner, 2026-11-20):** `alembic_version` = `c23f1f27522b`; **0** running pipeline runs. Rollback tag: api
+`main-1795110955-c46edb46f783f216eee40cbaf57a5b2ae6252e7d`.
+
+**Step 1 (owner, 2026-11-20):** `main` ff `c46edb4..97eff8b`, pushed. CI run `44729376551`.
+
 **Rollback:** prefer a forward fix. Before an image revert (api, workflow-worker, CronJob to step 0's tag), **delete
 every monitor** (their Schedules would fire into a workflow type the old worker does not have). The revert leaves 4.12
 applied — harmless, K's code maps none of its tables or columns. Do not downgrade the migration.
