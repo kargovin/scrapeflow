@@ -3825,7 +3825,8 @@ read>`; SQL through your usual `psql` on the app DB):
 3. **An unchanged check, by schedule.** Create a 5-minute monitor on a static page:
    `curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/monitors" -d '{"name": "l-static",
    "pipeline_id": "P", "inputs": {"url": "https://example.com"}, "schedule_cron": "*/5 * * * *"}'` → **`201`**, `state`
-   `active`, `next_check_at` set, `warnings` naming "no LLM block…" and "nothing is sent when a check fails". Note its
+   `active`, `next_check_at` set, one warning: "nothing is sent when a check fails…" (the "no LLM block and no change
+gate" warning needs both missing; this pipeline has a gate). Note its
    `id` as `M1`. Wait for **two** firings (≤ 10 min), then `curl -s -H "X-API-Key: $KEY" "$B/monitors/M1/history"` →
    two checks, newest first: the older `change_status` **`first_check`** (with `result_path`), the newer
    **`unchanged`** (`result_path` null, `stopped_at_block_id` `gate`). `$HOOK` received **one** message, with
@@ -3849,7 +3850,12 @@ read>`; SQL through your usual `psql` on the app DB):
 **Step 0 (owner, 2026-11-20):** `alembic_version` = `c23f1f27522b`; **0** running pipeline runs. Rollback tag: api
 `main-1795110955-c46edb46f783f216eee40cbaf57a5b2ae6252e7d`.
 
-**Step 1 (owner, 2026-11-20):** `main` ff `c46edb4..97eff8b`, pushed. CI run `44729376551`.
+**Step 1 (owner, 2026-11-20):** `main` ff `c46edb4..97eff8b`, pushed. CI run `44729376551`. `replay` + `build-api` green, the
+worker builds skipped; api 2/2 and workflow worker on `main-…-97eff8b…`; `alembic_version` = **`72b61b3efb61`**; 0
+monitors; `quota_active_submissions` reads.
+
+**Step 2 (owner, 2026-11-20):** pipeline `l-gate` `7ef27031-802f-4ec1-a90f-05d7a9ae929e`. Step 3's monitor `l-static`
+`b5ca7cf7-69b1-461e-a630-24db6fb02d43` created, one warning (no failure route), as expected.
 
 **Rollback:** prefer a forward fix. Before an image revert (api, workflow-worker, CronJob to step 0's tag), **delete
 every monitor** (their Schedules would fire into a workflow type the old worker does not have). The revert leaves 4.12
