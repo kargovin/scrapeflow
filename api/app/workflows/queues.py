@@ -23,6 +23,10 @@ CONTENT_QUEUE = "content"
 # target-facing fetches that are not scrapes (robots.txt, sitemaps) and link extraction.
 CRAWL_QUEUE = "crawl"
 
+# Polled by the delivery worker (ADR-015 §4): the sinks, their undos and the destination tests — the
+# only queue whose worker reaches user destinations, and it has no database.
+DELIVERY_QUEUE = "delivery"
+
 
 def scrape_queue(engine: str) -> str:
     """The queue whose worker runs ``engine``; both register the same activity name."""

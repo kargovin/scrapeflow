@@ -163,6 +163,23 @@ services:
       timeout: 5s
       retries: 5
 
+  # The delivery worker's read-only MinIO user (ADR-015 §4). One-shot on the mc image; re-runs on
+  # every `up` and is a no-op beyond re-setting the password. Shows as `exited (0)` in `compose ps`.
+  minio-users:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-scrapeflow}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-scrapeflow_secret}
+      DELIVERY_MINIO_USER: scrapeflow-delivery
+      DELIVERY_MINIO_PASSWORD: ${DELIVERY_MINIO_PASSWORD:-scrapeflow_delivery_secret}
+    volumes:
+      - ./minio:/scripts:ro
+    entrypoint: ['/bin/sh']
+    command: /scripts/create-users.sh
+
   # ── API ─────────────────────────────────────────────────────────────────────
 
   api:
@@ -283,6 +300,34 @@ services:
     stop_grace_period: 420s
     restart: unless-stopped
     # The pipeline gate's stand-in LLM endpoint (J.10).
+    networks: [default, crawl-fixture]
+
+  # ── Delivery worker (ADR-015 §4) ─────────────────────────────────────────────
+
+  # Serves the `delivery` task queue: the sinks, their undos, the destination tests.
+  # ⚠️ No env_file: ../.env holds DATABASE_URL and every other key. The destinations key is
+  # interpolated — compose reads it from the shell or docker/.env (a link to ../.env works).
+  delivery-worker:
+    build:
+      context: ../delivery-worker
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: scrapeflow
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: scrapeflow-delivery
+      MINIO_SECRET_KEY: ${DELIVERY_MINIO_PASSWORD:-scrapeflow_delivery_secret}
+      MINIO_BUCKET: scrapeflow-results
+      MINIO_SECURE: 'false'
+      DESTINATION_ENCRYPTION_KEY: ${DESTINATION_ENCRYPTION_KEY:-}
+    depends_on:
+      minio-users:
+        condition: service_completed_successfully
+      temporal-namespace:
+        condition: service_completed_successfully
+    # Above DELIVERY_GRACEFUL_SHUTDOWN_SECONDS (75): an in-flight attempt finishes before the kill.
+    stop_grace_period: 90s
+    restart: unless-stopped
+    # The gate fixtures' public-range names.
     networks: [default, crawl-fixture]
 
   # ── Go HTTP scraper worker ───────────────────────────────────────────────────

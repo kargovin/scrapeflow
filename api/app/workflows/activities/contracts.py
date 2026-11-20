@@ -222,3 +222,30 @@ class ExtractLinksOutput(BaseModel):
     """Same-origin links, fragments stripped; the crawl's path filters are admission's."""
 
     links: list[str] = []
+
+
+# --- delivery queue (ADR-015 §4) --------------------------------------------------------------
+
+# Registered by the delivery worker under these names (delivery-worker/worker/contracts.py).
+TEST_WEBHOOK_ACTIVITY = "TestWebhook"
+
+
+class DestinationTestInput(BaseModel):
+    """A saved destination or an unsaved form (ADR-015 §2d); the secret is always ciphertext."""
+
+    kind: Literal["bucket", "postgres", "smtp", "webhook"]
+    # As stored: schemas.destinations.stored(address).
+    address: dict[str, Any]
+    encrypted_secret: Annotated[str, StringConstraints(min_length=1)]
+
+
+class CheckResult(BaseModel):
+    check: str
+    outcome: Literal["passed", "failed", "warning"]
+    message: str | None = None
+
+
+class DestinationTestOutput(BaseModel):
+    """Each check run, in order; a failed check ends the test."""
+
+    checks: list[CheckResult]

@@ -3,7 +3,8 @@
 The wire contract is the job lane's, byte for byte: HMAC-SHA256 over the raw body,
 ``X-ScrapeFlow-Signature: sha256=<hex>`` always sent (``b""`` with no secret), 10 s per POST; the caller
 reads ``< 300`` as delivered. Both webhook senders call ``send_signed_post`` and keep their own outcome
-handling. ``delivery-worker/worker/egress.py`` holds the sinks' copy of the address check (M).
+handling. ``delivery-worker/worker/egress.py`` is the sinks' copy; ``contracts/test_egress.py`` runs
+one table of cases against both — change them together.
 """
 
 import asyncio

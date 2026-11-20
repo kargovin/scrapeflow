@@ -1,0 +1,18 @@
+[project]
+name = "delivery-worker"
+version = "0.1.0"
+requires-python = ">=3.12"
+# No database driver or ORM: this worker must not be able to reach the app database (ADR-015 §4).
+dependencies = [
+    "temporalio>=1.33.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.3.0",
+    "cryptography>=42.0.0",
+    "structlog>=24.0.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

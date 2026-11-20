@@ -44,6 +44,8 @@ api = _load("activity_contract_api", "api/app/workflows/activities/contracts.py"
 playwright = _load("activity_contract_playwright", "playwright-worker/worker/contracts.py")
 llm = _load("activity_contract_llm", "llm-worker/worker/contracts.py")
 api_queues = _load("activity_contract_api_queues", "api/app/workflows/queues.py")
+delivery = _load("activity_contract_delivery", "delivery-worker/worker/contracts.py")
+api_destinations = _load("activity_contract_api_destinations", "api/app/schemas/destinations.py")
 
 ARTIFACT_ID = "3f8b7a12-0c44-4e7a-9a1e-1b2c3d4e5f60"
 
@@ -558,3 +560,96 @@ def test_go_fixture_matches_what_the_api_emits(name):
     assert path.read_text() == current, (
         f"{path.name} is stale — regenerate with UPDATE_CONTRACT_FIXTURES=1."
     )
+
+
+# ---------------------------------------------------------------------------
+# Delivery queue (ADR-015 §4, §11)
+# ---------------------------------------------------------------------------
+
+# One of each kind, as the API stores it (schemas.destinations.stored).
+STORED_DESTINATIONS = {
+    "bucket": (
+        api_destinations.BucketAddress(
+            endpoint="https://s3.example.com", bucket="results", prefix="/runs/", region="eu-west-1"
+        ),
+        api_destinations.BucketSecret(access_key="AKIA", secret_key="s3cr3t"),
+    ),
+    "postgres": (
+        api_destinations.PostgresAddress(
+            host="DB.Example.com.", database="d", schema="sf", table="rows"
+        ),
+        api_destinations.LoginSecret(user="u", password="p"),
+    ),
+    "smtp": (
+        api_destinations.SmtpAddress(
+            host="mail.example.com",
+            port=465,
+            tls_mode="implicit",
+            **{"from": "alerts@example.com"},
+            to=["a@example.com", "b@example.com"],
+            ca_certificate="-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+        ),
+        api_destinations.LoginSecret(user="u", password="p"),
+    ),
+    "webhook": (
+        api_destinations.WebhookAddress(),
+        api_destinations.WebhookSecret(url="https://hooks.example.com/in?t=1"),
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(STORED_DESTINATIONS))
+def test_the_delivery_worker_parses_every_stored_destination_shape(kind):
+    address, secret = STORED_DESTINATIONS[kind]
+    stored_address = api_destinations.stored(address)
+    stored_secret = api_destinations.stored(secret)
+    address_model, secret_model = delivery.KIND_MODELS[kind]
+
+    parsed_address = address_model.model_validate(stored_address)
+    parsed_secret = secret_model.model_validate(stored_secret)
+
+    # Read back by alias, the worker's model says what the API stored.
+    assert parsed_address.model_dump(mode="json", by_alias=True) == stored_address
+    assert parsed_secret.model_dump(mode="json", by_alias=True) == stored_secret
+
+
+def test_both_sides_know_the_same_destination_kinds():
+    assert set(delivery.KIND_MODELS) == set(api_destinations.KIND_MODELS)
+
+
+@pytest.mark.parametrize("kind", sorted(STORED_DESTINATIONS))
+def test_the_destination_test_input_reaches_the_delivery_worker_whole(kind):
+    address, _ = STORED_DESTINATIONS[kind]
+    sent = api.DestinationTestInput(
+        kind=kind, address=api_destinations.stored(address), encrypted_secret="gAAAAAB_secret"
+    )
+    received = _decode(_encode(sent), delivery.DestinationTestInput)
+
+    assert received.model_dump() == sent.model_dump()
+
+
+def test_the_api_parses_the_destination_test_output():
+    out = delivery.DestinationTestOutput(
+        checks=[
+            delivery.CheckResult(check="address", outcome="passed"),
+            delivery.CheckResult(check="tls", outcome="failed", message="certificate not valid for h"),
+        ]
+    )
+    assert _decode(_encode(out), api.DestinationTestOutput).model_dump() == out.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("producer", "consumer"),
+    [
+        (api.DestinationTestInput, delivery.DestinationTestInput),
+        (delivery.DestinationTestOutput, api.DestinationTestOutput),
+        (delivery.CheckResult, api.CheckResult),
+    ],
+)
+def test_the_delivery_queue_carries_every_field_both_ways(producer, consumer):
+    assert set(producer.model_fields) == set(consumer.model_fields)
+
+
+def test_the_delivery_worker_registers_the_names_and_queue_the_api_calls():
+    assert delivery.DELIVERY_QUEUE == api_queues.DELIVERY_QUEUE
+    assert delivery.TEST_WEBHOOK_ACTIVITY == api.TEST_WEBHOOK_ACTIVITY
