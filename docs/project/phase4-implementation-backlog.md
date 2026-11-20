@@ -3857,6 +3857,9 @@ monitors; `quota_active_submissions` reads.
 **Step 2 (owner, 2026-11-20):** pipeline `l-gate` `7ef27031-802f-4ec1-a90f-05d7a9ae929e`. Step 3's monitor `l-static`
 `b5ca7cf7-69b1-461e-a630-24db6fb02d43` created, one warning (no failure route), as expected.
 
+**Step 3 (owner, 2026-11-20):** two scheduled firings — `first_check` (kept copy), then `unchanged` (stopped at
+`gate`, no copy); **one** webhook message.
+
 **Rollback:** prefer a forward fix. Before an image revert (api, workflow-worker, CronJob to step 0's tag), **delete
 every monitor** (their Schedules would fire into a workflow type the old worker does not have). The revert leaves 4.12
 applied — harmless, K's code maps none of its tables or columns. Do not downgrade the migration.
