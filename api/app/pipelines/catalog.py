@@ -432,6 +432,10 @@ class BlockType:
     sink: Sink | None = None
     # The destination kind a config's ``destination_id`` must name (ADR-015 §2b).
     destination_kind: str | None = None
+    # Configs whose timing GET /pipelines/catalog shows, by label: model_construct() overrides.
+    catalog_configs: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=lambda: {"default": {}}
+    )
 
     @property
     def current_version(self) -> int:
@@ -499,6 +503,7 @@ SCRAPE = BlockType(
     timing=_scrape_timing,
     bindable_fields={"url": lambda _config: frozenset({"url"})},
     secret_fields=frozenset({"proxy_url", "cookies"}),
+    catalog_configs={"http": {}, "playwright": {"engine": Engine.playwright}},
 )
 
 CLEAN = BlockType(
@@ -529,6 +534,10 @@ VALIDATE = BlockType(
     timing=_validate_timing,
     bindable_fields={"rules[].value": _compare_value_types, "rules[].text": _contains_text_types},
     check_input=_validate_check_input,
+    catalog_configs={
+        "default": {},
+        "stop, delete outputs": {"when_unmet": "stop", "on_stop_outputs": "delete"},
+    },
 )
 
 WEBHOOK = BlockType(
@@ -542,6 +551,7 @@ WEBHOOK = BlockType(
     timing=lambda config: _delivery_retry(20, calls_activity=WEBHOOK_RESULT_EVENT in config.events),
     sink=Sink(reversible=False),
     destination_kind="webhook",
+    catalog_configs={"default": {}, "alert only": {"events": ["pipeline.failed"]}},
 )
 
 # ADR-015 §6: one try = load_destination + the attempt; a retry adds mirror waiting and running.

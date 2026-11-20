@@ -43,6 +43,7 @@ from app.pipelines.catalog import (
     InputBinding,
     LLMExtractConfigV1,
     ScrapeConfigV1,
+    Timing,
     WebhookConfigV1,
     destination_refs,
 )
@@ -61,8 +62,12 @@ from app.pipelines.validator import (
     validate,
 )
 from app.schemas.pipelines import (
+    CatalogBlock,
+    CatalogSink,
+    CatalogTiming,
     MonitorRef,
     OutputState,
+    PipelineCatalogResponse,
     PipelineCreate,
     PipelineResponse,
     PipelineRunAlert,
@@ -358,6 +363,53 @@ async def list_pipelines(
     stmt = _owned_latest(user.id).order_by(Pipeline.created_at.desc()).limit(limit).offset(offset)
     rows = (await db.execute(stmt)).all()
     return [pipeline_response(pipeline, version) for pipeline, version in rows]
+
+
+def _catalog_timing(timing: Timing) -> CatalogTiming:
+    return CatalogTiming(
+        attempt_seconds=timing.start_to_close,
+        queue_wait_seconds=timing.schedule_to_start,
+        attempts=timing.maximum_attempts,
+        first_wait_seconds=timing.initial_interval,
+        backoff=timing.backoff_coefficient,
+        max_wait_seconds=timing.maximum_interval,
+        budget_seconds=timing.budget if timing.calls_activity else 0,
+        need_seconds=timing.need,
+    )
+
+
+# Before /{pipeline_id}: that route would read "catalog" as an id.
+@router.get("/catalog", response_model=PipelineCatalogResponse)
+async def get_catalog(_: User = Depends(get_current_user)) -> PipelineCatalogResponse:
+    """Each block type: its kind, whether it can be undone, and its timing (PRD-017 R2, R6)."""
+    blocks = []
+    for block_type in CATALOG.values():
+        model = block_type.config_versions[block_type.current_version]
+        sink = block_type.sink
+        blocks.append(
+            CatalogBlock(
+                type=block_type.name,
+                kind=block_type.kind,
+                config_schema_version=block_type.current_version,
+                consumes=sorted(block_type.consumes),
+                destination_kind=block_type.destination_kind,
+                sink=(
+                    CatalogSink(
+                        reversible=sink.reversible,
+                        undo=_catalog_timing(sink.undo) if sink.undo else None,
+                    )
+                    if sink
+                    else None
+                ),
+                timings={
+                    label: _catalog_timing(block_type.timing(model.model_construct(**config)))
+                    for label, config in block_type.catalog_configs.items()
+                },
+            )
+        )
+    return PipelineCatalogResponse(
+        blocks=blocks, run_limit_seconds=settings.pipeline_max_run_seconds
+    )
 
 
 @router.get("/{pipeline_id}", response_model=PipelineResponse)

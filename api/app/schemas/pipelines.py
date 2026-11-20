@@ -50,6 +50,47 @@ class PipelineResponse(BaseModel):
     monitors: list[MonitorRef] | None = None
 
 
+class CatalogTiming(BaseModel):
+    """One block's time budget, in seconds (PRD-016 R4, PRD-017 R6)."""
+
+    attempt_seconds: int
+    # How long an attempt may wait for a worker to take it.
+    queue_wait_seconds: int
+    attempts: int
+    first_wait_seconds: int
+    backoff: float
+    max_wait_seconds: int
+    # Every attempt and every wait at its limit.
+    budget_seconds: int
+    # What a run reserves for the block: the budget plus the run's own writes around it.
+    need_seconds: int
+
+
+class CatalogSink(BaseModel):
+    reversible: bool
+    # Reversible only: what one undo can take; a run reserves it per such block (rollback).
+    undo: CatalogTiming | None = None
+
+
+class CatalogBlock(BaseModel):
+    type: str
+    kind: Literal["content", "effect"]
+    config_schema_version: int
+    # Reference types accepted as input; empty for the starting block.
+    consumes: list[str]
+    # The kind of saved destination its destination_id names, if it takes one.
+    destination_kind: str | None
+    sink: CatalogSink | None
+    # By configuration, where the budget depends on it.
+    timings: dict[str, CatalogTiming]
+
+
+class PipelineCatalogResponse(BaseModel):
+    blocks: list[CatalogBlock]
+    # The longest a run may take: its blocks' need plus every reversible sink's undo.
+    run_limit_seconds: int
+
+
 class PipelineVersionResponse(BaseModel):
     version: int
     definition: dict[str, Any]
