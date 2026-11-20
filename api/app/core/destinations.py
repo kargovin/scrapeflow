@@ -91,3 +91,26 @@ async def reference_problems(
                 )
             )
     return missing, wrong_kind
+
+
+class DestinationGone(Exception):
+    """A destination a block names is deleted, another user's, or not the kind it needs."""
+
+
+async def current_destination(
+    db: AsyncSession, destination_id: uuid.UUID | None, user_id: uuid.UUID, kind: str
+) -> Destination:
+    """The destination as it is now, read at each attempt (ADR-015 §2b). Raises DestinationGone."""
+    destination = await db.get(Destination, destination_id) if destination_id else None
+    # Another user's reads as deleted: a run never delivers with someone else's credentials.
+    if destination is None or destination.user_id != user_id:
+        raise DestinationGone("destination deleted")
+    if destination.kind != kind:
+        raise DestinationGone(f"destination is a {destination.kind} destination, not {kind}")
+    return destination
+
+
+def webhook_target(destination: Destination) -> tuple[str, bytes]:
+    """A webhook destination's URL and signing key (b"" when it has none). Raises InvalidToken."""
+    secret = decrypt_secret(destination.encrypted_secret)
+    return secret["url"], (secret.get("secret") or "").encode()

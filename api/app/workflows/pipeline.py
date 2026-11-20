@@ -73,6 +73,7 @@ RECORD_STORAGE_ACTIVITY = "record_storage"
 CHECK_CANCELLED_ACTIVITY = "check_cancelled"
 WEBHOOK_ACTIVITY = "deliver_webhook"
 RELEASE_RUN_OUTPUTS_ACTIVITY = "release_run_outputs"
+LOAD_DESTINATION_ACTIVITY = "load_destination"
 
 # ADR-012: a Validate's stop mode, its bound rule values and the stop path (ADR-014 §6, J.6).
 VALIDATE_STOP_PATCH = "validate-stop"
@@ -88,6 +89,8 @@ WEBHOOK_EVENT = WEBHOOK_RESULT_EVENT
 RUN_CANCELLED_ERROR = "RunCancelled"
 # Raised retryable by release_run_outputs; its one detail is the object keys still held.
 OUTPUTS_LEFT_ERROR = "OutputsLeft"
+# Non-retryable: the destination a block names is gone, another user's, or not its kind (ADR-015 §2c).
+DESTINATION_GONE_ERROR = "DestinationDeleted"
 
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
 # ADR-014 §5a; each list matches its CHECK in migration 4.10 — a new value widens both.
@@ -166,6 +169,8 @@ class MirrorBlockInput(BaseModel):
     verdict: dict[str, Any] | None = None
     # completed only: a change gate's input, SHA-256 hex (ADR-016 §5e).
     fingerprint: str | None = None
+    # completed only: where a sink wrote, {destination_id, kind, location} (ADR-014 §5a).
+    delivery: dict[str, Any] | None = None
 
 
 class MirrorRunInput(BaseModel):
@@ -207,11 +212,26 @@ class RunRef(BaseModel):
     run_id: str
 
 
+class LoadDestinationInput(BaseModel):
+    run_id: str
+    destination_id: str
+    # The kind the block needs.
+    kind: str
+
+
+class LoadedDestination(BaseModel):
+    """The destination as it is now (ADR-015 §2b); the secret stays ciphertext."""
+
+    address: dict[str, Any]
+    encrypted_secret: str
+
+
 class WebhookInput(BaseModel):
     run_id: str
     pipeline_id: str
     block_id: str
-    url: str
+    # Exactly one: an inline URL, or a webhook destination read at each attempt (ADR-015 §2b).
+    url: str | None = None
     # The block's input reference: what is delivered.
     result_path: str
     encrypted_secret: str | None = None
@@ -222,6 +242,9 @@ class WebhookInput(BaseModel):
     # A monitor's check only (ADR-016 §6a): which monitor, and {status, baseline_run_id, summary}.
     monitor_id: str | None = None
     change: dict[str, Any] | None = None
+    destination_id: str | None = None
+    # Set from patch "sinks" on: the payload then carries block_id and these (PRD-017 R4).
+    deliveries: list[dict[str, Any]] | None = None
 
 
 # Three per block — running, record_storage, completed — must fit BLOCK_OVERHEAD_SECONDS.

@@ -1764,6 +1764,8 @@ async def test_webhook_delivers_the_last_content_blocks_object_and_passes_it_on(
         # A hand-run: no monitor's fields.
         "monitor_id": None,
         "change": None,
+        "destination_id": None,
+        "deliveries": None,
     }
     assert h.calls[-3:] == [
         MirrorBlockInput(run_id="r1", block_id="notify", status="running", input_ref=LLM_PATH),

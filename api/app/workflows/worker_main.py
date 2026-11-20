@@ -26,6 +26,7 @@ from app.workflows.activities.crawls import (
 )
 from app.workflows.activities.db import (
     check_cancelled,
+    load_destination,
     mirror_block_status,
     mirror_run_status,
     record_storage,
@@ -97,6 +98,7 @@ async def main() -> None:
             record_storage,
             release_run_outputs,
             check_cancelled,
+            load_destination,
             deliver_webhook,
             job_run_started,
             read_llm_settings,

@@ -15,11 +15,13 @@ from temporalio.testing import ActivityEnvironment
 
 from app.core import egress
 from app.core.db import AsyncSessionLocal
+from app.core.destinations import encrypt_secret
+from app.models.destination import Destination
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.settings import settings
 from app.workflows.activities import webhook as webhook_module
 from app.workflows.activities.webhook import deliver_webhook
-from app.workflows.pipeline import RUN_CANCELLED_ERROR, WebhookInput
+from app.workflows.pipeline import DESTINATION_GONE_ERROR, RUN_CANCELLED_ERROR, WebhookInput
 from tests.test_workflows_pipeline import LLM_PATH, _block, _run_rows
 
 HOOK_BLOCKS = (("extract", "llm_extract", "completed"), ("notify", "webhook", "running"))
@@ -232,3 +234,122 @@ async def test_an_undecryptable_secret_is_final(db_user, no_ssrf):
             )
     assert receiver.requests == []
     assert (exc.value.type, exc.value.non_retryable) == ("WebhookSecret", True)
+
+
+# --- M.7: a webhook destination, and the payload's block_id + deliveries ------------------------
+
+BUCKET_DELIVERY = {
+    "block_id": "store",
+    "kind": "bucket",
+    "location": {
+        "endpoint": "https://s3.example.com/",
+        "bucket": "b",
+        "region": None,
+        "key": "out/p/r/store.json",
+    },
+}
+
+
+async def _webhook_destination(user_id, url, secret: str | None = "dest-secret") -> Destination:
+    async with AsyncSessionLocal() as db:
+        d = Destination(
+            user_id=user_id,
+            name=f"hook-{uuid.uuid4().hex[:6]}",
+            kind="webhook",
+            address={},
+            encrypted_secret=encrypt_secret({"url": url, "secret": secret}),
+            display_host="127.0.0.1",
+        )
+        db.add(d)
+        await db.commit()
+        await db.refresh(d)
+    return d
+
+
+def _destination_input(run_id, destination_id, **fields) -> WebhookInput:
+    return _input(run_id, None, **fields).model_copy(update={"destination_id": str(destination_id)})
+
+
+async def test_the_payload_gains_block_id_and_deliveries_once_the_workflow_sends_them(
+    db_user, no_ssrf
+):
+    run = await _run_rows(db_user.id, HOOK_BLOCKS)
+    async with Receiver() as receiver:
+        await _attempt(_input(run.id, receiver.url, deliveries=[BUCKET_DELIVERY]))
+        await _attempt(_input(run.id, receiver.url, deliveries=[]))
+
+    first, second = (json.loads(body) for _, body in receiver.requests)
+    assert (first["block_id"], first["deliveries"]) == ("notify", [BUCKET_DELIVERY])
+    assert (second["block_id"], second["deliveries"]) == ("notify", [])
+    # Every other field is the layer-A payload's, unchanged.
+    assert {k: v for k, v in first.items() if k not in ("block_id", "deliveries")} == {
+        "event": "pipeline.result",
+        "run_id": str(run.id),
+        "pipeline_id": first["pipeline_id"],
+        "pipeline_run_id": str(run.id),
+        "result_path": LLM_PATH,
+        "diff_detected": False,
+        "diff_summary": None,
+        "timestamp": "2026-10-11T12:00:00+00:00",
+    }
+
+
+async def test_a_destination_webhook_posts_to_its_url_signed_with_its_secret(db_user, no_ssrf):
+    run = await _run_rows(db_user.id, HOOK_BLOCKS)
+    async with Receiver() as receiver:
+        destination = await _webhook_destination(db_user.id, receiver.url)
+        await _attempt(_destination_input(run.id, destination.id, deliveries=[]))
+
+    [(headers, body)] = receiver.requests
+    assert headers["x-scrapeflow-signature"] == (
+        "sha256=" + hmac.new(b"dest-secret", body, hashlib.sha256).hexdigest()
+    )
+    assert json.loads(body)["block_id"] == "notify"
+
+
+async def test_a_destination_edited_between_attempts_is_read_afresh(db_user, no_ssrf):
+    run = await _run_rows(db_user.id, HOOK_BLOCKS)
+    async with Receiver(503) as down, Receiver() as up:
+        destination = await _webhook_destination(db_user.id, down.url, secret=None)
+        with pytest.raises(ApplicationError):
+            await _attempt(_destination_input(run.id, destination.id))
+        async with AsyncSessionLocal() as db:
+            row = await db.get(Destination, destination.id)
+            row.encrypted_secret = encrypt_secret({"url": up.url, "secret": "rotated"})
+            await db.commit()
+        await _attempt(_destination_input(run.id, destination.id), attempt=2)
+
+    assert len(down.requests) == 1
+    [(headers, body)] = up.requests
+    assert headers["x-scrapeflow-signature"] == (
+        "sha256=" + hmac.new(b"rotated", body, hashlib.sha256).hexdigest()
+    )
+
+
+async def test_a_deleted_destination_is_final_and_sends_nothing(db_user, no_ssrf):
+    run = await _run_rows(db_user.id, HOOK_BLOCKS)
+    async with Receiver() as receiver:
+        destination = await _webhook_destination(db_user.id, receiver.url)
+        async with AsyncSessionLocal() as db:
+            await db.delete(await db.get(Destination, destination.id))
+            await db.commit()
+        with pytest.raises(ApplicationError) as exc:
+            await _attempt(_destination_input(run.id, destination.id))
+
+    assert receiver.requests == []
+    assert (exc.value.type, exc.value.non_retryable, exc.value.message) == (
+        DESTINATION_GONE_ERROR,
+        True,
+        "destination deleted",
+    )
+
+
+async def test_another_users_destination_reads_as_deleted(db_user, other_user, no_ssrf):
+    run = await _run_rows(db_user.id, HOOK_BLOCKS)
+    async with Receiver() as receiver:
+        destination = await _webhook_destination(other_user.id, receiver.url)
+        with pytest.raises(ApplicationError) as exc:
+            await _attempt(_destination_input(run.id, destination.id))
+
+    assert receiver.requests == []
+    assert (exc.value.type, exc.value.message) == (DESTINATION_GONE_ERROR, "destination deleted")

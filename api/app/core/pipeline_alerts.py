@@ -54,7 +54,9 @@ async def queue_failure_alerts(db: AsyncSession, run: PipelineRun) -> int:
                 pipeline_run_id=run.id,
                 block_id=block.id,
                 event=FAILED_EVENT,
-                webhook_url=str(block.config.url),
+                # A destination's URL is read at each attempt and never stored (ADR-014 §8b).
+                webhook_url=str(block.config.url) if block.config.url is not None else None,
+                destination_id=block.config.destination_id,
                 payload=failed_payload(run, block.id),
                 status="pending",
                 next_attempt_at=datetime.now(UTC),

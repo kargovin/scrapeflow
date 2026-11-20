@@ -6,6 +6,10 @@ Success = status < 300, the same backoff and attempt cap. Every attempt resolves
 refusal is final without counting as an attempt. The row stays the record the admin endpoints and the
 webhook meters read.
 
+A webhook row naming a destination (a pipeline alert from a destination-backed block) stores no URL:
+the destination's URL and signing key are read at each attempt; one gone, another user's or not a
+webhook destination ends the row at once with no attempt (ADR-015 §2c).
+
 An email row (``kind = 'email'``) is not sent here: the attempt hands the workflow the message, the
 workflow calls ``SendEmail`` on the delivery queue, and ``record_email_attempt`` applies the outcome
 with the same backoff and cap (ADR-015 §4).
@@ -23,10 +27,12 @@ from temporalio.exceptions import ApplicationError
 
 from app.core import egress, webhook_delivery
 from app.core.db import AsyncSessionLocal
+from app.core.destinations import DestinationGone, current_destination, webhook_target
 from app.core.email_deliveries import Undeliverable, email_for
 from app.core.pipeline_alerts import alert_secret
 from app.models.batch import Batch
 from app.models.job import Job
+from app.models.pipeline import PipelineRun
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
 from app.workflows.webhook_delivery import (
@@ -86,6 +92,31 @@ async def _secret(db, delivery: WebhookDelivery) -> bytes:
     return Fernet(key).decrypt(encrypted.encode())
 
 
+async def _destination_target(db, delivery: WebhookDelivery) -> tuple[str, bytes]:
+    """A destination row's URL and signing key as they are now. Raises Undeliverable."""
+    # One arm per owner, as _secret: a missed arm must not send with no owner check.
+    if delivery.pipeline_run_id:
+        run = await db.get(PipelineRun, delivery.pipeline_run_id)
+        if run is None:
+            raise Undeliverable("the run was deleted")
+        owner_id = run.user_id
+    else:
+        raise ApplicationError(
+            f"webhook delivery {delivery.id} has no owner it can send for", non_retryable=True
+        )
+    try:
+        destination = await current_destination(db, delivery.destination_id, owner_id, "webhook")
+    except DestinationGone as exc:
+        raise Undeliverable(str(exc)) from None
+    return webhook_target(destination)
+
+
+def _exhaust(delivery: WebhookDelivery, error: str) -> AttemptOutcome:
+    delivery.status = "exhausted"
+    delivery.last_error = error
+    return AttemptOutcome(status="exhausted")
+
+
 @activity.defn(name=ATTEMPT_WEBHOOK_ACTIVITY)
 async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
     delivery_id = uuid.UUID(input.delivery_id)
@@ -99,18 +130,29 @@ async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
             try:
                 return AttemptOutcome(status="email", email=await email_for(db, delivery))
             except Undeliverable as exc:
-                delivery.status = "exhausted"
-                delivery.last_error = str(exc)
+                outcome = _exhaust(delivery, str(exc))
                 await db.commit()
                 logger.warning(
                     "email: undeliverable", delivery_id=input.delivery_id, error=str(exc)
                 )
-                return AttemptOutcome(status="exhausted")
+                return outcome
 
         body = json.dumps(delivery.payload).encode()
-        secret = await _secret(db, delivery)
+        if delivery.webhook_url is not None:
+            url, secret = delivery.webhook_url, await _secret(db, delivery)
+        else:
+            # A destination row, or one whose destination was deleted (SET NULL).
+            try:
+                url, secret = await _destination_target(db, delivery)
+            except Undeliverable as exc:
+                outcome = _exhaust(delivery, str(exc))
+                await db.commit()
+                logger.warning(
+                    "webhook: undeliverable", delivery_id=input.delivery_id, error=str(exc)
+                )
+                return outcome
         try:
-            status_code = await egress.send_signed_post(delivery.webhook_url, body, secret)
+            status_code = await egress.send_signed_post(url, body, secret)
             error = None if status_code < 300 else f"HTTP {status_code}"
         except egress.EgressBlocked as exc:
             # A security event, not an attempt.
@@ -120,7 +162,9 @@ async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
             logger.warning(
                 "webhook: ssrf blocked — delivery marked exhausted",
                 delivery_id=input.delivery_id,
+                # Never a destination's URL: it may carry a credential.
                 url=delivery.webhook_url,
+                destination_id=str(delivery.destination_id) if delivery.destination_id else None,
                 error=str(exc),
             )
             return AttemptOutcome(status="exhausted")

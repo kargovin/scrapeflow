@@ -13,13 +13,19 @@ from sqlalchemy import select
 
 from app.core import egress
 from app.core.db import AsyncSessionLocal
+from app.core.destinations import encrypt_secret
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.main import app
+from app.models.destination import Destination
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
 from app.workflows.activities.db import mirror_run_status
-from app.workflows.activities.webhook_deliveries import _secret, attempt_webhook_delivery
+from app.workflows.activities.webhook_deliveries import (
+    _destination_target,
+    _secret,
+    attempt_webhook_delivery,
+)
 from app.workflows.pipeline import MirrorRunInput
 from app.workflows.webhook_delivery import DeliveryRef
 from tests.test_admin import admin_api_key, admin_headers, admin_user  # noqa: F401
@@ -349,3 +355,114 @@ async def test_admin_reads_show_an_alert_with_its_run_and_block_and_can_retry_it
     resp = await client.post(f"/admin/webhooks/deliveries/{row.id}/retry", headers=admin_headers)
     assert resp.status_code == 200
     assert (resp.json()["status"], resp.json()["attempts"]) == ("pending", 0)
+
+
+# --- M.7: an alert from a block naming a webhook destination -----------------------------------
+
+DESTINATION_URL = "https://dest.example.com/in?token=t0p"
+
+
+async def _hook_destination(user_id, secret=b"dest-secret") -> Destination:
+    async with AsyncSessionLocal() as db:
+        d = Destination(
+            user_id=user_id,
+            name=f"hook-{uuid.uuid4().hex[:6]}",
+            kind="webhook",
+            address={},
+            encrypted_secret=encrypt_secret(
+                {"url": DESTINATION_URL, "secret": secret.decode() if secret else None}
+            ),
+            display_host="dest.example.com",
+        )
+        db.add(d)
+        await db.commit()
+        await db.refresh(d)
+    return d
+
+
+def _destination_webhook(block_id, destination_id):
+    return {
+        "id": block_id,
+        "type": "webhook",
+        "input": "fetch",
+        "config_schema_version": 1,
+        "config": {
+            "url": None,
+            "secret": None,
+            "destination_id": str(destination_id),
+            "events": ["pipeline.failed"],
+        },
+        "secrets": {},
+    }
+
+
+async def _destination_alert(user_id, destination_id) -> WebhookDelivery:
+    run = await _run(user_id, _definition(_destination_webhook("alert", destination_id)))
+    await _fail(run)
+    [row] = await _alerts(run.id)
+    return row
+
+
+async def test_a_destination_blocks_alert_stores_the_destination_and_no_url(db_user):
+    destination = await _hook_destination(db_user.id)
+    row = await _destination_alert(db_user.id, destination.id)
+    assert (row.kind, row.destination_id, row.webhook_url) == (
+        "webhook",
+        destination.id,
+        None,
+    )
+
+
+async def test_a_destination_alert_is_sent_to_its_url_with_its_secret(db_user, receiver):
+    destination = await _hook_destination(db_user.id)
+    row = await _destination_alert(db_user.id, destination.id)
+
+    outcome = await attempt_webhook_delivery(DeliveryRef(delivery_id=str(row.id)))
+
+    assert outcome.status == "delivered"
+    [(url, body, headers)] = receiver.posts
+    assert (url, headers["Host"]) == ("https://93.184.216.34/in?token=t0p", "dest.example.com")
+    assert headers["X-ScrapeFlow-Signature"] == (
+        "sha256=" + hmac.new(b"dest-secret", body, hashlib.sha256).hexdigest()
+    )
+
+
+async def test_an_alert_whose_destination_was_deleted_ends_without_an_attempt(db_user, receiver):
+    destination = await _hook_destination(db_user.id)
+    row = await _destination_alert(db_user.id, destination.id)
+    async with AsyncSessionLocal() as db:
+        await db.delete(await db.get(Destination, destination.id))
+        await db.commit()
+
+    outcome = await attempt_webhook_delivery(DeliveryRef(delivery_id=str(row.id)))
+
+    assert outcome.status == "exhausted"
+    assert receiver.posts == []
+    [after] = await _alerts(row.pipeline_run_id)
+    # ON DELETE SET NULL: the row stays the record.
+    assert (after.destination_id, after.attempts, after.last_error) == (
+        None,
+        0,
+        "destination deleted",
+    )
+
+
+async def test_an_alert_never_uses_another_users_destination(db_user, other_user, receiver):
+    destination = await _hook_destination(other_user.id)
+    row = await _destination_alert(db_user.id, destination.id)
+
+    outcome = await attempt_webhook_delivery(DeliveryRef(delivery_id=str(row.id)))
+
+    assert outcome.status == "exhausted"
+    assert receiver.posts == []
+    [after] = await _alerts(row.pipeline_run_id)
+    assert after.last_error == "destination deleted"
+
+
+async def test_a_destination_row_with_no_owner_it_can_send_for_raises():
+    orphan = WebhookDelivery(
+        id=uuid.uuid4(), event="x", webhook_url=None, destination_id=uuid.uuid4(), payload={}
+    )
+    async with AsyncSessionLocal() as db:
+        with pytest.raises(Exception, match="no owner it can send for"):
+            await _destination_target(db, orphan)

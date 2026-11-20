@@ -16,6 +16,7 @@ from temporalio.exceptions import ApplicationError
 
 from app.core import webhook_delivery
 from app.core.db import AsyncSessionLocal
+from app.core.destinations import DestinationGone, current_destination
 from app.core.ledger import objects_for_pipeline_run, record_object, release_objects
 from app.core.monitor_checks import CheckEnded, after_commit, monitor_check_ended
 from app.core.pipeline_alerts import queue_failure_alerts
@@ -27,12 +28,16 @@ from app.models.storage_object import StorageObject
 from app.workflows.activities.job_runs import get_minio
 from app.workflows.pipeline import (
     CHECK_CANCELLED_ACTIVITY,
+    DESTINATION_GONE_ERROR,
+    LOAD_DESTINATION_ACTIVITY,
     MIRROR_BLOCK_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
     OUTPUTS_LEFT_ERROR,
     RECORD_STORAGE_ACTIVITY,
     RELEASE_RUN_OUTPUTS_ACTIVITY,
     RUN_CANCELLED_ERROR,
+    LoadDestinationInput,
+    LoadedDestination,
     MirrorBlockInput,
     MirrorRunInput,
     RecordStorageInput,
@@ -94,6 +99,7 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
             if input.status == "completed":
                 values["verdict"] = input.verdict
                 values["fingerprint"] = input.fingerprint
+                values["delivery"] = input.delivery
         result = await db.execute(
             update(PipelineRunBlock)
             .where(
@@ -249,6 +255,30 @@ async def check_cancelled(input: RunRef) -> bool:
     async with AsyncSessionLocal() as db:
         run = await db.get(PipelineRun, uuid.UUID(input.run_id))
         return run is None or _cancel_requested(run)
+
+
+@activity.defn(name=LOAD_DESTINATION_ACTIVITY)
+async def load_destination(input: LoadDestinationInput) -> LoadedDestination:
+    """A sink's destination as it is now, before each try (ADR-015 §4); the run's owner's only."""
+    async with AsyncSessionLocal() as db:
+        user_id = await db.scalar(
+            select(PipelineRun.user_id).where(PipelineRun.id == uuid.UUID(input.run_id))
+        )
+        if user_id is None:
+            raise ApplicationError(
+                "the run was deleted", type=RUN_CANCELLED_ERROR, non_retryable=True
+            )
+        try:
+            destination = await current_destination(
+                db, uuid.UUID(input.destination_id), user_id, input.kind
+            )
+        except DestinationGone as exc:
+            raise ApplicationError(
+                str(exc), type=DESTINATION_GONE_ERROR, non_retryable=True
+            ) from None
+        return LoadedDestination(
+            address=destination.address, encrypted_secret=destination.encrypted_secret
+        )
 
 
 @activity.defn(name=RELEASE_RUN_OUTPUTS_ACTIVITY)
