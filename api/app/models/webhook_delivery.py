@@ -7,6 +7,13 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
 
+# ADR-015 §4: an email row is sent by send_email on the delivery queue.
+DELIVERY_KINDS = ("webhook", "email")
+
+
+def _in(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
+
 
 class WebhookDelivery(Base):
     __tablename__ = "webhook_deliveries"
@@ -32,8 +39,17 @@ class WebhookDelivery(Base):
         nullable=True,
     )
     block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A saved destination's row (ADR-015 §2b): its URL or mail settings are read at each attempt.
+    # SET NULL leaves a row with no target — its attempt fails as "destination deleted".
+    destination_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "destinations.id", ondelete="SET NULL", name="fk_webhook_deliveries_destination_id"
+        ),
+        nullable=True,
+    )
+    kind: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="webhook")
     event: Mapped[str] = mapped_column(VARCHAR(50), nullable=False)
-    webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
+    webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -61,6 +77,15 @@ class WebhookDelivery(Base):
             "(pipeline_run_id IS NULL) = (block_id IS NULL)",
             name="ck_webhook_deliveries_pipeline_block",
         ),
+        CheckConstraint(_in("kind", DELIVERY_KINDS), name="ck_webhook_deliveries_kind"),
+        # Never both; neither only after the destination was deleted (SET NULL).
+        CheckConstraint(
+            "num_nonnulls(webhook_url, destination_id) <= 1",
+            name="ck_webhook_deliveries_one_target",
+        ),
+        CheckConstraint(
+            "kind = 'webhook' OR webhook_url IS NULL", name="ck_webhook_deliveries_email_no_url"
+        ),
         # A retried writer inserts nothing twice (ON CONFLICT DO NOTHING).
         Index(
             "uq_webhook_deliveries_pipeline_run_block_event",
@@ -69,6 +94,11 @@ class WebhookDelivery(Base):
             "event",
             unique=True,
             postgresql_where=text("pipeline_run_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_webhook_deliveries_destination_id",
+            "destination_id",
+            postgresql_where=text("destination_id IS NOT NULL"),
         ),
         Index(
             "idx_webhook_deliveries_status_next",

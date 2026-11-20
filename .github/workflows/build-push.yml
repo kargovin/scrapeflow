@@ -50,7 +50,7 @@ jobs:
         run: |
           uv sync --frozen --extra dev --no-install-project
           key() { uv run --no-sync python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"; }
-          export LLM_KEY_ENCRYPTION_KEY="$(key)" CREDENTIALS_ENCRYPTION_KEY="$(key)"
+          export LLM_KEY_ENCRYPTION_KEY="$(key)" CREDENTIALS_ENCRYPTION_KEY="$(key)" DESTINATION_ENCRYPTION_KEY="$(key)"
           uv run --no-sync pytest --noconftest tests/test_workflow_replay.py -q -p no:cacheprovider
 
   # ── API ────────────────────────────────────────────────────────────────────

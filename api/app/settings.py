@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env relative to this file: api/app/settings.py -> ../../.env (repo root)
@@ -59,6 +59,9 @@ class Settings(BaseSettings):
         default="", alias="CREDENTIALS_ENCRYPTION_KEY"
     )  # symmetric key for encrypting proxy URLs + cookies in activity inputs
 
+    # Destinations (ADR-015 §2a) — the delivery worker holds this key and no other
+    destination_encryption_key: str = Field(default="", alias="DESTINATION_ENCRYPTION_KEY")
+
     # Cron Scheduler
     schedule_min_interval_minutes: int = 5
 
@@ -92,24 +95,18 @@ class Settings(BaseSettings):
     # ADR-009 §8d: refuse to start a pipeline run this close to the storage limit (operator dial).
     storage_headroom_bytes: int = 52428800  # 50 MiB
 
-    @field_validator("llm_key_encryption_key")
-    def validate_fernet_key(cls, v):
+    @field_validator(
+        "llm_key_encryption_key", "credentials_encryption_key", "destination_encryption_key"
+    )
+    @classmethod
+    def validate_fernet_key(cls, v: str, info: ValidationInfo) -> str:
+        name = cls.model_fields[info.field_name].alias
         if not v:
-            raise ValueError("LLM_KEY_ENCRYPTION_KEY must be set to a valid Fernet key")
+            raise ValueError(f"{name} must be set to a valid Fernet key")
         try:
             Fernet(v)
         except (ValueError, InvalidToken):
-            raise ValueError("LLM_KEY_ENCRYPTION_KEY is not a valid Fernet key") from None
-        return v
-
-    @field_validator("credentials_encryption_key")
-    def validate_credentials_fernet_key(cls, v):
-        if not v:
-            raise ValueError("CREDENTIALS_ENCRYPTION_KEY must be set to a valid Fernet key")
-        try:
-            Fernet(v)
-        except (ValueError, InvalidToken):
-            raise ValueError("CREDENTIALS_ENCRYPTION_KEY is not a valid Fernet key") from None
+            raise ValueError(f"{name} is not a valid Fernet key") from None
         return v
 
     # Allowed origins - CORS

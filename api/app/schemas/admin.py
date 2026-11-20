@@ -33,7 +33,10 @@ class AdminWebhookDeliveryResponse(BaseModel):
     # A pipeline run's failure alert, and the block that sends it.
     pipeline_run_id: uuid.UUID | None = None
     block_id: str | None = None
-    webhook_url: str
+    kind: str = "webhook"
+    # A saved destination's row has no URL; it is resolved at each attempt.
+    destination_id: uuid.UUID | None = None
+    webhook_url: str | None = None
     payload: dict
     status: str
     attempts: int
