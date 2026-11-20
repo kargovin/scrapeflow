@@ -649,6 +649,8 @@ def test_the_api_parses_the_destination_test_output():
         (api.BucketLocation, delivery.BucketLocation),
         (api.UndoBucketInput, delivery.UndoBucketInput),
         (delivery.UndoBucketOutput, api.UndoBucketOutput),
+        (api.SendEmailInput, delivery.SendEmailInput),
+        (delivery.SendEmailOutput, api.SendEmailOutput),
     ],
 )
 def test_the_delivery_queue_carries_every_field_both_ways(producer, consumer):
@@ -661,11 +663,14 @@ def test_the_delivery_worker_registers_the_names_and_queue_the_api_calls():
     assert delivery.TEST_BUCKET_ACTIVITY == api.TEST_BUCKET_ACTIVITY
     assert delivery.DELIVER_BUCKET_ACTIVITY == api.DELIVER_BUCKET_ACTIVITY
     assert delivery.UNDO_BUCKET_ACTIVITY == api.UNDO_BUCKET_ACTIVITY
+    assert delivery.TEST_SMTP_ACTIVITY == api.TEST_SMTP_ACTIVITY
+    assert delivery.SEND_EMAIL_ACTIVITY == api.SEND_EMAIL_ACTIVITY
 
 
 def test_both_sides_agree_on_the_bucket_attempt_budgets():
     assert delivery.BUCKET_DELIVER_ATTEMPT_SECONDS == api.BUCKET_DELIVER_ATTEMPT_SECONDS
     assert delivery.BUCKET_UNDO_ATTEMPT_SECONDS == api.BUCKET_UNDO_ATTEMPT_SECONDS
+    assert delivery.EMAIL_SEND_ATTEMPT_SECONDS == api.EMAIL_SEND_ATTEMPT_SECONDS
 
 
 BUCKET_LOCATION = {
@@ -719,3 +724,25 @@ def test_a_recorded_location_reaches_the_undo_whole():
 def test_the_api_parses_the_undo_output(already_gone):
     out = delivery.UndoBucketOutput(already_gone=already_gone)
     assert _decode(_encode(out), api.UndoBucketOutput).already_gone is already_gone
+
+
+@pytest.mark.parametrize("run_id", ["0b1f6c1e-6a1d-4c39-9f0b-6f1d2b3c4d5e", None])
+def test_the_email_input_reaches_the_delivery_worker_whole(run_id):
+    stored = STORED_DESTINATIONS["smtp"]
+    sent = api.SendEmailInput(
+        address=api_destinations.stored(stored[0]),
+        encrypted_secret="gAAAAAB_secret",
+        message_id="<0b1f.notify.failed@scrapeflow.example.org>",
+        subject="[ScrapeFlow] prices: pipeline.failed",
+        body="pipeline.failed\n{}",
+        run_id=run_id,
+    )
+    received = _decode(_encode(sent), delivery.SendEmailInput)
+    assert received.model_dump() == sent.model_dump()
+    address, _ = delivery.KIND_MODELS["smtp"]
+    assert address.model_validate(received.address).sender == stored[0].sender
+
+
+def test_the_api_parses_the_email_output():
+    out = delivery.SendEmailOutput(refused=["oncall@example.org"])
+    assert _decode(_encode(out), api.SendEmailOutput).refused == ["oncall@example.org"]

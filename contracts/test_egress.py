@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO / "api"))
 from app.core import egress as api_egress  # noqa: E402
 
 # The delivery worker's package under another name, so its relative imports resolve without its
-# settings: egress and pinned_http import nothing else of it.
+# settings: egress, pinned_http and pinned_tcp import nothing else of it.
 _pkg_spec = importlib.util.spec_from_file_location(
     "delivery_worker_egress",
     REPO / "delivery-worker/worker/__init__.py",
@@ -38,12 +38,18 @@ sys.modules["delivery_worker_egress"] = _pkg
 _pkg_spec.loader.exec_module(_pkg)
 delivery_egress = importlib.import_module("delivery_worker_egress.egress")
 delivery_pinned = importlib.import_module("delivery_worker_egress.pinned_http")
+delivery_pinned_tcp = importlib.import_module("delivery_worker_egress.pinned_tcp")
 
 COPIES = {"api": api_egress, "delivery": delivery_egress}
 
-# Each pinned client: the api's webhook POST, the delivery worker's TLS handshake (webhook test)
-# and its aiohttp session (bucket sink).
-CLIENTS = {"api": api_egress, "delivery": delivery_egress, "delivery-bucket": delivery_egress}
+# Each pinned client: the api's webhook POST, the delivery worker's TLS handshake (webhook test),
+# its aiohttp session (bucket sink) and its TCP socket (SMTP).
+CLIENTS = {
+    "api": api_egress,
+    "delivery": delivery_egress,
+    "delivery-bucket": delivery_egress,
+    "delivery-smtp": delivery_egress,
+}
 
 PUBLIC = "93.184.216.34"
 PUBLIC_2 = "93.184.216.35"
@@ -241,6 +247,32 @@ def _connect(monkeypatch, copy: str, outcomes: list[str]):
         def connect():
             return delivery_pinned.pinned("hooks.example.com", 443, _attempt)
 
+    elif copy == "delivery-smtp":
+
+        class Sock:
+            def __init__(self, outcome):
+                self.outcome = outcome
+
+            def close(self):
+                pass
+
+        async def _open_tcp(ip, port, timeout):
+            tried.append(ip)
+            outcome = plays.pop(0)
+            if outcome in ("refused", "timeout"):
+                raise _delivery_error(outcome)
+            return Sock(outcome)
+
+        monkeypatch.setattr(delivery_pinned_tcp, "_open", _open_tcp)
+
+        # The SMTP session does TLS on the socket and surfaces its failures as ssl errors.
+        async def _session(sock):
+            if sock.outcome != "ok":
+                raise _delivery_error(sock.outcome)
+
+        def connect():
+            return delivery_pinned_tcp.pinned("hooks.example.com", 465, _session)
+
     else:
 
         async def _open(ip, port, host, context, timeout):
@@ -307,7 +339,9 @@ def _is(copy: str, kind: str, exc: BaseException) -> bool:
             )
         return isinstance(exc, httpx.ConnectError if copy == "api" else ConnectionRefusedError)
     if kind == "tls":
-        tls = {"api": httpx.ConnectError, "delivery": ssl.SSLError}.get(copy, aiohttp.ClientSSLError)
+        tls = {"api": httpx.ConnectError, "delivery": ssl.SSLError, "delivery-smtp": ssl.SSLError}.get(
+            copy, aiohttp.ClientSSLError
+        )
         return isinstance(exc, tls) and not isinstance(exc, module.CertificateMismatch)
     raise AssertionError(kind)
 

@@ -8,16 +8,19 @@ from urllib.parse import urlsplit
 import structlog
 from temporalio import activity
 
-from . import egress
+from . import egress, pinned_tcp, smtp
 from .bucket import BucketClient, Endpoint, Refused, describe, endpoint
 from .contracts import (
     TEST_BUCKET_ACTIVITY,
+    TEST_SMTP_ACTIVITY,
     TEST_WEBHOOK_ACTIVITY,
     BucketAddress,
     BucketSecret,
     CheckResult,
     DestinationTestInput,
     DestinationTestOutput,
+    LoginSecret,
+    SmtpAddress,
     WebhookSecret,
 )
 from .destinations import final_error, parse
@@ -126,3 +129,44 @@ async def _bucket_checks(client: BucketClient, where: Endpoint, key: str) -> lis
             message = f"delete failed — left `{key}` ({message})"
         return [*connected, _passed("write"), _warning("delete", message)]
     return [*connected, _passed("write"), _passed("delete")]
+
+
+@activity.defn(name=TEST_SMTP_ACTIVITY)
+async def test_smtp(inp: DestinationTestInput) -> DestinationTestOutput:
+    """Address check, TLS (STARTTLS or implicit), EHLO, AUTH, QUIT. Sends no mail."""
+    if inp.kind != "smtp":
+        raise final_error("DestinationKind", f"not an smtp destination: {inp.kind}")
+    address, secret = parse(inp.kind, inp.address, inp.encrypted_secret)
+    assert isinstance(address, SmtpAddress) and isinstance(secret, LoginSecret)
+    try:
+        smtp.tls_context(address.ca_certificate)
+    except ValueError as exc:
+        return DestinationTestOutput(checks=[_failed("address", str(exc))])
+
+    passed: list[str] = []
+
+    async def session(sock) -> None:
+        s = smtp.Session(sock, address, secret, TEST_SECONDS)
+        try:
+            await s.connect()
+            passed.append("tls")
+            await s.login()
+            passed.append("login")
+        finally:
+            await s.close()
+
+    try:
+        async with asyncio.timeout(TEST_SECONDS):
+            await pinned_tcp.pinned(address.host, address.port, session)
+    except egress.EgressBlocked as exc:
+        checks = [_failed("address", str(exc))]
+    except Exception as exc:
+        _, message, _ = smtp.describe(exc, address.host, address.port, "test")
+        checks = [_passed("address"), *(_passed(c) for c in passed)]
+        checks.append(_failed("login" if passed else "tls", message))
+    else:
+        checks = [_passed("address"), _passed("tls"), _passed("login")]
+    log.info(
+        "destination_test", kind=inp.kind, host=address.host, **{c.check: c.outcome for c in checks}
+    )
+    return DestinationTestOutput(checks=checks)

@@ -231,10 +231,13 @@ TEST_WEBHOOK_ACTIVITY = "TestWebhook"
 TEST_BUCKET_ACTIVITY = "TestBucket"
 DELIVER_BUCKET_ACTIVITY = "DeliverBucket"
 UNDO_BUCKET_ACTIVITY = "UndoBucket"
+TEST_SMTP_ACTIVITY = "TestSmtp"
+SEND_EMAIL_ACTIVITY = "SendEmail"
 
 # One attempt's start_to_close (ADR-015 §6); the worker gives up a few seconds sooner.
 BUCKET_DELIVER_ATTEMPT_SECONDS = 60
 BUCKET_UNDO_ATTEMPT_SECONDS = 30
+EMAIL_SEND_ATTEMPT_SECONDS = 60
 
 
 class DestinationTestInput(BaseModel):
@@ -300,3 +303,25 @@ class UndoBucketInput(BaseModel):
 class UndoBucketOutput(BaseModel):
     # The server said the object was missing; most answer a delete the same either way.
     already_gone: bool = False
+
+
+# --- email (ADR-015 §4, §5, §7) --------------------------------------------------------------
+#
+# Single attempt, as the bucket sink: non_retryable on the ApplicationError is the final/transient answer.
+
+
+class SendEmailInput(BaseModel):
+    # The smtp destination as it is now; the secret is ciphertext.
+    address: dict[str, Any]
+    encrypted_secret: Annotated[str, StringConstraints(min_length=1)]
+    # "<…@host>", the same on every attempt (ADR-015 §5).
+    message_id: Annotated[str, StringConstraints(min_length=1)]
+    subject: Annotated[str, StringConstraints(min_length=1)]
+    body: str
+    # Named by the "too large" note; None when the message belongs to no run.
+    run_id: str | None = None
+
+
+class SendEmailOutput(BaseModel):
+    # Recipients the server refused while it accepted others.
+    refused: list[str] = []
