@@ -228,6 +228,13 @@ class ExtractLinksOutput(BaseModel):
 
 # Registered by the delivery worker under these names (delivery-worker/worker/contracts.py).
 TEST_WEBHOOK_ACTIVITY = "TestWebhook"
+TEST_BUCKET_ACTIVITY = "TestBucket"
+DELIVER_BUCKET_ACTIVITY = "DeliverBucket"
+UNDO_BUCKET_ACTIVITY = "UndoBucket"
+
+# One attempt's start_to_close (ADR-015 §6); the worker gives up a few seconds sooner.
+BUCKET_DELIVER_ATTEMPT_SECONDS = 60
+BUCKET_UNDO_ATTEMPT_SECONDS = 30
 
 
 class DestinationTestInput(BaseModel):
@@ -249,3 +256,47 @@ class DestinationTestOutput(BaseModel):
     """Each check run, in order; a failed check ends the test."""
 
     checks: list[CheckResult]
+
+
+# --- the bucket sink (ADR-015 §5, §7) --------------------------------------------------------
+#
+# Single attempt each, retry policy maximum_attempts=1: a failure is an ApplicationError whose
+# non_retryable says final; the workflow retries a transient one (ADR-015 §4).
+
+
+class BucketLocation(BaseModel):
+    """Where a delivery landed: names only, never an address or a credential (ADR-015 §3)."""
+
+    endpoint: Annotated[str, StringConstraints(min_length=1)]
+    bucket: Annotated[str, StringConstraints(min_length=1)]
+    region: str | None = None
+    key: Annotated[str, StringConstraints(min_length=1)]
+
+
+class DeliverBucketInput(BaseModel):
+    # The destination as it is now (load_destination); the secret is ciphertext.
+    address: dict[str, Any]
+    encrypted_secret: Annotated[str, StringConstraints(min_length=1)]
+    # ScrapeFlow's copy, as {bucket}/{key}.
+    source_path: Annotated[str, StringConstraints(min_length=1)]
+    pipeline_id: Annotated[str, StringConstraints(min_length=1)]
+    run_id: Annotated[str, StringConstraints(min_length=1)]
+    block_id: Annotated[str, StringConstraints(min_length=1)]
+    ext: Literal["html", "md", "json"]
+
+
+class DeliverBucketOutput(BaseModel):
+    location: BucketLocation
+    size: int
+
+
+class UndoBucketInput(BaseModel):
+    """The location recorded at delivery, with the destination's current secret."""
+
+    location: BucketLocation
+    encrypted_secret: Annotated[str, StringConstraints(min_length=1)]
+
+
+class UndoBucketOutput(BaseModel):
+    # The server said the object was missing; most answer a delete the same either way.
+    already_gone: bool = False

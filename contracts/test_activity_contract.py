@@ -644,6 +644,11 @@ def test_the_api_parses_the_destination_test_output():
         (api.DestinationTestInput, delivery.DestinationTestInput),
         (delivery.DestinationTestOutput, api.DestinationTestOutput),
         (delivery.CheckResult, api.CheckResult),
+        (api.DeliverBucketInput, delivery.DeliverBucketInput),
+        (delivery.DeliverBucketOutput, api.DeliverBucketOutput),
+        (api.BucketLocation, delivery.BucketLocation),
+        (api.UndoBucketInput, delivery.UndoBucketInput),
+        (delivery.UndoBucketOutput, api.UndoBucketOutput),
     ],
 )
 def test_the_delivery_queue_carries_every_field_both_ways(producer, consumer):
@@ -653,3 +658,64 @@ def test_the_delivery_queue_carries_every_field_both_ways(producer, consumer):
 def test_the_delivery_worker_registers_the_names_and_queue_the_api_calls():
     assert delivery.DELIVERY_QUEUE == api_queues.DELIVERY_QUEUE
     assert delivery.TEST_WEBHOOK_ACTIVITY == api.TEST_WEBHOOK_ACTIVITY
+    assert delivery.TEST_BUCKET_ACTIVITY == api.TEST_BUCKET_ACTIVITY
+    assert delivery.DELIVER_BUCKET_ACTIVITY == api.DELIVER_BUCKET_ACTIVITY
+    assert delivery.UNDO_BUCKET_ACTIVITY == api.UNDO_BUCKET_ACTIVITY
+
+
+def test_both_sides_agree_on_the_bucket_attempt_budgets():
+    assert delivery.BUCKET_DELIVER_ATTEMPT_SECONDS == api.BUCKET_DELIVER_ATTEMPT_SECONDS
+    assert delivery.BUCKET_UNDO_ATTEMPT_SECONDS == api.BUCKET_UNDO_ATTEMPT_SECONDS
+
+
+BUCKET_LOCATION = {
+    "endpoint": "https://s3.example.com/",
+    "bucket": "results",
+    "region": "eu-west-1",
+    "key": "runs/4c1f0e7a/9d2e1b3c/store.json",
+}
+
+
+@pytest.mark.parametrize("ext", ["html", "md", "json"])
+def test_the_bucket_delivery_input_reaches_the_delivery_worker_whole(ext):
+    address, _ = STORED_DESTINATIONS["bucket"]
+    sent = api.DeliverBucketInput(
+        address=api_destinations.stored(address),
+        encrypted_secret="gAAAAAB_secret",
+        source_path="scrapeflow-results/history/3f8b7a12/scrape.html",
+        pipeline_id="4c1f0e7a-0000-4000-8000-000000000001",
+        run_id="9d2e1b3c-0000-4000-8000-000000000002",
+        block_id="store",
+        ext=ext,
+    )
+    received = _decode(_encode(sent), delivery.DeliverBucketInput)
+
+    assert received.model_dump() == sent.model_dump()
+    # The stored address goes through the worker's own parser as it is.
+    assert delivery.KIND_MODELS["bucket"][0].model_validate(received.address).prefix == "runs"
+
+
+def test_the_api_parses_the_bucket_delivery_output():
+    out = delivery.DeliverBucketOutput(
+        location=delivery.BucketLocation(**BUCKET_LOCATION), size=4_300_000
+    )
+    assert _decode(_encode(out), api.DeliverBucketOutput).model_dump() == out.model_dump()
+
+
+def test_a_recorded_location_reaches_the_undo_whole():
+    # The workflow hands the undo the location the delivery returned (ADR-014 §7).
+    recorded = _decode(
+        _encode(delivery.DeliverBucketOutput(location=delivery.BucketLocation(**BUCKET_LOCATION), size=1)),
+        api.DeliverBucketOutput,
+    ).location
+    sent = api.UndoBucketInput(location=recorded, encrypted_secret="gAAAAAB_secret")
+
+    received = _decode(_encode(sent), delivery.UndoBucketInput)
+
+    assert received.location.model_dump() == BUCKET_LOCATION
+
+
+@pytest.mark.parametrize("already_gone", [False, True])
+def test_the_api_parses_the_undo_output(already_gone):
+    out = delivery.UndoBucketOutput(already_gone=already_gone)
+    assert _decode(_encode(out), api.UndoBucketOutput).already_gone is already_gone

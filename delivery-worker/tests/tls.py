@@ -69,9 +69,8 @@ def make_pki(server_name: str) -> tuple[bytes, bytes, bytes]:
     return _pem(ca), _pem(cert), key_pem
 
 
-@asynccontextmanager
-async def tls_server(server_name: str):
-    """Yields (port, client context trusting the CA, list of SNI names the server saw)."""
+def contexts(server_name: str) -> tuple[ssl.SSLContext, ssl.SSLContext, list[str | None]]:
+    """(server context with a certificate for the name, client context trusting its CA, SNI seen)."""
     ca_pem, cert_pem, key_pem = make_pki(server_name)
     with tempfile.TemporaryDirectory() as tmp:
         cert_file, key_file = Path(tmp, "cert.pem"), Path(tmp, "key.pem")
@@ -81,12 +80,18 @@ async def tls_server(server_name: str):
         server_ctx.load_cert_chain(cert_file, key_file)
     seen: list[str | None] = []
     server_ctx.sni_callback = lambda sock, name, ctx: seen.append(name)
+    return server_ctx, ssl.create_default_context(cadata=ca_pem.decode()), seen
+
+
+@asynccontextmanager
+async def tls_server(server_name: str):
+    """Yields (port, client context trusting the CA, list of SNI names the server saw)."""
+    server_ctx, client_ctx, seen = contexts(server_name)
 
     async def handle(reader, writer):
         writer.close()
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_ctx)
     port = server.sockets[0].getsockname()[1]
-    client_ctx = ssl.create_default_context(cadata=ca_pem.decode())
     async with server:
         yield port, client_ctx, seen

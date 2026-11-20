@@ -8,6 +8,7 @@ Run with the contracts suite (docker-api image, repo root mounted) — see test_
 """
 
 import asyncio
+import importlib
 import importlib.util
 import ipaddress
 import socket
@@ -15,6 +16,7 @@ import ssl
 import sys
 from pathlib import Path
 
+import aiohttp
 import httpx
 import pytest
 
@@ -24,14 +26,24 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "api"))
 from app.core import egress as api_egress  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location(
-    "egress_delivery", REPO / "delivery-worker/worker/egress.py"
+# The delivery worker's package under another name, so its relative imports resolve without its
+# settings: egress and pinned_http import nothing else of it.
+_pkg_spec = importlib.util.spec_from_file_location(
+    "delivery_worker_egress",
+    REPO / "delivery-worker/worker/__init__.py",
+    submodule_search_locations=[str(REPO / "delivery-worker/worker")],
 )
-delivery_egress = importlib.util.module_from_spec(_spec)
-sys.modules["egress_delivery"] = delivery_egress
-_spec.loader.exec_module(delivery_egress)
+_pkg = importlib.util.module_from_spec(_pkg_spec)
+sys.modules["delivery_worker_egress"] = _pkg
+_pkg_spec.loader.exec_module(_pkg)
+delivery_egress = importlib.import_module("delivery_worker_egress.egress")
+delivery_pinned = importlib.import_module("delivery_worker_egress.pinned_http")
 
 COPIES = {"api": api_egress, "delivery": delivery_egress}
+
+# Each pinned client: the api's webhook POST, the delivery worker's TLS handshake (webhook test)
+# and its aiohttp session (bucket sink).
+CLIENTS = {"api": api_egress, "delivery": delivery_egress, "delivery-bucket": delivery_egress}
 
 PUBLIC = "93.184.216.34"
 PUBLIC_2 = "93.184.216.35"
@@ -147,9 +159,9 @@ def test_resolve_public(monkeypatch, copy, case):
 
 # --- the connection: pinned to the checked address --------------------------------------------
 #
-# Each copy's connect seam (the api's httpx POST, the delivery worker's TLS open) is replaced by a
-# recorder that plays one outcome per address tried. Outcomes are named, and each copy raises its
-# own client's form of them.
+# Each client's connect seam (the api's httpx POST, the delivery worker's TLS open and its aiohttp
+# session) is replaced by a recorder that plays one outcome per address tried. Outcomes are named,
+# and each client raises its own form of them.
 
 
 def _api_error(outcome: str) -> BaseException:
@@ -176,6 +188,20 @@ def _delivery_error(outcome: str) -> BaseException:
     }[outcome]
 
 
+_KEY = aiohttp.client_reqrep.ConnectionKey("hooks.example.com", 443, True, True, None, None, None)
+
+
+def _bucket_error(outcome: str) -> BaseException:
+    return {
+        "refused": aiohttp.ClientConnectorError(_KEY, ConnectionRefusedError(111, "refused")),
+        "timeout": aiohttp.ConnectionTimeoutError("timed out"),
+        "certificate": aiohttp.ClientConnectorCertificateError(
+            _KEY, ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED")
+        ),
+        "tls": aiohttp.ClientConnectorSSLError(_KEY, ssl.SSLError("handshake failure")),
+    }[outcome]
+
+
 def _connect(monkeypatch, copy: str, outcomes: list[str]):
     """Patches the copy's seam; returns (connect(host), addresses tried)."""
     tried: list[str] = []
@@ -196,6 +222,24 @@ def _connect(monkeypatch, copy: str, outcomes: list[str]):
 
         def connect():
             return api_egress.send_signed_post("https://hooks.example.com/in", b"{}", b"")
+
+    elif copy == "delivery-bucket":
+
+        async def _at(ip, host, context, attempt):
+            tried.append(ip)
+            assert host == "hooks.example.com"
+            outcome = plays.pop(0)
+            if outcome != "ok":
+                raise _bucket_error(outcome)
+            return await attempt(None)
+
+        monkeypatch.setattr(delivery_pinned, "_at", _at)
+
+        async def _attempt(session):
+            return 204
+
+        def connect():
+            return delivery_pinned.pinned("hooks.example.com", 443, _attempt)
 
     else:
 
@@ -247,7 +291,7 @@ CONNECT_CASES = {
 
 
 def _is(copy: str, kind: str, exc: BaseException) -> bool:
-    module = COPIES[copy]
+    module = CLIENTS[copy]
     if kind == "CertificateMismatch":
         return isinstance(exc, module.CertificateMismatch) and (
             str(exc) == "certificate not valid for hooks.example.com"
@@ -257,19 +301,22 @@ def _is(copy: str, kind: str, exc: BaseException) -> bool:
             "URL resolves to a private address: 10.0.0.5"
         )
     if kind == "connect":
+        if copy == "delivery-bucket":
+            return isinstance(exc, aiohttp.ClientConnectorError) and not isinstance(
+                exc, aiohttp.ClientSSLError
+            )
         return isinstance(exc, httpx.ConnectError if copy == "api" else ConnectionRefusedError)
     if kind == "tls":
-        return isinstance(exc, httpx.ConnectError if copy == "api" else ssl.SSLError) and not (
-            isinstance(exc, module.CertificateMismatch)
-        )
+        tls = {"api": httpx.ConnectError, "delivery": ssl.SSLError}.get(copy, aiohttp.ClientSSLError)
+        return isinstance(exc, tls) and not isinstance(exc, module.CertificateMismatch)
     raise AssertionError(kind)
 
 
-@pytest.mark.parametrize("copy", sorted(COPIES))
+@pytest.mark.parametrize("copy", sorted(CLIENTS))
 @pytest.mark.parametrize("case", sorted(CONNECT_CASES))
 def test_connect(monkeypatch, copy, case):
     answers, outcomes, expected_tried, error = CONNECT_CASES[case]
-    monkeypatch.setattr(COPIES[copy].socket, "getaddrinfo", Lookups(answers))
+    monkeypatch.setattr(CLIENTS[copy].socket, "getaddrinfo", Lookups(answers))
     connect, tried = _connect(monkeypatch, copy, outcomes)
 
     if error is None:
@@ -281,11 +328,11 @@ def test_connect(monkeypatch, copy, case):
     assert tried == expected_tried
 
 
-@pytest.mark.parametrize("copy", sorted(COPIES))
+@pytest.mark.parametrize("copy", sorted(CLIENTS))
 def test_a_name_that_rebinds_to_a_private_address_is_never_reached(monkeypatch, copy):
     # PRD-017's check: public at the first lookup, private at the second — and only one lookup.
     lookups = Lookups([PUBLIC], ["10.0.0.5"])
-    monkeypatch.setattr(COPIES[copy].socket, "getaddrinfo", lookups)
+    monkeypatch.setattr(CLIENTS[copy].socket, "getaddrinfo", lookups)
     connect, tried = _connect(monkeypatch, copy, ["ok"])
 
     asyncio.run(connect())

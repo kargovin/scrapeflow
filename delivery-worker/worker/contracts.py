@@ -15,6 +15,13 @@ NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 # on a queue nobody polls until its timeout fires.
 DELIVERY_QUEUE = "delivery"
 TEST_WEBHOOK_ACTIVITY = "TestWebhook"
+TEST_BUCKET_ACTIVITY = "TestBucket"
+DELIVER_BUCKET_ACTIVITY = "DeliverBucket"
+UNDO_BUCKET_ACTIVITY = "UndoBucket"
+
+# One attempt's start_to_close (ADR-015 §6); the activity gives up a few seconds sooner.
+BUCKET_DELIVER_ATTEMPT_SECONDS = 60
+BUCKET_UNDO_ATTEMPT_SECONDS = 30
 
 DestinationKind = Literal["bucket", "postgres", "smtp", "webhook"]
 
@@ -95,3 +102,47 @@ class DestinationTestOutput(BaseModel):
     """Each check run, in order; a failed check ends the test."""
 
     checks: list[CheckResult]
+
+
+# --- the bucket sink (ADR-015 §5, §7) -------------------------------------------------------
+#
+# Single attempt each: a failure raises ApplicationError, non_retryable = final. The workflow
+# retries a transient one (ADR-015 §4).
+
+
+class BucketLocation(BaseModel):
+    """Where a delivery landed: names only, never an address or a credential (ADR-015 §3)."""
+
+    endpoint: NonEmptyStr
+    bucket: NonEmptyStr
+    region: str | None = None
+    key: NonEmptyStr
+
+
+class DeliverBucketInput(BaseModel):
+    # The destination as it is now (load_destination); the secret is ciphertext.
+    address: dict[str, Any]
+    encrypted_secret: NonEmptyStr
+    # ScrapeFlow's copy, as {bucket}/{key}.
+    source_path: NonEmptyStr
+    pipeline_id: NonEmptyStr
+    run_id: NonEmptyStr
+    block_id: NonEmptyStr
+    ext: Literal["html", "md", "json"]
+
+
+class DeliverBucketOutput(BaseModel):
+    location: BucketLocation
+    size: int
+
+
+class UndoBucketInput(BaseModel):
+    """The location recorded at delivery, with the destination's current secret."""
+
+    location: BucketLocation
+    encrypted_secret: NonEmptyStr
+
+
+class UndoBucketOutput(BaseModel):
+    # The server said the object was missing; most answer a delete the same either way.
+    already_gone: bool = False
