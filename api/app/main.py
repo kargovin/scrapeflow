@@ -18,6 +18,7 @@ from app.routers import (
     admin_pipelines,
     batch,
     crawls,
+    destinations,
     health,
     jobs,
     monitors,
@@ -105,6 +106,8 @@ app.include_router(crawls.router)
 app.include_router(pipelines.router)
 app.include_router(monitors.router)
 app.include_router(monitors.admin_router)
+app.include_router(destinations.router)
+app.include_router(destinations.admin_router)
 app.include_router(admin.router)
 app.include_router(admin_pipelines.router)
 app.include_router(admin_lanes.router)
