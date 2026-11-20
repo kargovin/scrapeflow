@@ -51,6 +51,13 @@ from tests.test_workflows_pipeline import (
     _stop_guard,
 )
 from tests.test_workflows_scheduled_job import Harness as ScheduledHarness
+from tests.test_workflows_sinks import (
+    BUCKET_ONLY,
+    BUCKET_THEN_HOOKS,
+    _flaky_bucket,
+    _gone,
+    _refused,
+)
 
 
 async def _webhook_flaky(input):
@@ -114,6 +121,16 @@ def _cancel_after_three_asks(h):
     return during
 
 
+def _cancel_in_sink_wait(h):
+    async def during(handle):
+        while not h.bucket_inputs:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.5)
+        await handle.cancel()
+
+    return during
+
+
 SCENARIOS = {
     "harness_r6_webhook_delivered_after_retries": ({"webhook": _webhook_flaky}, R6),
     "harness_r6_webhook_run_cancelled_on_retry": ({"webhook": _webhook_cancelled}, R6),
@@ -157,6 +174,16 @@ SCENARIOS = {
     # J.7 — an alert-only Webhook (patch "webhook-events").
     "harness_alert_only_webhook_skipped": ({}, ALERT_ONLY),
     "harness_alert_only_webhook_run_failed": ({"llm": _llm_unauthorised}, ALERT_ONLY),
+    # M.7 — sinks (patch "sinks"): bucket tries, destination webhooks, block_id + deliveries.
+    "harness_sinks_bucket_retried_then_webhooks": ({"bucket": _flaky_bucket(1)}, BUCKET_THEN_HOOKS),
+    "harness_sinks_bucket_cancelled_in_retry_wait": (
+        {"bucket": _flaky_bucket(99), "during": _cancel_in_sink_wait},
+        BUCKET_THEN_HOOKS,
+    ),
+    "harness_sinks_bucket_refused": ({"bucket": _refused}, BUCKET_THEN_HOOKS),
+    "harness_sinks_bucket_gave_up": ({"bucket": _flaky_bucket(99)}, BUCKET_ONLY),
+    "harness_sinks_destination_deleted": ({"load": _gone}, BUCKET_ONLY),
+    "harness_sinks_r6_webhook_delivered": ({}, R6),
 }
 
 

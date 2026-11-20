@@ -304,6 +304,9 @@ async def test_a_hand_run_through_a_gate_reads_no_baseline_and_sends_todays_payl
         "diff_detected": False,
         "diff_summary": None,
         "timestamp": delivered.timestamp,
+        # PRD-017 R4 (patch "sinks"), on every run with a Webhook block.
+        "block_id": delivered.block_id,
+        "deliveries": [],
     }
 
 

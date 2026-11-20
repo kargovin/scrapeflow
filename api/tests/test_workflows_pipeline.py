@@ -36,6 +36,7 @@ from app.settings import settings
 from app.workflows.activities.contracts import (
     CAPTURE_ACTIVITY,
     CLEAN_ACTIVITY,
+    DELIVER_BUCKET_ACTIVITY,
     DIFF_ACTIVITY,
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
@@ -46,6 +47,8 @@ from app.workflows.activities.contracts import (
     CleanInput,
     CleanOutput,
     Credentials,
+    DeliverBucketInput,
+    DeliverBucketOutput,
     DiffInput,
     DiffOutput,
     DiffSummary,
@@ -66,6 +69,7 @@ from app.workflows.activities.db import (
 )
 from app.workflows.pipeline import (
     DB_ACTIVITY_SECONDS,
+    LOAD_DESTINATION_ACTIVITY,
     MIRROR_BLOCK_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
     OUTPUTS_LEFT_ERROR,
@@ -74,6 +78,8 @@ from app.workflows.pipeline import (
     RUN_CANCELLED_ERROR,
     WEBHOOK_ACTIVITY,
     LLMKey,
+    LoadDestinationInput,
+    LoadedDestination,
     MirrorBlockInput,
     MirrorRunInput,
     PipelineRunInput,
@@ -83,7 +89,13 @@ from app.workflows.pipeline import (
     StorageUsage,
     WebhookInput,
 )
-from app.workflows.queues import CONTENT_QUEUE, LLM_QUEUE, SCRAPE_HTTP_QUEUE, WORKFLOW_QUEUE
+from app.workflows.queues import (
+    CONTENT_QUEUE,
+    DELIVERY_QUEUE,
+    LLM_QUEUE,
+    SCRAPE_HTTP_QUEUE,
+    WORKFLOW_QUEUE,
+)
 from app.workflows.steps import (
     ACQUIRE_HOST_SLOT_ACTIVITY,
     HOST_LEASE_MARGIN,
@@ -192,6 +204,23 @@ async def _webhook_ok(input: WebhookInput) -> None:
     return None
 
 
+BUCKET_ADDRESS = {"endpoint": "https://s3.example.com/", "bucket": "exports", "prefix": "out"}
+
+
+async def _load_ok(input: LoadDestinationInput) -> LoadedDestination:
+    return LoadedDestination(address=BUCKET_ADDRESS, encrypted_secret="bucket-ciphertext")
+
+
+async def _bucket_ok(input: DeliverBucketInput) -> DeliverBucketOutput:
+    key = f"out/{input.pipeline_id}/{input.run_id}/{input.block_id}.{input.ext}"
+    return DeliverBucketOutput.model_validate(
+        {
+            "location": {"endpoint": "https://s3.example.com/", "bucket": "exports", "key": key},
+            "size": 3,
+        }
+    )
+
+
 class Harness:
     """Mocked activities on their real queues; records every DB-activity call in order."""
 
@@ -207,6 +236,8 @@ class Harness:
         release_outputs=_release_ok,
         diff=_diff_ok,
         capture=_capture_ok,
+        load=_load_ok,
+        bucket=_bucket_ok,
     ):
         self.calls: list = []
         self.acquired: list[HostSlotInput] = []
@@ -233,6 +264,10 @@ class Harness:
         self._diff = diff
         self._capture = capture
         self.release_info: list = []
+        self._load = load
+        self._bucket = bucket
+        self.bucket_inputs: list[DeliverBucketInput] = []
+        self.bucket_info: list = []
 
     def activities(self):
         @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
@@ -307,8 +342,20 @@ class Harness:
             self.calls.append(input)
             return await self._capture(input)
 
+        @activity.defn(name=LOAD_DESTINATION_ACTIVITY)
+        async def load(input: LoadDestinationInput) -> LoadedDestination:
+            self.calls.append(input)
+            return await self._load(input)
+
+        @activity.defn(name=DELIVER_BUCKET_ACTIVITY)
+        async def deliver_bucket(input: DeliverBucketInput) -> DeliverBucketOutput:
+            self.bucket_inputs.append(input)
+            self.bucket_info.append(activity.info())
+            return await self._bucket(input)
+
         workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
-        workflow_queue.append(release_outputs)
+        workflow_queue += [release_outputs, load]
+        self.delivery_queue = [deliver_bucket]
         return workflow_queue, scrape, llm, [clean, validate, diff, capture]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
@@ -327,6 +374,7 @@ class Harness:
                 Worker(env.client, task_queue=SCRAPE_HTTP_QUEUE, activities=[scrape]),
                 Worker(env.client, task_queue=LLM_QUEUE, activities=[llm]),
                 Worker(env.client, task_queue=CONTENT_QUEUE, activities=content),
+                Worker(env.client, task_queue=DELIVERY_QUEUE, activities=self.delivery_queue),
             ):
                 handle = await env.client.start_workflow(
                     PipelineWorkflow.run,
@@ -1765,7 +1813,8 @@ async def test_webhook_delivers_the_last_content_blocks_object_and_passes_it_on(
         "monitor_id": None,
         "change": None,
         "destination_id": None,
-        "deliveries": None,
+        # Patch "sinks": no sink before it.
+        "deliveries": [],
     }
     assert h.calls[-3:] == [
         MirrorBlockInput(run_id="r1", block_id="notify", status="running", input_ref=LLM_PATH),

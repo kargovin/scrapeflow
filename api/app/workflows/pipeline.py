@@ -6,7 +6,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, model_validator
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError, CancelledError, RetryState
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    CancelledError,
+    RetryState,
+    TimeoutType,
+)
+from temporalio.exceptions import TimeoutError as ActivityTimeoutError
 from temporalio.workflow import ActivityCancellationType
 
 with workflow.unsafe.imports_passed_through():
@@ -16,16 +23,22 @@ with workflow.unsafe.imports_passed_through():
         CATALOG,
         DB_ACTIVITY_SECONDS,
         DIFF_TIMING,
+        EXTRACTION,
         HOST_SLOT_SECONDS,
+        PAGE_HTML,
+        PAGE_JSON,
+        PAGE_MARKDOWN,
         RELEASE_OUTPUTS_TIMING,
         WEBHOOK_RESULT_EVENT,
         InputBinding,
         RunInputValue,
         Timing,
+        block_outputs,
         first_change_gate,
         is_change_gate,
     )
     from app.pipelines.definition import (
+        BucketBlock,
         CleanBlock,
         LLMExtractBlock,
         RunBlock,
@@ -38,6 +51,7 @@ with workflow.unsafe.imports_passed_through():
     from app.workflows.activities.contracts import (
         CAPTURE_ACTIVITY,
         CLEAN_ACTIVITY,
+        DELIVER_BUCKET_ACTIVITY,
         DIFF_ACTIVITY,
         LLM_EXTRACT_ACTIVITY,
         SCRAPE_ACTIVITY,
@@ -48,6 +62,8 @@ with workflow.unsafe.imports_passed_through():
         CleanInput,
         CleanOutput,
         Credentials,
+        DeliverBucketInput,
+        DeliverBucketOutput,
         DiffInput,
         DiffOutput,
         LLMInput,
@@ -61,6 +77,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.workflows.queues import (
         CONTENT_QUEUE,
+        DELIVERY_QUEUE,
         LLM_QUEUE,
         SCRAPE_HTTP_QUEUE,
         SCRAPE_PLAYWRIGHT_QUEUE,
@@ -81,6 +98,8 @@ VALIDATE_STOP_PATCH = "validate-stop"
 WEBHOOK_EVENTS_PATCH = "webhook-events"
 # ADR-012: a monitor's check, or a hand-run through a change gate (ADR-016 §15, L.8).
 MONITOR_CHECK_PATCH = "monitor-check"
+# ADR-012: bucket blocks' workflow-driven tries; Webhook destinations, block_id and deliveries (M.7).
+SINKS_PATCH = "sinks"
 
 # The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
 WEBHOOK_EVENT = WEBHOOK_RESULT_EVENT
@@ -247,6 +266,15 @@ class WebhookInput(BaseModel):
     deliveries: list[dict[str, Any]] | None = None
 
 
+# A bucket delivery's object extension, by the reference type it is given (ADR-015 §5).
+_BUCKET_EXT: dict[str, Literal["html", "md", "json"]] = {
+    PAGE_HTML: "html",
+    PAGE_MARKDOWN: "md",
+    PAGE_JSON: "json",
+    EXTRACTION: "json",
+}
+
+
 # Three per block — running, record_storage, completed — must fit BLOCK_OVERHEAD_SECONDS.
 assert 3 * DB_ACTIVITY_SECONDS <= BLOCK_OVERHEAD_SECONDS
 # A Scrape block's host-slot wait: the cap, its last acquire, the release.
@@ -311,6 +339,22 @@ def _kept_objects(exc: ActivityError) -> list[str]:
 def _scrape_url(block: ScrapeBlock, input: PipelineRunInput) -> str:
     url = block.config.url
     return str(input.inputs[url.input]) if isinstance(url, InputBinding) else str(url)
+
+
+def _sink_failure(cause: BaseException | None) -> tuple[str, bool]:
+    """(message, final) for one try on the delivery queue: the worker's classified error as it
+    says; a timeout transient (nothing took it, or it overran); anything else final."""
+    if isinstance(cause, ApplicationError):
+        return str(cause), cause.non_retryable
+    if isinstance(cause, ActivityTimeoutError):
+        if cause.type == TimeoutType.SCHEDULE_TO_START:
+            return "no delivery worker took the delivery", False
+        return "the delivery did not finish in time", False
+    return f"the delivery failed ({type(cause).__name__})", True
+
+
+def _run_cancelled() -> ApplicationError:
+    return ApplicationError("the run was cancelled", type=RUN_CANCELLED_ERROR, non_retryable=True)
 
 
 def _is_cancellation(exc: BaseException) -> bool:
@@ -388,6 +432,9 @@ class PipelineWorkflow:
     def __init__(self) -> None:
         self._cancel_requested = False
         self._check: _Check | None = None
+        self._sinks = False
+        # (block id, delivery record) per sink that delivered, in order (ADR-014 §7's `delivered`).
+        self._delivered: list[tuple[str, dict[str, Any]]] = []
 
     @workflow.run
     async def run(self, input: PipelineRunInput) -> str | None:
@@ -401,6 +448,9 @@ class PipelineWorkflow:
         ):
             self._check = _Check(first_gate, input.monitor)
         check = self._check
+        self._sinks = any(CATALOG[b.type].sink is not None for b in input.blocks) and (
+            workflow.patched(SINKS_PATCH)
+        )
         # The content block whose object the next block reads: a gate's page diff compares it.
         last_content: str | None = None
         for block in input.blocks:
@@ -428,10 +478,14 @@ class PipelineWorkflow:
                 return await self._cancel(input.run_id)
 
             timing = block_type.timing(block.config)
+            delivery: dict[str, Any] | None = None
             try:
                 # ADR-009 15a/15d: an effect block may wait between attempts, and a cancel
                 # interrupts that wait; a running attempt still finishes (R3).
-                if isinstance(block, ScrapeBlock) and workflow.patched(steps.HOST_SLOT_PATCH):
+                if isinstance(block, BucketBlock) and self._sinks:
+                    delivery = await self._deliver_bucket(block, input, input_ref, deadline, timing)
+                    objects = []
+                elif isinstance(block, ScrapeBlock) and workflow.patched(steps.HOST_SLOT_PATCH):
                     objects = await self._scrape_in_host_slot(
                         block, input, input_ref, deadline, timing
                     )
@@ -501,9 +555,12 @@ class PipelineWorkflow:
                     f"{usage.limit} bytes; the run completed and is charged. Delete results "
                     "to start new runs"
                 )
-            extra = {}
+            extra: dict[str, Any] = {}
             if check is not None and verdict is not None and verdict.fingerprint is not None:
                 extra["fingerprint"] = verdict.fingerprint
+            if delivery is not None:
+                extra["delivery"] = delivery
+                self._delivered.append((block.id, delivery))
             await self._mirror_block(
                 input.run_id, block.id, "completed", output_ref=output_ref, **extra
             )
@@ -620,6 +677,112 @@ class PipelineWorkflow:
         if self._cancel_requested:
             raise asyncio.CancelledError()
         return None
+
+    async def _deliver_bucket(
+        self,
+        block: BucketBlock,
+        input: PipelineRunInput,
+        input_ref: str | None,
+        deadline: datetime,
+        timing: Timing,
+    ) -> dict[str, Any]:
+        """The workflow-driven tries (ADR-015 §4): load the destination, one attempt on the delivery
+        queue; a transient failure mirrors ``waiting``, sleeps (a cancel ends the sleep) and mirrors
+        ``running`` again. Returns the delivery record; raises on a final failure."""
+        assert input_ref is not None and block.input is not None
+        destination_id = str(block.config.destination_id)
+        ext = _BUCKET_EXT[block_outputs(input.blocks)[block.input]]
+        error = ""
+        for attempt in range(1, timing.maximum_attempts + 1):
+            if attempt > 1:
+                await self._mirror_block(
+                    input.run_id, block.id, "waiting", error=f"attempt {attempt - 1}: {error}"
+                )
+                if self._cancel_requested:
+                    raise _run_cancelled()
+                wait = min(
+                    timing.initial_interval * timing.backoff_coefficient ** (attempt - 2),
+                    timing.maximum_interval,
+                )
+                if wait >= (deadline - workflow.now()).total_seconds():
+                    raise ApplicationError(
+                        f"{error} (the run's time budget ran out after {attempt - 1} attempts)",
+                        non_retryable=True,
+                    )
+                try:
+                    await workflow.sleep(wait)
+                except asyncio.CancelledError:
+                    self._cancel_requested = True
+                    raise
+                # 15d: the row's cancel, should the engine's have been lost.
+                running = await self._mirror_block(
+                    input.run_id, block.id, "running", input_ref=input_ref
+                )
+                if running != "running":
+                    raise _run_cancelled()
+            loaded: LoadedDestination = await self._finish(
+                _db(
+                    LOAD_DESTINATION_ACTIVITY,
+                    LoadDestinationInput(
+                        run_id=input.run_id, destination_id=destination_id, kind="bucket"
+                    ),
+                    LoadedDestination,
+                )
+            )
+            if self._cancel_requested:
+                raise _run_cancelled()
+            remaining_s = (deadline - workflow.now()).total_seconds()
+            if remaining_s <= 0:
+                raise ApplicationError("the run's time budget is spent", non_retryable=True)
+            try:
+                out: DeliverBucketOutput = await self._finish(
+                    workflow.execute_activity(
+                        DELIVER_BUCKET_ACTIVITY,
+                        DeliverBucketInput(
+                            address=loaded.address,
+                            encrypted_secret=loaded.encrypted_secret,
+                            source_path=input_ref,
+                            pipeline_id=input.pipeline_id,
+                            run_id=input.run_id,
+                            block_id=block.id,
+                            ext=ext,
+                        ),
+                        task_queue=DELIVERY_QUEUE,
+                        result_type=DeliverBucketOutput,
+                        schedule_to_start_timeout=timedelta(seconds=timing.schedule_to_start),
+                        start_to_close_timeout=timedelta(seconds=timing.start_to_close),
+                        schedule_to_close_timeout=timedelta(
+                            seconds=min(
+                                timing.schedule_to_start + timing.start_to_close, remaining_s
+                            )
+                        ),
+                        # One try per call: the loop above is the retry policy.
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                )
+            except ActivityError as exc:
+                error, final = _sink_failure(exc.cause)
+                if final:
+                    raise ApplicationError(error, non_retryable=True) from None
+                if self._cancel_requested:
+                    raise _run_cancelled() from None
+                continue
+            # Names only (ADR-014 §5a): never an address or a credential.
+            return {
+                "destination_id": destination_id,
+                "kind": "bucket",
+                "location": out.location.model_dump(mode="json"),
+            }
+        raise ApplicationError(
+            f"{error} (gave up after {timing.maximum_attempts} attempts)", non_retryable=True
+        )
+
+    def _deliveries(self) -> list[dict[str, Any]]:
+        """The Webhook payload's ``deliveries``: what the sinks before it wrote (PRD-017 R4)."""
+        return [
+            {"block_id": block_id, "kind": record["kind"], "location": record["location"]}
+            for block_id, record in self._delivered
+        ]
 
     def _webhook_check_fields(self) -> dict[str, Any]:
         check = self._check
@@ -892,7 +1055,13 @@ class PipelineWorkflow:
                     run_id=input.run_id,
                     pipeline_id=input.pipeline_id,
                     block_id=block.id,
-                    url=str(block.config.url),
+                    url=None if block.config.url is None else str(block.config.url),
+                    destination_id=(
+                        None
+                        if block.config.destination_id is None
+                        else str(block.config.destination_id)
+                    ),
+                    deliveries=self._deliveries() if self._sinks else None,
                     result_path=input_ref,
                     encrypted_secret=input.webhook_secrets.get(block.id),
                     timestamp=workflow.now().isoformat(),
