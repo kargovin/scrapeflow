@@ -561,6 +561,9 @@ latent rather than realised.
 **Discovered:** 2026-08-05, from a push-time Dependabot banner
 **Status:** Open — **deferred behind BUG-005 and the Temporal migration** (owner's call, recorded
 in `phase4-backlog.md` §4)
+**Fixed on `develop` 2026-11-20 (M.3, `2bc7488`):** `.github/dependabot.yml` lists every manifest with a
+lockfile — `api`, `frontend`, `http-worker`, `llm-worker`, `playwright-worker`, `delivery-worker`. `mcp/` stays
+out until it has a lockfile (BUG-013). Takes effect when the file reaches `main` (Release M).
 ⚠️ **Read the [addendum of 2026-09-04](#bug-006-addendum-2026-09-04--the-coverage-gap-produced-a-concrete-outage) at the end of this file before acting on this bug.** The gap
 stopped being theoretical: it produced a real outage, and it shifts what the fix has to be —
 **lockfiles, not scanning coverage.** The addendum is filed at the end rather than inline because
