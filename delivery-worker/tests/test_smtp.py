@@ -1,5 +1,6 @@
 """M.14 — email: the pinned SMTP session, send_email, test_smtp and the classifier (ADR-015 §2d–§7)."""
 
+import asyncio
 import email
 import email.policy
 import json
@@ -297,6 +298,25 @@ async def test_the_session_is_pinned_to_the_checked_address_with_the_name(lookup
         await _send(_send_input(server, mode="implicit"))
     assert dialled == [("127.0.0.1", server.port)]
     assert server.sni == [HOST]
+
+
+def _open_transports() -> list:
+    return [t for t in asyncio.get_running_loop()._transports.values() if not t.is_closing()]
+
+
+@pytest.mark.parametrize("mode", ["starttls", "implicit"])
+async def test_a_session_leaves_no_transport_on_its_closed_socket(lookups, mode):
+    """A transport still open on a socket pinned_tcp closed holds that fd number: the next socket
+    given the same number fails to connect (RuntimeError) in a long-running worker."""
+    # The server closes after the client, as one across a network does.
+    async with smtp_server(HOST, mode=mode, close_delay=0.2) as server:
+        for _ in range(3):
+            await _send(_send_input(server, mode=mode))
+            assert await _test(_test_input(server, mode=mode)) == [
+                ("address", "passed", None), ("tls", "passed", None), ("login", "passed", None)
+            ]
+    assert len(server.messages) == 3
+    assert _open_transports() == []
 
 
 # --- the destination test (ADR-015 §2d): EHLO, AUTH, QUIT; no mail ----------------------------

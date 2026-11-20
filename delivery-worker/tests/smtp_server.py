@@ -38,10 +38,11 @@ async def smtp_server(
     replies: dict[str, tuple[int, str]] | None = None,
     hang_after: str | None = None,
     refuse_rcpt: dict[str, int] | None = None,
+    close_delay: float = 0,
 ):
     """Yields an ``Smtp`` record. ``replies`` overrides a verb's answer ("BANNER" for the greeting);
     ``hang_after`` stops answering once that verb arrives; ``refuse_rcpt`` answers one recipient
-    with a code."""
+    with a code; ``close_delay`` holds the connection open that long after QUIT's reply."""
     ca_pem, cert_pem, key_pem = make_pki(name)
     with tempfile.TemporaryDirectory() as tmp:
         cert_file, key_file = Path(tmp, "cert.pem"), Path(tmp, "key.pem")
@@ -115,6 +116,7 @@ async def smtp_server(
                     await send(250, "queued")
                 elif verb == "QUIT":
                     await send(221, "bye")
+                    await asyncio.sleep(close_delay)
                     break
                 else:
                     await send(502, "unknown")

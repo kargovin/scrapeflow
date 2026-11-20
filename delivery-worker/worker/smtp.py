@@ -112,6 +112,7 @@ class Session:
         await self.client.login(self._secret.user, self._secret.password)
 
     async def close(self) -> None:
+        transport = self.client.transport
         try:
             if self.client.is_connected:
                 await self.client.quit()
@@ -119,6 +120,10 @@ class Session:
             pass
         finally:
             self.client.close()
+            # A TLS close waits for the server's close_notify, but pinned_tcp closes the socket
+            # next: a transport left open would hold its fd number for the next connection.
+            if transport is not None:
+                transport.abort()
 
 
 async def _send(sock: socket.socket, address: SmtpAddress, secret: LoginSecret, msg: EmailMessage,
