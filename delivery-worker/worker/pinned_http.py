@@ -1,8 +1,9 @@
 """aiohttp pinned to a checked address (ADR-015 §3): the bucket client's connection.
 
 One lookup through ``egress``; each request then goes out on a session whose resolver knows only the
-host and the one vetted address being tried. TLS presents the host and checks the certificate
-against it. Imports aiohttp and ``.egress`` only: ``contracts/test_egress.py`` loads it.
+host and the one vetted address being tried, and that sends one request. TLS presents the host and
+checks the certificate against it. Imports aiohttp and ``.egress`` only:
+``contracts/test_egress.py`` loads it.
 """
 
 import socket
@@ -44,6 +45,31 @@ class PinnedResolver(AbstractResolver):
         return None
 
 
+def _send_once() -> aiohttp.ClientMiddlewareType:
+    """Lets a session send one request: a second send re-raises the first one's failure.
+
+    aiohttp resends an idempotent request (PUT, DELETE) once after a disconnect, with no option
+    to turn it off; the resend goes back through the middlewares.
+    """
+    failure: Exception | None = None
+    sent = False
+
+    async def middleware(
+        req: aiohttp.ClientRequest, handler: aiohttp.ClientHandlerType
+    ) -> aiohttp.ClientResponse:
+        nonlocal failure, sent
+        if sent:
+            raise failure or RuntimeError("a pinned session sends one request")
+        sent = True
+        try:
+            return await handler(req)
+        except Exception as exc:
+            failure = exc
+            raise
+
+    return middleware
+
+
 def _session(host: str, ip: str, context) -> aiohttp.ClientSession:
     connector = aiohttp.TCPConnector(
         resolver=PinnedResolver(host, ip),
@@ -56,6 +82,7 @@ def _session(host: str, ip: str, context) -> aiohttp.ClientSession:
         timeout=aiohttp.ClientTimeout(total=None, sock_connect=egress.CONNECT_TIMEOUT_SECONDS),
         trust_env=False,
         auto_decompress=False,
+        middlewares=(_send_once(),),
     )
 
 

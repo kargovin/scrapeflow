@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from tests import tls
 from tests.s3 import Play, error_xml, s3_server
 from worker import bucket, checks, egress, pinned_http
 from worker.bucket import BucketActivities, Endpoint, Refused, Reply, describe, endpoint, object_key
@@ -399,6 +400,43 @@ async def test_the_last_refused_address_is_a_transient_error(monkeypatch):
             await _deliver(_deliver_input(s3))
     assert (exc.value.type, exc.value.non_retryable) == ("DestinationUnreachable", False)
     assert exc.value.message.startswith(f"could not reach s3.test:{s3.port} (")
+
+
+@asynccontextmanager
+async def _dropping_server():
+    """Reads each request's head, records its request line, then drops the connection."""
+    server_ctx, client_ctx, _ = tls.contexts("s3.test")
+    received: list[str] = []
+
+    async def handle(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            received.append(head.split(b"\r\n", 1)[0].decode())
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_ctx)
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        yield port, client_ctx, received
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+async def test_a_dropped_connection_is_not_resent(monkeypatch, method):
+    async with _dropping_server() as (port, client_ctx, received):
+        monkeypatch.setattr(egress, "tls_context", lambda: client_ctx)
+
+        async def vetted(host, port):
+            return ["127.0.0.1"]
+
+        monkeypatch.setattr(egress, "vetted_addresses", vetted)
+        s3 = type("S", (), {"endpoint": f"https://s3.test:{port}/"})()
+        call = _deliver(_deliver_input(s3)) if method == "PUT" else _undo(_undo_input(s3))
+        with pytest.raises(ApplicationError) as exc:
+            await call
+    assert [line.split(" ", 1)[0] for line in received] == [method]
+    assert (exc.value.type, exc.value.non_retryable) == ("DestinationUnreachable", False)
+    assert exc.value.message == f"could not reach s3.test:{port} (ServerDisconnectedError)"
 
 
 async def test_the_resolver_answers_for_the_checked_host_only():
