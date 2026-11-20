@@ -145,6 +145,13 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-20 *(clock)*
 
+🚀 **RELEASE L DONE — GROUP L CLOSED (2026-11-20).** Owner ran L.12: step 0 (`c23f1f27522b`, 0 running runs; rollback
+tag api `…c46edb4…`), pushed `main` `c46edb4..97eff8b` (CI `44729376551`: `replay`, `build-api`), rollout on `97eff8b`,
+`alembic_version` = `72b61b3efb61`. Prod checks: a 5-minute monitor fired twice (`first_check`, then `unchanged`, one
+message); a changing page by Check now (`first_check`, `changed`, `changed`, with diffs); 409 on a second Check now
+(needs a slow page — `httpbin.org/delay/8`); pause; deletes with checks; SPA. **Deployed code is `97eff8b`.**
+**Next: M.1** (`destinations`, `pipeline_version_destinations`, `webhook_deliveries.destination_id`/`kind`).
+
 🔧 **L.1–L.11 BUILT, 🧪 L.12 COMPOSE GATE PASSED, 📋 L.12 RUNBOOK READY (2026-11-20, twenty-second session; delegated
 build).** Owner: "read the handoff" → "build everything until l12; the open in background list will only be done post
 our backlog" (saved as a memory). **Order to replay:**
@@ -2085,6 +2092,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-20 (Release L close):** `main` = `origin/main` = `97eff8b` (**deployed**); `develop` = `main` + the release record commits, **not pushed**. Infra: Flux's tag bumps only. Compose up.
 - **2026-11-20 (L.1–L.12 delegated build close):** `develop` = `main` (`c46edb4`, deployed) + K's release-record commits + L's 12 commits + this closeout, **not pushed**. Infra untouched. Compose **up**, with the `gate` profile's `pipeline-fixture`; the LLM worker image rebuilt from this tree. `tmp/` untracked, pre-existing.
 - **2026-11-19 (Release K close):** `main` = `origin/main` = `c46edb4` (**deployed**); `develop` = `main` + the release record commits, **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose down`; volumes kept). `tmp/` untracked, pre-existing.
 - **2026-11-19 (J-b release close):** `main` = `origin/main` = `a10f698` (**deployed**); `develop` = `main` + the release record commits, pushed by the owner up to `a10f698`, the rest **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose --profile gate down`; volumes kept) — bring the gate fixture back with `docker compose --profile gate up -d pipeline-fixture`.
