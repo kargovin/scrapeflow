@@ -1,0 +1,27 @@
+# Every manifest with a lockfile (BUG-006). mcp/ has none yet (BUG-013), so it is not listed.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /api
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /http-worker
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directory: /llm-worker
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directory: /playwright-worker
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directory: /delivery-worker
+    schedule:
+      interval: weekly
