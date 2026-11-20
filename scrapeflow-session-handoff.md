@@ -143,7 +143,30 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-19 *(clock)*
+## Current state — as of 2026-11-20 *(clock)*
+
+🔧 **L.1–L.11 BUILT, 🧪 L.12 COMPOSE GATE PASSED, 📋 L.12 RUNBOOK READY (2026-11-20, twenty-second session; delegated
+build).** Owner: "read the handoff" → "build everything until l12; the open in background list will only be done post
+our backlog" (saved as a memory). **Order to replay:**
+- **L.1** `b7e3e7e` — `core/pipeline_trigger.py` builds a run's rows and input.
+- **L.2** `3d6aeb4` — migration 4.12 `72b61b3efb61` (`monitors`, `monitor_events`, check columns, `fingerprint`).
+- **L.3** `882b94f` — the `changed` rule and the change gate at save time.
+- **L.4** `55a0a28` — monitors API, monitor Schedules, the scheduled cap shared with jobs.
+- **L.5** `3960e67` — delete interlocks (pipeline, LLM key, monitor ± checks, admin user delete).
+- **L.6** `68f84ca` — counter + self-pause, monitor events, check columns on the mirrors.
+- **L.7** `cfdc6b0` — `MonitorCheckWorkflow` + `admit_monitor_check`.
+- **L.8** `36b003f` — the check in `PipelineWorkflow` (`patched("monitor-check")`).
+- **L.9** `1831909` — Check now. **L.10** `03df39c` — reads + admin. **L.11** `da1bb92` — SPA (not click-tested: Clerk).
+- **L.12** `f0331f6` — `scripts/monitor_gate.py`: 24 measured checks (23 Check now + 1 firing) → 3 LLM calls, 3 kept
+  copies, 3 messages, 24 units, storage only on the kept checks; plus baseline-deleted, hand-run, delete-with-checks,
+  carried value, self-pause. Runbook in the backlog's L.12 section.
+- **My calls** are listed per task in the backlog's status table.
+- **Numbers:** API suite 1088, replay 64, contracts 68; mutation per task, all killed.
+- ⚠️ **Compose's `llm-worker-temporal` image predated K** — rebuilt this session; rebuild after any `llm-worker/` change.
+- ⚠️ **The migration hot-reload trap bit twice** (the generated file was root-owned, the edit refused, the unpause applied
+  the raw file and dropped `idx_webhook_deliveries_dedup`); recovered by downgrade. `chown` the generated file inside the
+  one-off container before editing, and never unpause until the edited file is upgraded.
+- **Next:** **L.12 is the owner's** (push, ff `main`, migration 4.12 on startup, the prod monitor checks). Then **M.1**.
 
 🚀 **RELEASE K DONE — GROUP K CLOSED (2026-11-19).** Owner ran K.4: step 0 (`678c7e339d80`, 0 running runs, 0 crawl
 schedules; rollback tags api `…a10f698…`, llm-worker `…036870c…`), pushed `main` `a10f698..c46edb4` (CI `44582316601`:
@@ -2062,6 +2085,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-20 (L.1–L.12 delegated build close):** `develop` = `main` (`c46edb4`, deployed) + K's release-record commits + L's 12 commits + this closeout, **not pushed**. Infra untouched. Compose **up**, with the `gate` profile's `pipeline-fixture`; the LLM worker image rebuilt from this tree. `tmp/` untracked, pre-existing.
 - **2026-11-19 (Release K close):** `main` = `origin/main` = `c46edb4` (**deployed**); `develop` = `main` + the release record commits, **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose down`; volumes kept). `tmp/` untracked, pre-existing.
 - **2026-11-19 (J-b release close):** `main` = `origin/main` = `a10f698` (**deployed**); `develop` = `main` + the release record commits, pushed by the owner up to `a10f698`, the rest **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose --profile gate down`; volumes kept) — bring the gate fixture back with `docker compose --profile gate up -d pipeline-fixture`.
 - **2026-11-19 (J.5–J.10 delegated build close):** `develop` = `c595f41` + this closeout, 17 ahead of `origin/develop` (`f4ff446`), **not pushed**; `main` = `origin/main` = `036870c` (deployed). Infra untouched. `tmp/` untracked, pre-existing.

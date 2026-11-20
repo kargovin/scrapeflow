@@ -128,18 +128,18 @@
 | K.3 | LLM worker: Diff + Capture activities | ✅ **Released 2026-11-19 (K.4, `a10f698..c46edb4`)**; built 2026-11-19 (`7a67bfd` Validate's JSON helpers made public; `0f86fe4` the activities, `worker/changes.py`); called by nothing until L.8. **My calls (contract shapes):** `DiffInput{artifact_id, kind: page|extraction, baseline_path, current_path}`; `DiffOutput{summary, diff: StoredObject|None}` — `summary.status` is `ok`/`baseline_gone`/`unavailable` (the `change_summary` statuses; the activity returns `unavailable` with a `reason` for too large or not JSON, so L.8 records it as is); `CaptureInput{input_path, values: [{input, path, type: number|text}]}` → `{input: {value}|{missing}}`. An extraction's size guard is 50,000 values a side (the ADR's line guard, applied to values); the walk is iterative (no recursion limit). A non-finite number counts as missing (the trigger's rule). Sizes are measured as compact UTF-8 JSON. Worker 271, contracts 68; mutation 8/8 |
 | K.4 | 🚀 Release K (+ Y.2) | ✅ **RELEASED 2026-11-19** (`main` `a10f698..c46edb4`; api + llm-worker images, migration 4.11; no infra change) — owner verified a permanent delete freeing exactly its ledger bytes, and both SPA deletes. **Group K closed** |
 | **L** | **Monitors** (slice 1 · ADR-016) | |
-| L.1 | One builder for a pipeline run's rows + input (`core/pipeline_trigger.py`) | ⬜ |
-| L.2 | Migration: `monitors`, `monitor_events`, check columns, block `fingerprint` | ⬜ |
-| L.3 | The change gate at save time (rule limits, first gate, `on_stop_outputs` from the raw JSON) | ⬜ |
-| L.4 | Monitors API: create, read, edit, pause, resume; Schedules; shared scheduled cap | ⬜ |
-| L.5 | Interlocks: pipeline / LLM-key delete 409, monitor delete (± checks), admin user delete | ⬜ |
-| L.6 | Ending a check: `monitor_check_ended`, self-pause, events, user-then-run lock | ⬜ |
-| L.7 | The firing: `MonitorCheckWorkflow` + `admit_monitor_check` (baseline, carried values) | ⬜ |
-| L.8 | The check in `PipelineWorkflow` (patch `monitor-check`): fingerprints, Diff, Capture, payload | ⬜ |
-| L.9 | Check now | ⬜ |
-| L.10 | Reads + admin (run columns, diff read, history, admin monitors, two stats) | ⬜ |
-| L.11 | SPA: monitors | ⬜ |
-| L.12 | 🚀 Release L + the measured gate (23 Check now + 1 firing) | ⬜ |
+| L.1 | One builder for a pipeline run's rows + input (`core/pipeline_trigger.py`) | 🔧 Built 2026-11-19 (`b7e3e7e`). Builder test: the trigger's rows and input equal a direct build. ⚠️ Later split into `build_run` + `run_input` (L.7) so a retried admission rebuilds its input from its rows |
+| L.2 | Migration: `monitors`, `monitor_events`, check columns, block `fingerprint` | 🔧 Built 2026-11-19 (`3d6aeb4`, migration 4.12 `72b61b3efb61`). **Beyond the task text:** `uq_monitor_events_open_kind` (one open situation per kind, the backstop for `lock_user`) and `idx_monitors_pipeline_id`; `ck_pipeline_runs_change_status` written by hand (autogenerate never sees a CHECK on an existing table). ⚠️ The hot reload applied the unedited file twice while the edit was refused (root-owned file); recovered by downgrade each time — the dedup index is back |
+| L.3 | The change gate at save time (rule limits, first gate, `on_stop_outputs` from the raw JSON) | 🔧 Built 2026-11-19 (`882b94f`). `ChangedRule` in the API catalog; `is_change_gate` / `first_change_gate` shared with the workflow. **My call:** an explicit `"on_stop_outputs": null` reads as left out. Mutation 6/6 |
+| L.4 | Monitors API: create, read, edit, pause, resume; Schedules; shared scheduled cap | 🔧 Built 2026-11-19 (`55a0a28`). `core/monitor_schedules.py`, `core/monitors.py` (save-time checks), `routers/monitors.py`. **My calls:** a Schedule that cannot be armed leaves the monitor created **paused** with a 503 (the job lane's rule); SSRF refusals are the API's usual `400`; `monitors` is on every single-pipeline response (not the list); `DB_ACTIVITY_SECONDS` moved to the catalog; the allowance charges each Diff its budget + one DB call, each Capture its budget. Schedule checked live on compose (SKIP, 365 d, `pause_on_failure` false). Mutation 9/9 |
+| L.5 | Interlocks: pipeline / LLM-key delete 409, monitor delete (± checks), admin user delete | 🔧 Built 2026-11-19 (`3960e67`). The 409s carry `{error, message, monitors}`; the soft-delete path re-checks after its hard-delete fallback. Mutation 8/8 (one test added: a pipeline with runs) |
+| L.6 | Ending a check: `monitor_check_ended`, self-pause, events, user-then-run lock | 🔧 Built 2026-11-19 (`68f84ca`). `core/monitor_checks.py`, `core/monitor_events.py`; `mark_not_started` is the could-not-start branch for the trigger and Check now. **My calls:** a user-paused monitor counts failures but is never switched to `paused_itself`; resume ends the open situation (so a later self-pause starts a new row). Mutation 9/10 → the survivor was a redundant close, removed |
+| L.7 | The firing: `MonitorCheckWorkflow` + `admit_monitor_check` (baseline, carried values) | 🔧 Built 2026-11-19 (`cfdc6b0`). Six histories (`harness_monitor_check_*`; the gave-up one is 1.3 MB — a day of re-asks). **My calls:** the order under the lock is enabled → overlap → monthly → cannot run (keys, parse, SSRF) → storage → concurrency (a failed check costs a unit, so the monthly meter decides first); `MonitorContext` also carries the carried-value definitions Capture needs; a waiting firing's re-asks move `last_at`, not `count`. Mutation 13/13 |
+| L.8 | The check in `PipelineWorkflow` (patch `monitor-check`): fingerprints, Diff, Capture, payload | 🔧 Built 2026-11-19 (`36b003f`). Patch asked only when the run has a monitor or a gate, so other runs record no marker. Seven histories (`harness_monitor_*`). **My calls:** `change_summary` is keyed by the block that triggered each diff (the `?block=` the diff read takes); a Capture that fails records `{missing}` and never fails the check; a page diff compares the last content block before the gate. Mutation 12/12 |
+| L.9 | Check now | 🔧 Built 2026-11-19 (`1831909`). **My call:** Check now is allowed on a paused or self-paused monitor (the user asked). Mutation 4/4 |
+| L.10 | Reads + admin (run columns, diff read, history, admin monitors, two stats) | 🔧 Built 2026-11-19 (`03df39c`). **Beyond the task text:** an admin diff read beside the user's; `MonitorRef` moved to `schemas/pipelines` (import cycle) |
+| L.11 | SPA: monitors | 🔧 Built 2026-11-19 (`da1bb92`). `tsc -b` + `vite build` pass; wording run under Node. **Not click-tested** (Clerk) — moved to L.12 step 6 |
+| L.12 | 🚀 Release L + the measured gate (23 Check now + 1 firing) | 🧪 Compose gate passed 2026-11-20 (`f0331f6`); 📋 runbook ready — the owner's |
 | **M** | **Bucket sink, rollback, several webhooks** (PRD-017 slice 1 · ADR-015 + ADR-014 §7) | |
 | M.1 | Migration: `destinations`, `pipeline_version_destinations`, `webhook_deliveries.destination_id`/`kind` | ⬜ |
 | M.2 | Destinations API (CRUD, host-only display, delete-in-use 409) | ⬜ |
@@ -3773,6 +3773,82 @@ storage moves only for the 3 kept checks. Then the rest of PRD-018's slice-1 cri
 destinations, R7–R11). `main` push → api; the monitors migration on startup.
 **Verify:** owner — one 5-minute monitor in prod: an unchanged check, a changed check, pause, delete.
 **Depends on:** L.1–L.11
+
+**Compose gate ✅ (2026-11-20, `f0331f6`):** `scripts/monitor_gate.py` against the fixture's new `/watched/<key>` page
+(the gate changes it server-side; a monitor's inputs are fixed). **Measured:** 24 checks — 23 by Check now, check 17 by
+a real firing (`trigger()` on the monitor's Schedule → `MonitorCheckWorkflow` → admission) — gave **3 LLM calls, 3 kept
+copies (checks 1, 9, 17), 3 webhook messages, 24 monthly units**; storage moved by 211, 501, 501 bytes on the kept
+checks and **0** on the 21 unchanged ones. Also passed: each change compared with the previous kept check; the page diff
+shows `-…£80` / `+…£70` and the extraction diff `/price 80 → 70`; the full diff reads; webhook `change` + `monitor_id`,
+`diff_detected` true on a change and false on the first check; 24 checks in the history and in `?monitor_id=`;
+deleting the newest baseline makes later checks read "since deleted" and the next check compares with check 9; a
+hand-run through the gate reads `no_baseline` and sends today's payload; delete `?with_checks=true` frees exactly the
+ledger's 1,213 bytes; the carried `last_price` pipeline (start value on the first check, no LLM call when unchanged,
+same price → stopped at the Validate carrying 80, lower price → sent); a dead site pauses the monitor after the 5th
+failed check with one `paused_itself` event. **Not run here:** restarts mid-schedule and a Temporal outage, the SPA
+click-through (Clerk), pipelines switched off and waiting for a slot (both unit-tested).
+⚠️ Compose's `llm-worker-temporal` image predated K and had to be rebuilt (`docker compose build llm-worker-temporal`).
+
+**Ships** (`main` `c46edb4..develop`): `api/` + `frontend/` — L.1–L.12 (commits in the status table), migration 4.12
+`72b61b3efb61`. CI: `replay` → `build-api`. Flux bumps `api`, `workflow-worker` and the cleanup CronJob. **No
+llm-worker image**: its half (the `changed` rule, Diff, Capture) shipped with K, so *workers first* holds by
+construction (ADR-016 §16). **No infra change.**
+
+**Rollout window** (one-line notes, owner's rule for Phase 4):
+- An old api pod answers every `/monitors` route `404` — create no monitor until `rollout status` says 2/2.
+- An old workflow-worker pod picking up a monitor firing fails to find `MonitorCheckWorkflow` and retries the task
+  until a new pod takes it; no monitor exists before the release, so nothing is stranded.
+- Old code runs fine on 4.12: it maps none of the new columns, and `baseline_eligible` has a server default.
+
+**Runbook** (owner-run; `KEY=<an API key>`, `B=https://scrapeflow.govindappa.com`, `HOOK=<a webhook receiver you can
+read>`; SQL through your usual `psql` on the app DB):
+0. **Before (read-only, prod):**
+   - `SELECT version_num FROM alembic_version;` → expect `c23f1f27522b` (4.11, K).
+   - `SELECT count(*) FROM pipeline_runs WHERE status = 'running';` → note it (a rollout does not strand them).
+   - `kubectl -n scrapeflow get deploy scrapeflow-api -o jsonpath='{.spec.template.spec.containers[0].image}'` → note
+     the tag (expected `main-…-c46edb4…`): the rollback target.
+1. **Push `develop`, ff `main` to it, push.** Watch CI: `replay`, `build-api`. `kubectl -n scrapeflow rollout status
+   deploy/scrapeflow-api` → 2/2 on the new tag; the same for `deploy/scrapeflow-workflow-worker`. Then:
+   - `SELECT version_num FROM alembic_version;` → **`72b61b3efb61`**;
+   - `SELECT count(*) FROM monitors;` → `0`; `SELECT count(*) FROM quota_active_submissions;` returns.
+2. **A pipeline with a change gate** (no LLM block, so no key is needed; the save returns `201`):
+   ```bash
+   curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/pipelines" -d '{"name": "l-gate",
+     "definition": {"inputs": {"url": {"type": "url"}}, "blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": {"$input": "url"}}},
+       {"id": "clean", "type": "clean", "input": "fetch"},
+       {"id": "gate", "type": "validate", "input": "clean",
+        "config": {"rules": [{"kind": "changed"}], "when_unmet": "stop"}},
+       {"id": "notify", "type": "webhook", "input": "gate", "config": {"url": "'"$HOOK"'"}}]}}'
+   ```
+   → note its `id` as `P`; its `gate` block reads `"on_stop_outputs": "delete"`.
+3. **An unchanged check, by schedule.** Create a 5-minute monitor on a static page:
+   `curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/monitors" -d '{"name": "l-static",
+   "pipeline_id": "P", "inputs": {"url": "https://example.com"}, "schedule_cron": "*/5 * * * *"}'` → **`201`**, `state`
+   `active`, `next_check_at` set, `warnings` naming "no LLM block…" and "nothing is sent when a check fails". Note its
+   `id` as `M1`. Wait for **two** firings (≤ 10 min), then `curl -s -H "X-API-Key: $KEY" "$B/monitors/M1/history"` →
+   two checks, newest first: the older `change_status` **`first_check`** (with `result_path`), the newer
+   **`unchanged`** (`result_path` null, `stopped_at_block_id` `gate`). `$HOOK` received **one** message, with
+   `"monitor_id"` and `"change": {"status": "first_check", …}`.
+4. **A changed check, by Check now.** A second monitor on a page that differs every time:
+   the same create with `"name": "l-changing"`, `"inputs": {"url": "https://httpbin.org/uuid"}`,
+   `"schedule_cron": "0 3 1 1 *"` → `M2`. `curl -s -X POST -H "X-API-Key: $KEY" "$B/monitors/M2/check"` → **`202`**;
+   when it ends, again → the second check reads **`changed`** with `baseline_run_id` = the first's id and a
+   `change_summary.gate` whose `lines` show the old and new uuid; `$HOOK` got its message with `"diff_detected": true`.
+   A third `check` while one runs → **`409`** naming it.
+5. **Pause and delete.** `curl -s -X POST -H "X-API-Key: $KEY" "$B/monitors/M1/pause"` → `state` `paused`,
+   `next_check_at` null; no new check appears after the next 5-minute mark. Then `DELETE "$B/monitors/M1?with_checks=true"`
+   and `DELETE "$B/monitors/M2?with_checks=true"` → **`204`** each; `SELECT count(*) FROM monitors;` → `0`;
+   `SELECT count(*) FROM pipeline_runs WHERE pipeline_id = 'P';` → `0`. `DELETE "$B/pipelines/P?permanent=true"` →
+   `204` (a `409` naming a monitor means one is left).
+6. **SPA** (signed in): `/app/dashboard/monitors` → New monitor (from a pipeline page's *Monitor this pipeline*),
+   the monitor page's history, Check now → the run page's *Change* row and diff, Pause/Resume, Delete with checks;
+   *Usage Stats* shows the two monitor counts (admin). Not click-tested here: Clerk.
+7. Record step 0's values and the results here; mark L.1–L.12 ✅ in the status table.
+
+**Rollback:** prefer a forward fix. Before an image revert (api, workflow-worker, CronJob to step 0's tag), **delete
+every monitor** (their Schedules would fire into a workflow type the old worker does not have). The revert leaves 4.12
+applied — harmless, K's code maps none of its tables or columns. Do not downgrade the migration.
 
 ---
 
