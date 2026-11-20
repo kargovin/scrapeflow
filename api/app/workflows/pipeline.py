@@ -55,6 +55,7 @@ with workflow.unsafe.imports_passed_through():
         DIFF_ACTIVITY,
         LLM_EXTRACT_ACTIVITY,
         SCRAPE_ACTIVITY,
+        UNDO_BUCKET_ACTIVITY,
         VALIDATE_ACTIVITY,
         CaptureInput,
         CaptureOutput,
@@ -72,6 +73,8 @@ with workflow.unsafe.imports_passed_through():
         ScrapeOptions,
         ScrapeOutput,
         StoredObject,
+        UndoBucketInput,
+        UndoBucketOutput,
         ValidateInput,
         ValidateVerdict,
     )
@@ -102,6 +105,8 @@ WEBHOOK_EVENTS_PATCH = "webhook-events"
 MONITOR_CHECK_PATCH = "monitor-check"
 # ADR-012: bucket blocks' workflow-driven tries; Webhook destinations, block_id and deliveries (M.7).
 SINKS_PATCH = "sinks"
+# ADR-012: undoing the deliveries on the failure path, or marking what stays (ADR-014 §7, M.8).
+ROLLBACK_PATCH = "rollback"
 
 # The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
 WEBHOOK_EVENT = WEBHOOK_RESULT_EVENT
@@ -295,6 +300,12 @@ _BUCKET_EXT: dict[str, Literal["html", "md", "json"]] = {
 }
 
 
+# A reversible sink's undo by its delivery record's kind: activity, input, output (ADR-015 §5).
+_UNDO_ACTIVITIES: dict[str, tuple[str, type[BaseModel], type[BaseModel]]] = {
+    "bucket": (UNDO_BUCKET_ACTIVITY, UndoBucketInput, UndoBucketOutput),
+}
+
+
 # Three per block — running, record_storage, completed — must fit BLOCK_OVERHEAD_SECONDS.
 assert 3 * DB_ACTIVITY_SECONDS <= BLOCK_OVERHEAD_SECONDS
 # A Scrape block's host-slot wait: the cap, its last acquire, the release.
@@ -361,16 +372,16 @@ def _scrape_url(block: ScrapeBlock, input: PipelineRunInput) -> str:
     return str(input.inputs[url.input]) if isinstance(url, InputBinding) else str(url)
 
 
-def _sink_failure(cause: BaseException | None) -> tuple[str, bool]:
+def _sink_failure(cause: BaseException | None, what: str = "delivery") -> tuple[str, bool]:
     """(message, final) for one try on the delivery queue: the worker's classified error as it
     says; a timeout transient (nothing took it, or it overran); anything else final."""
     if isinstance(cause, ApplicationError):
         return str(cause), cause.non_retryable
     if isinstance(cause, ActivityTimeoutError):
         if cause.type == TimeoutType.SCHEDULE_TO_START:
-            return "no delivery worker took the delivery", False
-        return "the delivery did not finish in time", False
-    return f"the delivery failed ({type(cause).__name__})", True
+            return f"no delivery worker took the {what}", False
+        return f"the {what} did not finish in time", False
+    return f"the {what} failed ({type(cause).__name__})", True
 
 
 def _run_cancelled() -> ApplicationError:
@@ -455,6 +466,8 @@ class PipelineWorkflow:
         self._sinks = False
         # (block id, delivery record) per sink that delivered, in order (ADR-014 §7's `delivered`).
         self._delivered: list[tuple[str, dict[str, Any]]] = []
+        # Irreversible sinks that sent (§7's `announced`); an alert-only skip never gets here.
+        self._announced: list[str] = []
 
     @workflow.run
     async def run(self, input: PipelineRunInput) -> str | None:
@@ -548,6 +561,8 @@ class PipelineWorkflow:
                     raise
                 message = _failure_message(exc, timing.maximum_attempts)
                 await self._mirror_block(input.run_id, block.id, "failed", error=message)
+                if (self._delivered or self._announced) and workflow.patched(ROLLBACK_PATCH):
+                    await self._roll_back(input, block.id, f"{block.id}: {message}")
                 await self._mirror_run(
                     input.run_id,
                     "failed",
@@ -581,6 +596,8 @@ class PipelineWorkflow:
             if delivery is not None:
                 extra["delivery"] = delivery
                 self._delivered.append((block.id, delivery))
+            elif block_type.sink is not None and not block_type.sink.reversible:
+                self._announced.append(block.id)
             await self._mirror_block(
                 input.run_id, block.id, "completed", output_ref=output_ref, **extra
             )
@@ -796,6 +813,114 @@ class PipelineWorkflow:
         raise ApplicationError(
             f"{error} (gave up after {timing.maximum_attempts} attempts)", non_retryable=True
         )
+
+    async def _mirror_undo(
+        self, run_id: str, undo: dict[str, UndoStatus], error: str | None = None
+    ) -> RunStatus:
+        return await self._finish(
+            _db(MIRROR_UNDO_ACTIVITY, MirrorUndoInput(run_id=run_id, undo=undo, error=error), str)
+        )
+
+    async def _roll_back(self, input: PipelineRunInput, failed_block_id: str, error: str) -> None:
+        """ADR-014 §7, between the failed block and the failed run. Nothing announced: undo each
+        delivery, newest first, on its own budget. Announced: mark what stays, undo nothing (D13).
+
+        ⚠️ Every await goes through ``_finish(..., interruptible=False)``: a cancel is ignored."""
+        run_id = input.run_id
+        if self._announced:
+            undo: dict[str, UndoStatus] = {block_id: "kept" for block_id, _ in self._delivered}
+            undo |= dict.fromkeys(self._announced, "not_undoable")
+            await self._mirror_undo(run_id, undo)
+            return
+        types = {b.id: CATALOG[b.type] for b in input.blocks}
+        undos: list[tuple[str, dict[str, Any], Timing]] = []
+        for block_id, record in reversed(self._delivered):
+            sink = types[block_id].sink
+            assert sink is not None and sink.undo is not None
+            undos.append((block_id, record, sink.undo))
+        need = sum(timing.need for _, _, timing in undos)
+        started = await self._finish(
+            _db(
+                MIRROR_ROLLBACK_STARTED_ACTIVITY,
+                RollbackStartedInput(
+                    run_id=run_id,
+                    failed_block_id=failed_block_id,
+                    error=error,
+                    rollback_deadline=workflow.now() + timedelta(seconds=need),
+                ),
+                str,
+            )
+        )
+        # Not running: the run was deleted, and with it whose destination to load.
+        if started != "running":
+            return
+        for block_id, record, timing in undos:
+            if await self._mirror_undo(run_id, {block_id: "undoing"}) != "running":
+                return
+            outcome = await self._undo(run_id, record, timing)
+            if outcome is None:
+                return
+            undo_status, undo_error = outcome
+            await self._mirror_undo(run_id, {block_id: undo_status}, undo_error)
+
+    async def _undo(
+        self, run_id: str, record: dict[str, Any], timing: Timing
+    ) -> tuple[UndoStatus, str | None] | None:
+        """One delivery's undo: ADR-015 §4's tries less the waiting mirror and the cancel check,
+        at the recorded location with the destination's current secret. None: the run is gone."""
+        name, input_type, result_type = _UNDO_ACTIVITIES[record["kind"]]
+        error = ""
+        for attempt in range(1, timing.maximum_attempts + 1):
+            if attempt > 1:
+                wait = min(
+                    timing.initial_interval * timing.backoff_coefficient ** (attempt - 2),
+                    timing.maximum_interval,
+                )
+                await self._finish(workflow.sleep(wait))
+            try:
+                loaded: LoadedDestination = await self._finish(
+                    _db(
+                        LOAD_DESTINATION_ACTIVITY,
+                        LoadDestinationInput(
+                            run_id=run_id,
+                            destination_id=record["destination_id"],
+                            kind=record["kind"],
+                        ),
+                        LoadedDestination,
+                    )
+                )
+            except ActivityError as exc:
+                cause = exc.cause
+                if isinstance(cause, ApplicationError) and cause.type == RUN_CANCELLED_ERROR:
+                    return None
+                if isinstance(cause, ApplicationError) and cause.non_retryable:
+                    return "undo_failed", str(cause)
+                error = "the destination could not be read"
+                continue
+            try:
+                await self._finish(
+                    workflow.execute_activity(
+                        name,
+                        input_type(
+                            location=record["location"], encrypted_secret=loaded.encrypted_secret
+                        ),
+                        task_queue=DELIVERY_QUEUE,
+                        result_type=result_type,
+                        schedule_to_start_timeout=timedelta(seconds=timing.schedule_to_start),
+                        start_to_close_timeout=timedelta(seconds=timing.start_to_close),
+                        schedule_to_close_timeout=timedelta(
+                            seconds=timing.schedule_to_start + timing.start_to_close
+                        ),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                )
+            except ActivityError as exc:
+                error, final = _sink_failure(exc.cause, "undo")
+                if final:
+                    return "undo_failed", error
+                continue
+            return "undone", None
+        return "undo_failed", f"{error} (gave up after {timing.maximum_attempts} attempts)"
 
     def _deliveries(self) -> list[dict[str, Any]]:
         """The Webhook payload's ``deliveries``: what the sinks before it wrote (PRD-017 R4)."""

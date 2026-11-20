@@ -50,6 +50,13 @@ from tests.test_workflows_pipeline import (
     _not_met,
     _stop_guard,
 )
+from tests.test_workflows_rollback import (
+    TWO_BUCKETS_THEN_HOOK,
+    _flaky_undo,
+    _hook_refused,
+    _hook_refused_on,
+    _undo_refused,
+)
 from tests.test_workflows_scheduled_job import Harness as ScheduledHarness
 from tests.test_workflows_sinks import (
     BUCKET_ONLY,
@@ -131,6 +138,16 @@ def _cancel_in_sink_wait(h):
     return during
 
 
+def _cancel_in_undo_wait(h):
+    async def during(handle):
+        while not h.undo_inputs:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.5)
+        await handle.cancel()
+
+    return during
+
+
 SCENARIOS = {
     "harness_r6_webhook_delivered_after_retries": ({"webhook": _webhook_flaky}, R6),
     "harness_r6_webhook_run_cancelled_on_retry": ({"webhook": _webhook_cancelled}, R6),
@@ -184,6 +201,24 @@ SCENARIOS = {
     "harness_sinks_bucket_gave_up": ({"bucket": _flaky_bucket(99)}, BUCKET_ONLY),
     "harness_sinks_destination_deleted": ({"load": _gone}, BUCKET_ONLY),
     "harness_sinks_r6_webhook_delivered": ({}, R6),
+    # M.8 — rollback (patch "rollback"), ADR-014 §10's histories.
+    "harness_rollback_full_undo": ({"webhook": _hook_refused}, TWO_BUCKETS_THEN_HOOK),
+    "harness_rollback_undo_refused": (
+        {"webhook": _hook_refused, "undo": _undo_refused},
+        TWO_BUCKETS_THEN_HOOK,
+    ),
+    "harness_rollback_undo_gave_up": (
+        {"webhook": _hook_refused, "undo": _flaky_undo(99)},
+        BUCKET_THEN_HOOKS,
+    ),
+    "harness_rollback_after_webhook_sent": (
+        {"webhook": _hook_refused_on("notify_2")},
+        BUCKET_THEN_HOOKS,
+    ),
+    "harness_rollback_cancel_during_rollback": (
+        {"webhook": _hook_refused, "undo": _flaky_undo(1), "during": _cancel_in_undo_wait},
+        BUCKET_THEN_HOOKS,
+    ),
 }
 
 

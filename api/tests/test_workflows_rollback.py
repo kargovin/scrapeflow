@@ -1,13 +1,16 @@
-"""M.8 — rollback (ADR-014 §7): the rollback mirrors, the alert's rollback lists."""
+"""M.8 — rollback (ADR-014 §7): the rollback mirrors, the alert's rollback lists, the workflow."""
 
 import asyncio
+import itertools
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
 from sqlalchemy import func, select, update
+from temporalio import activity
+from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 
 from app.core.db import AsyncSessionLocal
@@ -15,16 +18,45 @@ from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.models.quota_views import quota_active_submissions
 from app.models.webhook_delivery import WebhookDelivery
+from app.pipelines.catalog import BUCKET_UNDO_TIMING
 from app.settings import settings
+from app.workflows.activities.contracts import BUCKET_UNDO_ATTEMPT_SECONDS, UndoBucketInput
 from app.workflows.activities.db import (
     mirror_rollback_started,
     mirror_run_status,
     mirror_undo_status,
 )
-from app.workflows.pipeline import MirrorRunInput, MirrorUndoInput, RollbackStartedInput
+from app.workflows.pipeline import (
+    RUN_CANCELLED_ERROR,
+    MirrorBlockInput,
+    MirrorRunInput,
+    MirrorUndoInput,
+    RollbackStartedInput,
+)
+from app.workflows.queues import DELIVERY_QUEUE
 from tests.test_pipeline_alerts import ALERT_URL, _definition, _webhook
 from tests.test_pipeline_alerts import _run as _alerting_run
-from tests.test_workflows_pipeline import _block, _run_rows
+from tests.test_workflows_pipeline import (
+    LLM_PATH,
+    Harness,
+    _block,
+    _bucket_ok,
+    _load_ok,
+    _run_rows,
+)
+from tests.test_workflows_sinks import (
+    BUCKET_THEN_HOOKS,
+    HOOK,
+    INLINE_HOOK,
+    LOAD,
+    STORE,
+    STORE_DESTINATION,
+    _gone,
+    _patches,
+    _refused,
+    _sinks,
+    _stored,
+)
 
 LOCATION = {
     "endpoint": "https://s3.example.com/",
@@ -305,3 +337,345 @@ async def test_a_failure_with_nothing_delivered_lists_nothing(db_user):
             )
         ).all()
     assert alert.payload["rollback"] == {"undone": [], "left_in_place": [], "kept": []}
+
+
+# --- the workflow (time-skipping env, activities mocked) ----------------------------------------
+
+STORE_2 = _stored("store_2", "bucket", "store", {"destination_id": STORE_DESTINATION})
+HOOK_AFTER_TWO = _stored("notify", "webhook", "store_2", {"url": "https://hooks.example.com/in"})
+TWO_BUCKETS_THEN_HOOK = _sinks(STORE, STORE_2, HOOK_AFTER_TWO)
+HOOKS_ONLY = _sinks({**HOOK, "input": "extract"}, INLINE_HOOK)
+
+
+def _key(block_id):
+    return f"out/p1/r1/{block_id}.json"
+
+
+def _undo_of(block_id):
+    return UndoBucketInput(
+        location={
+            "endpoint": "https://s3.example.com/",
+            "bucket": "exports",
+            "region": None,
+            "key": _key(block_id),
+        },
+        encrypted_secret="bucket-ciphertext",
+    )
+
+
+async def _hook_refused(input):
+    raise ApplicationError("ssrf_blocked: private", type="WebhookBlocked", non_retryable=True)
+
+
+def _hook_refused_on(block_id):
+    async def webhook(input):
+        if input.block_id == block_id:
+            await _hook_refused(input)
+
+    return webhook
+
+
+async def _undo_refused(input):
+    raise ApplicationError(
+        "the bucket refused the delete (AccessDenied)",
+        type="DestinationRefused",
+        non_retryable=True,
+    )
+
+
+def _flaky_undo(failures: int):
+    seen: list = []
+
+    async def undo(input):
+        if len(seen) < failures:
+            seen.append(input)
+            raise ApplicationError("HTTP 503 from the bucket", type="DestinationUnavailable")
+
+    return undo
+
+
+def _rollback_calls(calls):
+    """Everything from the rollback's first mirror on."""
+    first = next(
+        i for i, c in enumerate(calls) if isinstance(c, RollbackStartedInput | MirrorUndoInput)
+    )
+    return calls[first:]
+
+
+def _failed_run(block_id, message):
+    return MirrorRunInput(
+        run_id="r1", status="failed", error=f"{block_id}: {message}", failed_block_id=block_id
+    )
+
+
+REFUSED = "WebhookBlocked: ssrf_blocked: private"
+
+
+async def test_a_failure_after_deliveries_undoes_each_newest_first_then_fails_the_run():
+    h = Harness(webhook=_hook_refused)
+    result = await h.run(TWO_BUCKETS_THEN_HOOK)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert h.undo_inputs == [_undo_of("store_2"), _undo_of("store")]
+    [started, *rest] = _rollback_calls(h.calls)
+    assert started == RollbackStartedInput(
+        run_id="r1",
+        failed_block_id="notify",
+        error=f"notify: {REFUSED}",
+        rollback_deadline=started.rollback_deadline,
+    )
+    assert rest == [
+        MirrorUndoInput(run_id="r1", undo={"store_2": "undoing"}),
+        LOAD,
+        MirrorUndoInput(run_id="r1", undo={"store_2": "undone"}),
+        MirrorUndoInput(run_id="r1", undo={"store": "undoing"}),
+        LOAD,
+        MirrorUndoInput(run_id="r1", undo={"store": "undone"}),
+        _failed_run("notify", REFUSED),
+    ]
+    # Both undos' own budgets, from the moment rollback started.
+    budget = (started.rollback_deadline - h.undo_info[0].scheduled_time).total_seconds()
+    assert 2 * BUCKET_UNDO_TIMING.need - 5 <= budget <= 2 * BUCKET_UNDO_TIMING.need
+    # The failed block is mirrored before rollback starts: no block is running while undoing.
+    statuses = [(c.block_id, c.status) for c in h.calls if isinstance(c, MirrorBlockInput)]
+    assert statuses[-1] == ("notify", "failed")
+    assert h.calls.index(started) > h.calls.index(
+        MirrorBlockInput(run_id="r1", block_id="notify", status="failed", error=REFUSED)
+    )
+    assert "rollback" in _patches(h.history)
+
+
+async def test_one_undo_try_runs_on_the_delivery_queue_with_its_own_timeouts_and_no_retries():
+    h = Harness(webhook=_hook_refused)
+    await h.run(BUCKET_THEN_HOOKS)
+
+    [info] = h.undo_info
+    assert info.task_queue == DELIVERY_QUEUE
+    assert info.start_to_close_timeout == timedelta(seconds=BUCKET_UNDO_ATTEMPT_SECONDS)
+    assert info.schedule_to_close_timeout == timedelta(
+        seconds=BUCKET_UNDO_TIMING.schedule_to_start + BUCKET_UNDO_TIMING.start_to_close
+    )
+    assert info.attempt == 1
+
+
+async def test_an_undo_refused_is_left_in_place_and_the_older_ones_still_run():
+    refused_once: list = []
+
+    async def undo(input):
+        if not refused_once:
+            refused_once.append(input)
+            await _undo_refused(input)
+
+    h = Harness(webhook=_hook_refused, undo=undo)
+    result = await h.run(TWO_BUCKETS_THEN_HOOK)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert h.undo_inputs == [_undo_of("store_2"), _undo_of("store")]
+    undos = [c.undo | {"error": c.error} for c in h.calls if isinstance(c, MirrorUndoInput)]
+    assert undos == [
+        {"store_2": "undoing", "error": None},
+        {
+            "store_2": "undo_failed",
+            "error": "DestinationRefused: the bucket refused the delete (AccessDenied)",
+        },
+        {"store": "undoing", "error": None},
+        {"store": "undone", "error": None},
+    ]
+    assert h.calls[-1] == _failed_run("notify", REFUSED)
+
+
+async def test_a_transient_undo_failure_waits_reloads_and_tries_again_with_no_waiting_mirror():
+    h = Harness(webhook=_hook_refused, undo=_flaky_undo(2))
+    await h.run(BUCKET_THEN_HOOKS)
+
+    assert len(h.undo_inputs) == 3
+    started = [i.started_time for i in h.undo_info]
+    assert [round((b - a).total_seconds()) for a, b in itertools.pairwise(started)] == [30, 300]
+    assert _rollback_calls(h.calls)[1:] == [
+        MirrorUndoInput(run_id="r1", undo={"store": "undoing"}),
+        LOAD,
+        LOAD,
+        LOAD,
+        MirrorUndoInput(run_id="r1", undo={"store": "undone"}),
+        _failed_run("notify", REFUSED),
+    ]
+
+
+async def test_an_undo_gives_up_after_five_tries_and_is_not_cut_by_the_runs_deadline():
+    h = Harness(webhook=_hook_refused, undo=_flaky_undo(99))
+    # The run's deadline passes long before the undo's waits end.
+    result = await h.run(BUCKET_THEN_HOOKS.model_copy(update={"time_budget_seconds": 200}))
+
+    assert isinstance(result, WorkflowFailureError)
+    started = [i.started_time for i in h.undo_info]
+    assert [round((b - a).total_seconds()) for a, b in itertools.pairwise(started)] == [
+        30,
+        300,
+        3000,
+        7200,
+    ]
+    assert h.calls[-2:] == [
+        MirrorUndoInput(
+            run_id="r1",
+            undo={"store": "undo_failed"},
+            error="DestinationUnavailable: HTTP 503 from the bucket (gave up after 5 attempts)",
+        ),
+        _failed_run("notify", REFUSED),
+    ]
+
+
+async def test_a_destination_gone_at_the_undos_load_fails_the_undo_without_a_try():
+    async def load(input):
+        if any(isinstance(c, RollbackStartedInput) for c in h.calls):
+            return await _gone(input)
+        return await _load_ok(input)
+
+    h = Harness(webhook=_hook_refused, load=load)
+    await h.run(BUCKET_THEN_HOOKS)
+
+    assert h.undo_inputs == []
+    assert h.calls[-2] == MirrorUndoInput(
+        run_id="r1", undo={"store": "undo_failed"}, error="DestinationDeleted: destination deleted"
+    )
+
+
+async def test_a_load_that_could_not_run_is_a_transient_try():
+    failed_executions: list = []
+
+    async def load(input):
+        if any(isinstance(c, RollbackStartedInput) for c in h.calls):
+            if activity.info().attempt == 1:
+                failed_executions.append(input)
+            if len(failed_executions) == 1:
+                raise ApplicationError("database unavailable", type="OperationalError")
+        return await _load_ok(input)
+
+    h = Harness(webhook=_hook_refused, load=load)
+    await h.run(BUCKET_THEN_HOOKS)
+
+    assert h.undo_inputs == [_undo_of("store")]
+    assert h.calls[-2] == MirrorUndoInput(run_id="r1", undo={"store": "undone"})
+
+
+async def test_a_failure_after_a_webhook_went_out_undoes_nothing():
+    h = Harness(webhook=_hook_refused_on("notify_2"))
+    result = await h.run(BUCKET_THEN_HOOKS)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert h.undo_inputs == []
+    assert _rollback_calls(h.calls) == [
+        MirrorUndoInput(run_id="r1", undo={"store": "kept", "notify": "not_undoable"}),
+        _failed_run("notify_2", REFUSED),
+    ]
+
+
+async def test_a_sent_webhook_on_a_run_that_failed_is_not_undoable():
+    h = Harness(webhook=_hook_refused_on("notify_2"))
+    await h.run(HOOKS_ONLY)
+    assert _rollback_calls(h.calls) == [
+        MirrorUndoInput(run_id="r1", undo={"notify": "not_undoable"}),
+        _failed_run("notify_2", REFUSED),
+    ]
+
+
+async def test_a_failure_with_nothing_delivered_asks_no_patch_and_rolls_nothing_back():
+    h = Harness(bucket=_refused)
+    await h.run(BUCKET_THEN_HOOKS)
+    assert not [c for c in h.calls if isinstance(c, RollbackStartedInput | MirrorUndoInput)]
+    assert "rollback" not in _patches(h.history)
+
+
+async def test_a_completed_run_rolls_nothing_back():
+    h = Harness()
+    assert await h.run(BUCKET_THEN_HOOKS) == LLM_PATH
+    assert h.undo_inputs == []
+    assert "rollback" not in _patches(h.history)
+
+
+async def test_a_run_deleted_before_rollback_starts_undoes_nothing():
+    h = Harness(webhook=_hook_refused)
+    h.rollback_reply = "cancelled"
+    await h.run(BUCKET_THEN_HOOKS)
+    assert h.undo_inputs == []
+    assert [type(c) for c in _rollback_calls(h.calls)] == [RollbackStartedInput, MirrorRunInput]
+
+
+async def test_a_cancel_during_rollback_is_ignored_and_the_run_ends_failed():
+    async def cancel_in_undo_wait(handle):
+        while not h.undo_inputs:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.5)  # inside the undo's 30 s wait; nothing skips time here
+        await handle.cancel()
+
+    h = Harness(webhook=_hook_refused, undo=_flaky_undo(1))
+    result = await h.run(BUCKET_THEN_HOOKS, during=cancel_in_undo_wait)
+
+    # The failure was decided first: the wait and the second try still run, the run fails.
+    assert isinstance(result, WorkflowFailureError)
+    assert isinstance(result.cause, ApplicationError)
+    assert len(h.undo_inputs) == 2
+    assert h.calls[-2:] == [
+        MirrorUndoInput(run_id="r1", undo={"store": "undone"}),
+        _failed_run("notify", REFUSED),
+    ]
+
+
+async def test_a_cancel_during_an_undo_try_lets_it_finish_and_rollback_go_on():
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(input):
+        started.set()
+        await release.wait()
+
+    async def cancel_mid_delete(handle):
+        await started.wait()
+        await handle.cancel()
+        await asyncio.sleep(0.5)
+        release.set()
+
+    h = Harness(webhook=_hook_refused, undo=slow)
+    result = await h.run(TWO_BUCKETS_THEN_HOOK, during=cancel_mid_delete)
+
+    assert isinstance(result, WorkflowFailureError)
+    assert h.undo_inputs == [_undo_of("store_2"), _undo_of("store")]
+    # The delete in flight was never asked to stop: it finished and counts.
+    assert [c.undo for c in h.calls if isinstance(c, MirrorUndoInput)] == [
+        {"store_2": "undoing"},
+        {"store_2": "undone"},
+        {"store": "undoing"},
+        {"store": "undone"},
+    ]
+    assert h.calls[-1] == _failed_run("notify", REFUSED)
+
+
+async def test_a_bucket_failing_after_an_earlier_bucket_delivered_undoes_the_earlier_one():
+    async def second_refused(input):
+        if input.block_id == "store_2":
+            raise ApplicationError(
+                "the bucket refused the write (AccessDenied)",
+                type="DestinationRefused",
+                non_retryable=True,
+            )
+        return await _bucket_ok(input)
+
+    h = Harness(bucket=second_refused)
+    await h.run(TWO_BUCKETS_THEN_HOOK)
+    assert h.undo_inputs == [_undo_of("store")]
+    assert h.delivered == []
+
+
+async def test_a_run_deleted_under_an_undos_load_ends_the_rollback():
+    async def load(input):
+        if any(isinstance(c, RollbackStartedInput) for c in h.calls):
+            raise ApplicationError(
+                "the run was deleted", type=RUN_CANCELLED_ERROR, non_retryable=True
+            )
+        return await _load_ok(input)
+
+    h = Harness(webhook=_hook_refused, load=load)
+    await h.run(TWO_BUCKETS_THEN_HOOK)
+
+    assert h.undo_inputs == []
+    assert [c for c in h.calls if isinstance(c, MirrorUndoInput)] == [
+        MirrorUndoInput(run_id="r1", undo={"store_2": "undoing"})
+    ]

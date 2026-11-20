@@ -40,6 +40,7 @@ from app.workflows.activities.contracts import (
     DIFF_ACTIVITY,
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
+    UNDO_BUCKET_ACTIVITY,
     VALIDATE_ACTIVITY,
     CapturedValue,
     CaptureInput,
@@ -57,6 +58,8 @@ from app.workflows.activities.contracts import (
     ScrapeInput,
     ScrapeOutput,
     StoredObject,
+    UndoBucketInput,
+    UndoBucketOutput,
     ValidateInput,
     ValidateVerdict,
 )
@@ -71,7 +74,9 @@ from app.workflows.pipeline import (
     DB_ACTIVITY_SECONDS,
     LOAD_DESTINATION_ACTIVITY,
     MIRROR_BLOCK_ACTIVITY,
+    MIRROR_ROLLBACK_STARTED_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
+    MIRROR_UNDO_ACTIVITY,
     OUTPUTS_LEFT_ERROR,
     RECORD_STORAGE_ACTIVITY,
     RELEASE_RUN_OUTPUTS_ACTIVITY,
@@ -82,9 +87,11 @@ from app.workflows.pipeline import (
     LoadedDestination,
     MirrorBlockInput,
     MirrorRunInput,
+    MirrorUndoInput,
     PipelineRunInput,
     PipelineWorkflow,
     RecordStorageInput,
+    RollbackStartedInput,
     RunRef,
     StorageUsage,
     WebhookInput,
@@ -221,6 +228,10 @@ async def _bucket_ok(input: DeliverBucketInput) -> DeliverBucketOutput:
     )
 
 
+async def _undo_ok(input: UndoBucketInput) -> UndoBucketOutput:
+    return UndoBucketOutput()
+
+
 class Harness:
     """Mocked activities on their real queues; records every DB-activity call in order."""
 
@@ -238,6 +249,7 @@ class Harness:
         capture=_capture_ok,
         load=_load_ok,
         bucket=_bucket_ok,
+        undo=_undo_ok,
     ):
         self.calls: list = []
         self.acquired: list[HostSlotInput] = []
@@ -268,6 +280,11 @@ class Harness:
         self._bucket = bucket
         self.bucket_inputs: list[DeliverBucketInput] = []
         self.bucket_info: list = []
+        self._undo = undo
+        self.undo_inputs: list[UndoBucketInput] = []
+        self.undo_info: list = []
+        # What the rollback mirrors answer: the run's status.
+        self.rollback_reply = "running"
 
     def activities(self):
         @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
@@ -353,9 +370,25 @@ class Harness:
             self.bucket_info.append(activity.info())
             return await self._bucket(input)
 
+        @activity.defn(name=MIRROR_ROLLBACK_STARTED_ACTIVITY)
+        async def rollback_started(input: RollbackStartedInput) -> str:
+            self.calls.append(input)
+            return self.rollback_reply
+
+        @activity.defn(name=MIRROR_UNDO_ACTIVITY)
+        async def mirror_undo(input: MirrorUndoInput) -> str:
+            self.calls.append(input)
+            return self.rollback_reply
+
+        @activity.defn(name=UNDO_BUCKET_ACTIVITY)
+        async def undo_bucket(input: UndoBucketInput) -> UndoBucketOutput:
+            self.undo_inputs.append(input)
+            self.undo_info.append(activity.info())
+            return await self._undo(input)
+
         workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
-        workflow_queue += [release_outputs, load]
-        self.delivery_queue = [deliver_bucket]
+        workflow_queue += [release_outputs, load, rollback_started, mirror_undo]
+        self.delivery_queue = [deliver_bucket, undo_bucket]
         return workflow_queue, scrape, llm, [clean, validate, diff, capture]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):
