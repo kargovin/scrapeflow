@@ -5,6 +5,10 @@ payload as JSON, signed with the owner's secret (``b""`` when there is none — 
 Success = status < 300, the same backoff and attempt cap. Every attempt resolves afresh; an address
 refusal is final without counting as an attempt. The row stays the record the admin endpoints and the
 webhook meters read.
+
+An email row (``kind = 'email'``) is not sent here: the attempt hands the workflow the message, the
+workflow calls ``SendEmail`` on the delivery queue, and ``record_email_attempt`` applies the outcome
+with the same backoff and cap (ADR-015 §4).
 """
 
 import json
@@ -19,6 +23,7 @@ from temporalio.exceptions import ApplicationError
 
 from app.core import egress, webhook_delivery
 from app.core.db import AsyncSessionLocal
+from app.core.email_deliveries import Undeliverable, email_for
 from app.core.pipeline_alerts import alert_secret
 from app.models.batch import Batch
 from app.models.job import Job
@@ -26,9 +31,11 @@ from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
 from app.workflows.webhook_delivery import (
     ATTEMPT_WEBHOOK_ACTIVITY,
+    RECORD_EMAIL_ATTEMPT_ACTIVITY,
     SWEEP_WEBHOOKS_ACTIVITY,
     AttemptOutcome,
     DeliveryRef,
+    EmailAttempt,
 )
 
 logger = structlog.get_logger()
@@ -46,6 +53,15 @@ def _apply_backoff(delivery: WebhookDelivery, error: str) -> None:
     else:
         delay = BACKOFF_SECONDS[min(delivery.attempts, len(BACKOFF_SECONDS) - 1)]
         delivery.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+
+
+def _outcome(delivery: WebhookDelivery) -> AttemptOutcome:
+    return AttemptOutcome(
+        status=delivery.status if delivery.status != "pending" else "retry",
+        retry_in_seconds=max(
+            0, round((delivery.next_attempt_at - datetime.now(UTC)).total_seconds())
+        ),
+    )
 
 
 async def _secret(db, delivery: WebhookDelivery) -> bytes:
@@ -79,6 +95,17 @@ async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
         )
         if delivery is None or delivery.status != "pending":
             return AttemptOutcome(status="gone")
+        if delivery.kind == "email":
+            try:
+                return AttemptOutcome(status="email", email=await email_for(db, delivery))
+            except Undeliverable as exc:
+                delivery.status = "exhausted"
+                delivery.last_error = str(exc)
+                await db.commit()
+                logger.warning(
+                    "email: undeliverable", delivery_id=input.delivery_id, error=str(exc)
+                )
+                return AttemptOutcome(status="exhausted")
 
         body = json.dumps(delivery.payload).encode()
         secret = await _secret(db, delivery)
@@ -112,12 +139,7 @@ async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
             delivery.delivered_at = datetime.now(UTC)
         else:
             _apply_backoff(delivery, error)
-        outcome = AttemptOutcome(
-            status=delivery.status if delivery.status != "pending" else "retry",
-            retry_in_seconds=max(
-                0, round((delivery.next_attempt_at - datetime.now(UTC)).total_seconds())
-            ),
-        )
+        outcome = _outcome(delivery)
         await db.commit()
         logger.info(
             "webhook: attempt",
@@ -125,6 +147,46 @@ async def attempt_webhook_delivery(input: DeliveryRef) -> AttemptOutcome:
             attempts=delivery.attempts,
             outcome=outcome.status,
             error=error,
+        )
+        return outcome
+
+
+@activity.defn(name=RECORD_EMAIL_ATTEMPT_ACTIVITY)
+async def record_email_attempt(input: EmailAttempt) -> AttemptOutcome:
+    """Applies one SendEmail's outcome to its row: delivered, given up, or the next try's time."""
+    delivery_id = uuid.UUID(input.delivery_id)
+    async with AsyncSessionLocal() as db:
+        delivery = await db.scalar(
+            select(WebhookDelivery).where(WebhookDelivery.id == delivery_id).with_for_update()
+        )
+        if delivery is None or delivery.status != "pending":
+            return AttemptOutcome(status="gone")
+        if input.error_type == "EgressBlocked":
+            # A security event, not an attempt (as for a webhook).
+            delivery.status = "exhausted"
+            delivery.last_error = f"ssrf_blocked: {input.error}"
+        else:
+            delivery.attempts += 1
+            if input.error is None:
+                delivery.status = "delivered"
+                delivery.delivered_at = datetime.now(UTC)
+                delivery.last_error = (
+                    f"recipients refused: {', '.join(input.refused)}" if input.refused else None
+                )
+            elif input.final:
+                delivery.status = "exhausted"
+                delivery.last_error = input.error
+            else:
+                _apply_backoff(delivery, input.error)
+        outcome = _outcome(delivery)
+        await db.commit()
+        logger.info(
+            "email: attempt",
+            delivery_id=input.delivery_id,
+            attempts=delivery.attempts,
+            outcome=outcome.status,
+            error=input.error,
+            refused=input.refused,
         )
         return outcome
 

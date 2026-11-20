@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import Field, ValidationInfo, field_validator
@@ -61,6 +62,22 @@ class Settings(BaseSettings):
 
     # Destinations (ADR-015 §2a) — the delivery worker holds this key and no other
     destination_encryption_key: str = Field(default="", alias="DESTINATION_ENCRYPTION_KEY")
+
+    # Where users reach this deployment (no trailing path): its host names email Message-IDs
+    # (ADR-015 §5) and the links in messages.
+    public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
+
+    @field_validator("public_base_url")
+    @classmethod
+    def validate_public_base_url(cls, v: str) -> str:
+        parts = urlsplit(v)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("PUBLIC_BASE_URL must be set to an http(s) URL")
+        return v.rstrip("/")
+
+    @property
+    def public_host(self) -> str:
+        return urlsplit(self.public_base_url).hostname or ""
 
     # Cron Scheduler
     schedule_min_interval_minutes: int = 5

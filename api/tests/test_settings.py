@@ -40,3 +40,21 @@ def test_credentials_key_named_in_error():
     kwargs: dict[str, Any] = {"CREDENTIALS_ENCRYPTION_KEY": ""}
     with pytest.raises(ValidationError, match="CREDENTIALS_ENCRYPTION_KEY must be set"):
         Settings(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "value", ["", "scrapeflow.example.com", "ftp://scrapeflow.example.com", "https://"]
+)
+def test_public_base_url_required_as_an_http_url(value: str):
+    kwargs: dict[str, Any] = {"PUBLIC_BASE_URL": value}
+    with pytest.raises(ValidationError, match="PUBLIC_BASE_URL must be set"):
+        Settings(**kwargs)
+
+
+def test_public_host_is_the_base_url_s_host():
+    kwargs: dict[str, Any] = {"PUBLIC_BASE_URL": "https://ScrapeFlow.example.com:8443/"}
+    s = Settings(**kwargs)
+    assert (s.public_base_url, s.public_host) == (
+        "https://ScrapeFlow.example.com:8443",
+        "scrapeflow.example.com",
+    )

@@ -44,6 +44,7 @@ from app.workflows.activities.schedules import admit_scheduled_run
 from app.workflows.activities.webhook import deliver_webhook
 from app.workflows.activities.webhook_deliveries import (
     attempt_webhook_delivery,
+    record_email_attempt,
     sweep_pending_webhooks,
 )
 from app.workflows.batch import BatchWorkflow
@@ -112,6 +113,7 @@ async def main() -> None:
             admit_scheduled_run,
             admit_monitor_check,
             attempt_webhook_delivery,
+            record_email_attempt,
             sweep_pending_webhooks,
         ],
         graceful_shutdown_timeout=timedelta(seconds=20),

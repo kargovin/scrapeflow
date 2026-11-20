@@ -9,11 +9,13 @@ import asyncio
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from app.workflows.activities.contracts import DiffOutput, DiffSummary
+from app.workflows.activities.contracts import DiffOutput, DiffSummary, SendEmailOutput
 from app.workflows.job import RECORD_JOB_OBJECTS_ACTIVITY, JobLLM
 from app.workflows.pipeline import OUTPUTS_LEFT_ERROR, RUN_CANCELLED_ERROR, StorageUsage
 from app.workflows.steps import HostSlot
 from tests.replay.export_history import HISTORIES
+from tests.test_email_deliveries import Harness as EmailHarness
+from tests.test_email_deliveries import _final, _transient
 from tests.test_workflows_batch import Harness as BatchHarness
 from tests.test_workflows_batch import _batch_input, _scrape_ok, _scraped
 from tests.test_workflows_crawl import SITE, Frontier, _sitemaps, crawl_input
@@ -277,6 +279,14 @@ MONITOR_SCENARIOS = {
 }
 
 
+# M.14 — WebhookDeliveryWorkflow's email branch (patch email-delivery): the sends in turn.
+EMAIL_SCENARIOS = {
+    "harness_email_delivered": [SendEmailOutput()],
+    "harness_email_retried_then_delivered": [_transient, SendEmailOutput()],
+    "harness_email_refused_final": [_final],
+}
+
+
 async def main() -> None:
     runs = [(name, Harness, kwargs, run_input) for name, (kwargs, run_input) in SCENARIOS.items()]
     runs += [(name, JobHarness, kwargs, None) for name, kwargs in JOB_SCENARIOS.items()]
@@ -314,6 +324,14 @@ async def main() -> None:
         if path.exists():
             continue
         h = MonitorHarness(verdicts, child=child)
+        await h.run()
+        path.write_text(h.history.to_json() + "\n")
+        print(path)
+    for name, sends in EMAIL_SCENARIOS.items():
+        path = HISTORIES / f"{name}.json"
+        if path.exists():
+            continue
+        h = EmailHarness(sends)
         await h.run()
         path.write_text(h.history.to_json() + "\n")
         print(path)
