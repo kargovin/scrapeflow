@@ -28,7 +28,9 @@ from app.workflows.activities.db import (
     check_cancelled,
     load_destination,
     mirror_block_status,
+    mirror_rollback_started,
     mirror_run_status,
+    mirror_undo_status,
     record_storage,
     release_run_outputs,
 )
@@ -95,6 +97,8 @@ async def main() -> None:
             say_hello,
             mirror_block_status,
             mirror_run_status,
+            mirror_rollback_started,
+            mirror_undo_status,
             record_storage,
             release_run_outputs,
             check_cancelled,

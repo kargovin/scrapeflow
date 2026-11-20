@@ -91,6 +91,8 @@ CHECK_CANCELLED_ACTIVITY = "check_cancelled"
 WEBHOOK_ACTIVITY = "deliver_webhook"
 RELEASE_RUN_OUTPUTS_ACTIVITY = "release_run_outputs"
 LOAD_DESTINATION_ACTIVITY = "load_destination"
+MIRROR_ROLLBACK_STARTED_ACTIVITY = "mirror_rollback_started"
+MIRROR_UNDO_ACTIVITY = "mirror_undo_status"
 
 # ADR-012: a Validate's stop mode, its bound rule values and the stop path (ADR-014 §6, J.6).
 VALIDATE_STOP_PATCH = "validate-stop"
@@ -117,6 +119,8 @@ SkipReason = Literal["stopped", "upstream_failed", "cancelled", "not_started", "
 StopReason = Literal["rule_not_met"]
 # ADR-016 §2b; matches ck_pipeline_runs_change_status.
 ChangeStatus = Literal["first_check", "no_baseline", "changed", "unchanged"]
+# ADR-014 §5a; matches ck_pipeline_run_blocks_undo_status.
+UndoStatus = Literal["undoing", "undone", "undo_failed", "kept", "not_undoable"]
 
 
 class LLMKey(BaseModel):
@@ -243,6 +247,22 @@ class LoadedDestination(BaseModel):
 
     address: dict[str, Any]
     encrypted_secret: str
+
+
+class RollbackStartedInput(BaseModel):
+    run_id: str
+    failed_block_id: str
+    error: str
+    # The latest the undos can finish: their own budgets, not the run's (ADR-014 §7).
+    rollback_deadline: datetime
+
+
+class MirrorUndoInput(BaseModel):
+    run_id: str
+    # By block id; several only for kept / not_undoable (ADR-014 §7's one call).
+    undo: dict[str, UndoStatus]
+    # undo_failed only.
+    error: str | None = None
 
 
 class WebhookInput(BaseModel):

@@ -31,7 +31,9 @@ from app.workflows.pipeline import (
     DESTINATION_GONE_ERROR,
     LOAD_DESTINATION_ACTIVITY,
     MIRROR_BLOCK_ACTIVITY,
+    MIRROR_ROLLBACK_STARTED_ACTIVITY,
     MIRROR_RUN_ACTIVITY,
+    MIRROR_UNDO_ACTIVITY,
     OUTPUTS_LEFT_ERROR,
     RECORD_STORAGE_ACTIVITY,
     RELEASE_RUN_OUTPUTS_ACTIVITY,
@@ -40,7 +42,9 @@ from app.workflows.pipeline import (
     LoadedDestination,
     MirrorBlockInput,
     MirrorRunInput,
+    MirrorUndoInput,
     RecordStorageInput,
+    RollbackStartedInput,
     RunRef,
     SkipReason,
     StorageUsage,
@@ -187,6 +191,54 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
         if alerts:
             await webhook_delivery.start_pending(activity.client, db, pipeline_run_id=run.id)
         await after_commit(_client, ended)
+        return run.status
+
+
+@activity.defn(name=MIRROR_ROLLBACK_STARTED_ACTIVITY)
+async def mirror_rollback_started(input: RollbackStartedInput) -> str:
+    """The run stays running while its deliveries are undone (ADR-014 §5a, §7); returns its status.
+
+    A cancel requested meanwhile changes nothing: the failure was decided first.
+    """
+    async with AsyncSessionLocal() as db:
+        run = await _lock_run(db, input.run_id)
+        if run is None:
+            return "cancelled"
+        if run.status == "running":
+            run.failed_block_id = input.failed_block_id
+            run.error = input.error
+            run.rollback_deadline = input.rollback_deadline
+        await notify_run(db, run)
+        await db.commit()
+        return run.status
+
+
+@activity.defn(name=MIRROR_UNDO_ACTIVITY)
+async def mirror_undo_status(input: MirrorUndoInput) -> str:
+    """Writes delivered blocks' undo status; returns the run's. Never refused for a cancel."""
+    async with AsyncSessionLocal() as db:
+        run = await _lock_run(db, input.run_id)
+        if run is None:
+            return "cancelled"
+        for block_id, undo_status in input.undo.items():
+            result = await db.execute(
+                update(PipelineRunBlock)
+                .where(
+                    PipelineRunBlock.pipeline_run_id == run.id,
+                    PipelineRunBlock.block_id == block_id,
+                    PipelineRunBlock.status == "completed",
+                )
+                .values(
+                    undo_status=undo_status,
+                    undo_error=input.error if undo_status == "undo_failed" else None,
+                )
+            )
+            if result.rowcount != 1:
+                raise ApplicationError(
+                    f"no completed block {block_id!r} in run {input.run_id}", non_retryable=True
+                )
+            await notify_run(db, run, block_id, "completed", block_undo_status=undo_status)
+        await db.commit()
         return run.status
 
 
