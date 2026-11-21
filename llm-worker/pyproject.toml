@@ -3,7 +3,7 @@ name = "llm-worker"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "miniopy-async>=1.21.0",
+    "miniopy-async>=1.23.6",
     # aiohttp is miniopy-async's HTTP backend; declared explicitly because
     # worker/errors.py matches its connection-error types (UF-003 3a).
     "aiohttp>=3.9.0",

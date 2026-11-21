@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -755,7 +755,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "jsonschema", specifier = ">=4.23.0" },
     { name = "markdownify", specifier = ">=0.12.0" },
-    { name = "miniopy-async", specifier = ">=1.21.0" },
+    { name = "miniopy-async", specifier = ">=1.23.6" },
     { name = "openai", specifier = ">=3.8.0,<4" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.3.0" },
@@ -780,7 +780,7 @@ wheels = [
 
 [[package]]
 name = "miniopy-async"
-version = "1.23.5"
+version = "1.23.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -789,9 +789,9 @@ dependencies = [
     { name = "certifi" },
     { name = "pycryptodome" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/a5/d8d26e63a36f43e0fcacc26998ea3c80f57c927c4fb52f2d68d0eedc6bee/miniopy_async-1.23.5.tar.gz", hash = "sha256:33a559b3b63f82e34ac48e2b3e999edae7da3640788996a2633287cb4100d7f1", size = 80893, upload-time = "2026-03-31T13:36:23.147Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/fc/b53237bd3bd8fa553d030153cd48e2391e4f469f68436269cac5abab84d2/miniopy_async-1.23.6.tar.gz", hash = "sha256:e6249559b729f466cbb2e55a8fb6c1cdcb1b6e69b66df902ad997146451e3ce8", size = 80891, upload-time = "2026-10-26T01:36:57.525Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/8f/317a93e6647777c28bac5a8241cc8fbf0f7c93dea2b2b78b59d005a098c6/miniopy_async-1.23.5-py3-none-any.whl", hash = "sha256:9f27944eb16b3e29fd9440466192e73a14c30f370d53ccb1843c517b480e8467", size = 100738, upload-time = "2026-03-31T13:36:22.169Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/dd/2e4b740b623c5e977334e4c200e246d080d49b60bb116b98fad138d9b53a/miniopy_async-1.23.6-py3-none-any.whl", hash = "sha256:4047166a31f9696a77c50ae1434782808c18b4f5319f2f1e7deb7146982a7a66", size = 100729, upload-time = "2026-10-26T01:36:56.168Z" },
 ]
 
 [[package]]
