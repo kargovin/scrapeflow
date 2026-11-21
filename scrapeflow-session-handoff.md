@@ -163,7 +163,12 @@ API refuses 0).
 - **Owner, 2026-11-21:** the test pipelines and destinations are kept; both design questions → **follow the ADR**
   (the lost-reply key stays out of the `rollback` lists; notices per ADR-016 §7b). Still open: rotating the
   8-character MinIO root password (backlog *Bugs and backlog items*, unscheduled); an SMTP account for the email check.
-- **Next:** **N.1** (approval), same way of working (memory `feedback_orchestrate_subagents.md`).
+- **Released but not fully proven in prod:** email to a real SMTP server (5e skipped — P's release proves it);
+  5c's end state (owner reported, read not seen); SPA item 8 (compose gate only). BUG-032's workflow-worker half
+  stays open. `develop` is ahead of `main` by docs commits only — they ride the next release.
+- **Next:** **N.1** (approval), same way of working (memory `feedback_orchestrate_subagents.md`): the builder brief is
+  now **`docs/process/builder-brief.md`**; start a fresh scratchpad `carry-forward.md`; the notes M's builders left
+  for N, O and P are in the backlog under *Carried from M's build* above N.1, O.1 and P.1.
 
 ---
 

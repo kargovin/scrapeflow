@@ -4367,6 +4367,11 @@ is refused.
 
 ## Group N — Approval (Monitors slice 2)
 
+**Carried from M's build (2026-11-21):**
+- `webhook_deliveries` now has five owner kinds (see M.9 and the M.7 row) — every owner trap (CHECKs, `pending()`, meters) counts them; an approval message is not a notice (ADR-016 §8) — do not route it through `queue_notice`.
+- N.2: links use `settings.public_base_url` (`PUBLIC_BASE_URL`, required since M.14).
+- Trap: the Temporal test server never expires `schedule_to_start` — a workflow test waiting on an unpolled queue hangs; test the mapping, not the wait.
+
 #### N.1 — Schema and catalog
 
 **Why:** ADR-016 §9a, §10.
@@ -4426,6 +4431,14 @@ rollback-after-approval checks (the reason N follows M). `main` push → api.
 
 ## Group O — Postgres sink (PRD-017 slice 2)
 
+**Carried from M's build (2026-11-21):**
+- A new sink = a `BlockType` with `sink=Sink(...)`, `destination_kind`, and (reversible) an undo `Timing`; the order rule, rollback reserve, save/trigger destination checks and version rows follow from those fields.
+- Register `TestPostgres` (`TEST_POSTGRES_ACTIVITY`) on the delivery worker with the 20 s deadline — until then a postgres destination's test fails and it cannot be saved; the API and the SPA form (host/port/database/schema/table/CA + login) need nothing.
+- Rollback: a row in `_UNDO_ACTIVITIES` (`"postgres"` → `UndoPostgres`, input with `location` + `encrypted_secret`) and its `Sink.undo` timing; `rollback_lists` and the reserve need nothing.
+- Lost replies: `NOT_WRITTEN` only on failures that cannot have inserted, and a `_bucket_record` twin (row key from run/block) so a maybe-inserted row is deleted on rollback.
+- Any new client sending to a destination is pinned (`pinned_http.pinned`, one session per try) or carries `_send_once()` — no hidden resend.
+- The SPA renders a Postgres `location` as `postgres {json}` until `runText.locationInWords` learns it. Add a Postgres scenario to `api/scripts/delivery_gate.py` (needs a TLS Postgres fixture; the secret search and fixture pattern carry over).
+
 #### O.1 — The Postgres sink
 
 **Why:** ADR-015 §2d, §3, §5, §6, §7.
@@ -4446,6 +4459,12 @@ its undo counts in the rollback reserve. Never DDL. User guide: the fixed row sh
 ---
 
 ## Group P — Email sink (PRD-017 slice 3)
+
+**Carried from M's build (2026-11-21):**
+- The send uses `SendEmailInput` with Message-ID `<{run_id}.{block_id}@{public_host}>` (no suffix) and the same single-attempt / `non_retryable` loop as the bucket sink; `queue_failure_alerts` writes `kind="email"`, `destination_id`, no `webhook_url`.
+- It is an irreversible sink: once its activity returns it is `announced` (`sink and not sink.reversible`), so D13 holds with no change; a send that gave up never announces. The SPA already reads it as "could not be undone" (`undo_status = not_undoable`) and shows `email` in the alert's To column.
+- Pin any new client as in O.1. The delivery gate's SMTP sink (`/_mail`) can serve an Email block scenario.
+- Email to a real SMTP server is still unproven in production (Release M's 5e skipped) — P's release proves it.
 
 #### P.1 — The Email block
 
