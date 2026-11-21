@@ -14,9 +14,11 @@ from jsonschema import validators as jsonschema_validators
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.pipelines.catalog import (
+    APPROVAL,
     CATALOG,
     SCRAPE,
     VALIDATE,
+    ApprovalConfigV1,
     BlockType,
     JsonSchemaRule,
     LLMExtractConfigV1,
@@ -344,6 +346,41 @@ def _change_gate_problems(parsed: list[ValidatedBlock]) -> list[Problem]:
     return problems
 
 
+def _approval_problems(
+    blocks: list[BlockDefinition], parsed: list[ValidatedBlock]
+) -> list[Problem]:
+    """ADR-016 §9a: at most one Approval, never the last block (never the first: the starting-block
+    rule's); §9d: its deadline within the operator's maximum, apart from the run's budget."""
+    problems = []
+    approvals = [b.id for b in blocks if b.type == APPROVAL.name]
+    for block_id in approvals[1:]:
+        problems.append(
+            Problem(
+                block_id,
+                f"a pipeline may have one approval block; {approvals[0]!r} is already one",
+            )
+        )
+    if blocks[-1].type == APPROVAL.name:
+        problems.append(
+            Problem(
+                blocks[-1].id,
+                "an approval block holds the blocks after it until it is answered; on the last "
+                "block there is nothing to hold — put it before the blocks it guards",
+            )
+        )
+    limit = settings.approval_max_deadline_hours
+    for block in parsed:
+        if isinstance(block.config, ApprovalConfigV1) and block.config.deadline_hours > limit:
+            problems.append(
+                Problem(
+                    block.id,
+                    f"config.deadline_hours {block.config.deadline_hours} is over the limit of "
+                    f"{limit} h",
+                )
+            )
+    return problems
+
+
 def _resolve_gate_outputs(
     blocks: list[BlockDefinition], parsed: list[ValidatedBlock]
 ) -> list[ValidatedBlock]:
@@ -461,6 +498,7 @@ def validate(raw: Any) -> ValidatedPipeline:
         if validated is not None:
             parsed.append(validated)
     problems += _change_gate_problems(parsed)
+    problems += _approval_problems(blocks, parsed)
     parsed = _resolve_gate_outputs(blocks, parsed)
     for name in sorted(set(declared) - used):
         problems.append(Problem(None, f"run input {name!r} is declared but no block uses it"))

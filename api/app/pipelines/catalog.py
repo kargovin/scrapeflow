@@ -121,12 +121,15 @@ class Timing:
     host_slot: int = 0
     # Time the run spends after the activity: a stop's release of stored outputs (ADR-014 §6).
     after: int = 0
-    # False: the block never calls its activity — an alert-only Webhook (ADR-014 §8d).
+    # False: the block calls no activity on a worker queue — an alert-only Webhook (ADR-014
+    # §8d), an Approval (ADR-016 §9a).
     calls_activity: bool = True
     # A workflow-driven loop's own DB activities (ADR-015 §4, §6): before every try
     # (load_destination), and between tries (mirror waiting, mirror running).
     db_per_try: int = 0
     db_between_tries: int = 0
+    # The block's own app-DB activities, once each (an Approval's request and resolve).
+    db_steps: int = 0
 
     @property
     def budget(self) -> int:
@@ -150,9 +153,17 @@ class Timing:
     @property
     def need(self) -> int:
         """What the run budgets for the block: its budget, its host-slot wait, the DB overhead."""
+        own_db = self.db_steps * DB_ACTIVITY_SECONDS
         if not self.calls_activity:
-            return BLOCK_OVERHEAD_SECONDS
-        return self.budget + self.host_slot + self.after + self.loop_db + BLOCK_OVERHEAD_SECONDS
+            return own_db + BLOCK_OVERHEAD_SECONDS
+        return (
+            self.budget
+            + self.host_slot
+            + self.after
+            + self.loop_db
+            + own_db
+            + BLOCK_OVERHEAD_SECONDS
+        )
 
 
 def _delivery_retry(start_to_close: int, **extra: int) -> Timing:
@@ -396,6 +407,14 @@ class BucketConfigV1(_Config):
     destination_id: uuid.UUID
 
 
+class ApprovalConfigV1(_Config):
+    """ADR-016 §9a. The maximum is an operator setting, so the validator checks it."""
+
+    deadline_hours: StrictInt = Field(default=24, ge=1)
+    # Where the request and the other approval messages go (§9c); none = the SPA only.
+    destination_id: uuid.UUID | None = None
+
+
 # --- the catalog ---------------------------------------------------------------------------
 
 
@@ -430,8 +449,8 @@ class BlockType:
     # Extra save-time checks that need the input's reference type; returns problem messages.
     check_input: Callable[[Any, str], list[str]] = field(default=lambda _config, _ref: [])
     sink: Sink | None = None
-    # The destination kind a config's ``destination_id`` must name (ADR-015 §2b).
-    destination_kind: str | None = None
+    # The destination kinds a config's ``destination_id`` may name (ADR-015 §2b).
+    destination_kinds: tuple[str, ...] = ()
     # Configs whose timing GET /pipelines/catalog shows, by label: model_construct() overrides.
     catalog_configs: Mapping[str, Mapping[str, Any]] = field(
         default_factory=lambda: {"default": {}}
@@ -444,6 +463,11 @@ class BlockType:
     @property
     def is_source(self) -> bool:
         return not self.consumes
+
+    @property
+    def destination_kind(self) -> str | None:
+        """The one kind its destination must be; None when it takes none or several."""
+        return self.destination_kinds[0] if len(self.destination_kinds) == 1 else None
 
 
 def _scrape_timing(config: ScrapeConfigV1) -> Timing:
@@ -550,7 +574,7 @@ WEBHOOK = BlockType(
     # ADR-009 §15b/§15c: 10 s POST inside a ~20 s attempt; 30 s x10 capped at 7200 s, 5 attempts.
     timing=lambda config: _delivery_retry(20, calls_activity=WEBHOOK_RESULT_EVENT in config.events),
     sink=Sink(reversible=False),
-    destination_kind="webhook",
+    destination_kinds=("webhook",),
     catalog_configs={"default": {}, "alert only": {"events": ["pipeline.failed"]}},
 )
 
@@ -567,11 +591,33 @@ BUCKET = BlockType(
         BUCKET_DELIVER_ATTEMPT_SECONDS, db_per_try=1, db_between_tries=2
     ),
     sink=Sink(reversible=True, undo=BUCKET_UNDO_TIMING),
-    destination_kind="bucket",
+    destination_kinds=("bucket",),
+)
+
+# ADR-016 §9a: request_approval and resolve_approval, each one DB step; the wait is not in it (§9d).
+APPROVAL_TIMING = Timing(
+    start_to_close=DB_ACTIVITY_SECONDS,
+    maximum_attempts=1,
+    initial_interval=0,
+    backoff_coefficient=1,
+    maximum_interval=0,
+    calls_activity=False,
+    db_steps=2,
+)
+
+APPROVAL = BlockType(
+    name="approval",
+    kind="effect",
+    config_versions={1: ApprovalConfigV1},
+    consumes=ALL_REFS,
+    produces=_pass_through,
+    timing=lambda _config: APPROVAL_TIMING,
+    # §9c: a POST or an email, as a monitor notice.
+    destination_kinds=("webhook", "smtp"),
 )
 
 CATALOG: Mapping[str, BlockType] = {
-    t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK, BUCKET)
+    t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK, BUCKET, APPROVAL)
 }
 
 
@@ -608,14 +654,14 @@ def announces(block: _Block) -> bool:
     )
 
 
-def destination_refs(blocks: Iterable[_Block]) -> list[tuple[str, uuid.UUID, str]]:
-    """(block id, destination id, the kind it must be) for each block naming a destination."""
+def destination_refs(blocks: Iterable[_Block]) -> list[tuple[str, uuid.UUID, tuple[str, ...]]]:
+    """(block id, destination id, the kinds it may be) for each block naming a destination."""
     refs = []
     for block in blocks:
-        kind = _type_of(block).destination_kind
+        kinds = _type_of(block).destination_kinds
         destination_id = getattr(block.config, "destination_id", None)
-        if kind is not None and destination_id is not None:
-            refs.append((block.id, destination_id, kind))
+        if kinds and destination_id is not None:
+            refs.append((block.id, destination_id, kinds))
     return refs
 
 

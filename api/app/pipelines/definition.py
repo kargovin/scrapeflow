@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.pipelines.catalog import (
     CATALOG,
     CONTAINS_TEXT_MAX,
+    ApprovalConfigV1,
     BucketConfigV1,
     CleanConfigV1,
     ContainsRule,
@@ -85,8 +86,19 @@ class BucketBlock(_RunBlock):
     config: BucketConfigV1
 
 
+class ApprovalBlock(_RunBlock):
+    type: Literal["approval"] = "approval"
+    config: ApprovalConfigV1
+
+
 RunBlock = Annotated[
-    ScrapeBlock | CleanBlock | LLMExtractBlock | ValidateBlock | WebhookBlock | BucketBlock,
+    ScrapeBlock
+    | CleanBlock
+    | LLMExtractBlock
+    | ValidateBlock
+    | WebhookBlock
+    | BucketBlock
+    | ApprovalBlock,
     Field(discriminator="type"),
 ]
 
@@ -99,6 +111,7 @@ _RUN_BLOCKS: dict[str, type[_RunBlock]] = {
     "validate": ValidateBlock,
     "webhook": WebhookBlock,
     "bucket": BucketBlock,
+    "approval": ApprovalBlock,
 }
 
 

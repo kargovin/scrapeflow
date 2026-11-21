@@ -109,6 +109,8 @@ class Settings(BaseSettings):
     max_pipelines_per_user: int = 50
     # Upper bound on any run's time budget, declared or computed.
     pipeline_max_run_seconds: int = 86400
+    # ADR-016 §9a: the longest an Approval block may wait; checked at save, not at the trigger.
+    approval_max_deadline_hours: int = Field(default=168, ge=1)
     # ADR-009 §8d: refuse to start a pipeline run this close to the storage limit (operator dial).
     storage_headroom_bytes: int = 52428800  # 50 MiB
 

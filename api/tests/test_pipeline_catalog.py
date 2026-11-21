@@ -31,9 +31,12 @@ async def test_every_block_type_is_listed_with_its_kind_and_sink(client, headers
         "validate": ("effect", None),
         "webhook": ("effect", False),
         "bucket": ("effect", True),
+        "approval": ("effect", None),
     }
     assert blocks["bucket"]["destination_kind"] == "bucket"
     assert blocks["webhook"]["destination_kind"] == "webhook"
+    assert blocks["bucket"]["destination_kinds"] == ["bucket"]
+    assert blocks["scrape"]["destination_kinds"] == []
     assert blocks["scrape"]["consumes"] == []
     assert "extraction" in blocks["bucket"]["consumes"]
 

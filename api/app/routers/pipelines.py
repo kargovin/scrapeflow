@@ -392,6 +392,7 @@ async def get_catalog(_: User = Depends(get_current_user)) -> PipelineCatalogRes
                 kind=block_type.kind,
                 config_schema_version=block_type.current_version,
                 consumes=sorted(block_type.consumes),
+                destination_kinds=list(block_type.destination_kinds),
                 destination_kind=block_type.destination_kind,
                 sink=(
                     CatalogSink(

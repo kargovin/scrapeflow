@@ -1042,9 +1042,10 @@ def test_the_catalog_says_which_blocks_are_sinks_and_which_can_be_undone():
     assert {n: s.reversible for n, s in sinks.items()} == {"bucket": True, "webhook": False}
     assert sinks["bucket"].undo is BUCKET_UNDO_TIMING
     assert sinks["webhook"].undo is None
-    assert {n: t.destination_kind for n, t in CATALOG.items() if t.destination_kind} == {
-        "bucket": "bucket",
-        "webhook": "webhook",
+    assert {n: t.destination_kinds for n, t in CATALOG.items() if t.destination_kinds} == {
+        "bucket": ("bucket",),
+        "webhook": ("webhook",),
+        "approval": ("webhook", "smtp"),
     }
 
 

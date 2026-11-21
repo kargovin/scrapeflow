@@ -90,9 +90,9 @@ async def notice_destination_problem(
 
 
 async def reference_problems(
-    db: AsyncSession, user_id: uuid.UUID, refs: Iterable[tuple[str, uuid.UUID, str]]
+    db: AsyncSession, user_id: uuid.UUID, refs: Iterable[tuple[str, uuid.UUID, tuple[str, ...]]]
 ) -> tuple[list[str], list[tuple[str, str]]]:
-    """Each (block id, destination id, kind) checked against the user's destinations.
+    """Each (block id, destination id, kinds) checked against the user's destinations.
 
     Returns the block ids naming one that is gone or another user's (a 404: existence is not
     revealed), and (block id, message) for one of the wrong kind.
@@ -109,16 +109,16 @@ async def reference_problems(
         )
     }
     missing, wrong_kind = [], []
-    for block_id, destination_id, kind in refs:
+    for block_id, destination_id, kinds in refs:
         destination = owned.get(destination_id)
         if destination is None:
             missing.append(block_id)
-        elif destination.kind != kind:
+        elif destination.kind not in kinds:
             wrong_kind.append(
                 (
                     block_id,
                     f"destination {destination.name!r} is a {destination.kind} destination; "
-                    f"this block needs a {kind} destination",
+                    f"this block needs a {' or '.join(kinds)} destination",
                 )
             )
     return missing, wrong_kind

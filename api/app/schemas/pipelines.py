@@ -78,7 +78,9 @@ class CatalogBlock(BaseModel):
     config_schema_version: int
     # Reference types accepted as input; empty for the starting block.
     consumes: list[str]
-    # The kind of saved destination its destination_id names, if it takes one.
+    # The kinds of saved destination its destination_id may name; empty if it takes none.
+    destination_kinds: list[str]
+    # The one kind, when it takes exactly one.
     destination_kind: str | None
     sink: CatalogSink | None
     # By configuration, where the budget depends on it.
