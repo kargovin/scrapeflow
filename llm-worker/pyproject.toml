@@ -20,7 +20,7 @@ dependencies = [
     # names, and a rename falls through classify() to TERMINAL without an error.
     # Raise a cap by hand and re-check errors.py.
     "anthropic>=1.3.0,<2",
-    "openai>=3.8.0,<4",
+    "openai>=3.55.0,<4",
     "structlog>=24.0.0",
     "temporalio>=1.33.0",
     # Clean and Validate (worker/content.py).
