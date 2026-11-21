@@ -487,6 +487,41 @@ async def test_a_destination_deleted_anyway_is_a_failed_check(db_user):
     assert run.error == "store: destination no longer exists"
 
 
+async def test_an_alerting_destination_deleted_anyway_fails_the_check_and_alerts_nowhere(db_user):
+    from app.models.destination import Destination
+
+    monitor = await _monitor(db_user.id)
+    async with AsyncSessionLocal() as db:
+        destination = Destination(
+            user_id=db_user.id, name="h", kind="webhook", encrypted_secret="x", display_host="h"
+        )
+        db.add(destination)
+        await db.flush()
+        version = await db.get(PipelineVersion, monitor.pipeline_version_id)
+        notify = version.definition["blocks"][-1]
+        notify = {
+            **notify,
+            "config": {**notify["config"], "url": None, "destination_id": str(destination.id)},
+        }
+        version.definition = {
+            **version.definition,
+            "blocks": [*version.definition["blocks"][:-1], notify],
+        }
+        await db.commit()
+        await db.delete(destination)
+        await db.commit()
+
+    assert (await _admit(monitor))[0].verdict == "failed"
+
+    [run] = await _runs(monitor)
+    assert run.error == "notify: destination no longer exists"
+    async with AsyncSessionLocal() as db:
+        [alert] = await db.scalars(
+            select(WebhookDelivery).where(WebhookDelivery.pipeline_run_id == run.id)
+        )
+    assert (alert.destination_id, alert.webhook_url) == (None, None)
+
+
 async def test_a_url_now_private_is_a_failed_check(db_user, resolves_to):
     monitor = await _monitor(db_user.id)
     resolves_to("10.0.0.5")

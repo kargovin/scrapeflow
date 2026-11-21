@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.destination import Destination
 from app.models.pipeline import PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.webhook_delivery import WebhookDelivery
 from app.pipelines.definition import WebhookBlock, parse_definition
@@ -76,6 +77,20 @@ async def queue_failure_alerts(db: AsyncSession, run: PipelineRun) -> int:
         b for b in parsed.blocks if isinstance(b, WebhookBlock) and FAILED_EVENT in b.config.events
     ]
     rollback = await rollback_lists(db, run.id) if senders else None
+    named = {b.config.destination_id for b in senders if b.config.destination_id is not None}
+    # Deleted outside the API: the row is written with none and ends "destination deleted".
+    # FOR KEY SHARE holds the rest until commit, so the insert's foreign key cannot fail.
+    existing = (
+        set(
+            await db.scalars(
+                select(Destination.id)
+                .where(Destination.id.in_(named))
+                .with_for_update(read=True, key_share=True)
+            )
+        )
+        if named
+        else set()
+    )
     for block in senders:
         await db.execute(
             pg_insert(WebhookDelivery)
@@ -85,7 +100,9 @@ async def queue_failure_alerts(db: AsyncSession, run: PipelineRun) -> int:
                 event=FAILED_EVENT,
                 # A destination's URL is read at each attempt and never stored (ADR-014 §8b).
                 webhook_url=str(block.config.url) if block.config.url is not None else None,
-                destination_id=block.config.destination_id,
+                destination_id=(
+                    block.config.destination_id if block.config.destination_id in existing else None
+                ),
                 payload=failed_payload(run, block.id, rollback),
                 status="pending",
                 next_attempt_at=datetime.now(UTC),

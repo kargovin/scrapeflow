@@ -447,6 +447,27 @@ async def test_an_alert_whose_destination_was_deleted_ends_without_an_attempt(db
     )
 
 
+async def test_a_destination_deleted_before_the_failure_still_fails_the_run_and_alerts(
+    db_user, receiver
+):
+    destination = await _hook_destination(db_user.id)
+    run = await _run(db_user.id, _definition(_destination_webhook("alert", destination.id)))
+    # Outside the API: no interlock refused it.
+    async with AsyncSessionLocal() as db:
+        await db.delete(await db.get(Destination, destination.id))
+        await db.commit()
+
+    assert await _fail(run) == "failed"
+
+    [row] = await _alerts(run.id)
+    assert (row.destination_id, row.webhook_url, row.status) == (None, None, "pending")
+    outcome = await attempt_webhook_delivery(DeliveryRef(delivery_id=str(row.id)))
+    assert outcome.status == "exhausted"
+    assert receiver.posts == []
+    [after] = await _alerts(run.id)
+    assert after.last_error == "destination deleted"
+
+
 async def test_an_alert_never_uses_another_users_destination(db_user, other_user, receiver):
     destination = await _hook_destination(other_user.id)
     row = await _destination_alert(db_user.id, destination.id)
