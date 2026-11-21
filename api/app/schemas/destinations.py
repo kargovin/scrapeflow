@@ -251,13 +251,17 @@ DestinationCreate = Annotated[
 ]
 
 
-class DestinationUpdate(_Strict):
-    """Fields given replace the stored ones; the merged address and secret are checked whole.
-    The kind never changes (a pinned version's block needs its kind)."""
+class DestinationEdit(_Strict):
+    """Fields given replace the stored ones; the merged address and secret are checked whole."""
 
-    name: Name | None = None
     address: dict[str, Any] | None = None
     secret: dict[str, Any] | None = None
+
+
+class DestinationUpdate(DestinationEdit):
+    """The kind never changes (a pinned version's block needs its kind)."""
+
+    name: Name | None = None
 
 
 # --- responses --------------------------------------------------------------------------------

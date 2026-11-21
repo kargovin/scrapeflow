@@ -1534,6 +1534,99 @@ async def test_a_failed_run_lists_its_alerts_for_its_owner_and_the_admin(
     assert admin["failed_block_id"] == "fetch"
 
 
+LOCATION = {
+    "endpoint": "https://s3.example.com/",
+    "bucket": "results",
+    "region": None,
+    "key": "scrapeflow/p/r/store.json",
+}
+ROLLBACK = {
+    "undone": [],
+    "left_in_place": [{"block_id": "fetch", "kind": "bucket", "location": LOCATION}],
+    "kept": [],
+}
+
+
+async def test_a_rolled_back_run_reads_each_delivery_its_undo_and_the_alerts_lists(
+    client, headers, key, temporal, resolves_to, db_user
+):
+    """M.10: the run page's sink states and the alert's rollback lists, for owner and admin."""
+    from app.core.destinations import encrypt_secret
+    from app.models.destination import Destination
+    from app.models.webhook_delivery import WebhookDelivery
+
+    url, run_id = await _started_run(client, headers, key, temporal)
+    deadline = datetime.now(UTC) + timedelta(hours=3)
+    delivery = {"destination_id": str(uuid.uuid4()), "kind": "bucket", "location": LOCATION}
+    await _ended(
+        run_id,
+        status="running",
+        failed_block_id="notify",
+        error="notify: gave up",
+        rollback_deadline=deadline,
+        blocks={
+            "fetch": {"status": "completed", "delivery": delivery, "undo_status": "undoing"},
+            "notify": {"status": "failed"},
+        },
+    )
+    run = (await client.get(url, headers=headers)).json()
+    assert (run["status"], datetime.fromisoformat(run["rollback_deadline"])) == (
+        "running",
+        deadline,
+    )
+    fetch = run["blocks"][0]
+    assert (fetch["delivery"], fetch["undo_status"], fetch["undo_error"]) == (
+        delivery,
+        "undoing",
+        None,
+    )
+
+    async with AsyncSessionLocal() as db:
+        hook = Destination(
+            user_id=db_user.id,
+            name=f"hook-{uuid.uuid4().hex[:6]}",
+            kind="webhook",
+            encrypted_secret=encrypt_secret({"url": "https://hooks.example.com/x"}),
+            display_host="hooks.example.com",
+        )
+        db.add(hook)
+        await db.flush()
+        db.add(
+            WebhookDelivery(
+                pipeline_run_id=uuid.UUID(run_id),
+                block_id="notify",
+                event="pipeline.failed",
+                destination_id=hook.id,
+                payload={"rollback": ROLLBACK},
+            )
+        )
+        await db.commit()
+    await _ended(
+        run_id,
+        status="failed",
+        blocks={"fetch": {"undo_status": "undo_failed", "undo_error": "DestinationRefused: x"}},
+    )
+    run = (await client.get(url, headers=headers)).json()
+    assert run["blocks"][0]["undo_status"] == "undo_failed"
+    assert run["blocks"][0]["undo_error"] == "DestinationRefused: x"
+    [alert] = run["alerts"]
+    assert {k: alert[k] for k in ("block_id", "kind", "destination_id", "rollback")} == {
+        "block_id": "notify",
+        "kind": "webhook",
+        "destination_id": str(hook.id),
+        "rollback": ROLLBACK,
+    }
+
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, db_user.id)
+        user.is_admin = True
+        await db.commit()
+    admin = (await client.get(f"/admin{url}", headers=headers)).json()
+    assert admin["alerts"] == run["alerts"]
+    assert admin["blocks"] == run["blocks"]
+    assert admin["rollback_deadline"] == run["rollback_deadline"]
+
+
 # ---------------------------------------------------------------------------
 # K.1 — BUG-031: delete a run, delete a pipeline permanently (ADR-016 §11)
 # ---------------------------------------------------------------------------

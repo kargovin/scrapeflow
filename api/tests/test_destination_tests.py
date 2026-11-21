@@ -417,6 +417,51 @@ async def test_a_saved_destination_is_tested_as_stored(client, headers, mock_tem
     assert len(seen) == 2
 
 
+async def test_an_unsaved_edit_is_tested_over_the_stored_form_and_stores_nothing(
+    client, headers, mock_temporal, other_user, public_dns
+):
+    seen = _answers(mock_temporal, BUCKET_PASSED, BUCKET_DELETE_REFUSED)
+    created = (
+        await client.post(
+            "/destinations", json={"name": "lake", **BODIES["bucket"]}, headers=headers
+        )
+    ).json()
+    row = await _row(created["id"])
+    url = f"/destinations/{created['id']}/test"
+
+    resp = await client.post(
+        url,
+        json={"address": {"bucket": "other-results"}, "secret": {"secret_key": "new"}},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["checks"][-1]["outcome"] == "warning"
+    tested = seen[1]
+    assert tested.address == {**created["address"], "bucket": "other-results"}
+    assert decrypt_secret(tested.encrypted_secret) == {
+        **BODIES["bucket"]["secret"],
+        "secret_key": "new",
+    }
+    after = await _row(created["id"])
+    assert (after.address, after.encrypted_secret, after.updated_at) == (
+        row.address,
+        row.encrypted_secret,
+        row.updated_at,
+    )
+
+    # The PATCH's checks: a field the kind does not have, a name, a private host.
+    resp = await client.post(url, json={"address": {"nope": 1}}, headers=headers)
+    assert resp.status_code == 422
+    resp = await client.post(url, json={"name": "x"}, headers=headers)
+    assert resp.status_code == 422
+    public_dns.getaddrinfo.return_value = [(None, None, None, None, ("10.0.0.5", 0))]
+    resp = await client.post(
+        url, json={"address": {"endpoint": "https://lan.example.com"}}, headers=headers
+    )
+    assert resp.status_code == 400
+    assert len(seen) == 2
+
+
 @pytest.mark.parametrize(
     "failure, message",
     [

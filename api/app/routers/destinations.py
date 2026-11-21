@@ -31,6 +31,7 @@ from app.schemas.destinations import (
     KIND_MODELS,
     AdminDestinationResponse,
     DestinationCreate,
+    DestinationEdit,
     DestinationForm,
     DestinationKind,
     DestinationResponse,
@@ -167,16 +168,30 @@ async def get_destination(
     return _response(await _owned(db, user.id, destination_id))
 
 
+async def _edited(destination: Destination, body: DestinationEdit) -> _Checked:
+    """The stored address and secret with the edit's fields over them, checked whole."""
+    address_model, secret_model = KIND_MODELS[destination.kind]
+    address = _parse(address_model, {**destination.address, **(body.address or {})}, "address")
+    secret = decrypt_secret(destination.encrypted_secret)
+    secret = _parse(secret_model, {**secret, **(body.secret or {})}, "secret")
+    return await _checked(destination.kind, address, secret)
+
+
 @router.post("/{destination_id}/test", response_model=DestinationTestResult)
 async def test_destination(
     destination_id: uuid.UUID,
+    body: DestinationEdit | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     temporal: Client = Depends(get_temporal),
     _: None = Depends(check_rate_limit),
 ) -> DestinationTestResult:
-    """A saved destination, as stored; nothing is stored (ADR-015 §2a)."""
+    """A saved destination, as stored, or with an edit not yet saved over it (the PATCH's merge);
+    nothing is stored (ADR-015 §2a)."""
     destination = await _owned(db, user.id, destination_id)
+    if body is not None and (body.address is not None or body.secret is not None):
+        form = await _edited(destination, body)
+        return await run_test(temporal, db, destination.kind, form.address, form.encrypted_secret)
     return await run_test(
         temporal, db, destination.kind, destination.address, destination.encrypted_secret
     )
@@ -194,11 +209,7 @@ async def update_destination(
     destination = await _owned(db, user.id, destination_id)
     form, result = None, None
     if body.address is not None or body.secret is not None:
-        address_model, secret_model = KIND_MODELS[destination.kind]
-        address = _parse(address_model, {**destination.address, **(body.address or {})}, "address")
-        secret = decrypt_secret(destination.encrypted_secret)
-        secret = _parse(secret_model, {**secret, **(body.secret or {})}, "secret")
-        form = await _checked(destination.kind, address, secret)
+        form = await _edited(destination, body)
         result = await run_test(temporal, db, destination.kind, form.address, form.encrypted_secret)
         refuse_failed(result)
     # Only after the test: run_test commits the session before its wait.

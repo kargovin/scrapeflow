@@ -124,6 +124,19 @@ MonitorEventKind = Literal[
 ]
 
 
+class MonitorNotice(BaseModel):
+    """The notice a situation sent to the monitor's destination (§8); undelivered = ``exhausted``."""
+
+    kind: Literal["webhook", "email"]
+    # Null once that destination is deleted.
+    destination_id: uuid.UUID | None
+    status: Literal["pending", "delivered", "exhausted"]
+    attempts: int
+    last_error: str | None
+    next_attempt_at: datetime
+    delivered_at: datetime | None
+
+
 class MonitorEventResponse(BaseModel):
     """One situation (ADR-016 §7b): identical firings are one row with a count."""
 
@@ -135,6 +148,8 @@ class MonitorEventResponse(BaseModel):
     # Null while the situation is still going on.
     ended_at: datetime | None
     detail: dict[str, Any] | None
+    # Null: a history-only kind, or no notice destination was set when it began.
+    notice: MonitorNotice | None = None
 
 
 class MonitorHistoryItem(BaseModel):

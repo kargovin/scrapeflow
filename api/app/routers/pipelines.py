@@ -684,12 +684,15 @@ def run_response(
         alerts=[
             PipelineRunAlert(
                 block_id=a.block_id,
+                kind=a.kind,
+                destination_id=a.destination_id,
                 status=a.status,
                 attempts=a.attempts,
                 last_error=a.last_error,
                 next_attempt_at=a.next_attempt_at,
                 delivered_at=a.delivered_at,
                 created_at=a.created_at,
+                rollback=a.payload.get("rollback"),
             )
             for a in alerts
         ],

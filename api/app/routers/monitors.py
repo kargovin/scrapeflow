@@ -39,6 +39,7 @@ from app.core.rate_limit import check_rate_limit
 from app.models.monitor import Monitor, MonitorEvent
 from app.models.pipeline import Pipeline, PipelineRun, PipelineVersion
 from app.models.user import User
+from app.models.webhook_delivery import WebhookDelivery
 from app.pipelines.definition import (
     DefinitionUnreadable,
     LLMExtractBlock,
@@ -66,6 +67,7 @@ from app.schemas.monitors import (
     MonitorCreatedResponse,
     MonitorEventResponse,
     MonitorHistoryItem,
+    MonitorNotice,
     MonitorResponse,
     MonitorUpdate,
 )
@@ -576,11 +578,22 @@ async def monitor_history(
         MonitorHistoryItem(type="check", at=run.created_at, check=run_summary(run, version))
         for run, version in checks
     ]
+    events = list(events)
+    notices = {
+        n.monitor_event_id: MonitorNotice.model_validate(n, from_attributes=True)
+        for n in await db.scalars(
+            select(WebhookDelivery).where(
+                WebhookDelivery.monitor_event_id.in_([e.id for e in events])
+            )
+        )
+    }
     items += [
         MonitorHistoryItem(
             type="event",
             at=e.first_at,
-            event=MonitorEventResponse.model_validate(e, from_attributes=True),
+            event=MonitorEventResponse.model_validate(e, from_attributes=True).model_copy(
+                update={"notice": notices.get(e.id)}
+            ),
         )
         for e in events
     ]

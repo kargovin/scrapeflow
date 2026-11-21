@@ -172,12 +172,17 @@ class PipelineRunAlert(BaseModel):
     """One failure alert this run queued (ADR-014 §8e): users see an undeliverable alert here."""
 
     block_id: str
+    kind: Literal["webhook", "email"] = "webhook"
+    # Set when the block sends to a saved destination; null after that destination is deleted.
+    destination_id: uuid.UUID | None = None
     status: Literal["pending", "delivered", "exhausted"]
     attempts: int
     last_error: str | None
     next_attempt_at: datetime
     delivered_at: datetime | None
     created_at: datetime
+    # What the alert says rollback did: {undone, left_in_place, kept}, each [{block_id, kind, location}].
+    rollback: dict[str, list[dict[str, Any]]] | None = None
 
 
 class PipelineRunResponse(PipelineRunSummary):

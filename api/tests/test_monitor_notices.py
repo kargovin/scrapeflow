@@ -413,6 +413,80 @@ async def test_an_undeliverable_notice_changes_nothing_about_the_monitor(db_user
     assert event.ended_at is None
 
 
+async def _history_events(client, url, headers):  # noqa: F811
+    resp = await client.get(url, headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    items = body["history"] if "history" in body else body
+    return [i["event"] for i in items if i["type"] == "event"]
+
+
+async def test_the_history_shows_each_notice_s_delivery_beside_its_event(
+    client,
+    db_user,
+    headers,  # noqa: F811
+    admin_headers,  # noqa: F811
+):
+    monitor, notice = await _queued(db_user)
+    url = f"/monitors/{monitor.id}/history"
+
+    [event] = await _history_events(client, url, headers)
+    shown = dict(event["notice"])
+    assert datetime.fromisoformat(shown.pop("next_attempt_at")) == notice.next_attempt_at
+    assert shown == {
+        "kind": "webhook",
+        "destination_id": str(notice.destination_id),
+        "status": "pending",
+        "attempts": 0,
+        "last_error": None,
+        "delivered_at": None,
+    }
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(WebhookDelivery)
+            .where(WebhookDelivery.id == notice.id)
+            .values(status="exhausted", attempts=5, last_error="HTTP 500")
+        )
+        await db.commit()
+    [event] = await _history_events(client, url, headers)
+    assert {k: event["notice"][k] for k in ("status", "attempts", "last_error")} == {
+        "status": "exhausted",
+        "attempts": 5,
+        "last_error": "HTTP 500",
+    }
+    [admin_event] = await _history_events(client, f"/admin/monitors/{monitor.id}", admin_headers)
+    assert admin_event["notice"] == event["notice"]
+
+
+async def test_an_event_that_sent_no_notice_reads_none(
+    client,
+    db_user,
+    headers,  # noqa: F811
+):
+    # A history-only situation beside one that sent a notice; and a monitor with no destination.
+    monitor = await _monitor(db_user.id, await _destination(db_user.id))
+    await _admit(monitor)
+    assert (await _admit(monitor))[0].verdict == "skipped"
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun).where(PipelineRun.monitor_id == monitor.id).values(status="failed")
+        )
+        await db.commit()
+    await _used_up(db_user.id)
+    await _admit(monitor)
+    events = await _history_events(client, f"/monitors/{monitor.id}/history", headers)
+    assert [(e["kind"], e["notice"] is None) for e in events] == [
+        ("skipped_monthly_runs", False),
+        ("skipped_check_in_progress", True),
+    ]
+
+    silent = await _monitor(db_user.id)
+    await _admit(silent)
+    [event] = await _history_events(client, f"/monitors/{silent.id}/history", headers)
+    assert (event["kind"], event["notice"]) == ("skipped_monthly_runs", None)
+
+
 async def test_a_notice_never_uses_another_user_s_destination(
     db_user,
     other_user,
