@@ -139,7 +139,8 @@ class PipelineRun(Base):
             name="ck_pipeline_runs_status",
         ),
         CheckConstraint(
-            "stop_reason IS NULL OR stop_reason IN ('rule_not_met')",
+            "stop_reason IS NULL OR stop_reason IN "
+            "('rule_not_met', 'approval_rejected', 'approval_expired', 'approval_superseded')",
             name="ck_pipeline_runs_stop_reason",
         ),
         CheckConstraint(
@@ -210,6 +211,24 @@ class PipelineRunBlock(Base):
     undo_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # A change gate's input, SHA-256 hex (ADR-016 §5c); outlives the stored copy.
     fingerprint: Mapped[str | None] = mapped_column(VARCHAR(64), nullable=True)
+    # An Approval block (ADR-016 §9a). The answer is written once, conditionally on IS NULL.
+    approval_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    approval_answer: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    answered_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_pipeline_run_blocks_answered_by"),
+        nullable=True,
+    )
+    superseded_by_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "pipeline_runs.id",
+            ondelete="SET NULL",
+            name="fk_pipeline_run_blocks_superseded_by_run_id",
+        ),
+        nullable=True,
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -218,7 +237,8 @@ class PipelineRunBlock(Base):
         ),
         CheckConstraint(
             "status_reason IS NULL OR status_reason IN "
-            "('stopped', 'upstream_failed', 'cancelled', 'not_started', 'alert_only')",
+            "('stopped', 'upstream_failed', 'cancelled', 'not_started', 'alert_only', "
+            "'awaiting_approval')",
             name="ck_pipeline_run_blocks_status_reason",
         ),
         CheckConstraint(
@@ -234,9 +254,25 @@ class PipelineRunBlock(Base):
             "undo_status IS NULL OR status = 'completed'",
             name="ck_pipeline_run_blocks_undo_status_completed",
         ),
+        CheckConstraint(
+            "approval_answer IS NULL OR approval_answer IN "
+            "('approved', 'rejected', 'expired', 'superseded')",
+            name="ck_pipeline_run_blocks_approval_answer",
+        ),
         CheckConstraint("position >= 0", name="ck_pipeline_run_blocks_position_nonnegative"),
         UniqueConstraint(
             "pipeline_run_id", "block_id", name="uq_pipeline_run_blocks_pipeline_run_id_block_id"
+        ),
+        # The SET NULL actions' lookups when a run or a user is deleted.
+        Index(
+            "idx_pipeline_run_blocks_superseded_by_run_id",
+            "superseded_by_run_id",
+            postgresql_where=text("superseded_by_run_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_pipeline_run_blocks_answered_by",
+            "answered_by",
+            postgresql_where=text("answered_by IS NOT NULL"),
         ),
     )
 

@@ -115,10 +115,19 @@ class PipelineRunCreate(BaseModel):
 OutputState = Literal["none", "passed_through", "stored", "collected"]
 
 
-# ADR-014 §5a's skip reasons, plus "not_recorded" for a skipped block from before them (§5c).
+# ADR-014 §5a's skip reasons, plus "not_recorded" for a skipped block from before them (§5c);
+# "awaiting_approval" sits on a waiting Approval block (ADR-016 §9a).
 BlockStatusReason = Literal[
-    "stopped", "upstream_failed", "cancelled", "not_started", "alert_only", "not_recorded"
+    "stopped",
+    "upstream_failed",
+    "cancelled",
+    "not_started",
+    "alert_only",
+    "awaiting_approval",
+    "not_recorded",
 ]
+# ADR-014 §5a; the approval endings are ADR-016 §10's.
+StopReason = Literal["rule_not_met", "approval_rejected", "approval_expired", "approval_superseded"]
 
 
 class PipelineRunBlockResponse(BaseModel):
@@ -159,7 +168,7 @@ class PipelineRunSummary(BaseModel):
     finished_at: datetime | None
     # How it ended (ADR-014 §5a): a stop is completed + these two; the list's label reads them.
     stopped_at_block_id: str | None = None
-    stop_reason: Literal["rule_not_met"] | None = None
+    stop_reason: StopReason | None = None
     failed_block_id: str | None = None
     # Non-null while running = undoing deliveries (PRD-017).
     rollback_deadline: datetime | None = None
