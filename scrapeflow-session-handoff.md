@@ -151,6 +151,24 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-21 *(clock)*
 
+🚀 **RELEASE M DONE — GROUP M CLOSED (2026-11-21).** The owner ran the M.12 runbook in their own terminal, step by step;
+I explained and checked each step's output. `main` `97eff8b..d36a114` (api image + the new delivery-worker image,
+migrations 4.13 + 4.14); infra `9266ef7` (step 1) → `7bdd92e` (step 3) → `0f6828c` (step 4 = M.13). **The
+NetworkPolicy gate passed** — the first proof this cluster enforces one (delivery worker: four targets
+`ECONNREFUSED`, the api control `OPEN`). 5a/5b/5d ✅, 5c reported done by the owner, 5e skipped (no SMTP account); SPA
+items passed except 8 (R2 cannot make a write-without-delete key — covered by the compose gate); M.13: six node probes
+`open` → `blocked`, jobs/crawl fine. MinIO's default `console` admin user was present and **removed by the owner**.
+Full record: backlog M.12 section → *Release record*. **Runbook fix:** 5d sets `monthly_runs_limit` to 1 (the admin
+API refuses 0).
+- **Still open, owner's:** delete the test pipelines `m-bucket`, `m-undo`, `m-refuse`, `m-watch`, `m-kept`
+  (`?permanent=true`) and their destinations; rotate the 8-character MinIO root password; an SMTP account for the
+  email check; the ADR question (lost-reply key in the `rollback` lists); PRD-018 R6 vs ADR-016 §7b on notices.
+- **Next:** **N.1** (approval), same way of working (memory `feedback_orchestrate_subagents.md`).
+
+---
+
+## Build state before the release — 2026-11-21 *(clock)*
+
 🔧 **M.1–M.11 + M.13 BUILT, 🧪 M.12 COMPOSE GATE PASSED, 📋 RELEASE M RUNBOOK READY (2026-11-20 → 21, twenty-third
 session; delegated build).** Owner: "build everything until m12" + "fold in m13 before m12 playbook", and a new way of
 working — **I orchestrate, one builder subagent per task**, each given a shared brief + carry-forward notes; after each I
@@ -2124,6 +2142,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-21 (Release M):** `main` = `origin/main` = `develop` before this closeout = `d36a114` (deployed); `develop` = `main` + the release record, **not pushed**. Infra repo: `origin/main` = `0f6828c` (steps 1, 3, 4 pushed by the owner); local branch `release-m` = `origin/main`, can be deleted.
 - **2026-11-21 (M build close):** `main` = `origin/main` = `97eff8b` (deployed); `develop` = `main` + L's release records + Group M (M.1–M.14 builds, review fixes, M.12 gate + runbook) + this closeout, **not pushed**. Infra repo: local branch `release-m` = `origin/main` `7825689` + steps 1/3/4, **not pushed** (rebase before each push). Compose **up** with `delivery-fixture`; local `.env` gained `DESTINATION_ENCRYPTION_KEY` + `PUBLIC_BASE_URL`; `docker/.env` → `../.env` symlink (untracked). `tmp/` untracked, pre-existing.
 - **2026-11-20 (Release L close):** `main` = `origin/main` = `97eff8b` (**deployed**); `develop` = `main` + the release record commits, **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose --profile gate down`; volumes kept) — bring the gate fixture back with `docker compose --profile gate up -d pipeline-fixture`.
 - **2026-11-20 (L.1–L.12 delegated build close):** `develop` = `main` (`c46edb4`, deployed) + K's release-record commits + L's 12 commits + this closeout, **not pushed**. Infra untouched. Compose **up**, with the `gate` profile's `pipeline-fixture`; the LLM worker image rebuilt from this tree. `tmp/` untracked, pre-existing.
@@ -2297,6 +2316,7 @@ ADR-009's review log; this table is only *what a session produced*.
 
 | Date | Session produced | Commits |
 |---|---|---|
+| 2026-11-21 *(clock, twenty-third)* | **🔧 M.1–M.14 built (one builder subagent per task, me orchestrating), 🧪 M.12 compose gate 66/66, 🚀 Release M RELEASED — Group M closed.** Destinations, the isolated delivery worker, bucket sink + undo, email sending, destination test, sinks + rollback in `PipelineWorkflow`, monitor notices to a destination, reads + SPA; infra steps 1/3/4 (M.13 = the scrape workers' NetworkPolicy). Owner ran the runbook; NetworkPolicy gate passed; MinIO `console` user removed | `8f69d11` … `d36a114` (in order in *Build state before the release*), release record |
 | 2026-11-20 *(clock, twenty-second)* | **🔧 L.1–L.11 built, 🧪 L.12 compose gate passed, 🚀 Release L RELEASED — Group L closed** (delegated build, no walkthrough). Monitors slice 1: shared run builder; migration 4.12; the change gate at save; monitors API + Schedules + shared cap; delete interlocks; counter/self-pause/events; `MonitorCheckWorkflow` + admission; the check in `PipelineWorkflow` (`monitor-check`); Check now; reads + admin; SPA; monitor gate harness (24 measured checks: 3 LLM calls, 3 copies, 3 messages, 24 units). Owner pushed `main` `c46edb4..97eff8b` and verified the prod checks. Owner's rule saved: the background list waits for the backlog's end | `b7e3e7e`, `3d6aeb4`, `882b94f`, `55a0a28`, `3960e67`, `68f84ca`, `cfdc6b0`, `36b003f`, `1831909`, `03df39c`, `da1bb92`, `f0331f6`, `97eff8b`, `afa354c`, `a96eb4f`, `ec10596`, `51d0b5a`, `97bf532`, closeout |
 | 2026-11-19 *(clock, twenty-first)* | **🔧 K.1–K.3 + Y.2 built, 🚀 Release K RELEASED — Group K closed** (delegated build, no walkthrough). BUG-031's run delete + permanent pipeline delete (deleted run reads as cancelled; `record_storage` locks the run); the `changed` rule + SHA-256 fingerprint; Diff + Capture; migration 4.11 drops the job lane's diff columns + `crawls.schedule_cron`. K.4 runbook; owner pushed `main` `a10f698..c46edb4` and verified a permanent delete freeing exactly its ledger bytes, plus the SPA deletes. BUG-031 closed | `04d98f1`, `30efd8f`, `eeb6f22`, `2f436fc`, `f385cf4`, `7a67bfd`, `0f86fe4`, `33599ae`, `8ddd7cc`, `362826e`, `c46edb4`, `97e948d`, `b66106b`, `19712c9`, `4de0890`, closeout |
 | 2026-11-19 *(clock, twentieth)* | **🔧 J.5–J.9 built, 🧪 J.10 compose gate passed** (delegated build, no walkthrough). Mirrors record endings; the stop path (`validate-stop`); failure alerts + alert-only skip (`webhook-events`); BUG-030 (`core/egress`); run reads + SPA + BUG-018; the pipeline gate harness (42/42, worker kill, could-not-start). J-b runbook written | `3b427d6`, `936be65`, `1f0f736`, `19f78b5`, `f2a1513`, `c298014`, `fe75dd8`, `bac7a16`, `12fad79`, `6abc040`, `4fc099f`, `dd0676a`, `491a15b`, `6106207`, `ac3c1ef`, `c595f41`, closeout |
