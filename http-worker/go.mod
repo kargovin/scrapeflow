@@ -7,7 +7,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/fernet/fernet-go v0.0.0-20240119011108-303da6aec611
 	github.com/minio/minio-go/v7 v7.0.70
-	go.temporal.io/sdk v1.49.0
+	go.temporal.io/sdk v1.51.0
 	golang.org/x/net v0.58.0
 )
 
@@ -33,7 +33,7 @@ require (
 	github.com/rs/xid v1.5.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
-	go.temporal.io/api v1.63.5 // indirect
+	go.temporal.io/api v1.64.3 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
