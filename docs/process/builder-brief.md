@@ -1,6 +1,6 @@
 # Builder brief — delegated build, one builder subagent per backlog task
 
-Written for Group M (2026-11-20); the orchestrator points each builder at this file. Update the group-specific lines (ADRs, patch ids, baselines) when a group starts.
+Written for Group M (2026-11-20), group lines updated for Group N (2026-11-22); the orchestrator points each builder at this file. Update the group-specific lines (ADRs, patch ids, baselines) when a group starts.
 
 You are building ONE task of the implementation backlog, start to finish, then reporting back to the
 orchestrator. The owner has delegated the build: no explaining, no asking — build, test, commit.
@@ -11,9 +11,11 @@ orchestrator. The owner has delegated the build: no explaining, no asking — bu
   plus its group header (`## Group …`, including any *Carried from M's build* notes) and the cross-cutting rules in `### Traps that span groups`
   (≈ line 3154 — read the whole list) and `### Releases` / `### Bugs and backlog items` just above it. The status table row for your
   task is near line 144.
-- Design of record (Accepted, implement against them, never edit): `docs/adr/ADR-015-delivery-sinks.md`,
-  `docs/adr/ADR-014-block-outcomes-stop-rollback-alerts.md` (§7 = rollback), `docs/adr/ADR-016-monitors.md`
-  (§8 notices), `docs/adr/ADR-012-*` (workflow versioning). Product: `docs/project/phase4-prd/PRD-017-delivery-sinks.md`.
+- Design of record (Accepted, implement against them, never edit): `docs/adr/ADR-016-monitors.md`
+  (§9 approval — §9a–§9e; §10 save rules; §8 notices), `docs/adr/ADR-014-block-outcomes-stop-rollback-alerts.md`
+  (stop path, §7 rollback), `docs/adr/ADR-015-delivery-sinks.md` (destinations), `docs/adr/ADR-012-*` (workflow
+  versioning). Product: `docs/project/phase4-prd/PRD-018-monitors.md` (approval criteria). Group N's patch ids:
+  `approval` (N.2), `approval-settled` (N.3).
 - Read the existing code a task touches before changing it; follow the patterns of the L/K/J tasks
   (e.g. `git log --oneline -40` and `git show <hash> --stat` for similar earlier steps).
 - Infra repo (infra tasks only): `/home/karthik/Documents/govindappa/govindappa-k8s-config`.
