@@ -2460,7 +2460,7 @@ P8 / the ledger (the 503 rule the fix must keep).
 credentials today (the kubelet on 10250 and the k3s API on 6443 both require authentication).
 **Discovered:** 2026-11-18, in the owner's ADR-015 review (round 6), designing the delivery worker's NetworkPolicy.
 By reasoning only — **not reproduced**.
-**Status:** 🔴 **OPEN — filed 2026-11-18; not fixed.**
+**Status:** 🟡 **OPEN — scrape workers' fix built 2026-11-21, unreleased** (M.13, infra repo `release-m` step 4 `61a0843`; ships as the last step of Release M's runbook, after M.12's gate proves this cluster enforces NetworkPolicy). NetworkPolicy `scrapeflow-scrape-workers` gives the http, playwright and LLM workers the delivery worker's fence — DNS, Temporal, MinIO, public IPv4 except private ranges and `139.99.121.44/32`. **Stays open:** the workflow worker's half — a job, batch, crawl or pipeline-alert webhook to the node's IP (the `EGRESS_DENY_CIDRS` idea below, unscheduled).
 
 `core/security.is_public_address` admits any globally reachable address, and the k3s node's own public IP
 (production egress shows `139.99.121.44`) is one. A connection from a pod to its own node's IP is delivered to the
