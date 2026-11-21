@@ -5,7 +5,9 @@ import uuid
 from typing import Any, NamedTuple
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -44,7 +46,25 @@ from app.schemas.destinations import (
 )
 from app.workflows.client import get_temporal, get_temporal_or_none
 
-router = APIRouter(prefix="/destinations", tags=["destinations"])
+
+class _NoEcho(APIRoute):
+    """Answers a refused body without the values it was sent: a form carries a secret."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def route(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                raise RequestValidationError(
+                    [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()]
+                ) from None
+
+        return route
+
+
+router = APIRouter(prefix="/destinations", tags=["destinations"], route_class=_NoEcho)
 admin_router = APIRouter(prefix="/admin/destinations", tags=["admin"])
 logger = structlog.get_logger()
 

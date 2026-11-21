@@ -218,6 +218,36 @@ async def test_a_bad_field_is_refused_at_save_naming_it(client, headers, kind, c
     assert any(e["loc"][-1] == field for e in resp.json()["detail"]), resp.text
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        (
+            "post",
+            "/destinations",
+            {"name": "x", "kind": "webhook", "secret": {"url": HOOK.replace("https", "http")}},
+        ),
+        (
+            "post",
+            "/destinations/test",
+            {
+                "kind": "bucket",
+                **{k: v for k, v in BODIES["bucket"].items() if k != "kind"},
+                "secret": {"access_key": "a", "secret_key": SENTINEL * 20},
+            },
+        ),
+        ("post", "/destinations", {"name": "x", **BODIES["smtp"], "secret": SENTINEL}),
+        ("patch", "/destinations/{id}", {"secret": SENTINEL}),
+        ("post", "/destinations/{id}/test", {"address": SENTINEL}),
+    ],
+)
+async def test_a_refused_body_echoes_none_of_its_values(client, headers, method, path, body):
+    created = await _create(client, headers, "smtp")
+    resp = await getattr(client, method)(path.format(id=created["id"]), json=body, headers=headers)
+    assert resp.status_code == 422
+    _no_secret(resp)
+    assert resp.json()["detail"] and all("input" not in e for e in resp.json()["detail"])
+
+
 @pytest.mark.parametrize("kind", list(BODIES))
 async def test_a_private_address_is_refused_at_save(client, headers, resolves_to, kind):
     resolves_to("10.0.0.5")
