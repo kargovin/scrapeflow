@@ -103,8 +103,11 @@ MIRROR_UNDO_ACTIVITY = "mirror_undo_status"
 REQUEST_APPROVAL_ACTIVITY = "request_approval"
 REMIND_APPROVAL_ACTIVITY = "remind_approval"
 RESOLVE_APPROVAL_ACTIVITY = "resolve_approval"
-# Sent by whoever records an answer (or N.3's supersede) after its commit: a wake-up, not the answer.
+SUPERSEDE_APPROVAL_ACTIVITY = "supersede_approval"
+# Sent by whoever records an answer (or a supersede) after its commit: a wake-up, not the answer.
 APPROVAL_SIGNAL = "approval_answered"
+# Sent to a monitor check's tick once its approval is requested (ADR-016 §9e).
+CHECK_SETTLED_SIGNAL = "check_settled"
 # ADR-016 §9c: the reminder, only when the deadline is further away than this.
 APPROVAL_REMINDER_BEFORE = timedelta(hours=2)
 
@@ -263,6 +266,12 @@ class ResolveApprovalInput(ApprovalRef):
 class ApprovalOutcome(BaseModel):
     # None: nothing recorded yet.
     answer: ApprovalAnswer | None = None
+
+
+class SupersedeApprovalInput(BaseModel):
+    # The check waiting for approval, and the later check whose content differs (ADR-016 §9e).
+    run_id: str
+    superseded_by_run_id: str
 
 
 class RecordStorageInput(BaseModel):

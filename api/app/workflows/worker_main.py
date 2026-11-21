@@ -19,6 +19,7 @@ from app.workflows.activities.approvals import (
     remind_approval,
     request_approval,
     resolve_approval,
+    supersede_approval,
 )
 from app.workflows.activities.batches import finish_batch
 from app.workflows.activities.crawls import (
@@ -111,6 +112,7 @@ async def main() -> None:
             request_approval,
             remind_approval,
             resolve_approval,
+            supersede_approval,
             deliver_webhook,
             job_run_started,
             read_llm_settings,

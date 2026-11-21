@@ -20,10 +20,16 @@ from app.models.api_key import ApiKey
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
-from app.workflows.activities.approvals import remind_approval, request_approval, resolve_approval
+from app.workflows.activities.approvals import (
+    remind_approval,
+    request_approval,
+    resolve_approval,
+    supersede_approval,
+)
 from app.workflows.activities.db import mirror_block_status, mirror_run_status
 from app.workflows.client import get_temporal
 from app.workflows.pipeline import (
+    APPROVAL_SIGNAL,
     RUN_CANCELLED_ERROR,
     ApprovalOutcome,
     ApprovalRef,
@@ -31,6 +37,7 @@ from app.workflows.pipeline import (
     MirrorRunInput,
     RequestApprovalInput,
     ResolveApprovalInput,
+    SupersedeApprovalInput,
 )
 from tests.test_pipeline_approval import _destination, _guarded, _save
 
@@ -570,6 +577,146 @@ async def test_an_answer_and_the_expiry_together_one_wins(client, headers, tempo
         assert outcome.answer == recorded
         assert (resp.status_code == 200) == (recorded == "approved")
         assert recorded in ("approved", "expired")
+
+
+# --- supersede (ADR-016 §9e) ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def wake():
+    """The supersede's wake-up to the waiting run's workflow (outside an activity there is no
+    client)."""
+    with patch("app.workflows.activities.approvals.activity.client") as client:
+        sent = AsyncMock()
+        client.return_value.get_workflow_handle.return_value.signal = sent
+        yield client
+
+
+def _supersede(run, by) -> SupersedeApprovalInput:
+    return SupersedeApprovalInput(run_id=str(run.id), superseded_by_run_id=str(by.id))
+
+
+async def test_a_supersede_records_it_tells_the_destination_and_wakes_the_run(
+    client, headers, db_user, temporal, wake
+):
+    destination = await _destination(db_user.id, "webhook")
+    run = await _triggered(client, headers, destination_id=str(destination.id))
+    later = await _triggered(client, headers, destination_id=str(destination.id))
+    await _waiting(run)
+
+    assert await supersede_approval(_supersede(run, later)) == ApprovalOutcome(answer="superseded")
+
+    block = await _approval(run.id)
+    assert (block.approval_answer, block.superseded_by_run_id) == ("superseded", later.id)
+    assert (block.answered_at, block.answered_by) == (None, None)
+    _, superseded = await _messages(run.id)
+    assert (superseded.event, superseded.destination_id) == (
+        "pipeline.approval_superseded",
+        destination.id,
+    )
+    assert superseded.payload["superseded_by_run_id"] == str(later.id)
+    assert superseded.payload["answer"] == "superseded"
+    wake.return_value.get_workflow_handle.assert_called_with(run.workflow_id)
+    wake.return_value.get_workflow_handle.return_value.signal.assert_awaited_once_with(
+        APPROVAL_SIGNAL
+    )
+    # Its workflow, woken or not, reads it back and stops.
+    resolved = await resolve_approval(ResolveApprovalInput(run_id=str(run.id), **REF))
+    assert resolved == ApprovalOutcome(answer="superseded")
+
+
+async def test_a_retried_supersede_writes_nothing_twice_and_wakes_the_run_again(
+    client, headers, db_user, temporal, wake
+):
+    destination = await _destination(db_user.id, "smtp")
+    run = await _triggered(client, headers, destination_id=str(destination.id))
+    later = await _triggered(client, headers)
+    await _waiting(run)
+
+    await supersede_approval(_supersede(run, later))
+    assert await supersede_approval(_supersede(run, later)) == ApprovalOutcome(answer="superseded")
+
+    assert [m.event for m in await _messages(run.id)] == [
+        "pipeline.approval_requested",
+        "pipeline.approval_superseded",
+    ]
+    assert wake.return_value.get_workflow_handle.return_value.signal.await_count == 2
+
+
+async def test_an_answer_recorded_first_stands_and_the_supersede_is_a_no_op(
+    client, headers, db_user, temporal, signal, wake
+):
+    destination = await _destination(db_user.id, "webhook")
+    run = await _triggered(client, headers, destination_id=str(destination.id))
+    later = await _triggered(client, headers)
+    await _waiting(run)
+    await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert await supersede_approval(_supersede(run, later)) == ApprovalOutcome(answer="approved")
+
+    block = await _approval(run.id)
+    assert (block.approval_answer, block.superseded_by_run_id) == ("approved", None)
+    assert [m.event for m in await _messages(run.id)] == ["pipeline.approval_requested"]
+    wake.return_value.get_workflow_handle.return_value.signal.assert_not_awaited()
+
+
+async def test_a_run_no_longer_waiting_is_left_alone(client, headers, temporal, wake):
+    later = await _triggered(client, headers)
+    not_asked = await _triggered(client, headers)
+    cancelling = await _triggered(client, headers)
+    await _waiting(cancelling)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == cancelling.id)
+            .values(cancel_requested_at=datetime.now(UTC))
+        )
+        await db.commit()
+
+    for run in (not_asked, cancelling):
+        assert await supersede_approval(_supersede(run, later)) == ApprovalOutcome()
+        assert (await _approval(run.id)).approval_answer is None
+    wake.return_value.get_workflow_handle.return_value.signal.assert_not_awaited()
+
+
+async def test_superseded_before_its_request_the_run_asks_nobody(
+    client, headers, db_user, temporal, wake
+):
+    destination = await _destination(db_user.id, "webhook")
+    run = await _triggered(client, headers, destination_id=str(destination.id))
+    later = await _triggered(client, headers)
+    await mirror_block_status(
+        MirrorBlockInput(
+            run_id=str(run.id),
+            block_id="approve",
+            status="waiting",
+            status_reason="awaiting_approval",
+        )
+    )
+    await supersede_approval(_supersede(run, later))
+    await request_approval(
+        RequestApprovalInput(
+            run_id=str(run.id), block_id="approve", deadline=datetime.now(UTC) + timedelta(hours=1)
+        )
+    )
+
+    assert [m.event for m in await _messages(run.id)] == ["pipeline.approval_superseded"]
+
+
+async def test_a_supersede_and_an_answer_together_one_wins(client, headers, temporal, signal, wake):
+    later = await _triggered(client, headers)
+    for _ in range(5):
+        run = await _triggered(client, headers)
+        await _waiting(run)
+        resp, outcome = await asyncio.gather(
+            client.post(_answer_url(run), json={"decision": "rejected"}, headers=headers),
+            supersede_approval(_supersede(run, later)),
+        )
+        block = await _approval(run.id)
+        assert outcome.answer == block.approval_answer
+        assert (resp.status_code == 200) == (block.approval_answer == "rejected")
+        assert block.approval_answer in ("rejected", "superseded")
+        assert (block.superseded_by_run_id is not None) == (block.approval_answer == "superseded")
 
 
 # --- reads -------------------------------------------------------------------------------------
