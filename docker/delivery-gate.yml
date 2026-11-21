@@ -1,0 +1,19 @@
+# The delivery gate (M.12, scripts/delivery-gate.sh): the delivery and workflow workers trust the gate
+# fixture's CA. `docker compose up -d delivery-worker workflow-worker` puts them back on the plain config.
+services:
+  delivery-worker:
+    environment:
+      SSL_CERT_FILE: /gate-pki/bundle.pem
+    volumes:
+      - delivery_gate_pki:/gate-pki:ro
+    depends_on:
+      delivery-fixture:
+        condition: service_healthy
+  workflow-worker:
+    environment:
+      SSL_CERT_FILE: /gate-pki/bundle.pem
+    volumes:
+      - delivery_gate_pki:/gate-pki:ro
+    depends_on:
+      delivery-fixture:
+        condition: service_healthy
