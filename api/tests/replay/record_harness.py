@@ -24,6 +24,13 @@ from tests.test_destination_tests import (
 from tests.test_destination_tests import Harness as DestinationTestHarness
 from tests.test_email_deliveries import Harness as EmailHarness
 from tests.test_email_deliveries import _final, _transient
+from tests.test_workflows_approval import (
+    APPROVAL_RUN,
+    MONITORED,
+    WAIT_TIMEOUT,
+    answers,
+    cancels_while_waiting,
+)
 from tests.test_workflows_batch import Harness as BatchHarness
 from tests.test_workflows_batch import _batch_input, _scrape_ok, _scraped
 from tests.test_workflows_crawl import SITE, Frontier, _sitemaps, crawl_input
@@ -241,6 +248,24 @@ SCENARIOS = {
         {"bucket": _unanswered(), "during": _cancel_in_sink_wait},
         BUCKET_ONLY,
     ),
+    # N.2 — an Approval block's wait (patch "approval").
+    "harness_approval_approved": (
+        {"during": answers("approved"), "timeout": WAIT_TIMEOUT},
+        APPROVAL_RUN,
+    ),
+    "harness_approval_rejected": (
+        {"during": answers("rejected"), "timeout": WAIT_TIMEOUT},
+        APPROVAL_RUN,
+    ),
+    "harness_approval_expired_after_reminder": ({"timeout": WAIT_TIMEOUT}, APPROVAL_RUN),
+    "harness_approval_cancelled_while_waiting": (
+        {"during": cancels_while_waiting, "timeout": WAIT_TIMEOUT},
+        APPROVAL_RUN,
+    ),
+    "harness_approval_check_expired": (
+        {"validate": _changed, "timeout": WAIT_TIMEOUT},
+        MONITORED,
+    ),
 }
 
 
@@ -404,8 +429,11 @@ async def main() -> None:
             continue
         kwargs = dict(kwargs)
         during = kwargs.pop("during", None)
+        timeout = kwargs.pop("timeout", None)
         h = harness(**kwargs)
         run_kwargs = {"during": during(h)} if during else {}
+        if timeout is not None:
+            run_kwargs["timeout"] = timeout
         await (h.run(run_input, **run_kwargs) if run_input is not None else h.run(**run_kwargs))
         path.write_text(h.history.to_json() + "\n")
         print(path)

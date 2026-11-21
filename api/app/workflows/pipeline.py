@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         is_change_gate,
     )
     from app.pipelines.definition import (
+        ApprovalBlock,
         BucketBlock,
         CleanBlock,
         LLMExtractBlock,
@@ -339,6 +340,13 @@ _BUCKET_EXT: dict[str, Literal["html", "md", "json"]] = {
 }
 
 
+_APPROVAL_STOPS: dict[str, StopReason] = {
+    "rejected": "approval_rejected",
+    "expired": "approval_expired",
+    "superseded": "approval_superseded",
+}
+
+
 # A reversible sink's undo by its delivery record's kind: activity, input, output (ADR-015 §5).
 _UNDO_ACTIVITIES: dict[str, tuple[str, type[BaseModel], type[BaseModel]]] = {
     "bucket": (UNDO_BUCKET_ACTIVITY, UndoBucketInput, UndoBucketOutput),
@@ -490,6 +498,8 @@ class _Check:
         self.monitor = monitor
         self.change_status: ChangeStatus | None = None
         self.passed_first_gate = False
+        # Expired or superseded: nobody looked at this content (§4a).
+        self.lapsed = False
         # The bounded diff summaries, by the block that triggered each.
         self.summaries: dict[str, dict[str, Any]] = {}
         self.captured: dict[str, dict[str, Any]] = {}
@@ -506,7 +516,8 @@ class _Check:
         return {
             "baseline_eligible": completed
             and self.monitor is not None
-            and (self.first_gate is None or self.passed_first_gate),
+            and (self.first_gate is None or self.passed_first_gate)
+            and not self.lapsed,
             "change_status": self.change_status,
             "change_summary": self.summaries or None,
             "captured_values": self.captured or None,
@@ -542,6 +553,12 @@ class PipelineWorkflow:
         self._announced: list[str] = []
         # A failing bucket block's newest try that may have written: rollback undoes its key.
         self._unsure: tuple[str, dict[str, Any]] | None = None
+        # Set by APPROVAL_SIGNAL: an answer may be recorded on the row (ADR-016 §9b).
+        self._approval_woken = False
+
+    @workflow.signal(name=APPROVAL_SIGNAL)
+    def approval_answered(self) -> None:
+        self._approval_woken = True
 
     @workflow.run
     async def run(self, input: PipelineRunInput) -> str | None:
@@ -564,6 +581,7 @@ class PipelineWorkflow:
             block_type = CATALOG[block.type]
             input_ref = refs.get(block.input) if block.input else None
             verdict: ValidateVerdict | None = None
+            answer: ApprovalAnswer | None = None
             if (
                 isinstance(block, WebhookBlock)
                 and WEBHOOK_RESULT_EVENT not in block.config.events
@@ -578,8 +596,14 @@ class PipelineWorkflow:
                 assert input_ref is not None
                 refs[block.id] = input_ref
                 continue
+            approval = isinstance(block, ApprovalBlock) and workflow.patched(APPROVAL_PATCH)
+            start: dict[str, Any] = (
+                {"status": "waiting", "status_reason": "awaiting_approval"}
+                if approval
+                else {"status": "running"}
+            )
             if self._cancel_requested or (
-                await self._mirror_block(input.run_id, block.id, "running", input_ref=input_ref)
+                await self._mirror_block(input.run_id, block.id, input_ref=input_ref, **start)
                 != "running"
             ):
                 return await self._cancel(input.run_id)
@@ -589,7 +613,13 @@ class PipelineWorkflow:
             try:
                 # ADR-009 15a/15d: an effect block may wait between attempts, and a cancel
                 # interrupts that wait; a running attempt still finishes (R3).
-                if isinstance(block, BucketBlock) and self._sinks:
+                if approval:
+                    assert isinstance(block, ApprovalBlock)
+                    answer, waited = await self._await_approval(block, input)
+                    # §9d: the run's budget does not run during the wait.
+                    deadline += waited
+                    objects = []
+                elif isinstance(block, BucketBlock) and self._sinks:
                     delivery = await self._deliver_bucket(block, input, input_ref, deadline, timing)
                     objects = []
                 elif isinstance(block, ScrapeBlock) and workflow.patched(steps.HOST_SLOT_PATCH):
@@ -635,7 +665,11 @@ class PipelineWorkflow:
                         input.run_id,
                         block.id,
                         "failed",
-                        error=f"cancelled before it finished{lost}",
+                        error=(
+                            "cancelled while waiting for approval"
+                            if approval
+                            else f"cancelled before it finished{lost}"
+                        ),
                     )
                     return await self._cancel(input.run_id)
                 if not isinstance(exc, Exception):
@@ -661,6 +695,9 @@ class PipelineWorkflow:
             if verdict is not None and verdict.outcome == "not_met":
                 assert isinstance(block, ValidateBlock)
                 return await self._stop(input, block, verdict, input_ref, result_path, wall)
+            if answer is not None and answer != "approved":
+                assert isinstance(block, ApprovalBlock)
+                return await self._approval_stop(input, block, answer, input_ref, result_path, wall)
 
             # ADR-009 §5: content blocks write an object; effect blocks pass their input on.
             output_ref = objects[0].path if block_type.kind == "content" else input_ref
@@ -765,6 +802,95 @@ class PipelineWorkflow:
             error="; ".join(notes) or None,
             stopped_at_block_id=block.id,
             stop_reason="rule_not_met",
+            **(check.run_fields() if check is not None else {}),
+        )
+        return result_path
+
+    async def _await_approval(
+        self, block: ApprovalBlock, input: PipelineRunInput
+    ) -> tuple[ApprovalAnswer, timedelta]:
+        """ADR-016 §9b: request, then wait for a wake-up, the reminder or the deadline, and read
+        the answer back. Returns it and how long the run waited (§9d). A cancel raises."""
+        ref = {"run_id": input.run_id, "block_id": block.id}
+        check = self._check
+        deadline = workflow.now() + timedelta(hours=block.config.deadline_hours)
+        await self._finish(
+            _db(
+                REQUEST_APPROVAL_ACTIVITY,
+                RequestApprovalInput(
+                    **ref,
+                    deadline=deadline,
+                    change_status=check.change_status if check is not None else None,
+                    change_summary=(check.summaries or None) if check is not None else None,
+                ),
+                None,
+            )
+        )
+        started = workflow.now()
+        remind_at = (
+            deadline - APPROVAL_REMINDER_BEFORE
+            if timedelta(hours=block.config.deadline_hours) > APPROVAL_REMINDER_BEFORE
+            else None
+        )
+        answer: ApprovalAnswer | None = None
+        waited = timedelta(0)
+        while answer is None:
+            if self._cancel_requested:
+                raise _run_cancelled()
+            woken = await self._wait_for_answer(remind_at or deadline)
+            waited = workflow.now() - started
+            if woken:
+                self._approval_woken = False
+                name, arg = RESOLVE_APPROVAL_ACTIVITY, ResolveApprovalInput(**ref)
+            elif remind_at is not None:
+                remind_at = None
+                name, arg = REMIND_APPROVAL_ACTIVITY, ApprovalRef(**ref)
+            else:
+                name, arg = RESOLVE_APPROVAL_ACTIVITY, ResolveApprovalInput(**ref, expire=True)
+            outcome: ApprovalOutcome = await self._finish(_db(name, arg, ApprovalOutcome))
+            answer = outcome.answer
+        if self._cancel_requested:
+            raise _run_cancelled()
+        return answer, waited
+
+    async def _wait_for_answer(self, until: datetime) -> bool:
+        """True: woken by the signal; False: ``until`` came first."""
+        if self._approval_woken:
+            return True
+        timeout = (until - workflow.now()).total_seconds()
+        if timeout <= 0:
+            return False
+        try:
+            await workflow.wait_condition(lambda: self._approval_woken, timeout=timeout)
+        except TimeoutError:
+            return False
+        except asyncio.CancelledError:
+            self._cancel_requested = True
+            raise
+        return True
+
+    async def _approval_stop(
+        self,
+        input: PipelineRunInput,
+        block: ApprovalBlock,
+        answer: ApprovalAnswer,
+        input_ref: str | None,
+        result_path: str | None,
+        wall: str | None,
+    ) -> str | None:
+        """Rejected, expired or superseded: the run ends completed at the Approval block; nothing
+        is undone and every copy is kept (ADR-016 §9b)."""
+        await self._mirror_block(input.run_id, block.id, "completed", output_ref=input_ref)
+        check = self._check
+        if check is not None and answer in ("expired", "superseded"):
+            check.lapsed = True
+        await self._mirror_run(
+            input.run_id,
+            "completed",
+            result_path=result_path,
+            error=wall,
+            stopped_at_block_id=block.id,
+            stop_reason=_APPROVAL_STOPS[answer],
             **(check.run_fields() if check is not None else {}),
         )
         return result_path

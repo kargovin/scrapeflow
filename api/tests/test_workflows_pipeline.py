@@ -80,8 +80,13 @@ from app.workflows.pipeline import (
     OUTPUTS_LEFT_ERROR,
     RECORD_STORAGE_ACTIVITY,
     RELEASE_RUN_OUTPUTS_ACTIVITY,
+    REMIND_APPROVAL_ACTIVITY,
+    REQUEST_APPROVAL_ACTIVITY,
+    RESOLVE_APPROVAL_ACTIVITY,
     RUN_CANCELLED_ERROR,
     WEBHOOK_ACTIVITY,
+    ApprovalOutcome,
+    ApprovalRef,
     LLMKey,
     LoadDestinationInput,
     LoadedDestination,
@@ -91,6 +96,8 @@ from app.workflows.pipeline import (
     PipelineRunInput,
     PipelineWorkflow,
     RecordStorageInput,
+    RequestApprovalInput,
+    ResolveApprovalInput,
     RollbackStartedInput,
     RunRef,
     StorageUsage,
@@ -250,6 +257,7 @@ class Harness:
         load=_load_ok,
         bucket=_bucket_ok,
         undo=_undo_ok,
+        answer=None,
     ):
         self.calls: list = []
         self.acquired: list[HostSlotInput] = []
@@ -260,6 +268,7 @@ class Harness:
         self.scraped: list[ScrapeInput] = []
         self.scrape_info: list = []
         self.extracted: list[LLMInput] = []
+        self.llm_info: list = []
         self.cleaned: list[CleanInput] = []
         self.validated: list[ValidateInput] = []
         self.content_info: list = []
@@ -285,12 +294,19 @@ class Harness:
         self.undo_info: list = []
         # What the rollback mirrors answer: the run's status.
         self.rollback_reply = "running"
+        # The Approval block's recorded answer, as its row holds it; an expiry writes "expired".
+        self.answer = answer
+        self.requested = asyncio.Event()
+        # The row's cancel, its Temporal cancel lost: the approval activities refuse the run.
+        self.row_cancelled = False
+        # (activity name, when it was scheduled) for each approval activity.
+        self.approval_times: list[tuple[str, datetime]] = []
 
     def activities(self):
         @activity.defn(name=MIRROR_BLOCK_ACTIVITY)
         async def mirror_block(input: MirrorBlockInput) -> str:
             self.calls.append(input)
-            if input.status == "running":
+            if input.status == "running" or input.status_reason == "awaiting_approval":
                 return self.running_reply.get(input.block_id, "running")
             return "running"
 
@@ -313,6 +329,7 @@ class Harness:
         @activity.defn(name=LLM_EXTRACT_ACTIVITY)
         async def llm(input: LLMInput) -> LLMOutput:
             self.extracted.append(input)
+            self.llm_info.append(activity.info())
             return await self._llm(input)
 
         @activity.defn(name=CLEAN_ACTIVITY)
@@ -386,8 +403,33 @@ class Harness:
             self.undo_info.append(activity.info())
             return await self._undo(input)
 
+        @activity.defn(name=REQUEST_APPROVAL_ACTIVITY)
+        async def request_approval(input: RequestApprovalInput) -> None:
+            self.calls.append(input)
+            self.approval_times.append((REQUEST_APPROVAL_ACTIVITY, activity.info().scheduled_time))
+            self.requested.set()
+
+        @activity.defn(name=REMIND_APPROVAL_ACTIVITY)
+        async def remind_approval(input: ApprovalRef) -> ApprovalOutcome:
+            self.calls.append(input)
+            self.approval_times.append((REMIND_APPROVAL_ACTIVITY, activity.info().scheduled_time))
+            if self.row_cancelled:
+                raise ApplicationError("cancelled", type=RUN_CANCELLED_ERROR, non_retryable=True)
+            return ApprovalOutcome(answer=self.answer)
+
+        @activity.defn(name=RESOLVE_APPROVAL_ACTIVITY)
+        async def resolve_approval(input: ResolveApprovalInput) -> ApprovalOutcome:
+            self.calls.append(input)
+            self.approval_times.append((RESOLVE_APPROVAL_ACTIVITY, activity.info().scheduled_time))
+            if self.row_cancelled:
+                raise ApplicationError("cancelled", type=RUN_CANCELLED_ERROR, non_retryable=True)
+            if self.answer is None and input.expire:
+                self.answer = "expired"
+            return ApprovalOutcome(answer=self.answer)
+
         workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
         workflow_queue += [release_outputs, load, rollback_started, mirror_undo]
+        workflow_queue += [request_approval, remind_approval, resolve_approval]
         self.delivery_queue = [deliver_bucket, undo_bucket]
         return workflow_queue, scrape, llm, [clean, validate, diff, capture]
 
