@@ -153,7 +153,7 @@
 | M.9 | Monitor notices to a destination (ADR-016 §8) | 🔧 **Built 2026-11-21** (`3a65fcf`, migration 4.14 `3af61135d943`). `monitors.notice_destination_id`; `webhook_deliveries` gains `monitor_id`, `monitor_event_id` (both CASCADE), both owner CHECKs widened, `uq_webhook_deliveries_monitor_event_id`; round trip clean, `alembic check` shows only the dedup false positive, no quota view touched. `monitor_events.record` takes the monitor and, on an insert of a notice kind, queues a `monitor.notice` row (`queue_notice`, ON CONFLICT DO NOTHING) in the same transaction; admission's skips and `monitor_check_ended` (`CheckEnded.notice_event_id`) start it after their commit via `pending(monitor_event_id=…)`. Owner arms: `_destination_target` and `email_for` (Message-ID `<{monitor_event_id}@host>`, subject `[ScrapeFlow] monitor {name}: {kind}`, no run id), `_secret` raises for a notice (it never has a URL); the three `job_lane_webhook*` meters gain `monitor_id IS NULL`. `POST`/`PATCH /monitors` take `notice_destination_id` (404 gone or another user's, 422 not `webhook`/`smtp`; PATCH now takes `lock_user` first; `null` clears); reads return it; the "no failure route" warning counts it; the destination delete's 409 gains `monitors: [{id, name}]`. API 1339 → 1365, replay 100, contracts 212, delivery worker 161. No workflow code changed (activities only), so no patch and no history. Verified on compose through real `MonitorCheckWorkflow` firings: three monthly-runs skips → one event (count 3), one notice, delivered once to the gate fixture receiver, signed with the destination's secret; the destination switched to `smtp` (a throwaway STARTTLS sink on the public-range network, removed after) → an email row, a 451 then 250, delivered, same Message-ID both tries; a destination answering 503 → the notice retries, the monitor's state, counter and `updated_at` unchanged, later firings keep counting. **My calls:** the notice kinds are every new situation except `skipped_check_in_progress` and `waiting_for_slot` (ADR-016 §7b names only those two as history only), so `skipped_pipelines_disabled` sends one; `monitors.notice_destination_id` has no `ondelete` (the delete is refused with 409; a user delete removes both in one statement); a new CHECK `ck_webhook_deliveries_monitor_notice` (a notice has its event and never a URL); `POST /monitors` accepts the field too; `pending()` with no owner raises (it would otherwise start every pending row). **Beyond the task text:** the admin delivery read gains `monitor_id`, `monitor_event_id`. **Left for M.10:** each notice's delivery state beside its event in the history read and the SPA. Mutation 21/22 (the survivor — a bump also queuing — is absorbed by the unique index, equivalent) |
 | M.10 | Reads + SPA: destinations, sink and undo states | 🔧 **Built 2026-11-21** (`cc7532c` reads, `2bde599` SPA). **Reads:** each monitor event carries `notice` (kind, destination, status, attempts, last error, next try, delivered) from its `webhook_deliveries` row, on the user history and the admin detail; `PipelineRunAlert` gains `kind`, `destination_id`, `rollback` (the payload's lists); run blocks already carried `delivery`/`undo_status`/`undo_error` and the run `rollback_deadline` (now tested through the user and admin reads). **SPA:** Destinations list + detail (user and admin, `mode`), host only, address fields, credentials never shown; a new destination's Save is enabled only after a passed *Test* of the current form (the delete warning shows first, "Save with this warning"); a refused save shows its checks; delete shows the 409's pipelines, runs and monitors as links. Run page: status `undoing` (wins over cancelling), "Undoing deliveries — N left, by HH:MM" banner, undo pills, a Deliveries table with the exact location and state (provisional / undone / undo failed: left in place / kept / could not be undone), alert `To` column and the alert's rollback lists; Cancel hidden while undoing. Monitor page: notices destination shown and editable (webhook/smtp, or none); each event's notice delivered / sending / **undelivered**. Pipeline page names each block's destination; editor lists the user's destinations (ids) and the catalog's budgets. `tsc -b` + `vite build` pass (node:22-slim); wording run under Node. **Not click-tested** (Clerk) — list in M.12. API 1365 → 1369, replay 100, contracts 212. Mutation 7/7. **My calls:** `POST /destinations/{id}/test` takes an optional `{address, secret}` merged as the PATCH merges it (so an edit is tested before save too; nothing stored); the run page's "N left" = delivered blocks whose undo is not settled (ADR-014 §5a's "count at undoing" is 1 at a time); Cancel is hidden while undoing (it would not stop it); all four kinds are offered in the form (a postgres test fails until O.1 — the API's message says so); a webhook's signing secret can be replaced, not cleared, from the SPA; `ErrorBox` labels FastAPI 422s by field and shows an object detail's `message`. **Not done:** no SPA page for the admin `webhook_deliveries` read (none existed; its type is not in the SPA) |
 | M.11 | Infra: Secrets, read-only MinIO user, NetworkPolicy; delivery Deployment | 🔧 **Built 2026-11-21** — infra repo, local branch `release-m` on `origin/main` `7825689`, unpushed: **step 1** `9266ef7` (Secrets `scrapeflow-destination-secrets` and `scrapeflow-minio-delivery-credentials`, owner-created as the README says; MinIO chart `policies`/`users` → `scrapeflow-delivery` with `delivery-read` = compose's `docker/minio/delivery-read.json`; NetworkPolicy `scrapeflow-delivery-worker`; `DESTINATION_ENCRYPTION_KEY` + `PUBLIC_BASE_URL` on the api, workflow worker and cleanup CronJob), **step 3** `3eeece6` (Deployment `scrapeflow-delivery-worker`, ImageRepository/ImagePolicy `scrapeflow-delivery-worker-*`; tag placeholder `main-STEP2-TAG` replaced with the tag CI builds at step 2). Checked locally only: `kubectl kustomize` + kubeconform (all non-CRD resources valid); the README's MinIO read-only check ran against compose's MinIO (read ok; list, write, delete refused). Server-side dry-run is the owner's (M.12 runbook). **My calls:** the destinations key is its own Secret (the delivery pod references no app secret); the CronJob also gets the destinations key (M adds no new reason for BUG-019; its two older keys and `python` path stay BUG-019's); Temporal and MinIO allowed by pod label + port (policy sees the pod after DNAT), DNS by CoreDNS's label; egress IPv4 only (IPv6 refused — fail closed); the node's address is `139.99.121.44/32` hardcoded — the node's InternalIP is its public IP (CoreDNS `NodeHosts`), no LAN address recorded, and the M.12 gate uses the cni0 address `10.42.0.1` for "LAN"; the k3s default pod/service CIDRs listed though inside 10/8; the image's own CMD (venv python) kept, no `command`; `automountServiceAccountToken: false`, no privilege escalation, all capabilities dropped. **Found:** the MinIO chart's default `users` is `console`/`console123` with `consoleAdmin` and this HelmRelease never overrode it, so prod MinIO most likely has that user; declaring `users` stops the chart re-creating it but does not remove it — README check + removal command, owner's call |
-| M.12 | 🚀 Release M (infra → `main` → infra) + NetworkPolicy gate | ⬜ |
+| M.12 | 🚀 Release M (infra → `main` → infra) + NetworkPolicy gate | 🔧 **Gate passed on compose 2026-11-21** (`77da15b`; fix `c579a51`); **runbook ready — owner's** (M.12 section: steps 0–9, infra step 1 → `main` → infra step 3 → the NetworkPolicy gate → product checks → SPA → step 4 = M.13 → MinIO's `console` user). `scripts/delivery-gate.sh`: 66/66 checks twice in a row, the J.10 and L.12 gates unchanged, the known secret in 0 of 262 API responses, 0 of 32 histories, 0 log lines of eight services; the rebinding test 6/6; a bucket test and a bucket delivery that **pass**, against MinIO behind a TLS front the workers trust only under `docker/delivery-gate.yml`. **Fix found by the gate:** a refused destination form's `422` echoed its values (FastAPI's `input`, so a submitted secret) — `c579a51` drops `input` on every destinations route (mutation 5/5). **My calls:** a refusing webhook is one whose destination resolves to a private address (final at once) — a non-2xx gives up only after ≈2.9 h, so prod step 5c runs that slowly and 5b shows the undo quickly with a failing Validate; the gate user's secrets are built from one fresh value per run and the search covers decoded history payloads; the SMTP sink accepts any password not starting `wrong` and records its hash; the NetworkPolicy gate probes the same four targets from the api pod as a control (a port answering there proves a non-`OPEN` from the delivery worker is the policy); prod product checks create destinations in the SPA (no secret on a command line). **Not run on compose:** a webhook's five tries, a third-party S3 / SMTP server, the NetworkPolicy, the SPA |
 | M.13 | (optional, owner's call) BUG-032: fence the scrape workers | 🔧 **Owner's call 2026-11-20: taken. Built 2026-11-21** — infra repo, local branch `release-m`, **step 4** `61a0843` on step 3 (`3eeece6`), unpushed; applied as the last step of the M.12 runbook, after the delivery worker's gate has proved enforcement. NetworkPolicy `scrapeflow-scrape-workers` (`app/scrape-workers-networkpolicy.yaml`): the delivery worker's egress rules, identical (CoreDNS; Temporal 7233 and MinIO 9000 by pod label; `0.0.0.0/0` except pod/service CIDRs, RFC 1918, `100.64/10`, link-local, loopback, `139.99.121.44/32`), no ingress; README section with a before/after probe from each pod. Checked locally only: `kubectl kustomize` + kubeconform (27 valid, 12 CRDs skipped); both policies' egress compared equal; the probe commands run against the compose workers. **My calls:** one policy selecting the three pods (`app In (…)`), not three copies; the `except` list copied, not shared (a comment in each file says to keep them equal); ingress denied — the three pods expose no port, probe or metrics and nothing in the cluster scrapes them; no Redis/Postgres/api rule — the per-host limiter is the workflow worker's (`host_slots`), and none of the three workers reads Redis, Postgres or the api; a target or LLM endpoint on the node's address (anything this cluster serves through Traefik) becomes unreachable from the workers, as it already is for the delivery worker. **Not covered:** the workflow worker's webhooks to the node's IP (BUG-032's `EGRESS_DENY_CIDRS` idea, unscheduled) |
 | **N** | **Approval** (Monitors slice 2 · ADR-016 §9) | |
 | N.1 | Schema + catalog (approval columns, reason widenings, `approval` block) | ⬜ |
@@ -4048,6 +4048,296 @@ worker pod, TCP to `scrapeflow-postgresql:5432`, Redis, the node's LAN address a
 to a public host **succeeds** — the first proof that this cluster enforces NetworkPolicy.
 **Verify:** owner — a bucket pipeline in prod, then the same with a refusing webhook (object undone).
 **Depends on:** M.1–M.11, M.14
+
+**Compose gate ✅ (2026-11-21, `77da15b`):** `scripts/delivery-gate.sh` (repo root) drives `api/scripts/delivery_gate.py`
+against a new fixture, `contracts/fixtures/delivery-gate/` — compose service `delivery-fixture` (profile `gate`; built
+from the delivery worker's image for `cryptography`): a TLS front on the public-range network for **MinIO**
+(`s3.deliveryfixture.com`, with three one-shot faults keyed on the object path: a PUT closed unanswered, a PUT written
+with its reply dropped, a DELETE closed unanswered) and for the pipeline fixture's **webhook receiver**
+(`hooks.deliveryfixture.com`), an **SMTP sink** (`mail.deliveryfixture.com:587`, STARTTLS + AUTH, records each
+session's password hash and each message), and the **gate CA** that signed them. The workers trust that CA only under
+`docker/delivery-gate.yml` (`SSL_CERT_FILE` on the delivery and workflow workers), which the driver applies and takes
+off again; an SMTP destination carries the CA in its own `ca_certificate`. The driver makes a fresh **known secret**
+per run and builds every credential from it — the gate's MinIO users' secret keys (`contracts/fixtures/delivery-gate/minio.sh`:
+`gate-rw`, `gate-putonly` (write only), `gate-other` (another bucket)), the webhook destination's URL path and signing
+secret, the SMTP password — then searches for it.
+
+```
+docker compose --profile gate up -d            # from ./docker: the stack and both fixtures
+scripts/delivery-gate.sh                        # ≈ 6 min; --no-regression skips the J.10/L.12 gates
+```
+
+**66 checks, all passed** (two full runs in a row, 66/66 each; a first run's two mismatches were the harness's own expectations — a deleted step's result is `410`, and each webhook block stamps its own `timestamp`), through the real API, `DestinationTestWorkflow`, `PipelineWorkflow`
+(patches `sinks`, `rollback`), the delivery worker against a real S3 server over TLS, `WebhookDeliveryWorkflow` and
+`MonitorCheckWorkflow`:
+- **The test before save** (first live pass of a bucket test): a bucket form passes `address`, `tls`, `write`,
+  `delete` and leaves nothing behind; a write-only key passes with the `delete` warning ("delete refused — rollback to
+  this bucket will fail…") and saves; a webhook destination passes; an SMTP destination passes `address`, `tls`,
+  `login`, and a wrong password is refused at save (`login` failed). Private addresses (a bucket endpoint, a webhook
+  destination URL, an inline webhook URL) are refused at save (`400`).
+- **Delivered:** *scrape → extract → bucket → webhook(destination) → webhook(inline)* completes; the object sits at
+  `gate/{pipeline}/{run}/store.json` and holds the extraction; the destination webhook arrives signed with its secret,
+  its payload names `block_id` and `deliveries` (the bucket, key and endpoint) and equals the inline one's except
+  `block_id` and `timestamp`; storage usage moved by ScrapeFlow's own copies only and the run took one monthly unit.
+  After a secret rotation (`PATCH`, re-tested) the next delivery is signed with the new secret.
+- **Rollback:** a webhook that refuses (its destination resolves to a private address — final at once) fails the run
+  naming it; while the first DELETE is refused the run is `running` with `rollback_deadline` set, the bucket block
+  `undoing`, and **no concurrency slot is held** — a second run starts and ends at a concurrency limit of 1; then the
+  object is gone, the block reads delivered → `undone`, the alert carries `undone: [store]`, and the extraction is
+  still readable (D12). A write-only key → `undo_failed` with the exact bucket and key, the object left. An object the
+  user had already deleted → `undone`. The destination moved to another bucket mid-undo (`PATCH`, re-tested) → the
+  undo goes to the original location and reads `undo_failed`, the object left there.
+- **A lost reply:** the first PUT written by MinIO with its reply dropped, the retry 30 s later → `completed`, two PUTs
+  seen, **one** object.
+- **A down endpoint:** the bucket block `waiting` holds no slot (a second run completes at a limit of 1); the next try
+  delivers.
+- **Order and budget:** *bucket → webhook → bucket* refused at save naming `store_2` and `notify`; *bucket → bucket →
+  webhook → webhook* runs; four buckets + a webhook refused with "… h of blocks + … h to undo 4 deliveries; the limit
+  is 24 h".
+- **Cancel** in the webhook's retry wait → `cancelled` in ~1 s, the object stays and the run names its key.
+- **PRD-019's bucket criterion:** *Scrape → Bucket → Validate (stop, delete) → Webhook* ends `completed`, stopped at
+  the Validate, the webhook skipped; ScrapeFlow's copy deleted (usage back where it was, the step's result `410`), the
+  object still in the bucket, nothing sent.
+- **D13:** *bucket → webhook → webhook(refusing)* → bucket `kept`, first webhook `not_undoable`, no rollback started,
+  the object stays.
+- A bucket endpoint resolving to a private address at delivery → failed at once (`EgressBlocked`), no retry.
+- A destination in use → `409` naming its pipelines.
+- **Monitor notices:** three new situations (monthly limit 0, pause/resume between) → two **emails** (one SMTP session
+  each, logged in with the stored password) then a **webhook** notice signed with the destination's (rotated) secret —
+  four SMTP sessions (a refused test, a passed test, both sends) to **one delivery-worker life** (M.14's
+  long-session bug).
+- **The known secret:** in **0 of 262 API responses**, **0 of 32 workflow histories** (every
+  workflow started since the gate began, payloads decoded: `PipelineWorkflow`, `DestinationTestWorkflow`,
+  `WebhookDeliveryWorkflow`, `MonitorCheckWorkflow`) and **0 log lines** of api, workflow-worker, delivery-worker, the
+  three scrape workers, Temporal and Postgres. Found while building the gate: a `422` echoed a refused form's values
+  (FastAPI's `input`, e.g. a non-https webhook URL) — fixed in `c579a51` (the destinations routes drop `input`; the PATCH already did).
+- **An admin deletes the user** → the delivered object is still in the bucket (R1).
+- **Rebinding:** `contracts/test_egress.py -k rebind` — the api copy and the delivery copy's three clients (6 passed).
+- **Unchanged:** the J.10 pipeline gate and the L.12 monitor gate pass as before (`GATE PASSED` in both runs).
+
+**Not run on compose:** a webhook giving up after its five tries (≈2.9 h; unit-tested at M.8 — here a refusal is
+final at once), a real third-party S3 service and SMTP server (prod step 5), the NetworkPolicy (step 4), the SPA
+(Clerk — step 6). Suites: API 1399 (incl. replay 106), contracts 217, delivery worker 161 + 7 skipped.
+
+**Ships** (`main` `97eff8b..develop`): `api/` + `frontend/` + **`delivery-worker/` (new image)** — M.1–M.10, M.14, the
+review fixes and `c579a51` (commits in the status table); migrations **4.13 `d0434b2ec373`** (destinations,
+`pipeline_version_destinations`, `webhook_deliveries.destination_id`/`kind`) and **4.14 `3af61135d943`** (monitor
+notices) on api startup — no quota view touched. CI: `replay` → `build-api`, and **`build-delivery-worker`** beside
+them; http, playwright and LLM worker builds skipped. Flux bumps `api`, `workflow-worker` and the cleanup CronJob.
+**Infra** (`/home/karthik/Documents/govindappa/govindappa-k8s-config`, local branch `release-m`, three commits on
+`origin/main` `7825689`, unpushed): step 1 `9266ef7`, step 3 `3eeece6`, step 4 `61a0843` (M.13) — every rebase changes
+the hashes; the runbook reads them off the branch each time.
+
+**Rollout window** (one-line notes, owner's rule for Phase 4):
+- Step 1 rolls the api and workflow worker on the **same image** with two new env vars (old code ignores them) and
+  upgrades the MinIO HelmRelease (its post-job adds the user and policy).
+- Step 2: an old api pod answers `/destinations` `404` and refuses a `bucket` block at save — save nothing until
+  `rollout status` says 2/2. Old code runs fine on 4.13/4.14: no row it reads changes until a destination exists.
+- **Between steps 2 and 3 nothing polls `delivery`**: a destination save answers `503` after 4 s, a sink would fail at
+  its 60 s `schedule_to_start`. Noted, not guarded — save no destination until step 3 is verified.
+- ⚠️ **After step 2, never revert step 1**: the new api refuses to start without `DESTINATION_ENCRYPTION_KEY`.
+- Step 4 applies to running pods (no restart).
+
+**Runbook** (owner-run, in your own terminal). Variables, once:
+```bash
+export B=https://scrapeflow.govindappa.com
+export KEY=<an API key from the SPA>
+export HOOK=<an https webhook receiver URL you can read>
+export INFRA=/home/karthik/Documents/govindappa/govindappa-k8s-config
+q() { kubectl -n scrapeflow exec -i sts/scrapeflow-postgresql -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<< "$1"; }
+```
+
+0. **Before (read-only).**
+   - `q "SELECT version_num FROM alembic_version;"` → **`72b61b3efb61`** (4.12, L).
+   - `q "SELECT count(*) FROM pipeline_runs WHERE status = 'running';"` → record it (expected 0).
+   - `q "SELECT count(*) FROM monitors;"` → record it (firings during the rollout are fine).
+   - Rollback tags (the api image also runs the workflow worker and the CronJob):
+     `kubectl -n scrapeflow get deploy scrapeflow-api scrapeflow-workflow-worker -o jsonpath='{range .items[*]}{.metadata.name} {.spec.template.spec.containers[0].image}{"\n"}{end}'`
+     and `kubectl -n scrapeflow get cronjob scrapeflow-cleanup -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}'`
+     → expected `main-…-97eff8b…` (L). For step 4's record, the three scrape workers' tags:
+     `kubectl -n scrapeflow get deploy scrapeflow-http-worker-temporal scrapeflow-playwright-worker-temporal scrapeflow-llm-worker-temporal -o jsonpath='{range .items[*]}{.metadata.name} {.spec.template.spec.containers[0].image}{"\n"}{end}'`.
+   - Infra branch: `git -C $INFRA fetch && git -C $INFRA log --oneline origin/main..release-m` → three commits (steps
+     1, 3, 4).
+   - The values the NetworkPolicy assumes (infra README *Delivery worker NetworkPolicy*): `kubectl get nodes -o wide`
+     → one node, INTERNAL-IP **`139.99.121.44`** and no other address (else add it to the policy's `except` in both
+     policy files before step 1); `kubectl get nodes -o jsonpath='{.items[*].spec.podCIDRs}'; echo` → inside
+     `10.42.0.0/16`; `kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'; echo` → `10.43.0.1`;
+     `kubectl -n kube-system get pods -l k8s-app=kube-dns`, `kubectl -n scrapeflow get pods -l app=scrapeflow-temporal`,
+     `kubectl -n scrapeflow get pods -l app=minio,release=scrapeflow-minio` → each lists a pod.
+1. **Infra step 1 — Secrets, MinIO user, NetworkPolicy, env.**
+   - The two Secrets (the destinations key is **never regenerated** once anything is saved with it):
+     ```bash
+     DEST_FERNET_KEY="$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")"
+     kubectl create secret generic scrapeflow-destination-secrets -n scrapeflow --from-literal=destination-encryption-key="$DEST_FERNET_KEY"
+     DELIVERY_MINIO_PASS="$(openssl rand -hex 24)"
+     kubectl create secret generic scrapeflow-minio-delivery-credentials -n scrapeflow --from-literal=password="$DELIVERY_MINIO_PASS"
+     ```
+   - `git -C $INFRA rebase origin/main release-m`, then `S1=$(git -C $INFRA rev-parse release-m~2)`.
+   - Server-side dry run of step 1 alone: `git -C $INFRA switch --detach $S1`;
+     `kubectl apply --dry-run=server -k $INFRA/clusters/k3s-server/scrapeflow` (a "missing last-applied-configuration"
+     warning on Flux-owned objects is harmless) and `kubectl diff -k $INFRA/clusters/k3s-server/scrapeflow` → only: env
+     on the api, workflow worker and CronJob, the MinIO HelmRelease values, the new NetworkPolicy;
+     `git -C $INFRA switch release-m`.
+   - Push **step 1 only**: `git -C $INFRA push origin $S1:main`.
+   - Verify: `flux get helmreleases -n scrapeflow` → `scrapeflow-minio` Ready (its post-job ran);
+     `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` and `deploy/scrapeflow-workflow-worker` (same image,
+     new env); `kubectl -n scrapeflow get networkpolicy scrapeflow-delivery-worker`; the README's `mc` script
+     (*Delivery worker's MinIO user*) → `read: ok`, then `refused` three times — and note whether `mc admin user list`
+     shows `console` (step 8).
+2. **ScrapeFlow `main`** (from the app repo): `git checkout main && git merge --ff-only develop && git push origin main && git checkout develop`.
+   - CI (`gh run watch`): `replay`, `build-api`, **`build-delivery-worker`** green; http, playwright, LLM skipped.
+   - The delivery worker's tag: the `build-delivery-worker` push line, or
+     `curl -s "https://hub.docker.com/v2/repositories/k4rth/scrapeflow-delivery-worker/tags?page_size=5"` (the `name`
+     fields; `main-<ts>-<sha>`). **No answer = the new repository is private** — make it public as the other
+     ScrapeFlow images (the ImageRepository has no pull secret), or step 3's pod cannot pull.
+   - `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → 2/2 on the new tag; the same for
+     `deploy/scrapeflow-workflow-worker`.
+   - `q "SELECT version_num FROM alembic_version;"` → **`3af61135d943`** (4.14); `q "SELECT count(*) FROM destinations;"`
+     → `0`; `q "SELECT count(*) FROM quota_active_submissions;"` returns.
+   - Record the api tag and the delivery-worker tag here. Save no destination until step 3 is verified.
+3. **Infra step 3 — the delivery worker.**
+   - `git -C $INFRA fetch && git -C $INFRA rebase origin/main release-m` (Flux's step-2 image commits are on `main`);
+     `git -C $INFRA log --oneline origin/main..release-m` → two commits (steps 3, 4).
+   - `export TAG=main-<ts>-<sha>` (step 2's tag); `S3=$(git -C $INFRA rev-parse release-m~1)`;
+     `sed -i "s/main-STEP2-TAG/$TAG/" $INFRA/clusters/k3s-server/scrapeflow/app/delivery-worker.yaml` (the
+     `# {"$imagepolicy": …}` marker stays on the line); `git -C $INFRA commit --fixup=$S3 clusters/k3s-server/scrapeflow/app/delivery-worker.yaml`;
+     `GIT_SEQUENCE_EDITOR=: git -C $INFRA rebase -i --autosquash origin/main`; `S3=$(git -C $INFRA rev-parse release-m~1)`;
+     `git -C $INFRA show $S3 | grep "scrapeflow-delivery-worker:"` → your tag.
+   - Dry run of step 3: `git -C $INFRA switch --detach $S3`; the same `apply --dry-run=server` and `diff` → only the
+     Deployment, the ImageRepository and the ImagePolicy; `git -C $INFRA switch release-m`.
+   - Push **step 3 only**: `git -C $INFRA push origin $S3:main` — ⚠️ **not** `release-m:main`, which would ship step 4
+     before step 4's gate.
+   - Verify: `kubectl -n scrapeflow rollout status deploy/scrapeflow-delivery-worker`;
+     `kubectl -n scrapeflow logs deploy/scrapeflow-delivery-worker | grep temporal_worker_started` → `task_queue=delivery`;
+     `kubectl -n scrapeflow get deploy scrapeflow-delivery-worker -o yaml | grep -c DATABASE_URL` → `0`.
+4. **The NetworkPolicy release gate** — the first proof that this cluster enforces one. The same probe from a pod
+   with **no** policy (the api) and from the delivery worker; `OPEN` = connected, anything else (`EAGAIN` = dropped,
+   `ECONNREFUSED` = rejected) = not connected:
+   ```bash
+   PY='import socket,sys,errno; s=socket.socket(); s.settimeout(5); r=s.connect_ex((sys.argv[1], int(sys.argv[2]))); print(sys.argv[1], sys.argv[2], "OPEN" if r == 0 else errno.errorcode.get(r, r))'
+   for hp in scrapeflow-postgresql:5432 scrapeflow-redis-master:6379 10.42.0.1:10250 139.99.121.44:6443; do h=${hp%:*}; p=${hp#*:}
+     kubectl -n scrapeflow exec deploy/scrapeflow-api -c api -- /app/.venv/bin/python -c "$PY" $h $p
+     kubectl -n scrapeflow exec deploy/scrapeflow-delivery-worker -- python -c "$PY" $h $p
+   done
+   kubectl -n scrapeflow exec deploy/scrapeflow-delivery-worker -- python -c "$PY" example.com 443
+   ```
+   **Pass:** each of the four from the api pod `OPEN` (the control: the port answers), from the delivery worker **not**
+   `OPEN`; `example.com 443 OPEN` from the delivery worker. (`10.42.0.1` is the pod's default gateway — the node's cni0
+   address, "the node's LAN address" in ADR-015 §8; 10250 is the kubelet, 6443 the API server, both on every node
+   address.) If a control is not `OPEN`, pick another port the node answers on. **A target `OPEN` from the delivery
+   worker = the gate failed: stop here** — no product check, no step 4; the policy is not enforced (k3s's embedded
+   controller disabled?) and the delivery worker's only fence is the code-level check.
+5. **Product checks** (prod). Create the destinations in the **SPA** (step 6, items 2–3), so no secret is typed on a
+   command line, and export their ids: `export D_BUCKET=<id> D_HOOK=<id>` (and `D_MAIL=<id>`). The bucket: an
+   S3-compatible bucket you control, **https**, reachable from the internet (not served through this cluster — the
+   policy blocks the node's address), a key that can write **and delete**, prefix e.g. `scrapeflow-m`.
+   - **a. A bucket pipeline:**
+     ```bash
+     curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/pipelines" -d '{"name": "m-bucket", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}},
+       {"id": "store", "type": "bucket", "input": "fetch", "config": {"destination_id": "'"$D_BUCKET"'"}},
+       {"id": "notify", "type": "webhook", "input": "store", "config": {"destination_id": "'"$D_HOOK"'"}}]}}'
+     ```
+     → `201`, `export P1=<id>`; `curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/pipelines/$P1/runs" -d '{}'`
+     → `202`, `export R1=<id>`; `curl -s -H "X-API-Key: $KEY" "$B/pipelines/$P1/runs/$R1"` → **`completed`**; `store`
+     has `delivery.location` `{endpoint, bucket, key: "scrapeflow-m/<P1>/<R1>/store.html"}`; the object is in your
+     bucket; `$HOOK` got one POST with `"block_id": "notify"` and `"deliveries"` naming that key, signed
+     (`X-ScrapeFlow-Signature`) with the destination's signing secret.
+   - **b. Rolled back, quickly** — a Validate that fails after the bucket:
+     ```bash
+     curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/pipelines" -d '{"name": "m-undo", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}},
+       {"id": "store", "type": "bucket", "input": "fetch", "config": {"destination_id": "'"$D_BUCKET"'"}},
+       {"id": "guard", "type": "validate", "input": "store", "config": {"rules": [{"kind": "contains", "text": "Sold out"}]}},
+       {"id": "notify", "type": "webhook", "input": "guard", "config": {"destination_id": "'"$D_HOOK"'"}}]}}'
+     ```
+     → run it (`P2`, `R2`) → **`failed`**, `failed_block_id` `guard`; `store` `undo_status` **`undone`**; the object
+     (`scrapeflow-m/<P2>/<R2>/store.html`) is **gone** from your bucket; nothing at `$HOOK`.
+   - **c. The refusing webhook** (the release's own check; ≈2.9 h): make `$HOOK` answer non-2xx (or use a second
+     receiver that does), run `m-bucket` again (`R3`): the run page shows `notify` `waiting` — "attempt N: HTTP …" —
+     for five tries over ≈2.9 h, then the run goes **undoing** and ends **`failed`** naming `notify`, `store` **`undone`**,
+     the object gone. Check back after 3 h.
+   - **d. A monitor notice to a destination.** `curl -s -H "X-API-Key: $KEY" "$B/users/me"` → `export ME=<id>`;
+     `curl -s -H "X-API-Key: $KEY" "$B/admin/users/$ME/quota"` → note `monthly_runs_limit` (to restore). A pipeline with
+     no sink: `curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/pipelines" -d '{"name": "m-watch", "definition": {"blocks": [{"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}}]}}'`
+     → `export P3=<id>`. Monthly runs to 0 (so the next firing is skipped — a new situation):
+     `curl -s -X PATCH -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/admin/users/$ME/quota" -d '{"monthly_runs_limit": 0}'`;
+     then `curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B/monitors" -d '{"name": "m-notice", "pipeline_id": "'"$P3"'", "inputs": {}, "schedule_cron": "*/5 * * * *", "notice_destination_id": "'"$D_HOOK"'"}'`
+     → `201`, `export M1=<id>`. After the next 5-minute mark `curl -s -H "X-API-Key: $KEY" "$B/monitors/$M1/history"`
+     → an event `skipped_monthly_runs` with `notice.status` **`delivered`**, and `$HOOK` got `"event": "monitor.notice"`,
+     `"notice": "skipped_monthly_runs"`, signed with the destination's secret. Restore the limit
+     (`-d '{"monthly_runs_limit": <noted value or null>}'`), then
+     `curl -s -X DELETE -H "X-API-Key: $KEY" "$B/monitors/$M1?with_checks=true"` → `204`.
+   - **e. Email (optional — if you have an SMTP account):** an `smtp` destination saved from the SPA (its test passes
+     `address`, `tls`, `login`); repeat **d** with `"notice_destination_id": "'"$D_MAIL"'"` → the email arrives,
+     subject `[ScrapeFlow] monitor m-notice: skipped_monthly_runs`.
+   - Logs: `kubectl -n scrapeflow logs deploy/scrapeflow-delivery-worker --since=30m` — no traceback.
+6. **SPA** (signed in; M.10's list, nothing there was clicked before):
+   1. Dashboard → **Destinations**: name, kind, host only (a webhook shows its host, never the URL); the kind filter.
+   2. **New destination** → bucket: *Save* disabled until *Test*; Test shows address/tls/write/delete; a key that cannot
+      delete → the **delete warning** + amber note, "Save with this warning"; change a field → "test it again", Save
+      disabled; a bad key → Test failed, Save stays disabled; Save → the detail page.
+   3. A **webhook** destination (URL + signing secret) and, if you have one, an **smtp** one; the detail reads "URL
+      hidden…", "Credentials: stored encrypted — never shown"; DevTools → Network: no response carries the URL or a
+      secret.
+   4. Detail → **Test** (stored) → checks. **Edit**: rename only → Save at once; change the bucket or paste a new
+      secret → "Test the changes" first; Save → "Saved. The test it passed".
+   5. **Delete** a destination `m-bucket` uses → the red box names the pipeline as a link; an unused one → back to the
+      list.
+   6. Pipeline editor: "Your destinations" lists ids; "Block budgets" lists bucket as "undoable sink → bucket
+      destination" with its undo reserve, webhook "cannot be undone". `m-bucket`'s page: each sink chip "→ <name>".
+   7. Run `m-bucket` with the refusing receiver (5c) and watch: bucket `completed`, Deliveries "delivered —
+      provisional…", webhook `waiting` "attempt N: …"; after it gives up: pill `undoing`, the orange "Undoing deliveries
+      — 1 left, by HH:MM" banner, no Cancel; then `failed`, bucket `undone`, Deliveries "undone".
+   8. A bucket key that cannot delete (a second destination) in `m-undo` → Deliveries "undo failed: left in place —
+      remove it by hand …" with the exact bucket, key and host.
+   9. A run where the webhook delivered and a later step failed → bucket "kept: a webhook or email had already gone
+      out", webhook "could not be undone".
+   10. `m-notice`'s page (before 5d's delete): "Notices to" row; *Edit name, schedule or notices* → pick a webhook or
+       smtp destination (no buckets offered) → Save; "nowhere else" clears it; History shows "notice delivered …".
+   11. Admin → **Destinations**: every user's destinations with the owner's email, a read-only detail (no
+       Test/Edit/Delete); the admin run and monitor pages show the same sink, undo and notice states.
+7. **Step 4 = M.13 — fence the scrape workers** (only after step 4's gate passed).
+   - Baseline, before the push — each pair must say `open` now, or the "after" proves nothing (pick a port the node
+     answers on if one says `blocked`):
+     ```bash
+     PY='import socket,sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 5)'
+     for hp in 139.99.121.44:6443 10.42.0.1:10250; do h=${hp%:*}; p=${hp#*:}
+       kubectl -n scrapeflow exec deploy/scrapeflow-http-worker-temporal -- nc -z -w 5 $h $p && echo "http $hp open" || echo "http $hp blocked"
+       for w in playwright llm; do
+         kubectl -n scrapeflow exec deploy/scrapeflow-$w-worker-temporal -- python -c "$PY" $h $p 2>/dev/null && echo "$w $hp open" || echo "$w $hp blocked"
+       done
+     done
+     ```
+   - `git -C $INFRA fetch && git -C $INFRA rebase origin/main release-m`; `git -C $INFRA log --oneline origin/main..release-m`
+     → one commit; `kubectl diff -k $INFRA/clusters/k3s-server/scrapeflow` → only NetworkPolicy
+     `scrapeflow-scrape-workers`; `git -C $INFRA push origin release-m:main`;
+     `kubectl -n scrapeflow get networkpolicy` lists it.
+   - After: the same loop → all six **`blocked`**. Public hosts still answer:
+     `kubectl -n scrapeflow exec deploy/scrapeflow-http-worker-temporal -- wget -q -T 10 -O /dev/null https://example.com && echo ok`;
+     `for w in playwright llm; do kubectl -n scrapeflow exec deploy/scrapeflow-$w-worker-temporal -- python -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=10); print('$w ok')"; done`.
+   - Product checks (no restart needed): an http job, a playwright job, a crawl and a job with an LLM step all
+     `completed`; `kubectl -n scrapeflow logs deploy/scrapeflow-<w>-worker-temporal --since=10m` → no Temporal or MinIO
+     connection errors.
+   - Rollback: `git revert` the step-4 commit + push (Flux prunes the policy). A target or LLM endpoint on the node's
+     address (anything served through this cluster's Traefik) now fails from the workers — expected, not a fault.
+8. **A separate owner decision — MinIO's default admin user.** If step 1's `mc admin user list` showed `console`
+   (the chart's default `console`/`console123` with `consoleAdmin`, never overridden here): it is an admin login with a
+   published password on the store holding every user's results. Removing it is
+   `mc admin user remove m console` in the README's `mc` session; nothing in ScrapeFlow uses it (the api and workers use
+   the root user and `scrapeflow-delivery`). Your call; record it here either way.
+9. Record step 0's values and each step's results here; mark M.1–M.14 ✅ in the status table; BUG-030's CLAUDE.md row
+   unchanged; BUG-032 → the scrape-worker half released (CLAUDE.md *SSRF re-validation* row's last sentence gains
+   "— the node's IP is fenced by NetworkPolicy"; the workflow worker's webhook half stays open); permanently delete `m-bucket`, `m-undo`, `m-watch`
+   (`?permanent=true`), then their destinations.
+
+**Rollback:** prefer a forward fix. **Never revert step 1 after step 2** (the api refuses to start without the key).
+Step 4 reverts on its own (above). Step 3: `git revert` + push removes the delivery worker — sinks and destination
+tests then fail as between steps 2 and 3. An api image revert (api, workflow-worker, CronJob to step 0's tags) leaves
+4.13/4.14 applied — L's code maps none of their tables or columns — but first: no pipeline run with a sink in flight
+(`q "SELECT count(*) FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'bucket';"`
+→ 0; the old workflow worker cannot replay a `sinks`/`rollback` run) and pending destination rows marked off (`q "UPDATE webhook_deliveries SET status='exhausted', last_error='rolled back' WHERE destination_id IS NOT NULL AND status='pending';"`
+— the old delivery activity cannot send a row without a URL). Do not downgrade the migrations.
 
 #### M.13 — (optional, owner's call) BUG-032: fence the scrape workers
 
