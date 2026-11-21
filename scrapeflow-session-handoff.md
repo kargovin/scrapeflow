@@ -160,9 +160,9 @@ items passed except 8 (R2 cannot make a write-without-delete key — covered by 
 `open` → `blocked`, jobs/crawl fine. MinIO's default `console` admin user was present and **removed by the owner**.
 Full record: backlog M.12 section → *Release record*. **Runbook fix:** 5d sets `monthly_runs_limit` to 1 (the admin
 API refuses 0).
-- **Still open, owner's:** delete the test pipelines `m-bucket`, `m-undo`, `m-refuse`, `m-watch`, `m-kept`
-  (`?permanent=true`) and their destinations; rotate the 8-character MinIO root password; an SMTP account for the
-  email check; the ADR question (lost-reply key in the `rollback` lists); PRD-018 R6 vs ADR-016 §7b on notices.
+- **Owner, 2026-11-21:** the test pipelines and destinations are kept; both design questions → **follow the ADR**
+  (the lost-reply key stays out of the `rollback` lists; notices per ADR-016 §7b). Still open: rotating the
+  8-character MinIO root password (backlog *Bugs and backlog items*, unscheduled); an SMTP account for the email check.
 - **Next:** **N.1** (approval), same way of working (memory `feedback_orchestrate_subagents.md`).
 
 ---
