@@ -69,16 +69,19 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
         run = await _lock_run(db, input.run_id)
         if run is None:
             return "cancelled"
-        if input.status == "running" and (run.status != "running" or _cancel_requested(run)):
+        # An Approval's waiting is its block's start (ADR-016 §9b).
+        starts = input.status == "running" or input.status_reason == "awaiting_approval"
+        if starts and (run.status != "running" or _cancel_requested(run)):
             await notify_run(db, run)
             await db.commit()
             return "cancelled" if _cancel_requested(run) else run.status
 
         now = datetime.now(UTC)
-        if input.status == "running":
+        if starts:
             # A retry after `waiting` keeps the first start; the last attempt's error clears.
             values = {
                 "status": input.status,
+                "status_reason": input.status_reason,
                 "input_ref": input.input_ref,
                 "started_at": func.coalesce(PipelineRunBlock.started_at, now),
                 "error": None,
@@ -96,6 +99,8 @@ async def mirror_block_status(input: MirrorBlockInput) -> str:
             # A block's outcome is a fact even on a cancelled run: its object exists and is charged.
             values = {
                 "status": input.status,
+                # ck_pipeline_run_blocks_status_reason: an Approval's awaiting_approval clears.
+                "status_reason": None,
                 "output_ref": input.output_ref,
                 "error": input.error,
                 "finished_at": now,

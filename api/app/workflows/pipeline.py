@@ -99,6 +99,13 @@ RELEASE_RUN_OUTPUTS_ACTIVITY = "release_run_outputs"
 LOAD_DESTINATION_ACTIVITY = "load_destination"
 MIRROR_ROLLBACK_STARTED_ACTIVITY = "mirror_rollback_started"
 MIRROR_UNDO_ACTIVITY = "mirror_undo_status"
+REQUEST_APPROVAL_ACTIVITY = "request_approval"
+REMIND_APPROVAL_ACTIVITY = "remind_approval"
+RESOLVE_APPROVAL_ACTIVITY = "resolve_approval"
+# Sent by whoever records an answer (or N.3's supersede) after its commit: a wake-up, not the answer.
+APPROVAL_SIGNAL = "approval_answered"
+# ADR-016 §9c: the reminder, only when the deadline is further away than this.
+APPROVAL_REMINDER_BEFORE = timedelta(hours=2)
 
 # ADR-012: a Validate's stop mode, its bound rule values and the stop path (ADR-014 §6, J.6).
 VALIDATE_STOP_PATCH = "validate-stop"
@@ -110,6 +117,8 @@ MONITOR_CHECK_PATCH = "monitor-check"
 SINKS_PATCH = "sinks"
 # ADR-012: undoing the deliveries on the failure path, or marking what stays (ADR-014 §7, M.8).
 ROLLBACK_PATCH = "rollback"
+# ADR-012: an Approval block's wait (ADR-016 §9b to §9d, N.2).
+APPROVAL_PATCH = "approval"
 
 # The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
 WEBHOOK_EVENT = WEBHOOK_RESULT_EVENT
@@ -124,7 +133,11 @@ DESTINATION_GONE_ERROR = "DestinationDeleted"
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
 # ADR-014 §5a; each list matches its CHECK in migration 4.10 — a new value widens both.
 SkipReason = Literal["stopped", "upstream_failed", "cancelled", "not_started", "alert_only"]
-StopReason = Literal["rule_not_met"]
+StopReason = Literal["rule_not_met", "approval_rejected", "approval_expired", "approval_superseded"]
+# ADR-016 §9a; matches ck_pipeline_run_blocks_status_reason with SkipReason.
+WaitReason = Literal["awaiting_approval"]
+# ADR-016 §9a; matches ck_pipeline_run_blocks_approval_answer.
+ApprovalAnswer = Literal["approved", "rejected", "expired", "superseded"]
 # ADR-016 §2b; matches ck_pipeline_runs_change_status.
 ChangeStatus = Literal["first_check", "no_baseline", "changed", "unchanged"]
 # ADR-014 §5a; matches ck_pipeline_run_blocks_undo_status.
@@ -193,8 +206,8 @@ class MirrorBlockInput(BaseModel):
     input_ref: str | None = None
     output_ref: str | None = None
     error: str | None = None
-    # skipped only.
-    status_reason: SkipReason | None = None
+    # skipped; or awaiting_approval on an Approval's waiting, which starts the block.
+    status_reason: SkipReason | WaitReason | None = None
     reason_block_id: str | None = None
     # completed only: a stop-mode Validate's verdict, less its outcome.
     verdict: dict[str, Any] | None = None
@@ -226,6 +239,29 @@ class MirrorRunInput(BaseModel):
         if (self.stopped_at_block_id is None) != (self.stop_reason is None):
             raise ValueError("stopped_at_block_id and stop_reason go together")
         return self
+
+
+class ApprovalRef(BaseModel):
+    run_id: str
+    block_id: str
+
+
+class RequestApprovalInput(ApprovalRef):
+    # Workflow time: the wait's timers count to it.
+    deadline: datetime
+    # A check's change so far, for the request (ADR-016 §9c).
+    change_status: ChangeStatus | None = None
+    change_summary: dict[str, Any] | None = None
+
+
+class ResolveApprovalInput(ApprovalRef):
+    # The workflow's deadline timer fired: no answer recorded -> expired.
+    expire: bool = False
+
+
+class ApprovalOutcome(BaseModel):
+    # None: nothing recorded yet.
+    answer: ApprovalAnswer | None = None
 
 
 class RecordStorageInput(BaseModel):

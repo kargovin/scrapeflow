@@ -15,6 +15,11 @@ from temporalio.worker import Worker
 
 from app.core import webhook_delivery
 from app.settings import settings
+from app.workflows.activities.approvals import (
+    remind_approval,
+    request_approval,
+    resolve_approval,
+)
 from app.workflows.activities.batches import finish_batch
 from app.workflows.activities.crawls import (
     admit_urls,
@@ -103,6 +108,9 @@ async def main() -> None:
             release_run_outputs,
             check_cancelled,
             load_destination,
+            request_approval,
+            remind_approval,
+            resolve_approval,
             deliver_webhook,
             job_run_started,
             read_llm_settings,
