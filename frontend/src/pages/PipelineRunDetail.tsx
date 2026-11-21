@@ -2,14 +2,25 @@ import { lazy, Suspense, useState } from 'react'
 import { useMutation, useQuery, useQueryClient, type Query } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
+  type Destination,
   type OutputState,
   type PipelineRun,
+  type PipelineRunAlert,
   type PipelineRunCancel,
   type PipelineRunResult,
+  type RollbackEntry,
 } from '../api'
 import { useApi } from '../lib/useApi'
 import { useLiveSocket } from '../lib/useLiveSocket'
-import { blockDetail, failedBlock, resultDeletedOnStop, verdictInWords } from '../lib/runText'
+import {
+  UNDO_PILL,
+  blockDetail,
+  failedBlock,
+  locationInWords,
+  resultDeletedOnStop,
+  undoLeft,
+  verdictInWords,
+} from '../lib/runText'
 import { changeLabel, comparedWith } from '../lib/monitorText'
 import DiffView from '../components/DiffView'
 import ErrorBox from '../components/ErrorBox'
@@ -35,6 +46,17 @@ function duration(start: string | null, end: string | null): string {
   const ms = (end ? new Date(end) : new Date()).getTime() - new Date(start).getTime()
   const s = Math.max(0, Math.round(ms / 1000))
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+}
+
+// "by 14:20", with the date when it is not today.
+function byTime(iso: string): string {
+  const at = new Date(iso)
+  const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString()} ${time}`
+}
+
+function rollbackLine(label: string, entries: RollbackEntry[]): string | null {
+  return entries.length ? `${label}: ${entries.map(e => e.block_id).join(', ')}` : null
 }
 
 function seconds(n: number): string {
@@ -73,6 +95,29 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
     isTerminal: msg => TERMINAL.has(msg.status ?? ''),
   })
 
+  const destinationIds = new Set([
+    ...(run?.blocks.flatMap(b => (b.delivery ? [b.delivery.destination_id] : [])) ?? []),
+    ...(run?.alerts.flatMap(a => (a.destination_id ? [a.destination_id] : [])) ?? []),
+  ])
+  // Names for the destinations this run wrote to; the run carries ids only.
+  const { data: destinations } = useQuery<Destination[]>({
+    queryKey: ['destinations', mode, isAdmin ? run?.user_id : 'me'],
+    queryFn: () =>
+      api.get(isAdmin ? `/admin/destinations?user_id=${run!.user_id}&limit=200` : '/destinations'),
+    enabled: !!run && destinationIds.size > 0 && (!isAdmin || !!run.user_id),
+  })
+  const destinationBase = isAdmin ? '/app/admin/destinations' : '/app/dashboard/destinations'
+  const destinationLink = (id: string | null) => {
+    if (!id) return <span className="text-gray-400">—</span>
+    const d = destinations?.find(x => x.id === id)
+    if (destinations && !d) return <span className="text-gray-400">deleted</span>
+    return (
+      <button onClick={() => navigate(`${destinationBase}/${id}`)} className="text-indigo-600 hover:underline">
+        {d ? `${d.name} (${d.display_host})` : id.slice(0, 8)}
+      </button>
+    )
+  }
+
   const blockParam = viewing ? `?block=${encodeURIComponent(viewing)}` : ''
   const showResult = viewing !== null || (run?.status === 'completed' && !!run.result_path)
   const output = useQuery<PipelineRunResult>({
@@ -103,6 +148,9 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
 
   const status = runStatus(run)
   const cancelling = status === 'cancelling'
+  const undoing = status === 'undoing'
+  const delivered = run.blocks.filter(b => b.delivery || b.undo_status)
+  const reported: PipelineRunAlert | undefined = run.alerts.find(a => a.rollback)
   const stopper = run.blocks.find(b => b.block_id === run.stopped_at_block_id)
   const brokeAt = failedBlock(run)
 
@@ -233,6 +281,18 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
         </div>
       )}
 
+      {undoing && (
+        <div className="border border-orange-200 bg-orange-50 rounded-lg p-4 mb-6 text-sm text-orange-800">
+          <p className="font-semibold mb-1">
+            Undoing deliveries — {undoLeft(run)} left, by {byTime(run.rollback_deadline!)}
+          </p>
+          <p>
+            {brokeAt ?? 'A step'} failed, so what this run delivered is being removed, newest first.
+            The run reads failed when that is done. A cancel does not stop it.
+          </p>
+        </div>
+      )}
+
       <h3 className="text-sm font-semibold text-gray-900 mb-2">Steps</h3>
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
         <table className="min-w-full divide-y divide-gray-200 text-sm">
@@ -251,7 +311,10 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
                   <span className="font-medium">{b.type}</span>
                   <span className="ml-1 text-gray-400">{b.block_id}</span>
                 </td>
-                <td className="px-4 py-3"><StatusPill status={b.status} /></td>
+                <td className="px-4 py-3 space-x-1 whitespace-nowrap">
+                  <StatusPill status={b.status} />
+                  {b.undo_status && UNDO_PILL[b.undo_status] && <StatusPill status={UNDO_PILL[b.undo_status]} />}
+                </td>
                 <td className="px-4 py-3 text-gray-500">{duration(b.started_at, b.finished_at)}</td>
                 <td className="px-4 py-3 text-gray-500">
                   {b.output_state === 'stored' ? (
@@ -274,6 +337,51 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
         </table>
       </div>
 
+      {delivered.length > 0 && (
+        <>
+          <h3 className="text-sm font-semibold text-gray-900 mb-2">Deliveries</h3>
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  {['Step', 'Destination', 'Where', 'State'].map(h => (
+                    <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {delivered.map(b => (
+                  <tr key={b.block_id}>
+                    <td className="px-4 py-3 text-gray-900">{b.block_id}</td>
+                    <td className="px-4 py-3">{destinationLink(b.delivery?.destination_id ?? null)}</td>
+                    <td className="px-4 py-3 text-gray-700 font-mono text-xs break-all">
+                      {b.delivery ? locationInWords(b.delivery) : 'sent — a message cannot be taken back'}
+                    </td>
+                    <td className="px-4 py-3 text-gray-500 max-w-sm break-words">
+                      {b.undo_status === 'undone'
+                        ? 'undone'
+                        : b.undo_status === 'undoing'
+                          ? 'undoing…'
+                          : b.undo_status === 'undo_failed'
+                            ? `undo failed: left in place — remove it by hand. ${b.undo_error ?? ''}`
+                            : b.undo_status === 'kept'
+                              ? 'kept: a webhook or email had already gone out'
+                              : b.undo_status === 'not_undoable'
+                                ? 'could not be undone'
+                                : undoing
+                                  ? 'waiting to be undone'
+                                  : run.status === 'running'
+                                    ? 'delivered — provisional until the run completes'
+                                    : 'delivered'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
       {run.alerts.length > 0 && (
         <>
           <h3 className="text-sm font-semibold text-gray-900 mb-2">Failure alerts</h3>
@@ -281,7 +389,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
             <table className="min-w-full divide-y divide-gray-200 text-sm">
               <thead className="bg-gray-50">
                 <tr>
-                  {['Sent by', 'Status', 'Attempts', 'Last error'].map(h => (
+                  {['Sent by', 'To', 'Status', 'Attempts', 'Last error'].map(h => (
                     <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
                   ))}
                 </tr>
@@ -290,6 +398,10 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
                 {run.alerts.map(a => (
                   <tr key={a.block_id}>
                     <td className="px-4 py-3 text-gray-900">{a.block_id}</td>
+                    <td className="px-4 py-3 text-gray-500">
+                      {a.kind}
+                      {a.destination_id && <span className="ml-1">{destinationLink(a.destination_id)}</span>}
+                    </td>
                     <td className="px-4 py-3">
                       <StatusPill status={a.status === 'exhausted' ? 'failed' : a.status === 'delivered' ? 'completed' : 'pending'} />
                       <span className="ml-2 text-xs text-gray-500">
@@ -306,6 +418,19 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
                 ))}
               </tbody>
             </table>
+            {reported?.rollback && (
+              <p className="px-4 py-2 border-t border-gray-100 text-xs text-gray-600">
+                The alert reports what rollback did —{' '}
+                {[
+                  rollbackLine('undone', reported.rollback.undone),
+                  rollbackLine('left in place', reported.rollback.left_in_place),
+                  rollbackLine('kept', reported.rollback.kept),
+                ]
+                  .filter(Boolean)
+                  .join('; ') || 'nothing had been delivered'}
+                .
+              </p>
+            )}
           </div>
         </>
       )}
@@ -333,7 +458,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
         ) : null
       )}
 
-      {!isAdmin && run.status === 'running' && !run.cancel_requested_at && (
+      {!isAdmin && run.status === 'running' && !run.cancel_requested_at && !undoing && (
         <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
           <h3 className="text-sm font-semibold text-gray-900 mb-1">Cancel run</h3>
           <p className="text-xs text-gray-600 mb-3">

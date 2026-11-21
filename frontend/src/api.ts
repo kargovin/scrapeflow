@@ -235,13 +235,47 @@ export interface RunVerdict {
 
 export interface PipelineRunAlert {
   block_id: string
+  kind: 'webhook' | 'email'
+  // A saved destination's; null for an inline URL, or once that destination is deleted.
+  destination_id: string | null
   status: 'pending' | 'delivered' | 'exhausted'
   attempts: number
   last_error: string | null
   next_attempt_at: string
   delivered_at: string | null
   created_at: string
+  // What the alert says rollback did (PRD-017 R3).
+  rollback: RollbackLists | null
 }
+
+export interface RollbackEntry {
+  block_id: string
+  kind: string
+  location: BucketLocation | Record<string, unknown>
+}
+
+export interface RollbackLists {
+  undone: RollbackEntry[]
+  left_in_place: RollbackEntry[]
+  kept: RollbackEntry[]
+}
+
+// Where a bucket sink wrote (ADR-015 §5): the location its undo uses, never the destination's current one.
+export interface BucketLocation {
+  endpoint: string
+  bucket: string
+  region: string | null
+  key: string
+}
+
+export interface SinkDelivery {
+  destination_id: string
+  kind: string
+  location: BucketLocation | Record<string, unknown>
+}
+
+// ADR-014 §5a: after a delivery, on a failed run. Null = nothing to undo.
+export type UndoStatus = 'undoing' | 'undone' | 'undo_failed' | 'kept' | 'not_undoable'
 
 export type OutputState = 'none' | 'passed_through' | 'stored' | 'collected'
 
@@ -260,6 +294,10 @@ export interface PipelineRunBlock {
   status_reason: BlockStatusReason | null
   reason_block_id: string | null
   verdict: RunVerdict | null
+  // A sink's delivery record and its undo (PRD-017).
+  delivery: SinkDelivery | null
+  undo_status: UndoStatus | null
+  undo_error: string | null
 }
 
 export interface PipelineRun extends PipelineRunSummary {
@@ -421,6 +459,8 @@ export interface Monitor {
   inputs: Record<string, RunInputValue>
   carried: CarriedInput[]
   schedule_cron: string
+  // Where notices also go: a webhook or smtp destination.
+  notice_destination_id: string | null
   state: MonitorState
   consecutive_failures: number
   next_check_at: string | null
@@ -459,6 +499,18 @@ export interface MonitorEvent {
   count: number
   ended_at: string | null
   detail: Record<string, unknown> | null
+  // The notice this situation sent to the monitor's destination; null = none sent.
+  notice: MonitorNotice | null
+}
+
+export interface MonitorNotice {
+  kind: 'webhook' | 'email'
+  destination_id: string | null
+  status: 'pending' | 'delivered' | 'exhausted'
+  attempts: number
+  last_error: string | null
+  next_attempt_at: string
+  delivered_at: string | null
 }
 
 export interface MonitorHistoryItem {
@@ -470,4 +522,87 @@ export interface MonitorHistoryItem {
 
 export interface AdminMonitorDetail extends Monitor {
   history: MonitorHistoryItem[]
+}
+
+// ---------------------------------------------------------------------------
+// Destinations (PRD-017 · ADR-015 §2)
+// ---------------------------------------------------------------------------
+
+export type DestinationKind = 'bucket' | 'postgres' | 'smtp' | 'webhook'
+
+// Never the secret; a webhook's URL is a credential, so it shows only display_host.
+export interface Destination {
+  id: string
+  name: string
+  kind: DestinationKind
+  address: Record<string, unknown>
+  display_host: string
+  created_at: string
+  updated_at: string
+  // Admin routes only.
+  user_id?: string
+  user_email?: string
+}
+
+export interface DestinationCheck {
+  check: string
+  outcome: 'passed' | 'failed' | 'warning'
+  message: string | null
+}
+
+// A warning (a bucket that refused the delete) still passes.
+export interface DestinationTestResult {
+  passed: boolean
+  checks: DestinationCheck[]
+}
+
+export interface DestinationSaved extends Destination {
+  // Null: an edit that changed neither address nor secret runs no test.
+  test: DestinationTestResult | null
+}
+
+// 422 from a save whose test failed.
+export interface DestinationTestFailed {
+  error: 'destination_test_failed'
+  message: string
+  checks: DestinationCheck[]
+}
+
+// 409 from a delete: what still uses it.
+export interface DestinationInUse {
+  error: 'destination_in_use'
+  message: string
+  pipelines: Array<{ id: string; name: string }>
+  runs: Array<{ id: string; pipeline_id: string }>
+  monitors: Array<{ id: string; name: string }>
+}
+
+// ---------------------------------------------------------------------------
+// Block catalog (PRD-016 R4, PRD-017 R2/R6)
+// ---------------------------------------------------------------------------
+
+export interface CatalogTiming {
+  attempt_seconds: number
+  queue_wait_seconds: number
+  attempts: number
+  first_wait_seconds: number
+  backoff: number
+  max_wait_seconds: number
+  budget_seconds: number
+  need_seconds: number
+}
+
+export interface CatalogBlock {
+  type: string
+  kind: 'content' | 'effect'
+  config_schema_version: number
+  consumes: string[]
+  destination_kind: DestinationKind | null
+  sink: { reversible: boolean; undo: CatalogTiming | null } | null
+  timings: Record<string, CatalogTiming>
+}
+
+export interface PipelineCatalog {
+  blocks: CatalogBlock[]
+  run_limit_seconds: number
 }

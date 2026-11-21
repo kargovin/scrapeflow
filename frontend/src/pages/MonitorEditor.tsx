@@ -8,7 +8,8 @@ import { useApi } from '../lib/useApi'
 import ErrorBox from '../components/ErrorBox'
 
 const HELP = [
-  'A monitor runs one pinned version of a pipeline on a schedule (UTC cron, at most every 5 minutes). Its pipeline, version and inputs are fixed for its life; only the name and the schedule can change later.',
+  'A monitor runs one pinned version of a pipeline on a schedule (UTC cron, at most every 5 minutes). Its pipeline, version and inputs are fixed for its life; only the name, the schedule and the notice destination can change later.',
+  'Notices (checks skipped, paused itself) always show on the monitor page; set "notice_destination_id" to the id of one of your webhook or email destinations to also be told there.',
   'Every run input goes in "inputs" (a fixed value) or in "carried": {input, from_block, path, start} takes the value at a JSON Pointer path of a block\'s output from the last check, starting at "start".',
   'A pipeline with an LLM block needs a change gate before it: a validate block with rules [{"kind": "changed"}] and when_unmet "stop", so an unchanged page is never sent to the LLM.',
 ]
@@ -24,6 +25,7 @@ function template(pipeline: Pipeline | undefined, pipelineId: string | null) {
     inputs,
     carried: [],
     schedule_cron: '0 * * * *',
+    notice_destination_id: null,
   }
 }
 

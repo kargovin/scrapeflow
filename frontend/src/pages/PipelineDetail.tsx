@@ -1,7 +1,13 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient, type Query } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
-import { type Pipeline, type PipelineRun, type PipelineRunSummary, type RunInputValue } from '../api'
+import {
+  type Destination,
+  type Pipeline,
+  type PipelineRun,
+  type PipelineRunSummary,
+  type RunInputValue,
+} from '../api'
 import { useApi } from '../lib/useApi'
 import { stopLabel } from '../lib/runText'
 import { STATE_LABELS, changeLabel } from '../lib/monitorText'
@@ -31,6 +37,16 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
     refetchInterval: (query: Query<PipelineRunSummary[]>) =>
       (query.state.data ?? []).some(r => r.status === 'running') ? 5_000 : false,
   })
+
+  const referenced = pipeline?.definition.blocks.some(b => typeof b.config.destination_id === 'string')
+  const { data: destinations } = useQuery<Destination[]>({
+    queryKey: ['destinations', mode, isAdmin ? pipeline?.user_id : 'me'],
+    queryFn: () =>
+      api.get(isAdmin ? `/admin/destinations?user_id=${pipeline!.user_id}&limit=200` : '/destinations'),
+    enabled: !!referenced && (!isAdmin || !!pipeline?.user_id),
+  })
+  const destinationName = (id: unknown) =>
+    typeof id === 'string' ? (destinations?.find(d => d.id === id)?.name ?? id.slice(0, 8)) : null
 
   const inputTypes: Record<string, string> = Object.fromEntries(
     Object.entries(pipeline?.definition.inputs ?? {}).map(([n, d]) => [n, String(d.type ?? 'url')]),
@@ -102,6 +118,16 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
             <span className="px-2 py-1 bg-white border border-gray-200 rounded text-xs">
               <span className="font-semibold text-gray-800">{b.type}</span>
               <span className="ml-1 text-gray-400">{b.id}</span>
+              {destinationName(b.config.destination_id) && (
+                <button
+                  onClick={() =>
+                    navigate(`${isAdmin ? '/app/admin' : '/app/dashboard'}/destinations/${String(b.config.destination_id)}`)
+                  }
+                  className="ml-1 text-indigo-600 hover:underline"
+                >
+                  → {destinationName(b.config.destination_id)}
+                </button>
+              )}
               {b.secrets.length > 0 && (
                 <span className="ml-1 text-gray-400" title={`secrets set: ${b.secrets.join(', ')}`}>🔒</span>
               )}

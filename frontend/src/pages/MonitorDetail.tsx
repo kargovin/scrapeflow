@@ -3,7 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   type AdminMonitorDetail,
+  type Destination,
   type Monitor,
+  type MonitorNotice,
   type MonitorHistoryItem,
   type PipelineRun,
   type ScheduledJobsUsage,
@@ -15,6 +17,27 @@ import { stopLabel } from '../lib/runText'
 import ErrorBox from '../components/ErrorBox'
 import StatusPill, { runStatus } from '../components/StatusPill'
 import { STATE_PILL } from './Monitors'
+
+// PRD-018 R6: a notice that could not be delivered is shown as such, beside its situation.
+function NoticeState({ notice }: { notice: MonitorNotice }) {
+  const to = notice.kind === 'email' ? 'email' : 'notice'
+  if (notice.status === 'delivered') {
+    return <span className="text-xs text-gray-500">{to} delivered {new Date(notice.delivered_at!).toLocaleString()}</span>
+  }
+  if (notice.status === 'exhausted') {
+    return (
+      <span className="text-xs text-red-600">
+        {to} undelivered{notice.last_error ? ` — ${notice.last_error}` : ''}
+      </span>
+    )
+  }
+  return (
+    <span className="text-xs text-amber-700">
+      {to} sending{notice.attempts ? ` — tried ${notice.attempts}×${notice.last_error ? ` (${notice.last_error})` : ''}` : ''}, next try{' '}
+      {new Date(notice.next_attempt_at).toLocaleString()}
+    </span>
+  )
+}
 
 function HistoryLine({
   item,
@@ -44,6 +67,7 @@ function HistoryLine({
       <span className="w-44 text-xs text-gray-400">{at}</span>
       <StatusPill status={event.kind === 'paused_itself' ? 'failed' : 'skipped'} />
       <span className="text-gray-600">{eventInWords(event)}</span>
+      {event.notice && <NoticeState notice={event.notice} />}
     </li>
   )
 }
@@ -62,6 +86,7 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState('')
   const [cron, setCron] = useState('')
+  const [notice, setNotice] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<'plain' | 'with_checks' | null>(null)
 
   // R9: the page refreshes while it is open; no live channel.
@@ -77,6 +102,20 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
     refetchInterval: 10_000,
   })
   const history = isAdmin ? (monitor as AdminMonitorDetail | undefined)?.history : userHistory
+  // ADR-016 §8: notices go to one webhook or smtp destination of the owner's.
+  const { data: destinations } = useQuery<Destination[]>({
+    queryKey: ['destinations', 'user', 'me'],
+    queryFn: () => api.get('/destinations'),
+    enabled: !isAdmin,
+  })
+  const noticeId = monitor?.notice_destination_id ?? null
+  const { data: adminDestination } = useQuery<Destination>({
+    queryKey: ['destination', 'admin', noticeId],
+    queryFn: () => api.get(`/admin/destinations/${noticeId}`),
+    enabled: isAdmin && !!noticeId,
+  })
+  const noticeDestination = isAdmin ? adminDestination : destinations?.find(d => d.id === noticeId)
+  const noticeChoices = destinations?.filter(d => d.kind === 'webhook' || d.kind === 'smtp') ?? []
   const { data: usage } = useQuery<ScheduledJobsUsage>({
     queryKey: ['scheduled-jobs-usage'],
     queryFn: () => api.get('/users/me/scheduled-jobs'),
@@ -105,6 +144,7 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
       api.patch<Monitor>(`/monitors/${monitorId}`, {
         name: name !== monitor?.name ? name : undefined,
         schedule_cron: cron !== monitor?.schedule_cron ? cron : undefined,
+        notice_destination_id: notice !== (monitor?.notice_destination_id ?? '') ? notice || null : undefined,
       }),
     onSuccess: () => {
       setEditing(false)
@@ -150,6 +190,19 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
           <span className="text-xs text-gray-400 font-mono">{monitor.schedule_cron} (UTC)</span>
         )}
       </span>,
+    ],
+    [
+      'Notices to',
+      noticeId ? (
+        <button
+          onClick={() => navigate(`${isAdmin ? '/app/admin' : '/app/dashboard'}/destinations/${noticeId}`)}
+          className="text-indigo-600 hover:underline"
+        >
+          {noticeDestination ? `${noticeDestination.name} (${noticeDestination.kind}, ${noticeDestination.display_host})` : noticeId}
+        </button>
+      ) : (
+        <span className="text-gray-500">this page only — choose a webhook or email destination to be told elsewhere</span>
+      ),
     ],
     ['Next check', monitor.next_check_at ? new Date(monitor.next_check_at).toLocaleString() : '—'],
     ['Failed in a row', `${monitor.consecutive_failures} (pauses itself at 5)`],
@@ -205,11 +258,12 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
             onClick={() => {
               setName(monitor.name)
               setCron(monitor.schedule_cron)
+              setNotice(monitor.notice_destination_id ?? '')
               setEditing(!editing)
             }}
             className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
           >
-            Edit name or schedule
+            Edit name, schedule or notices
           </button>
           {usage && (
             <span className="self-center text-xs text-gray-500">
@@ -238,6 +292,20 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
               className="block mt-1 w-48 text-sm font-mono border border-gray-300 rounded px-2 py-1 text-gray-900"
             />
           </label>
+          <label className="text-xs text-gray-500">
+            notices also go to
+            <select
+              value={notice}
+              onChange={e => setNotice(e.target.value)}
+              className="block mt-1 w-64 text-sm border border-gray-300 rounded px-2 py-1 text-gray-900"
+            >
+              <option value="">nowhere else (this page only)</option>
+              {noticeChoices.map(d => (
+                <option key={d.id} value={d.id}>{d.name} ({d.kind}, {d.display_host})</option>
+              ))}
+              {notice && !noticeChoices.some(d => d.id === notice) && <option value={notice}>{notice}</option>}
+            </select>
+          </label>
           <button
             onClick={() => edit.mutate()}
             disabled={edit.isPending || !name.trim() || !cron.trim()}
@@ -245,7 +313,7 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
           >
             {edit.isPending ? 'Saving…' : 'Save'}
           </button>
-          <ErrorBox error={edit.error} />
+          <ErrorBox error={edit.error} subject="monitor" />
         </div>
       )}
 
