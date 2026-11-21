@@ -18,6 +18,7 @@ from worker import bucket, checks, egress, pinned_http
 from worker.bucket import BucketActivities, Endpoint, Refused, Reply, describe, endpoint, object_key
 from worker.config import settings
 from worker.contracts import (
+    NOT_WRITTEN,
     BucketLocation,
     DeliverBucketInput,
     DestinationTestInput,
@@ -167,6 +168,8 @@ async def test_a_retry_overwrites_the_same_key(s3):
     with pytest.raises(ApplicationError) as exc:
         await _deliver(inp)
     assert exc.value.non_retryable is False
+    # An error reply: the bucket did not store it.
+    assert exc.value.details == (NOT_WRITTEN,)
     out = await _deliver(inp)
 
     assert [r.path for r in s3.requests] == [f"/results/{out.location.key}"] * 2
@@ -208,6 +211,7 @@ async def test_a_redirect_is_not_followed(s3):
     assert exc.value.message == (
         "s3.test redirected the write (PermanentRedirect, HTTP 307); the bucket is in region eu-west-1"
     )
+    assert exc.value.details == (NOT_WRITTEN,)
     assert len(s3.requests) == 1
 
 
@@ -218,6 +222,7 @@ async def test_an_error_never_carries_the_server_s_text_or_the_secret(s3):
     assert exc.value.message == "s3.test refused the write (SignatureDoesNotMatch, HTTP 403)"
     assert exc.value.non_retryable is True
     assert SECRET_KEY not in repr(exc.value) and exc.value.__cause__ is None
+    assert exc.value.details == (NOT_WRITTEN,)
 
 
 async def test_a_missing_copy_is_final_and_reaches_no_bucket(s3):
@@ -225,6 +230,7 @@ async def test_a_missing_copy_is_final_and_reaches_no_bucket(s3):
     with pytest.raises(ApplicationError) as exc:
         await _deliver(_deliver_input(s3), FakeSource(error=missing))
     assert (exc.value.type, exc.value.non_retryable) == ("SourceFailed", True)
+    assert exc.value.details == (NOT_WRITTEN,)
     assert s3.requests == []
 
 
@@ -232,6 +238,8 @@ async def test_a_copy_that_fails_mid_stream_is_the_source_s_transient_error(s3):
     with pytest.raises(ApplicationError) as exc:
         await _deliver(_deliver_input(s3), FakeSource(fail_mid=True))
     assert (exc.value.type, exc.value.non_retryable) == ("SourceUnavailable", False)
+    # A body cut short of its Content-Length is never stored.
+    assert exc.value.details == (NOT_WRITTEN,)
 
 
 async def test_an_attempt_past_its_deadline_is_transient(s3, monkeypatch):
@@ -241,6 +249,8 @@ async def test_an_attempt_past_its_deadline_is_transient(s3, monkeypatch):
         await _deliver(_deliver_input(s3))
     assert (exc.value.type, exc.value.non_retryable) == ("DestinationUnreachable", False)
     assert exc.value.message == f"s3.test:{s3.port} did not answer in time"
+    # The PUT may have landed: the workflow undoes the key if the block fails.
+    assert exc.value.details == ()
 
 
 async def test_an_address_that_is_not_https_is_final_before_any_lookup(s3):
@@ -249,6 +259,7 @@ async def test_an_address_that_is_not_https_is_final_before_any_lookup(s3):
     with pytest.raises(ApplicationError) as exc:
         await _deliver(inp)
     assert (exc.value.type, exc.value.non_retryable) == ("DestinationAddress", True)
+    assert exc.value.details == (NOT_WRITTEN,)
     assert s3.lookups == []
 
 
@@ -335,6 +346,8 @@ async def test_a_private_endpoint_is_refused_at_every_attempt(monkeypatch, reach
             await call
         assert (exc.value.type, exc.value.non_retryable) == ("EgressBlocked", True)
         assert exc.value.message == "URL resolves to a private address: 10.0.0.5"
+        if call.__name__ == "_deliver":
+            assert exc.value.details == (NOT_WRITTEN,)
     assert await _test(_test_input(endpoint_)) == [
         ("address", "failed", "URL resolves to a private address: 10.0.0.5"),
     ]
@@ -370,6 +383,7 @@ async def test_a_certificate_for_another_name_is_final_and_tries_no_other_addres
             await _deliver(_deliver_input(s3))
     assert (exc.value.type, exc.value.message) == ("CertificateMismatch", "certificate not valid for s3.test")
     assert exc.value.non_retryable is True
+    assert exc.value.details == (NOT_WRITTEN,)
     assert tried == ["127.0.0.1"]
     assert s3.requests == []
 
@@ -400,6 +414,8 @@ async def test_the_last_refused_address_is_a_transient_error(monkeypatch):
             await _deliver(_deliver_input(s3))
     assert (exc.value.type, exc.value.non_retryable) == ("DestinationUnreachable", False)
     assert exc.value.message.startswith(f"could not reach s3.test:{s3.port} (")
+    # Never connected: nothing was sent.
+    assert exc.value.details == (NOT_WRITTEN,)
 
 
 @asynccontextmanager
@@ -437,6 +453,9 @@ async def test_a_dropped_connection_is_not_resent(monkeypatch, method):
     assert [line.split(" ", 1)[0] for line in received] == [method]
     assert (exc.value.type, exc.value.non_retryable) == ("DestinationUnreachable", False)
     assert exc.value.message == f"could not reach s3.test:{port} (ServerDisconnectedError)"
+    if method == "PUT":
+        # The request went out: whether it was stored is unknown.
+        assert exc.value.details == ()
 
 
 async def test_the_resolver_answers_for_the_checked_host_only():

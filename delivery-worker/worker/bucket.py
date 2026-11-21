@@ -24,6 +24,7 @@ from .contracts import (
     BUCKET_DELIVER_ATTEMPT_SECONDS,
     BUCKET_UNDO_ATTEMPT_SECONDS,
     DELIVER_BUCKET_ACTIVITY,
+    NOT_WRITTEN,
     UNDO_BUCKET_ACTIVITY,
     BucketAddress,
     BucketLocation,
@@ -32,6 +33,7 @@ from .contracts import (
     DeliverBucketOutput,
     UndoBucketInput,
     UndoBucketOutput,
+    object_key,
 )
 from .destinations import final_error, parse
 from .source import Source, source_error
@@ -74,11 +76,6 @@ def endpoint(url: str) -> Endpoint:
     host = parts.hostname.rstrip(".").lower()
     shown = f"[{host}]" if ":" in host else host
     return Endpoint(host, port, shown if port == 443 else f"{shown}:{port}")
-
-
-def object_key(prefix: str, pipeline_id: str, run_id: str, block_id: str, ext: str) -> str:
-    """``{prefix}/{pipeline_id}/{run_id}/{block_id}.{ext}`` (ADR-015 §5): a retry overwrites."""
-    return "/".join(p for p in (prefix.strip("/"), pipeline_id, run_id, f"{block_id}.{ext}") if p)
 
 
 @dataclass(frozen=True)
@@ -210,6 +207,22 @@ def classified(exc: BaseException, where: Endpoint, action: str) -> ApplicationE
     return ApplicationError(message, type=type_, non_retryable=final)
 
 
+def _not_written(err: ApplicationError) -> ApplicationError:
+    return ApplicationError(err.message, NOT_WRITTEN, type=err.type, non_retryable=err.non_retryable)
+
+
+def _never_written(exc: BaseException) -> bool:
+    """The bucket answered, or the request was never sent: the object cannot be there."""
+    return isinstance(
+        exc,
+        Refused
+        | egress.EgressBlocked
+        | egress.CertificateMismatch
+        | aiohttp.ClientConnectorError
+        | aiohttp.ConnectionTimeoutError,
+    )
+
+
 def _endpoint_or_final(url: str) -> Endpoint:
     try:
         return endpoint(url)
@@ -223,23 +236,41 @@ class BucketActivities:
 
     @activity.defn(name=DELIVER_BUCKET_ACTIVITY)
     async def deliver_bucket(self, inp: DeliverBucketInput) -> DeliverBucketOutput:
-        """PUT the input at its run-keyed key, streamed from ScrapeFlow's copy with its length."""
-        address, secret = parse("bucket", inp.address, inp.encrypted_secret)
+        """PUT the input at its run-keyed key, streamed from ScrapeFlow's copy with its length.
+
+        A failure carries ``NOT_WRITTEN`` unless the PUT may have stored the object."""
+        try:
+            address, secret = parse("bucket", inp.address, inp.encrypted_secret)
+            where = _endpoint_or_final(address.endpoint)
+        except ApplicationError as exc:
+            raise _not_written(exc) from None
         assert isinstance(address, BucketAddress) and isinstance(secret, BucketSecret)
-        where = _endpoint_or_final(address.endpoint)
         key = object_key(address.prefix, inp.pipeline_id, inp.run_id, inp.block_id, inp.ext)
         client = BucketClient(where, address.bucket, address.region, secret)
 
-        async with self._source.open(inp.source_path) as obj:
-            try:
-                async with asyncio.timeout(BUCKET_DELIVER_ATTEMPT_SECONDS - ATTEMPT_MARGIN_SECONDS):
-                    reply = await client.put(key, obj.chunks(), obj.length, CONTENT_TYPES[inp.ext])
-                if not reply.ok:
-                    raise Refused(reply)
-            except Exception as exc:
-                if obj.failure is not None:
-                    raise source_error(obj.failure) from None
-                raise classified(exc, where, "write") from None
+        opened = False
+        try:
+            async with self._source.open(inp.source_path) as obj:
+                opened = True
+                try:
+                    async with asyncio.timeout(
+                        BUCKET_DELIVER_ATTEMPT_SECONDS - ATTEMPT_MARGIN_SECONDS
+                    ):
+                        reply = await client.put(
+                            key, obj.chunks(), obj.length, CONTENT_TYPES[inp.ext]
+                        )
+                    if not reply.ok:
+                        raise Refused(reply)
+                except Exception as exc:
+                    # A body cut short is refused for its length: nothing is stored.
+                    if obj.failure is not None:
+                        raise _not_written(source_error(obj.failure)) from None
+                    error = classified(exc, where, "write")
+                    raise (_not_written(error) if _never_written(exc) else error) from None
+        except ApplicationError as exc:
+            if opened:
+                raise
+            raise _not_written(exc) from None
 
         log.info(
             "bucket_delivered",

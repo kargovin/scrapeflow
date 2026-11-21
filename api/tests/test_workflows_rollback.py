@@ -11,7 +11,8 @@ import pytest
 from sqlalchemy import func, select, update
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, TimeoutType
+from temporalio.exceptions import TimeoutError as ActivityTimeoutError
 
 from app.core.db import AsyncSessionLocal
 from app.core.pipeline_status import PIPELINE_STATUS_CHANNEL
@@ -20,7 +21,11 @@ from app.models.quota_views import quota_active_submissions
 from app.models.webhook_delivery import WebhookDelivery
 from app.pipelines.catalog import BUCKET_UNDO_TIMING
 from app.settings import settings
-from app.workflows.activities.contracts import BUCKET_UNDO_ATTEMPT_SECONDS, UndoBucketInput
+from app.workflows.activities.contracts import (
+    BUCKET_UNDO_ATTEMPT_SECONDS,
+    NOT_WRITTEN,
+    UndoBucketInput,
+)
 from app.workflows.activities.db import (
     mirror_rollback_started,
     mirror_run_status,
@@ -32,6 +37,7 @@ from app.workflows.pipeline import (
     MirrorRunInput,
     MirrorUndoInput,
     RollbackStartedInput,
+    _may_have_written,
 )
 from app.workflows.queues import DELIVERY_QUEUE
 from tests.test_pipeline_alerts import ALERT_URL, _definition, _webhook
@@ -45,6 +51,7 @@ from tests.test_workflows_pipeline import (
     _run_rows,
 )
 from tests.test_workflows_sinks import (
+    BUCKET_ONLY,
     BUCKET_THEN_HOOKS,
     HOOK,
     INLINE_HOOK,
@@ -653,6 +660,7 @@ async def test_a_bucket_failing_after_an_earlier_bucket_delivered_undoes_the_ear
         if input.block_id == "store_2":
             raise ApplicationError(
                 "the bucket refused the write (AccessDenied)",
+                NOT_WRITTEN,
                 type="DestinationRefused",
                 non_retryable=True,
             )
@@ -679,3 +687,211 @@ async def test_a_run_deleted_under_an_undos_load_ends_the_rollback():
     assert [c for c in h.calls if isinstance(c, MirrorUndoInput)] == [
         MirrorUndoInput(run_id="r1", undo={"store_2": "undoing"})
     ]
+
+
+# --- a failed bucket block whose try may have written (its reply was lost) -----------------------
+
+
+def _unanswered(times: int = 99, then=None):
+    """The worker's own deadline or a dropped connection: no NOT_WRITTEN, the PUT may have landed."""
+    seen: list = []
+
+    async def bucket(input):
+        seen.append(input)
+        if len(seen) <= times:
+            raise ApplicationError(
+                "s3.example.com:443 did not answer in time", type="DestinationUnreachable"
+            )
+        return await (then or _bucket_ok)(input)
+
+    return bucket
+
+
+def _unanswered_on(block_id: str):
+    unanswered = _unanswered()
+
+    async def bucket(input):
+        return await (unanswered if input.block_id == block_id else _bucket_ok)(input)
+
+    return bucket
+
+
+async def _refused_write(input):
+    raise ApplicationError(
+        "the bucket refused the write (AccessDenied)",
+        NOT_WRITTEN,
+        type="DestinationRefused",
+        non_retryable=True,
+    )
+
+
+# Out of save-time order (a bucket after a webhook): D13 on the workflow side.
+HOOK_THEN_BUCKET = _sinks({**HOOK, "input": "extract"}, {**STORE, "input": "notify"})
+UNANSWERED = "DestinationUnreachable: s3.example.com:443 did not answer in time"
+LOST = (
+    "a try whose reply was lost may have written bucket exports, "
+    "key out/p1/r1/store.json at https://s3.example.com/"
+)
+
+
+async def test_a_lost_reply_then_the_budget_running_out_undoes_the_blocks_own_key():
+    h = Harness(bucket=_unanswered())
+    result = await h.run(BUCKET_ONLY.model_copy(update={"time_budget_seconds": 200}))
+
+    assert isinstance(result, WorkflowFailureError)
+    assert len(h.bucket_inputs) == 2
+    message = f"{UNANSWERED} (the run's time budget ran out after 2 attempts); {LOST}"
+    assert h.undo_inputs == [_undo_of("store")]
+    [started, *rest] = _rollback_calls(h.calls)
+    assert started == RollbackStartedInput(
+        run_id="r1",
+        failed_block_id="store",
+        error=f"store: {message}",
+        rollback_deadline=started.rollback_deadline,
+    )
+    # No undo status: ADR-014 §5a keeps it on completed blocks; the outcome is in the run's error.
+    assert rest == [LOAD, _failed_run("store", f"{message}; rollback removed it")]
+    # The location is on the failed block before rollback starts.
+    assert h.calls.index(
+        MirrorBlockInput(run_id="r1", block_id="store", status="failed", error=message)
+    ) < h.calls.index(started)
+    # Inside the reserve the catalog holds for the block.
+    budget = (started.rollback_deadline - h.undo_info[0].scheduled_time).total_seconds()
+    assert BUCKET_UNDO_TIMING.need - 5 <= budget <= BUCKET_UNDO_TIMING.need
+
+
+async def test_a_lost_reply_then_a_final_refusal_still_undoes_the_key():
+    h = Harness(bucket=_unanswered(1, then=_refused_write))
+    await h.run(BUCKET_ONLY)
+
+    assert len(h.bucket_inputs) == 2
+    assert h.undo_inputs == [_undo_of("store")]
+    message = f"DestinationRefused: the bucket refused the write (AccessDenied); {LOST}"
+    assert h.calls[-1] == _failed_run("store", f"{message}; rollback removed it")
+
+
+async def test_a_lost_reply_then_the_destination_deleted_is_left_in_place_with_its_location():
+    loads: list = []
+
+    async def load(input):
+        loads.append(input)
+        return await (_gone if len(loads) > 1 else _load_ok)(input)
+
+    h = Harness(bucket=_unanswered(), load=load)
+    await h.run(BUCKET_ONLY)
+
+    assert len(h.bucket_inputs) == 1
+    assert h.undo_inputs == []
+    assert h.calls[-1].error == (
+        f"store: DestinationDeleted: destination deleted; {LOST}; "
+        "rollback could not remove it, left in place: DestinationDeleted: destination deleted"
+    )
+
+
+async def test_an_undo_that_gives_up_names_the_key_left_in_place():
+    h = Harness(bucket=_unanswered(1, then=_refused_write), undo=_flaky_undo(99))
+    await h.run(BUCKET_ONLY)
+
+    assert len(h.undo_inputs) == 5
+    assert h.calls[-1].error.endswith(
+        f"{LOST}; rollback could not remove it, left in place: DestinationUnavailable: "
+        "HTTP 503 from the bucket (gave up after 5 attempts)"
+    )
+
+
+async def test_the_lost_reply_is_undone_first_then_the_earlier_deliveries():
+    h = Harness(bucket=_unanswered_on("store_2"))
+    await h.run(TWO_BUCKETS_THEN_HOOK.model_copy(update={"time_budget_seconds": 300}))
+
+    assert h.undo_inputs == [_undo_of("store_2"), _undo_of("store")]
+    started = _rollback_calls(h.calls)[0]
+    budget = (started.rollback_deadline - h.undo_info[0].scheduled_time).total_seconds()
+    assert 2 * BUCKET_UNDO_TIMING.need - 5 <= budget <= 2 * BUCKET_UNDO_TIMING.need
+    assert [c.undo for c in h.calls if isinstance(c, MirrorUndoInput)] == [
+        {"store": "undoing"},
+        {"store": "undone"},
+    ]
+    assert h.calls[-1].error.endswith("; rollback removed it")
+
+
+async def test_a_lost_reply_on_a_try_that_later_delivers_is_not_undone_twice():
+    h = Harness(bucket=_unanswered(1), webhook=_hook_refused)
+    await h.run(BUCKET_THEN_HOOKS)
+
+    assert len(h.bucket_inputs) == 2
+    assert h.undo_inputs == [_undo_of("store")]
+    assert h.calls[-1] == _failed_run("notify", REFUSED)
+
+
+async def test_a_refusal_with_no_lost_reply_before_it_undoes_nothing():
+    h = Harness(bucket=_refused_write)
+    await h.run(BUCKET_ONLY)
+    assert h.undo_inputs == []
+    assert not [c for c in h.calls if isinstance(c, RollbackStartedInput | MirrorUndoInput)]
+    assert h.calls[-1] == _failed_run(
+        "store", "DestinationRefused: the bucket refused the write (AccessDenied)"
+    )
+
+
+async def test_a_lost_reply_after_a_webhook_went_out_is_left_and_said_so():
+    h = Harness(bucket=_unanswered())
+    await h.run(HOOK_THEN_BUCKET)
+
+    assert h.undo_inputs == []
+    rollback = _rollback_calls(h.calls)
+    assert rollback[0] == MirrorUndoInput(run_id="r1", undo={"notify": "not_undoable"})
+    assert rollback[1].error.endswith(
+        f"{LOST}; left in place: a webhook or email had already gone out"
+    )
+
+
+async def test_a_cancel_after_a_lost_reply_names_where_it_may_have_written_and_undoes_nothing():
+    async def cancel_in_wait(handle):
+        while not h.bucket_inputs:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.5)
+        await handle.cancel()
+
+    h = Harness(bucket=_unanswered())
+    await h.run(BUCKET_ONLY, during=cancel_in_wait)
+
+    assert h.undo_inputs == []
+    assert h.calls[-2:] == [
+        MirrorBlockInput(
+            run_id="r1",
+            block_id="store",
+            status="failed",
+            error=f"cancelled before it finished; {LOST}",
+        ),
+        MirrorRunInput(run_id="r1", status="cancelled"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cause", "written"),
+    [
+        (ApplicationError("x", type="DestinationUnreachable"), True),
+        (ApplicationError("x", type="DeliveryFailed", non_retryable=True), True),
+        (ApplicationError("x", NOT_WRITTEN, type="DestinationUnavailable"), False),
+        (ApplicationError("x", NOT_WRITTEN, type="DestinationRefused", non_retryable=True), False),
+        (
+            ActivityTimeoutError("t", type=TimeoutType.START_TO_CLOSE, last_heartbeat_details=[]),
+            True,
+        ),
+        (
+            ActivityTimeoutError(
+                "t", type=TimeoutType.SCHEDULE_TO_CLOSE, last_heartbeat_details=[]
+            ),
+            True,
+        ),
+        (
+            ActivityTimeoutError(
+                "t", type=TimeoutType.SCHEDULE_TO_START, last_heartbeat_details=[]
+            ),
+            False,
+        ),
+        (RuntimeError("?"), True),
+    ],
+)
+def test_a_try_may_have_written_unless_the_worker_says_not_or_no_worker_took_it(cause, written):
+    assert _may_have_written(cause) is written

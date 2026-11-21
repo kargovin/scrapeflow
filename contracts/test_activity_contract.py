@@ -674,6 +674,18 @@ def test_both_sides_agree_on_the_bucket_attempt_budgets():
     assert delivery.EMAIL_SEND_ATTEMPT_SECONDS == api.EMAIL_SEND_ATTEMPT_SECONDS
 
 
+def test_both_sides_agree_on_the_not_written_detail():
+    # A mismatch is silent: every failed try reads as maybe written and is undone.
+    assert delivery.NOT_WRITTEN == api.NOT_WRITTEN
+
+
+@pytest.mark.parametrize("prefix", ["", "runs", "/runs/", "a/b/"])
+def test_the_workflow_derives_the_key_the_worker_writes(prefix):
+    # A lost reply's key is rebuilt in the workflow to undo it (ADR-015 §5).
+    args = (prefix, "4c1f0e7a", "9d2e1b3c", "store", "json")
+    assert api.object_key(*args) == delivery.object_key(*args)
+
+
 BUCKET_LOCATION = {
     "endpoint": "https://s3.example.com/",
     "bucket": "results",

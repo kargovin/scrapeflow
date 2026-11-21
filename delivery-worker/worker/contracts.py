@@ -27,7 +27,16 @@ BUCKET_DELIVER_ATTEMPT_SECONDS = 60
 BUCKET_UNDO_ATTEMPT_SECONDS = 30
 EMAIL_SEND_ATTEMPT_SECONDS = 60
 
+# A DeliverBucket failure's detail when its request cannot have written the object: the bucket
+# answered, or nothing was sent. Without it the workflow treats the try as maybe written.
+NOT_WRITTEN = "not_written"
+
 DestinationKind = Literal["bucket", "postgres", "smtp", "webhook"]
+
+
+def object_key(prefix: str, pipeline_id: str, run_id: str, block_id: str, ext: str) -> str:
+    """``{prefix}/{pipeline_id}/{run_id}/{block_id}.{ext}`` (ADR-015 §5): a retry overwrites."""
+    return "/".join(p for p in (prefix.strip("/"), pipeline_id, run_id, f"{block_id}.{ext}") if p)
 
 
 # --- a destination as stored ----------------------------------------------------------------

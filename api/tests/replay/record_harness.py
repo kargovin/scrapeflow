@@ -51,10 +51,14 @@ from tests.test_workflows_pipeline import (
     _stop_guard,
 )
 from tests.test_workflows_rollback import (
+    HOOK_THEN_BUCKET,
     TWO_BUCKETS_THEN_HOOK,
     _flaky_undo,
     _hook_refused,
     _hook_refused_on,
+    _refused_write,
+    _unanswered,
+    _unanswered_on,
     _undo_refused,
 )
 from tests.test_workflows_scheduled_job import Harness as ScheduledHarness
@@ -218,6 +222,24 @@ SCENARIOS = {
     "harness_rollback_cancel_during_rollback": (
         {"webhook": _hook_refused, "undo": _flaky_undo(1), "during": _cancel_in_undo_wait},
         BUCKET_THEN_HOOKS,
+    ),
+    # Review fix — a failed bucket block whose try's reply was lost: its key is undone.
+    "harness_rollback_lost_reply_budget_out": (
+        {"bucket": _unanswered()},
+        BUCKET_ONLY.model_copy(update={"time_budget_seconds": 200}),
+    ),
+    "harness_rollback_lost_reply_then_refused": (
+        {"bucket": _unanswered(1, then=_refused_write)},
+        BUCKET_ONLY,
+    ),
+    "harness_rollback_lost_reply_then_earlier_delivery": (
+        {"bucket": _unanswered_on("store_2")},
+        TWO_BUCKETS_THEN_HOOK.model_copy(update={"time_budget_seconds": 300}),
+    ),
+    "harness_rollback_lost_reply_after_webhook_sent": ({"bucket": _unanswered()}, HOOK_THEN_BUCKET),
+    "harness_rollback_lost_reply_cancelled": (
+        {"bucket": _unanswered(), "during": _cancel_in_sink_wait},
+        BUCKET_ONLY,
     ),
 }
 

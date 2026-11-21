@@ -267,6 +267,15 @@ class DestinationTestOutput(BaseModel):
 # Single attempt each, retry policy maximum_attempts=1: a failure is an ApplicationError whose
 # non_retryable says final; the workflow retries a transient one (ADR-015 §4).
 
+# A DeliverBucket failure's detail when its request cannot have written the object. Without it
+# the try may have written: a failed block's rollback undoes its key.
+NOT_WRITTEN = "not_written"
+
+
+def object_key(prefix: str, pipeline_id: str, run_id: str, block_id: str, ext: str) -> str:
+    """``{prefix}/{pipeline_id}/{run_id}/{block_id}.{ext}`` (ADR-015 §5): a retry overwrites."""
+    return "/".join(p for p in (prefix.strip("/"), pipeline_id, run_id, f"{block_id}.{ext}") if p)
+
 
 class BucketLocation(BaseModel):
     """Where a delivery landed: names only, never an address or a credential (ADR-015 §3)."""

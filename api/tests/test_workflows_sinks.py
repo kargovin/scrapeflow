@@ -18,7 +18,11 @@ from app.models.destination import Destination
 from app.models.pipeline import PipelineRunBlock
 from app.pipelines.catalog import BUCKET
 from app.pipelines.definition import parse_definition
-from app.workflows.activities.contracts import BUCKET_DELIVER_ATTEMPT_SECONDS, DeliverBucketInput
+from app.workflows.activities.contracts import (
+    BUCKET_DELIVER_ATTEMPT_SECONDS,
+    NOT_WRITTEN,
+    DeliverBucketInput,
+)
 from app.workflows.activities.db import load_destination, mirror_block_status
 from app.workflows.pipeline import (
     DESTINATION_GONE_ERROR,
@@ -237,7 +241,9 @@ def _flaky_bucket(failures: int):
     async def bucket(input):
         if len(seen) < failures:
             seen.append(input)
-            raise ApplicationError("HTTP 503 from the bucket", type="DestinationUnavailable")
+            raise ApplicationError(
+                "HTTP 503 from the bucket", NOT_WRITTEN, type="DestinationUnavailable"
+            )
         return await _bucket_ok(input)
 
     return bucket
@@ -254,7 +260,10 @@ def _patches(history) -> list[str]:
 
 async def _refused(input):
     raise ApplicationError(
-        "the bucket refused the write (AccessDenied)", type="DestinationRefused", non_retryable=True
+        "the bucket refused the write (AccessDenied)",
+        NOT_WRITTEN,
+        type="DestinationRefused",
+        non_retryable=True,
     )
 
 
@@ -445,7 +454,9 @@ async def test_a_row_cancel_found_after_the_wait_stops_without_another_try():
         seen.append(input)
         # The run's cancel is written while the block waits; the next running mirror finds it.
         h.running_reply["store"] = "cancelled"
-        raise ApplicationError("HTTP 503 from the bucket", type="DestinationUnavailable")
+        raise ApplicationError(
+            "HTTP 503 from the bucket", NOT_WRITTEN, type="DestinationUnavailable"
+        )
 
     h._bucket = bucket
     assert await h.run(BUCKET_ONLY) is None
@@ -492,7 +503,9 @@ async def test_a_cancel_after_a_transient_failure_does_not_wait():
     async def slow_then_down(input):
         started.set()
         await release.wait()
-        raise ApplicationError("HTTP 503 from the bucket", type="DestinationUnavailable")
+        raise ApplicationError(
+            "HTTP 503 from the bucket", NOT_WRITTEN, type="DestinationUnavailable"
+        )
 
     async def cancel_mid_put(handle):
         await started.wait()

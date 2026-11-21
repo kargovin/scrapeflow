@@ -54,9 +54,11 @@ with workflow.unsafe.imports_passed_through():
         DELIVER_BUCKET_ACTIVITY,
         DIFF_ACTIVITY,
         LLM_EXTRACT_ACTIVITY,
+        NOT_WRITTEN,
         SCRAPE_ACTIVITY,
         UNDO_BUCKET_ACTIVITY,
         VALIDATE_ACTIVITY,
+        BucketLocation,
         CaptureInput,
         CaptureOutput,
         CarriedValue,
@@ -77,6 +79,7 @@ with workflow.unsafe.imports_passed_through():
         UndoBucketOutput,
         ValidateInput,
         ValidateVerdict,
+        object_key,
     )
     from app.workflows.queues import (
         CONTENT_QUEUE,
@@ -384,6 +387,39 @@ def _sink_failure(cause: BaseException | None, what: str = "delivery") -> tuple[
     return f"the {what} failed ({type(cause).__name__})", True
 
 
+def _may_have_written(cause: BaseException | None) -> bool:
+    """A try whose request may have stored the object: anything but a worker's ``NOT_WRITTEN``
+    or a try no worker took."""
+    if isinstance(cause, ActivityTimeoutError):
+        return cause.type != TimeoutType.SCHEDULE_TO_START
+    return not (isinstance(cause, ApplicationError) and NOT_WRITTEN in cause.details)
+
+
+def _bucket_record(
+    destination_id: str, address: dict[str, Any], input: PipelineRunInput, block_id: str, ext: str
+) -> dict[str, Any]:
+    """The record a try against ``address`` would return: the worker builds the key the same way."""
+    location = BucketLocation(
+        endpoint=address["endpoint"],
+        bucket=address["bucket"],
+        region=address.get("region"),
+        key=object_key(address.get("prefix", ""), input.pipeline_id, input.run_id, block_id, ext),
+    )
+    return {
+        "destination_id": destination_id,
+        "kind": "bucket",
+        "location": location.model_dump(mode="json"),
+    }
+
+
+def _lost_reply(record: dict[str, Any]) -> str:
+    loc = record["location"]
+    return (
+        f"a try whose reply was lost may have written bucket {loc['bucket']}, "
+        f"key {loc['key']} at {loc['endpoint']}"
+    )
+
+
 def _run_cancelled() -> ApplicationError:
     return ApplicationError("the run was cancelled", type=RUN_CANCELLED_ERROR, non_retryable=True)
 
@@ -468,6 +504,8 @@ class PipelineWorkflow:
         self._delivered: list[tuple[str, dict[str, Any]]] = []
         # Irreversible sinks that sent (§7's `announced`); an alert-only skip never gets here.
         self._announced: list[str] = []
+        # A failing bucket block's newest try that may have written: rollback undoes its key.
+        self._unsure: tuple[str, dict[str, Any]] | None = None
 
     @workflow.run
     async def run(self, input: PipelineRunInput) -> str | None:
@@ -552,25 +590,37 @@ class PipelineWorkflow:
                 # Code no longer matches history: the task retries until a deploy fixes it.
                 raise
             except (Exception, asyncio.CancelledError) as exc:
+                # ADR-014 §5a: undo_status and delivery belong to completed blocks; a failed
+                # block's maybe-written key is named in its error and the run's.
+                unsure = self._unsure_of(block.id)
+                lost = f"; {_lost_reply(unsure)}" if unsure is not None else ""
                 if _is_cancellation(exc):
                     await self._mirror_block(
-                        input.run_id, block.id, "failed", error="cancelled before it finished"
+                        input.run_id,
+                        block.id,
+                        "failed",
+                        error=f"cancelled before it finished{lost}",
                     )
                     return await self._cancel(input.run_id)
                 if not isinstance(exc, Exception):
                     raise
-                message = _failure_message(exc, timing.maximum_attempts)
+                message = _failure_message(exc, timing.maximum_attempts) + lost
                 await self._mirror_block(input.run_id, block.id, "failed", error=message)
-                if (self._delivered or self._announced) and workflow.patched(ROLLBACK_PATCH):
-                    await self._roll_back(input, block.id, f"{block.id}: {message}")
+                error = f"{block.id}: {message}"
+                if (self._delivered or self._announced or unsure is not None) and workflow.patched(
+                    ROLLBACK_PATCH
+                ):
+                    left = await self._roll_back(input, block.id, error)
+                    if left is not None:
+                        error += f"; {left}"
                 await self._mirror_run(
                     input.run_id,
                     "failed",
-                    error=f"{block.id}: {message}",
+                    error=error,
                     failed_block_id=block.id,
                     **(check.run_fields(completed=False) if check is not None else {}),
                 )
-                raise ApplicationError(f"{block.id}: {message}", non_retryable=True) from exc
+                raise ApplicationError(error, non_retryable=True) from exc
 
             if verdict is not None and verdict.outcome == "not_met":
                 assert isinstance(block, ValidateBlock)
@@ -798,6 +848,11 @@ class PipelineWorkflow:
                     )
                 )
             except ActivityError as exc:
+                if _may_have_written(exc.cause):
+                    self._unsure = (
+                        block.id,
+                        _bucket_record(destination_id, loaded.address, input, block.id, ext),
+                    )
                 error, final = _sink_failure(exc.cause)
                 if final:
                     raise ApplicationError(error, non_retryable=True) from None
@@ -821,24 +876,40 @@ class PipelineWorkflow:
             _db(MIRROR_UNDO_ACTIVITY, MirrorUndoInput(run_id=run_id, undo=undo, error=error), str)
         )
 
-    async def _roll_back(self, input: PipelineRunInput, failed_block_id: str, error: str) -> None:
+    def _unsure_of(self, block_id: str) -> dict[str, Any] | None:
+        return self._unsure[1] if self._unsure is not None and self._unsure[0] == block_id else None
+
+    async def _roll_back(
+        self, input: PipelineRunInput, failed_block_id: str, error: str
+    ) -> str | None:
         """ADR-014 §7, between the failed block and the failed run. Nothing announced: undo each
         delivery, newest first, on its own budget. Announced: mark what stays, undo nothing (D13).
 
+        The failed block's maybe-written key is undone first, its outcome returned for the run's
+        error (no undo status: the block is not completed).
+
         ⚠️ Every await goes through ``_finish(..., interruptible=False)``: a cancel is ignored."""
         run_id = input.run_id
+        unsure = self._unsure_of(failed_block_id)
         if self._announced:
             undo: dict[str, UndoStatus] = {block_id: "kept" for block_id, _ in self._delivered}
             undo |= dict.fromkeys(self._announced, "not_undoable")
             await self._mirror_undo(run_id, undo)
-            return
+            return (
+                None if unsure is None else "left in place: a webhook or email had already gone out"
+            )
         types = {b.id: CATALOG[b.type] for b in input.blocks}
         undos: list[tuple[str, dict[str, Any], Timing]] = []
         for block_id, record in reversed(self._delivered):
             sink = types[block_id].sink
             assert sink is not None and sink.undo is not None
             undos.append((block_id, record, sink.undo))
+        unsure_sink = types[failed_block_id].sink
+        unsure_timing = unsure_sink.undo if unsure_sink is not None else None
+        assert unsure is None or unsure_timing is not None
         need = sum(timing.need for _, _, timing in undos)
+        if unsure is not None and unsure_timing is not None:
+            need += unsure_timing.need
         started = await self._finish(
             _db(
                 MIRROR_ROLLBACK_STARTED_ACTIVITY,
@@ -853,15 +924,27 @@ class PipelineWorkflow:
         )
         # Not running: the run was deleted, and with it whose destination to load.
         if started != "running":
-            return
+            return None
+        left = None
+        if unsure is not None and unsure_timing is not None:
+            outcome = await self._undo(run_id, unsure, unsure_timing)
+            if outcome is None:
+                return None
+            undo_status, undo_error = outcome
+            left = (
+                "rollback removed it"
+                if undo_status == "undone"
+                else f"rollback could not remove it, left in place: {undo_error}"
+            )
         for block_id, record, timing in undos:
             if await self._mirror_undo(run_id, {block_id: "undoing"}) != "running":
-                return
+                return left
             outcome = await self._undo(run_id, record, timing)
             if outcome is None:
-                return
+                return left
             undo_status, undo_error = outcome
             await self._mirror_undo(run_id, {block_id: undo_status}, undo_error)
+        return left
 
     async def _undo(
         self, run_id: str, record: dict[str, Any], timing: Timing
