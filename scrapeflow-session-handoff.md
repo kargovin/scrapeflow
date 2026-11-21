@@ -112,6 +112,12 @@ the write):
 cd http-worker && UPDATE_CONTRACT_FIXTURES=1 go test -count=1 ./internal/activity/
 ```
 
+**Delivery worker tests** (image from `docker compose build delivery-worker`; from repo root):
+```bash
+docker run --rm -v "$PWD/delivery-worker:/app" -w /app --entrypoint python docker-delivery-worker -m pytest -q -p no:cacheprovider
+```
+**Delivery gate (M.12):** `scripts/delivery-gate.sh` (compose profile `gate`, ~6 min).
+
 **MCP tests** (standalone image, not in compose):
 ```bash
 docker build -t scrapeflow-mcp mcp/
@@ -143,7 +149,33 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-20 *(clock)*
+## Current state — as of 2026-11-21 *(clock)*
+
+🔧 **M.1–M.11 + M.13 BUILT, 🧪 M.12 COMPOSE GATE PASSED, 📋 RELEASE M RUNBOOK READY (2026-11-20 → 21, twenty-third
+session; delegated build).** Owner: "build everything until m12" + "fold in m13 before m12 playbook", and a new way of
+working — **I orchestrate, one builder subagent per task**, each given a shared brief + carry-forward notes; after each I
+checked git and re-ran the full API suite; one independent reviewer over all of M before M.12 (memory
+`feedback_orchestrate_subagents.md`). **Order to replay** (each task's backlog row lists its calls):
+- **M.1** `8f69d11` — migration 4.13 `d0434b2ec373` (`destinations`, `pipeline_version_destinations`, `webhook_deliveries.destination_id`/`kind`); `DESTINATION_ENCRYPTION_KEY`.
+- **M.2** `4501e80` — destinations API (CRUD, host-only display, delete-in-use 409, SSRF at save).
+- **M.3** `8693033`, `2bc7488` — `delivery-worker/` (no DB, explicit env, read-only MinIO user), egress copy + `contracts/test_egress.py`, `TestWebhook`; `dependabot.yml` (BUG-006).
+- **M.4** `b706c7b` — bucket sink (`DeliverBucket`/`UndoBucket`/`TestBucket`, own signed PUT/DELETE on a pinned aiohttp session). **Fix `f97a351`**: aiohttp resent a PUT/DELETE after a dropped connection (hidden retry) — blocked by a middleware.
+- **M.14** `0dcecb4`, `54e1010`, `f35c4bf` — SMTP (`SendEmail`, `TestSmtp`, pinned socket), `kind = email` rows under patch **`email-delivery`**; `PUBLIC_BASE_URL` (required). **Fix `fb1918a`** (found at M.5): every SMTP session after the first could fail in a long-lived worker.
+- **M.5** `24363b4` — `DestinationTestWorkflow` + its three call sites (422 = a check failed, 503 = we could not run it; postgres refused until O.1).
+- **M.6** `1d8baeb`, `16d80ae` — bucket block, sink order, several webhooks, rollback reserve, destination checks at save + trigger; `GET /pipelines/catalog`.
+- **M.7** `ab03d1a`, `517bdae` — `load_destination`, delivery record, destination webhooks + alert rows; sinks in `PipelineWorkflow` (patch **`sinks`**).
+- **M.8** `a0b8bfe`, `a33a271`, `05791f7` — rollback mirrors + alert lists; rollback (patch **`rollback`**); compose histories.
+- **M.9** `3a65fcf` — monitor notices to a destination, migration 4.14 `3af61135d943`, the monitor owner on `webhook_deliveries`.
+- **M.10** `cc7532c`, `2bde599` — reads + SPA (destinations pages, sink/undo states, notice delivery). **Not click-tested** (Clerk) — runbook step.
+- **M.11** infra `9266ef7` (step 1), `3eeece6` (step 3, image tag placeholder `main-STEP2-TAG`); **M.13** infra `61a0843` (step 4) — all on the infra repo's **local branch `release-m`**, not pushed.
+- **Review fixes** `5efdf19` (alert row for a destination deleted outside the API), `67d7bd4` (a bucket write whose reply was lost is undone at rollback; reported in the run/alert `error`, not the `rollback` lists — ADR-014 §5a keeps undo fields on completed blocks only; putting it in the lists is an ADR change, owner's call).
+- **M.12** `c579a51` (422s on destination routes echoed the submitted secret — fixed), `77da15b` (gate: `scripts/delivery-gate.sh`, profile `gate`, `delivery-fixture`), runbook `7bc5fa2`. **66/66 twice**; test secret in 0/262 responses, 0/32 histories, 0 log lines.
+- **Numbers:** API 1399 (incl. replay 106), contracts 217, delivery worker 161 + 7 skipped (MinIO-backed).
+- **Unproven on compose:** a webhook giving up after five tries (~2.9 h — prod check 5c), real third-party S3/SMTP, the NetworkPolicy, the SPA.
+- **Owner decisions in the runbook:** ⚠️ **the MinIO chart's default `console`/`console123` admin user is very likely live in prod** (step 8 — remove?); make the new Docker Hub repo public if it comes out private (no pull secret); an SMTP account for the optional email check. ADR question above (lost-reply key in the `rollback` lists). PRD-018 R6 vs ADR-016 §7b: notices follow the ADR (`skipped_pipelines_disabled` sends one) — one-line change if not wanted.
+- **Dev DB:** ~3000 MinIO objects with no ledger row + 4 dangling rows, pre-existing (not from M) — not reconciled.
+- **Next:** **M.12 is the owner's** (backlog M.12 section: step 0 → infra step 1 → `main` → infra step 3 → NetworkPolicy gate → product checks + SPA → step 4 = M.13 → MinIO decision). Then **N.1**.
+
 
 🚀 **RELEASE L DONE — GROUP L CLOSED (2026-11-20).** Owner ran L.12: step 0 (`c23f1f27522b`, 0 running runs; rollback
 tag api `…c46edb4…`), pushed `main` `c46edb4..97eff8b` (CI `44729376551`: `replay`, `build-api`), rollout on `97eff8b`,
@@ -2092,6 +2124,7 @@ The displacement is declared in **ADR-011's header** instead. Two knock-ons:
 
 ### Git / deploy state
 
+- **2026-11-21 (M build close):** `main` = `origin/main` = `97eff8b` (deployed); `develop` = `main` + L's release records + Group M (M.1–M.14 builds, review fixes, M.12 gate + runbook) + this closeout, **not pushed**. Infra repo: local branch `release-m` = `origin/main` `7825689` + steps 1/3/4, **not pushed** (rebase before each push). Compose **up** with `delivery-fixture`; local `.env` gained `DESTINATION_ENCRYPTION_KEY` + `PUBLIC_BASE_URL`; `docker/.env` → `../.env` symlink (untracked). `tmp/` untracked, pre-existing.
 - **2026-11-20 (Release L close):** `main` = `origin/main` = `97eff8b` (**deployed**); `develop` = `main` + the release record commits, **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose --profile gate down`; volumes kept) — bring the gate fixture back with `docker compose --profile gate up -d pipeline-fixture`.
 - **2026-11-20 (L.1–L.12 delegated build close):** `develop` = `main` (`c46edb4`, deployed) + K's release-record commits + L's 12 commits + this closeout, **not pushed**. Infra untouched. Compose **up**, with the `gate` profile's `pipeline-fixture`; the LLM worker image rebuilt from this tree. `tmp/` untracked, pre-existing.
 - **2026-11-19 (Release K close):** `main` = `origin/main` = `c46edb4` (**deployed**); `develop` = `main` + the release record commits, **not pushed**. Infra: Flux's tag bumps only. Compose **stopped** (`docker compose down`; volumes kept). `tmp/` untracked, pre-existing.
