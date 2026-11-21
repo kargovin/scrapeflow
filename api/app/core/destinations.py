@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.destination import Destination, PipelineVersionDestination
+from app.models.monitor import Monitor
 from app.models.pipeline import Pipeline, PipelineRun, PipelineVersion
 from app.settings import settings
 
@@ -56,6 +57,36 @@ async def runs_using(db: AsyncSession, destination_id: uuid.UUID) -> list[Pipeli
         .order_by(PipelineRun.created_at)
     )
     return list(rows)
+
+
+async def monitors_using(db: AsyncSession, destination_id: uuid.UUID) -> list[Monitor]:
+    """Monitors naming it as their notice destination, whatever their state (ADR-016 §13)."""
+    rows = await db.scalars(
+        select(Monitor)
+        .where(Monitor.notice_destination_id == destination_id)
+        .order_by(Monitor.name)
+    )
+    return list(rows)
+
+
+# ADR-016 §8: a notice is a webhook POST or an email.
+NOTICE_DESTINATION_KINDS = ("webhook", "smtp")
+
+
+async def notice_destination_problem(
+    db: AsyncSession, user_id: uuid.UUID, destination_id: uuid.UUID
+) -> str | None:
+    """Why it cannot be a notice destination, or None. Raises LookupError when it is gone or
+    another user's (a 404: existence is not revealed). The caller holds ``lock_user``."""
+    destination = await db.get(Destination, destination_id)
+    if destination is None or destination.user_id != user_id:
+        raise LookupError("Destination not found")
+    if destination.kind not in NOTICE_DESTINATION_KINDS:
+        return (
+            f"destination {destination.name!r} is a {destination.kind} destination; "
+            "a notice destination must be a webhook or smtp destination"
+        )
+    return None
 
 
 async def reference_problems(

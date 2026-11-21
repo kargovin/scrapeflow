@@ -16,6 +16,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from app.auth.dependencies import get_current_admin_user, get_current_user
 from app.core import monitor_events, monitor_schedules
 from app.core.db import get_db
+from app.core.destinations import notice_destination_problem
 from app.core.minio import get_minio
 from app.core.monitors import (
     ceiling_problems,
@@ -149,6 +150,7 @@ async def monitor_responses(db: AsyncSession, monitors: list[Monitor]) -> list[M
                 inputs=m.inputs,
                 carried=m.carried,
                 schedule_cron=m.schedule_cron,
+                notice_destination_id=m.notice_destination_id,
                 state=m.state,
                 consecutive_failures=m.consecutive_failures,
                 next_check_at=monitor_schedules.next_check(m),
@@ -179,6 +181,23 @@ async def owned_monitor(
     if monitor is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Monitor not found")
     return monitor
+
+
+async def check_notice_destination(
+    db: AsyncSession, user_id: uuid.UUID, destination_id: uuid.UUID | None
+) -> None:
+    """404 for one gone or another user's, 422 for a bucket or postgres one. Under ``lock_user``,
+    as a destination delete (ADR-015 §2c)."""
+    if destination_id is None:
+        return
+    try:
+        problem = await notice_destination_problem(db, user_id, destination_id)
+    except LookupError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Destination not found"
+        ) from None
+    if problem is not None:
+        raise unprocessable([Problem(None, f"notice_destination_id: {problem}")])
 
 
 def _name_conflict(exc: IntegrityError) -> HTTPException | None:
@@ -243,6 +262,7 @@ async def create_monitor(
         parsed, await owned_llm_keys(db, user_id, llm_key_ids(parsed))
     ):
         raise unprocessable(problems)
+    await check_notice_destination(db, user_id, body.notice_destination_id)
     # 7. The scheduled cap, shared with jobs.
     await check_scheduled_jobs_quota(user_id, db)
 
@@ -255,6 +275,7 @@ async def create_monitor(
         inputs=body.inputs,
         carried=carried,
         schedule_cron=body.schedule_cron,
+        notice_destination_id=body.notice_destination_id,
         state="active",
         consecutive_failures=0,
     )
@@ -277,7 +298,10 @@ async def create_monitor(
 
     logger.info("monitor_created", monitor_id=str(monitor.id), pipeline_id=str(pipeline.id))
     [response] = await monitor_responses(db, [monitor])
-    return MonitorCreatedResponse(**response.model_dump(), warnings=warnings(parsed))
+    return MonitorCreatedResponse(
+        **response.model_dump(),
+        warnings=warnings(parsed, has_notice_destination=monitor.notice_destination_id is not None),
+    )
 
 
 @router.get("", response_model=list[MonitorResponse])
@@ -316,14 +340,21 @@ async def update_monitor(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(check_rate_limit),
 ) -> MonitorResponse:
-    """The name and the schedule (D15); a cron change on an active monitor re-arms it."""
+    """The name, the schedule and the notice destination (D15); a cron change on an active
+    monitor re-arms it."""
+    if body.schedule_cron is not None:
+        validate_cron(body.schedule_cron)
+    # User then monitor, as a destination delete reads the notice setting under the user's lock.
+    await lock_user(user.id, db)
     monitor = await owned_monitor(db, user.id, monitor_id, lock=True)
     before = monitor.schedule_cron
     if body.schedule_cron is not None:
-        validate_cron(body.schedule_cron)
         monitor.schedule_cron = body.schedule_cron
     if body.name is not None:
         monitor.name = body.name
+    if "notice_destination_id" in body.model_fields_set:
+        await check_notice_destination(db, user.id, body.notice_destination_id)
+        monitor.notice_destination_id = body.notice_destination_id
     monitor.updated_at = datetime.now(UTC)
     await _commit(db)
 

@@ -190,6 +190,10 @@ async def mirror_run_status(input: MirrorRunInput) -> str:
         await db.commit()
         if alerts:
             await webhook_delivery.start_pending(activity.client, db, pipeline_run_id=run.id)
+        if ended.notice_event_id:
+            await webhook_delivery.start_pending(
+                activity.client, db, monitor_event_id=ended.notice_event_id
+            )
         await after_commit(_client, ended)
         return run.status
 

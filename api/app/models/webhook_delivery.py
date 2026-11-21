@@ -39,6 +39,17 @@ class WebhookDelivery(Base):
         nullable=True,
     )
     block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A monitor notice (ADR-016 §8): the monitor, and the situation it reports.
+    monitor_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("monitors.id", ondelete="CASCADE", name="fk_webhook_deliveries_monitor_id"),
+        nullable=True,
+    )
+    monitor_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "monitor_events.id", ondelete="CASCADE", name="fk_webhook_deliveries_monitor_event_id"
+        ),
+        nullable=True,
+    )
     # A saved destination's row (ADR-015 §2b): its URL or mail settings are read at each attempt.
     # SET NULL leaves a row with no target — its attempt fails as "destination deleted".
     destination_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -66,16 +77,22 @@ class WebhookDelivery(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "num_nonnulls(job_id, batch_id, crawl_id, pipeline_run_id) = 1",
+            "num_nonnulls(job_id, batch_id, crawl_id, pipeline_run_id, monitor_id) = 1",
             name="ck_webhook_deliveries_job_or_batch_or_crawls",
         ),
         CheckConstraint(
-            "num_nonnulls(run_id, crawl_id, pipeline_run_id) = 1",
+            "num_nonnulls(run_id, crawl_id, pipeline_run_id, monitor_id) = 1",
             name="ck_webhook_deliveries_run_or_crawl",
         ),
         CheckConstraint(
             "(pipeline_run_id IS NULL) = (block_id IS NULL)",
             name="ck_webhook_deliveries_pipeline_block",
+        ),
+        # A notice goes to the monitor's destination only: never an inline URL.
+        CheckConstraint(
+            "(monitor_id IS NULL) = (monitor_event_id IS NULL)"
+            " AND (monitor_id IS NULL OR webhook_url IS NULL)",
+            name="ck_webhook_deliveries_monitor_notice",
         ),
         CheckConstraint(_in("kind", DELIVERY_KINDS), name="ck_webhook_deliveries_kind"),
         # Never both; neither only after the destination was deleted (SET NULL).
@@ -94,6 +111,18 @@ class WebhookDelivery(Base):
             "event",
             unique=True,
             postgresql_where=text("pipeline_run_id IS NOT NULL"),
+        ),
+        # One notice per situation, whatever retries its writer.
+        Index(
+            "uq_webhook_deliveries_monitor_event_id",
+            "monitor_event_id",
+            unique=True,
+            postgresql_where=text("monitor_event_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_webhook_deliveries_monitor_id",
+            "monitor_id",
+            postgresql_where=text("monitor_id IS NOT NULL"),
         ),
         Index(
             "idx_webhook_deliveries_destination_id",

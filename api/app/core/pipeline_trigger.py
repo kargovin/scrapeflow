@@ -114,6 +114,8 @@ async def mark_not_started(
     if alerts:
         # The engine is likely down: the sweep sends what this cannot start.
         await webhook_delivery.start_pending(get_client, db, pipeline_run_id=run.id)
+    if ended.notice_event_id:
+        await webhook_delivery.start_pending(get_client, db, monitor_event_id=ended.notice_event_id)
     await after_commit(_awaitable(get_client), ended)
 
 

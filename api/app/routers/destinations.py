@@ -15,7 +15,13 @@ from temporalio.client import Client
 from app.auth.dependencies import get_current_admin_user, get_current_user
 from app.core.db import get_db
 from app.core.destination_tests import refuse_failed, run_test
-from app.core.destinations import decrypt_secret, encrypt_secret, pipelines_using, runs_using
+from app.core.destinations import (
+    decrypt_secret,
+    encrypt_secret,
+    monitors_using,
+    pipelines_using,
+    runs_using,
+)
 from app.core.pipeline_trigger import ssrf_check
 from app.core.quota import lock_user
 from app.core.rate_limit import check_rate_limit
@@ -217,19 +223,26 @@ async def delete_destination(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """ADR-015 §2c: refused while a non-deleted pipeline's version or a running run refers to it.
-    The trigger takes the same lock, so no run starts against a destination being deleted."""
+    """ADR-015 §2c: refused while a non-deleted pipeline's version, a running run or a monitor's
+    notice setting refers to it (ADR-016 §13). The trigger and the monitor edits take the same
+    lock, so nothing starts using a destination being deleted."""
     await lock_user(user.id, db)
     destination = await _owned(db, user.id, destination_id)
     pipelines = await pipelines_using(db, destination.id)
     runs = await runs_using(db, destination.id)
-    if pipelines or runs:
-        names = ", ".join(p.name for p in pipelines)
-        message = (
-            f"Pipelines use this destination: {names}. Change or delete them first."
-            if pipelines
-            else "Runs using this destination are still running; wait for them to end."
-        )
+    monitors = await monitors_using(db, destination.id)
+    if pipelines or runs or monitors:
+        if pipelines:
+            names = ", ".join(p.name for p in pipelines)
+            message = f"Pipelines use this destination: {names}. Change or delete them first."
+        elif monitors:
+            names = ", ".join(m.name for m in monitors)
+            message = (
+                f"Monitors send their notices to this destination: {names}. "
+                "Choose another notice destination for them first."
+            )
+        else:
+            message = "Runs using this destination are still running; wait for them to end."
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -237,6 +250,7 @@ async def delete_destination(
                 "message": message,
                 "pipelines": [{"id": str(p.id), "name": p.name} for p in pipelines],
                 "runs": [{"id": str(r.id), "pipeline_id": str(r.pipeline_id)} for r in runs],
+                "monitors": [{"id": str(m.id), "name": m.name} for m in monitors],
             },
         )
     await db.execute(delete(Destination).where(Destination.id == destination.id))

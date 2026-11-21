@@ -136,7 +136,7 @@ def check_ceiling_seconds(parsed: ParsedDefinition, carried: list[Mapping[str, A
     )
 
 
-def warnings(parsed: ParsedDefinition) -> list[str]:
+def warnings(parsed: ParsedDefinition, has_notice_destination: bool = False) -> list[str]:
     """§2d's warnings: allowed, but the user should know."""
     found = []
     types = {b.type for b in parsed.blocks}
@@ -144,12 +144,13 @@ def warnings(parsed: ParsedDefinition) -> list[str]:
         found.append(
             "no LLM block and no change gate: every check stores a copy and runs every block"
         )
-    if not any(
+    if not has_notice_destination and not any(
         isinstance(b, WebhookBlock) and FAILED_EVENT in b.config.events for b in parsed.blocks
     ):
         found.append(
             "nothing is sent when a check fails: add pipeline.failed to a Webhook block's "
-            "events, or a failing monitor is visible only on its page"
+            "events or choose a notice destination, or a failing monitor is visible only on "
+            "its page"
         )
     return found
 

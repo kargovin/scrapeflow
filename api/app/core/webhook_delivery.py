@@ -1,4 +1,4 @@
-"""Starting job, batch, crawl and pipeline-alert webhook deliveries (F.4) — one ``WebhookDeliveryWorkflow`` per row.
+"""Starting job, batch, crawl, pipeline-alert and monitor-notice deliveries (F.4) — one ``WebhookDeliveryWorkflow`` per row.
 
 Whoever commits a ``webhook_deliveries`` row starts its delivery right after, best effort. A start
 that is lost (a crash after the commit, Temporal down) is picked up by the ``webhook-sweep``
@@ -59,7 +59,10 @@ async def pending(
     batch_id: uuid.UUID | None = None,
     crawl_id: uuid.UUID | None = None,
     pipeline_run_id: uuid.UUID | None = None,
+    monitor_event_id: uuid.UUID | None = None,
 ) -> list[uuid.UUID]:
+    if all(o is None for o in (run_id, batch_id, crawl_id, pipeline_run_id, monitor_event_id)):
+        raise ValueError("pending() needs an owner")
     stmt = select(WebhookDelivery.id).where(WebhookDelivery.status == "pending")
     if run_id is not None:
         stmt = stmt.where(WebhookDelivery.run_id == run_id)
@@ -69,6 +72,8 @@ async def pending(
         stmt = stmt.where(WebhookDelivery.crawl_id == crawl_id)
     if pipeline_run_id is not None:
         stmt = stmt.where(WebhookDelivery.pipeline_run_id == pipeline_run_id)
+    if monitor_event_id is not None:
+        stmt = stmt.where(WebhookDelivery.monitor_event_id == monitor_event_id)
     return list((await db.scalars(stmt)).all())
 
 

@@ -346,8 +346,9 @@ async def test_the_run_mirror_takes_the_users_lock_first_for_a_check(db_user, pa
 
 async def _record(monitor_id, kind, detail=None):
     async with AsyncSessionLocal() as db:
-        await lock_user((await db.get(Monitor, monitor_id)).user_id, db)
-        inserted = await monitor_events.record(db, monitor_id, kind, datetime.now(UTC), detail)
+        monitor = await db.get(Monitor, monitor_id)
+        await lock_user(monitor.user_id, db)
+        inserted = await monitor_events.record(db, monitor, kind, datetime.now(UTC), detail)
         await db.commit()
         return inserted
 

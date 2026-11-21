@@ -139,6 +139,10 @@ async def _fail_check(
     await db.commit()
     if alerts:
         await webhook_delivery.start_pending(activity.client, db, pipeline_run_id=run_id)
+    if ended.notice_event_id:
+        await webhook_delivery.start_pending(
+            activity.client, db, monitor_event_id=ended.notice_event_id
+        )
     await after_commit(_client, ended)
     logger.warning("monitor_check_failed_at_admission", monitor_id=str(monitor.id), error=error)
     return MonitorAdmission(verdict="failed")
@@ -147,8 +151,10 @@ async def _fail_check(
 async def _skip(
     db: AsyncSession, monitor: Monitor, kind: str, now: datetime, detail=None
 ) -> MonitorAdmission:
-    await monitor_events.record(db, monitor.id, kind, now, detail)
+    event = await monitor_events.record(db, monitor, kind, now, detail)
     await db.commit()
+    if event is not None:
+        await webhook_delivery.start_pending(activity.client, db, monitor_event_id=event.id)
     logger.info("monitor_firing_skipped", monitor_id=str(monitor.id), reason=kind)
     return MonitorAdmission(verdict="skipped")
 
@@ -163,7 +169,7 @@ async def _wait(db: AsyncSession, monitor: Monitor, now: datetime) -> MonitorAdm
         )
     )
     if open_row is None:
-        await monitor_events.record(db, monitor.id, "waiting_for_slot", now)
+        await monitor_events.record(db, monitor, "waiting_for_slot", now)
     else:
         open_row.last_at = now
     await db.commit()

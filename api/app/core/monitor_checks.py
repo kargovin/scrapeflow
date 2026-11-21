@@ -6,6 +6,7 @@ in the call that moves the run out of ``running``: those writers are retried, an
 retry would pause a monitor after fewer real failures than five. The caller holds ``lock_user``.
 """
 
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -24,6 +25,8 @@ SELF_PAUSE_AFTER = 5
 class CheckEnded:
     # Set when this check paused its monitor: the writer pauses the Schedule after its commit.
     paused: Monitor | None = None
+    # The paused_itself event: the writer starts its notice after its commit (§8).
+    notice_event_id: uuid.UUID | None = None
 
 
 async def monitor_check_ended(db: AsyncSession, run: PipelineRun) -> CheckEnded:
@@ -43,9 +46,9 @@ async def monitor_check_ended(db: AsyncSession, run: PipelineRun) -> CheckEnded:
     monitor.state = "paused_itself"
     monitor.updated_at = now
     # Ends any open situation (§7b); this one stays open until the monitor resumes.
-    await monitor_events.record(
+    event = await monitor_events.record(
         db,
-        monitor.id,
+        monitor,
         "paused_itself",
         now,
         {
@@ -54,7 +57,7 @@ async def monitor_check_ended(db: AsyncSession, run: PipelineRun) -> CheckEnded:
             "failures": monitor.consecutive_failures,
         },
     )
-    return CheckEnded(paused=monitor)
+    return CheckEnded(paused=monitor, notice_event_id=event.id if event else None)
 
 
 async def after_commit(temporal, ended: CheckEnded) -> None:

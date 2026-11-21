@@ -537,7 +537,9 @@ async def _build_operational_stats(
                 select(func.count())
                 .select_from(WebhookDelivery)
                 .where(
-                    WebhookDelivery.status == "pending", WebhookDelivery.pipeline_run_id.is_(None)
+                    WebhookDelivery.status == "pending",
+                    WebhookDelivery.pipeline_run_id.is_(None),
+                    WebhookDelivery.monitor_id.is_(None),
                 )
             )
         )
@@ -551,6 +553,7 @@ async def _build_operational_stats(
                 .where(
                     WebhookDelivery.status == "exhausted",
                     WebhookDelivery.pipeline_run_id.is_(None),
+                    WebhookDelivery.monitor_id.is_(None),
                 )
             )
         )
@@ -695,7 +698,11 @@ async def _build_historical_stats(
             func.sum(case((WebhookDelivery.status == "delivered", 1), else_=0)).label("delivered"),
         )
         .select_from(WebhookDelivery)
-        .where(WebhookDelivery.created_at >= week_ago, WebhookDelivery.pipeline_run_id.is_(None))
+        .where(
+            WebhookDelivery.created_at >= week_ago,
+            WebhookDelivery.pipeline_run_id.is_(None),
+            WebhookDelivery.monitor_id.is_(None),
+        )
     )
     if user_id is not None:
         wh_stmt = wh_stmt.where(_webhook_owned_by(user_id))

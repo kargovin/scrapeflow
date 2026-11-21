@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.exceptions import ApplicationError
 
 from app.models.destination import Destination
+from app.models.monitor import Monitor
 from app.models.pipeline import Pipeline, PipelineRun
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
@@ -38,6 +39,17 @@ async def email_for(db: AsyncSession, delivery: WebhookDelivery) -> SendEmailInp
         subject = f"[ScrapeFlow] {name}: {delivery.event}"
         heading = f"{delivery.event} — pipeline {name}, run {run.id}"
         run_id = str(run.id)
+    elif delivery.monitor_id is not None:
+        monitor = await db.get(Monitor, delivery.monitor_id)
+        if monitor is None:
+            raise Undeliverable("the monitor was deleted")
+        owner_id = monitor.user_id
+        local = str(delivery.monitor_event_id)
+        name = _one_line(monitor.name)
+        notice = delivery.payload.get("notice", delivery.event)
+        subject = f"[ScrapeFlow] monitor {name}: {notice}"
+        heading = f"{delivery.event} — monitor {name}: {notice}"
+        run_id = None
     else:
         raise ApplicationError(
             f"email delivery {delivery.id} has no owner it can send for", non_retryable=True

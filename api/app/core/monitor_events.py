@@ -1,17 +1,24 @@
-"""A monitor's own history (ADR-016 §7b): one ``monitor_events`` row per situation.
+"""A monitor's own history (ADR-016 §7b): one ``monitor_events`` row per situation, and its notice (§8).
 
 Every write happens under ``quota.lock_user`` — "find the open row, then bump it or insert one"
-is a read followed by a write.
+is a read followed by a write. A new situation of a ``NOTICE_KINDS`` kind queues a ``monitor.notice``
+row in the same transaction when the monitor names a notice destination; the writer starts it after
+its commit (``webhook_delivery.start_pending(..., monitor_event_id=...)``), the sweep otherwise.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.monitor import MonitorEvent
+from app.models.destination import Destination
+from app.models.monitor import NOTICE_KINDS, Monitor, MonitorEvent
+from app.models.webhook_delivery import WebhookDelivery
+
+NOTICE_EVENT = "monitor.notice"
 
 
 async def close_open(
@@ -27,9 +34,50 @@ async def close_open(
     await db.execute(stmt.values(ended_at=now))
 
 
+def notice_payload(event: MonitorEvent, now: datetime) -> dict[str, Any]:
+    return {
+        "event": NOTICE_EVENT,
+        "monitor_id": str(event.monitor_id),
+        "notice": event.kind,
+        "detail": event.detail,
+        "first_at": event.first_at.isoformat(),
+        "timestamp": now.isoformat(),
+    }
+
+
+async def queue_notice(db: AsyncSession, monitor: Monitor, event: MonitorEvent) -> bool:
+    """The notice row for a new situation, if its kind sends one and the monitor names a
+    destination. ON CONFLICT DO NOTHING: one row per situation."""
+    if event.kind not in NOTICE_KINDS or monitor.notice_destination_id is None:
+        return False
+    destination = await db.get(Destination, monitor.notice_destination_id)
+    if destination is None:
+        return False
+    now = datetime.now(UTC)
+    await db.execute(
+        pg_insert(WebhookDelivery)
+        .values(
+            monitor_id=monitor.id,
+            monitor_event_id=event.id,
+            event=NOTICE_EVENT,
+            kind="email" if destination.kind == "smtp" else "webhook",
+            # Its URL or mail settings are read at each attempt (ADR-015 §2b).
+            destination_id=destination.id,
+            payload=notice_payload(event, now),
+            status="pending",
+            next_attempt_at=now,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["monitor_event_id"],
+            index_where=WebhookDelivery.monitor_event_id.isnot(None),
+        )
+    )
+    return True
+
+
 async def record(
     db: AsyncSession,
-    monitor_id: uuid.UUID,
+    monitor: Monitor,
     kind: str,
     now: datetime,
     detail: dict[str, Any] | None = None,
@@ -38,6 +86,7 @@ async def record(
 
     Returns the row only when it was inserted — a new situation, the one a notice is sent for.
     """
+    monitor_id = monitor.id
     await close_open(db, monitor_id, now, except_kind=kind)
     open_row = await db.scalar(
         select(MonitorEvent).where(
@@ -57,4 +106,5 @@ async def record(
     )
     db.add(event)
     await db.flush()
+    await queue_notice(db, monitor, event)
     return event

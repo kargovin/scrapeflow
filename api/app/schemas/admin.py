@@ -25,7 +25,7 @@ class AdminUserDetailResponse(AdminUserResponse):
 
 class AdminWebhookDeliveryResponse(BaseModel):
     id: uuid.UUID
-    # Exactly one of the four owners; a crawl's row and a pipeline alert have no job run.
+    # Exactly one of the five owners; a crawl's row, a pipeline alert and a notice have no job run.
     job_id: uuid.UUID | None = None
     batch_id: uuid.UUID | None = None
     crawl_id: uuid.UUID | None = None
@@ -33,6 +33,9 @@ class AdminWebhookDeliveryResponse(BaseModel):
     # A pipeline run's failure alert, and the block that sends it.
     pipeline_run_id: uuid.UUID | None = None
     block_id: str | None = None
+    # A monitor notice, and the situation it reports.
+    monitor_id: uuid.UUID | None = None
+    monitor_event_id: uuid.UUID | None = None
     kind: str = "webhook"
     # A saved destination's row has no URL; it is resolved at each attempt.
     destination_id: uuid.UUID | None = None

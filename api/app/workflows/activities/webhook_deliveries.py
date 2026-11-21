@@ -1,4 +1,4 @@
-"""Job, batch, crawl and pipeline-alert webhooks — the deleted ``webhook_loop.py``'s attempt, one call per attempt (F.4).
+"""Job, batch, crawl, pipeline-alert and monitor-notice webhooks — the deleted ``webhook_loop.py``'s attempt, one call per attempt (F.4).
 
 The send is ``core/egress.send_signed_post``, shared with the pipeline Webhook block: the row's
 payload as JSON, signed with the owner's secret (``b""`` when there is none — a crawl has none).
@@ -6,7 +6,8 @@ Success = status < 300, the same backoff and attempt cap. Every attempt resolves
 refusal is final without counting as an attempt. The row stays the record the admin endpoints and the
 webhook meters read.
 
-A webhook row naming a destination (a pipeline alert from a destination-backed block) stores no URL:
+A webhook row naming a destination (a pipeline alert from a destination-backed block, a monitor
+notice) stores no URL:
 the destination's URL and signing key are read at each attempt; one gone, another user's or not a
 webhook destination ends the row at once with no attempt (ADR-015 §2c).
 
@@ -32,6 +33,7 @@ from app.core.email_deliveries import Undeliverable, email_for
 from app.core.pipeline_alerts import alert_secret
 from app.models.batch import Batch
 from app.models.job import Job
+from app.models.monitor import Monitor
 from app.models.pipeline import PipelineRun
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
@@ -85,6 +87,12 @@ async def _secret(db, delivery: WebhookDelivery) -> bytes:
         # Encrypted by core/pipeline_trigger.encrypt_secret, not with the jobs' key.
         key = settings.credentials_encryption_key
         encrypted = await alert_secret(db, delivery)
+    elif delivery.monitor_id:
+        # ck_webhook_deliveries_monitor_notice: a notice never has a URL of its own.
+        raise ApplicationError(
+            f"monitor notice {delivery.id} has a URL; it is sent to its destination only",
+            non_retryable=True,
+        )
     else:
         raise ApplicationError(f"webhook delivery {delivery.id} has no owner", non_retryable=True)
     if encrypted is None:
@@ -100,6 +108,11 @@ async def _destination_target(db, delivery: WebhookDelivery) -> tuple[str, bytes
         if run is None:
             raise Undeliverable("the run was deleted")
         owner_id = run.user_id
+    elif delivery.monitor_id:
+        monitor = await db.get(Monitor, delivery.monitor_id)
+        if monitor is None:
+            raise Undeliverable("the monitor was deleted")
+        owner_id = monitor.user_id
     else:
         raise ApplicationError(
             f"webhook delivery {delivery.id} has no owner it can send for", non_retryable=True

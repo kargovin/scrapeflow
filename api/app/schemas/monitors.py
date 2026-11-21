@@ -42,6 +42,8 @@ class MonitorCreate(BaseModel):
     inputs: dict[str, Any] = {}
     carried: list[CarriedInput] = []
     schedule_cron: str = Field(min_length=1, max_length=200)
+    # Where notices are also sent (ADR-016 §8): a webhook or smtp destination of the user's.
+    notice_destination_id: uuid.UUID | None = None
 
 
 # D15: a monitor's pipeline, version and inputs are fixed for its life.
@@ -49,10 +51,12 @@ _FIXED = ("pipeline_id", "version", "pipeline_version_id", "inputs", "carried")
 
 
 class MonitorUpdate(BaseModel):
-    """Only the name and the schedule change; anything else is a new monitor."""
+    """Only the name, the schedule and the notice destination change; anything else is a new
+    monitor. ``notice_destination_id: null`` stops sending notices."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     schedule_cron: str | None = Field(default=None, min_length=1, max_length=200)
+    notice_destination_id: uuid.UUID | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -71,8 +75,8 @@ class MonitorUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _something(self) -> "MonitorUpdate":
-        if self.name is None and self.schedule_cron is None:
-            raise ValueError("send a name, a schedule_cron, or both")
+        if not self.model_fields_set & {"name", "schedule_cron", "notice_destination_id"}:
+            raise ValueError("send a name, a schedule_cron or a notice_destination_id")
         return self
 
 
@@ -96,6 +100,7 @@ class MonitorResponse(BaseModel):
     inputs: dict[str, Any]
     carried: list[dict[str, Any]]
     schedule_cron: str
+    notice_destination_id: uuid.UUID | None
     state: MonitorState
     consecutive_failures: int
     next_check_at: datetime | None

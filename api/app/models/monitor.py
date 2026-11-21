@@ -27,6 +27,13 @@ MONITOR_EVENT_KINDS = (
     "gave_up_waiting",
     "paused_itself",
 )
+# §7b/§8: the situations a notice is sent for when they start; the others are history only.
+NOTICE_KINDS = (
+    "skipped_monthly_runs",
+    "skipped_pipelines_disabled",
+    "gave_up_waiting",
+    "paused_itself",
+)
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -57,6 +64,11 @@ class Monitor(Base):
     carried: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     schedule_cron: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="active")
+    # Where notices are also sent (§8): a webhook or smtp destination of the owner's. No ondelete:
+    # a destination delete is refused with 409 while a monitor names it (ADR-015 §2c).
+    notice_destination_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("destinations.id", name="fk_monitors_notice_destination_id"), nullable=True
+    )
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
@@ -74,6 +86,11 @@ class Monitor(Base):
         CheckConstraint(_in("state", MONITOR_STATES), name="ck_monitors_state"),
         CheckConstraint("consecutive_failures >= 0", name="ck_monitors_failures_nonnegative"),
         Index("idx_monitors_pipeline_id", "pipeline_id"),
+        Index(
+            "idx_monitors_notice_destination_id",
+            "notice_destination_id",
+            postgresql_where=text("notice_destination_id IS NOT NULL"),
+        ),
     )
 
     def __repr__(self) -> str:
