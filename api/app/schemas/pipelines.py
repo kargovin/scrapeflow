@@ -153,6 +153,12 @@ class PipelineRunBlockResponse(BaseModel):
     delivery: dict[str, Any] | None = None
     undo_status: str | None = None
     undo_error: str | None = None
+    # An Approval block (ADR-016 §9a); null on every other block.
+    approval_deadline: datetime | None = None
+    approval_answer: Literal["approved", "rejected", "expired", "superseded"] | None = None
+    answered_at: datetime | None = None
+    answered_by: uuid.UUID | None = None
+    superseded_by_run_id: uuid.UUID | None = None
 
 
 class PipelineRunSummary(BaseModel):
@@ -180,9 +186,11 @@ class PipelineRunSummary(BaseModel):
 
 
 class PipelineRunAlert(BaseModel):
-    """One failure alert this run queued (ADR-014 §8e): users see an undeliverable alert here."""
+    """One message this run queued: a failure alert (ADR-014 §8e) or an Approval block's
+    (ADR-016 §9c). Users see an undeliverable one here."""
 
     block_id: str
+    event: str = "pipeline.failed"
     kind: Literal["webhook", "email"] = "webhook"
     # Set when the block sends to a saved destination; null after that destination is deleted.
     destination_id: uuid.UUID | None = None
@@ -199,6 +207,8 @@ class PipelineRunAlert(BaseModel):
 class PipelineRunResponse(PipelineRunSummary):
     blocks: list[PipelineRunBlockResponse]
     alerts: list[PipelineRunAlert] = []
+    # The Approval block's request, reminder, expired and superseded messages.
+    approval_messages: list[PipelineRunAlert] = []
     # The check this one was compared with; null with a change_status other than first_check
     # (and no_baseline) = compared with a check since deleted.
     baseline_run_id: uuid.UUID | None = None

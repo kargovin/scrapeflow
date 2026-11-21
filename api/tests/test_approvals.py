@@ -1,6 +1,7 @@
 """N.2 — an Approval block's record and messages (ADR-016 §9b, §9c): the three activities, the
 answer route, ``GET /approvals`` and the run reads."""
 
+import asyncio
 import socket
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -11,10 +12,13 @@ import pytest_asyncio
 from sqlalchemy import delete, select, update
 from temporalio.exceptions import ApplicationError
 
+from app.auth.api_key import generate_api_key, hash_api_key
 from app.core import approvals
 from app.core.db import AsyncSessionLocal
 from app.main import app
+from app.models.api_key import ApiKey
 from app.models.pipeline import PipelineRun, PipelineRunBlock
+from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
 from app.workflows.activities.approvals import remind_approval, request_approval, resolve_approval
 from app.workflows.activities.db import mirror_block_status, mirror_run_status
@@ -345,3 +349,281 @@ async def test_a_deleted_run_resolves_as_cancelled(client, headers, temporal):
         with pytest.raises(ApplicationError) as exc:
             await call
         assert exc.value.type == RUN_CANCELLED_ERROR
+
+
+# --- answering -------------------------------------------------------------------------------
+
+
+async def _key(user, admin=False) -> dict:
+    raw = generate_api_key()
+    async with AsyncSessionLocal() as db:
+        db.add(ApiKey(user_id=user.id, key_hash=hash_api_key(raw), name="other key"))
+        if admin:
+            await db.execute(update(User).where(User.id == user.id).values(is_admin=True))
+        await db.commit()
+    return {"X-API-Key": raw}
+
+
+@pytest.fixture
+def signal(mock_temporal):
+    sent = AsyncMock()
+    mock_temporal.get_workflow_handle.return_value.signal = sent
+    return sent
+
+
+def _answer_url(run) -> str:
+    return f"/pipelines/{run.pipeline_id}/runs/{run.id}/approval"
+
+
+async def test_the_owner_approves_then_the_workflow_is_woken(
+    client, headers, db_user, temporal, signal, mock_temporal
+):
+    run = await _triggered(client, headers)
+    deadline = await _waiting(run)
+
+    resp = await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["state"], body["answered_by"], body["block_id"]) == (
+        "approved",
+        str(db_user.id),
+        "approve",
+    )
+    assert datetime.fromisoformat(body["deadline"]) == deadline
+    block = await _approval(run.id)
+    assert (block.approval_answer, block.answered_by) == ("approved", db_user.id)
+    assert block.answered_at is not None
+    # Still waiting: only the workflow moves the block on.
+    assert block.status == "waiting"
+    mock_temporal.get_workflow_handle.assert_called_with(run.workflow_id)
+    signal.assert_awaited_once_with("approval_answered")
+
+
+async def test_an_answer_is_never_flipped(client, headers, temporal, signal):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+    await client.post(_answer_url(run), json={"decision": "rejected"}, headers=headers)
+
+    resp = await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["message"] == "The approval is already rejected"
+    assert detail["approval"]["state"] == "rejected"
+    assert (await _approval(run.id)).approval_answer == "rejected"
+    signal.assert_awaited_once()
+
+
+async def test_after_the_deadline_the_answer_is_refused_with_the_current_state(
+    client, headers, temporal, signal
+):
+    run = await _triggered(client, headers)
+    await _waiting(run, deadline=datetime.now(UTC) - timedelta(seconds=1))
+
+    resp = await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["message"] == "The approval's deadline has passed"
+    assert (await _approval(run.id)).approval_answer is None
+    signal.assert_not_awaited()
+
+
+async def test_an_expired_approval_cannot_be_answered(client, headers, temporal, signal):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+    await resolve_approval(ResolveApprovalInput(run_id=str(run.id), expire=True, **REF))
+
+    resp = await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["approval"]["state"] == "expired"
+
+
+async def test_before_the_request_there_is_nothing_to_answer(client, headers, temporal, signal):
+    run = await _triggered(client, headers)
+
+    resp = await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["approval"]["state"] == "not_requested"
+
+
+async def test_a_run_being_cancelled_cannot_be_approved(client, headers, temporal, signal):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+    cancel = await client.post(
+        f"/pipelines/{run.pipeline_id}/runs/{run.id}/cancel", headers=headers
+    )
+    # Nothing executes while an approval waits.
+    assert (cancel.json()["still_running"], cancel.json()["upper_bound_seconds"]) == ([], 0)
+
+    resp = await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["message"] == "The run is being cancelled"
+    assert (await _approval(run.id)).approval_answer is None
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_anyone_but_the_owner_gets_a_404_admins_included(
+    client, headers, other_user, temporal, signal, admin
+):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+
+    resp = await client.post(
+        _answer_url(run), json={"decision": "approved"}, headers=await _key(other_user, admin)
+    )
+
+    assert resp.status_code == 404, resp.text
+    assert (await _approval(run.id)).approval_answer is None
+    signal.assert_not_awaited()
+
+
+async def test_a_run_without_an_approval_block_is_a_404(client, headers, temporal):
+    pipeline = (
+        await _save(
+            client,
+            headers,
+            {"blocks": [{"id": "fetch", "type": "scrape", "config": {"url": "https://e.com/"}}]},
+            name=uuid.uuid4().hex,
+        )
+    ).json()
+    run = (await client.post(f"/pipelines/{pipeline['id']}/runs", json={}, headers=headers)).json()
+
+    resp = await client.post(
+        f"/pipelines/{pipeline['id']}/runs/{run['id']}/approval",
+        json={"decision": "approved"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "This run has no approval block"
+
+
+async def test_a_lost_signal_still_leaves_the_answer_recorded(client, headers, temporal, signal):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+    signal.side_effect = RuntimeError("engine down")
+
+    resp = await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    resolve = ResolveApprovalInput(run_id=str(run.id), expire=True, **REF)
+    assert await resolve_approval(resolve) == ApprovalOutcome(answer="approved")
+
+
+async def test_only_approved_or_rejected_is_an_answer(client, headers, temporal):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+    resp = await client.post(_answer_url(run), json={"decision": "expired"}, headers=headers)
+    assert resp.status_code == 422
+
+
+# --- an answer racing the expiry ---------------------------------------------------------------
+
+
+async def test_an_answer_committed_first_beats_the_expiry(client, headers, temporal, signal):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+    await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    outcome = await resolve_approval(ResolveApprovalInput(run_id=str(run.id), expire=True, **REF))
+
+    assert outcome == ApprovalOutcome(answer="approved")
+    assert [m.event for m in await _messages(run.id)] == []
+
+
+async def test_an_answer_waits_for_an_expiry_holding_the_run_and_then_sees_it(
+    client, headers, temporal, signal
+):
+    run = await _triggered(client, headers)
+    await _waiting(run)
+    async with AsyncSessionLocal() as holder:
+        # The expiry's transaction, open: it holds the run's lock.
+        await holder.scalar(select(PipelineRun).where(PipelineRun.id == run.id).with_for_update())
+        block = await approvals.approval_block(holder, run.id)
+        assert await approvals.record_answer(holder, block, "expired")
+        task = asyncio.create_task(
+            client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+        )
+        await asyncio.sleep(1)
+        assert not task.done(), "the answer did not wait for the run's lock"
+        await holder.commit()
+    resp = await asyncio.wait_for(task, timeout=10)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["approval"]["state"] == "expired"
+    assert (await _approval(run.id)).approval_answer == "expired"
+
+
+async def test_an_answer_and_the_expiry_together_one_wins(client, headers, temporal, signal):
+    for _ in range(5):
+        run = await _triggered(client, headers)
+        await _waiting(run)
+        resp, outcome = await asyncio.gather(
+            client.post(_answer_url(run), json={"decision": "approved"}, headers=headers),
+            resolve_approval(ResolveApprovalInput(run_id=str(run.id), expire=True, **REF)),
+        )
+        recorded = (await _approval(run.id)).approval_answer
+        assert outcome.answer == recorded
+        assert (resp.status_code == 200) == (recorded == "approved")
+        assert recorded in ("approved", "expired")
+
+
+# --- reads -------------------------------------------------------------------------------------
+
+
+async def test_get_approvals_lists_the_users_waiting_ones_soonest_first(
+    client, headers, other_user, temporal, signal
+):
+    later, sooner, answered, not_asked = [await _triggered(client, headers) for _ in range(4)]
+    now = datetime.now(UTC)
+    await _waiting(later, deadline=now + timedelta(hours=5))
+    await _waiting(sooner, deadline=now + timedelta(hours=1), change_status="changed")
+    await _waiting(answered)
+    await client.post(_answer_url(answered), json={"decision": "rejected"}, headers=headers)
+    del not_asked
+
+    resp = await client.get("/approvals", headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    listed = resp.json()
+    assert [a["run_id"] for a in listed] == [str(sooner.id), str(later.id)]
+    first = listed[0]
+    assert (first["state"], first["change_status"], first["block_id"]) == (
+        "waiting",
+        "changed",
+        "approve",
+    )
+    assert first["pipeline_name"] and first["requested_at"] and first["deliveries"] == []
+    other = await client.get("/approvals", headers=await _key(other_user))
+    assert other.json() == []
+
+
+async def test_a_run_read_shows_the_approval_and_its_messages_apart_from_alerts(
+    client, headers, db_user, temporal, signal
+):
+    destination = await _destination(db_user.id, "webhook")
+    run = await _triggered(client, headers, destination_id=str(destination.id))
+    await _waiting(run)
+    await client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+
+    resp = await client.get(f"/pipelines/{run.pipeline_id}/runs/{run.id}", headers=headers)
+
+    body = resp.json()
+    approve = next(b for b in body["blocks"] if b["block_id"] == "approve")
+    assert (approve["status"], approve["status_reason"], approve["approval_answer"]) == (
+        "waiting",
+        "awaiting_approval",
+        "approved",
+    )
+    assert approve["approval_deadline"] and approve["answered_by"] == str(db_user.id)
+    assert body["alerts"] == []
+    [message] = body["approval_messages"]
+    assert (message["event"], message["status"], message["destination_id"]) == (
+        "pipeline.approval_requested",
+        "pending",
+        str(destination.id),
+    )

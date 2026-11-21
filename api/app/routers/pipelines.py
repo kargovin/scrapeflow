@@ -17,6 +17,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.auth.dependencies import auth_from_token, get_current_user
+from app.core import approvals
 from app.core.db import get_db
 from app.core.destinations import reference_problems
 from app.core.job_notifier import WebSocketConnectionLimitExceeded
@@ -61,6 +62,8 @@ from app.pipelines.validator import (
     ValidatedPipeline,
     validate,
 )
+from app.routers.approvals import approval_response
+from app.schemas.approvals import ApprovalAnswer, ApprovalResponse
 from app.schemas.pipelines import (
     CatalogBlock,
     CatalogSink,
@@ -83,7 +86,7 @@ from app.schemas.pipelines import (
 )
 from app.settings import settings
 from app.workflows.client import get_temporal, get_temporal_or_none
-from app.workflows.pipeline import PipelineWorkflow
+from app.workflows.pipeline import APPROVAL_SIGNAL, PipelineWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
@@ -671,6 +674,22 @@ def run_summary(run: PipelineRun, version: int) -> PipelineRunSummary:
     )
 
 
+def _run_message(a: WebhookDelivery) -> PipelineRunAlert:
+    return PipelineRunAlert(
+        block_id=a.block_id,
+        event=a.event,
+        kind=a.kind,
+        destination_id=a.destination_id,
+        status=a.status,
+        attempts=a.attempts,
+        last_error=a.last_error,
+        next_attempt_at=a.next_attempt_at,
+        delivered_at=a.delivered_at,
+        created_at=a.created_at,
+        rollback=a.payload.get("rollback"),
+    )
+
+
 def run_response(
     run: PipelineRun,
     version: int,
@@ -682,21 +701,8 @@ def run_response(
         baseline_run_id=run.baseline_run_id,
         change_summary=run.change_summary,
         carried_sources=run.carried_sources,
-        alerts=[
-            PipelineRunAlert(
-                block_id=a.block_id,
-                kind=a.kind,
-                destination_id=a.destination_id,
-                status=a.status,
-                attempts=a.attempts,
-                last_error=a.last_error,
-                next_attempt_at=a.next_attempt_at,
-                delivered_at=a.delivered_at,
-                created_at=a.created_at,
-                rollback=a.payload.get("rollback"),
-            )
-            for a in alerts
-        ],
+        alerts=[_run_message(a) for a in alerts if a.event not in approvals.APPROVAL_EVENTS],
+        approval_messages=[_run_message(a) for a in alerts if a.event in approvals.APPROVAL_EVENTS],
         blocks=[
             PipelineRunBlockResponse(
                 block_id=b.block_id,
@@ -716,6 +722,11 @@ def run_response(
                 delivery=b.delivery,
                 undo_status=b.undo_status,
                 undo_error=b.undo_error,
+                approval_deadline=b.approval_deadline,
+                approval_answer=b.approval_answer,
+                answered_at=b.answered_at,
+                answered_by=b.answered_by,
+                superseded_by_run_id=b.superseded_by_run_id,
             )
             for b in blocks
         ],
@@ -978,7 +989,12 @@ async def cancel_run(
             logger.warning("pipeline_run_cancel_not_sent", run_id=str(run.id), error=str(exc))
 
     blocks = await run_blocks(db, run.id)
-    active = [b for b in blocks if b.status in ("running", "waiting")]
+    # A waiting Approval executes nothing: the run ends at once (ADR-016 §9b).
+    active = [
+        b
+        for b in blocks
+        if b.status in ("running", "waiting") and b.status_reason != "awaiting_approval"
+    ]
     logger.info("pipeline_run_cancel_requested", run_id=str(run.id), notified=workflow_notified)
     return PipelineRunCancelResponse(
         run=run_response(run, await version_number(db, run), blocks),
@@ -987,6 +1003,71 @@ async def cancel_run(
         llm_billed=any(b.type == "llm_extract" and b.started_at for b in blocks),
         workflow_notified=workflow_notified,
     )
+
+
+def _refusal(run: PipelineRun, block: PipelineRunBlock) -> str:
+    state = approvals.approval_state(block)
+    if state in ("approved", "rejected", "expired", "superseded"):
+        return f"The approval is already {state}"
+    if run.status != "running" or run.cancel_requested_at is not None:
+        return f"The run is {'being cancelled' if run.status == 'running' else run.status}"
+    if state == "waiting":
+        return "The approval's deadline has passed"
+    if state == "not_requested":
+        return "The run is not waiting for approval yet"
+    return "The run is no longer waiting for approval"
+
+
+@router.post("/{pipeline_id}/runs/{run_id}/approval", response_model=ApprovalResponse)
+async def answer_approval(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    body: ApprovalAnswer,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    temporal: Client | None = Depends(get_temporal_or_none),
+) -> ApprovalResponse:
+    """Records the owner's answer on the block row, then wakes the workflow (ADR-016 §9b).
+
+    Row first, under the run's lock and conditionally, so an answer and the expiry cannot both
+    win; the signal is best effort (a lost one is found at the reminder or the deadline).
+    """
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id).with_for_update())
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    block = await approvals.approval_block(db, run.id)
+    if block is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="This run has no approval block"
+        )
+    name = await db.scalar(select(Pipeline.name).where(Pipeline.id == run.pipeline_id))
+    answerable = run.status == "running" and run.cancel_requested_at is None
+    if not answerable or not await approvals.record_answer(
+        db, block, body.decision, answered_by=user.id, open_until_deadline=True
+    ):
+        await db.refresh(block)
+        current = await approval_response(db, run, block, name)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": _refusal(run, block), "approval": current.model_dump(mode="json")},
+        )
+    await notify_run(db, run, block.block_id, block.status, block.status_reason)
+    await db.commit()
+
+    signalled = False
+    if temporal is not None:
+        try:
+            await temporal.get_workflow_handle(run.workflow_id).signal(APPROVAL_SIGNAL)
+            signalled = True
+        except Exception as exc:
+            logger.warning("pipeline_approval_signal_not_sent", run_id=str(run.id), error=str(exc))
+    logger.info(
+        "pipeline_approval_answered",
+        run_id=str(run.id),
+        decision=body.decision,
+        signalled=signalled,
+    )
+    return await approval_response(db, run, block, name)
 
 
 @router.delete("/{pipeline_id}/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
