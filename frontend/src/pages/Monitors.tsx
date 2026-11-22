@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { type Monitor } from '../api'
 import { useApi } from '../lib/useApi'
+import { useWaitingApprovals } from '../lib/useApprovals'
 import { describeCron } from '../lib/cron'
 import { STATE_LABELS, changeLabel } from '../lib/monitorText'
 import StatusPill from '../components/StatusPill'
@@ -27,6 +28,9 @@ export default function Monitors({ mode }: { mode: 'admin' | 'user' }) {
     queryFn: () => api.get(`${isAdmin ? '/admin/monitors' : '/monitors'}?limit=${limit}&offset=${offset}`),
     refetchInterval: 30_000,
   })
+  // R9: the list shows each monitor's approvals waiting (at most one, D10).
+  const { data: approvals } = useWaitingApprovals({ mode, refetchInterval: 30_000 })
+  const waiting = (id: string) => approvals?.filter(a => a.monitor_id === id).length ?? 0
 
   return (
     <div>
@@ -58,7 +62,7 @@ export default function Monitors({ mode }: { mode: 'admin' | 'user' }) {
             <table className="min-w-full divide-y divide-gray-200 text-sm">
               <thead className="bg-gray-50">
                 <tr>
-                  {['Name', ...(isAdmin ? ['Owner'] : []), 'State', 'Schedule', 'Next check', 'Last check'].map(h => (
+                  {['Name', ...(isAdmin ? ['Owner'] : []), 'State', 'Schedule', 'Next check', 'Last check', 'Approval'].map(h => (
                     <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
                   ))}
                 </tr>
@@ -87,6 +91,9 @@ export default function Monitors({ mode }: { mode: 'admin' | 'user' }) {
                       ) : (
                         '—'
                       )}
+                    </td>
+                    <td className="px-4 py-3 text-gray-500">
+                      {waiting(m.id) ? <StatusPill status="waiting" /> : '—'}
                     </td>
                   </tr>
                 ))}

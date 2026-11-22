@@ -202,7 +202,7 @@ export interface PipelineRunSummary {
   finished_at: string | null
   // How it ended (ADR-014 §5a): a stop is `completed` plus these two.
   stopped_at_block_id: string | null
-  stop_reason: 'rule_not_met' | null
+  stop_reason: StopReason | null
   failed_block_id: string | null
   rollback_deadline: string | null
   user_id?: string
@@ -213,6 +213,9 @@ export interface PipelineRunSummary {
 
 export type ChangeStatus = 'first_check' | 'no_baseline' | 'changed' | 'unchanged'
 
+// ADR-014 §5a; the approval endings are ADR-016 §10's.
+export type StopReason = 'rule_not_met' | 'approval_rejected' | 'approval_expired' | 'approval_superseded'
+
 export type RunInputValue = string | number
 
 export type BlockStatusReason =
@@ -221,6 +224,7 @@ export type BlockStatusReason =
   | 'cancelled'
   | 'not_started'
   | 'alert_only'
+  | 'awaiting_approval'
   | 'not_recorded'
 
 // A stop-mode Validate's verdict; `rule` is as saved, so a bound value is {"$input": name}.
@@ -233,8 +237,10 @@ export interface RunVerdict {
   matched?: 'baseline' | 'waiting' | null
 }
 
+// A failure alert (ADR-014 §8e) or an Approval block's message (ADR-016 §9c).
 export interface PipelineRunAlert {
   block_id: string
+  event: string
   kind: 'webhook' | 'email'
   // A saved destination's; null for an inline URL, or once that destination is deleted.
   destination_id: string | null
@@ -298,11 +304,22 @@ export interface PipelineRunBlock {
   delivery: SinkDelivery | null
   undo_status: UndoStatus | null
   undo_error: string | null
+  // An Approval block (ADR-016 §9a); null on every other block. While the run is still
+  // waiting, an answer can already be recorded: the workflow has not woken yet.
+  approval_deadline: string | null
+  approval_answer: ApprovalAnswer | null
+  answered_at: string | null
+  answered_by: string | null
+  superseded_by_run_id: string | null
 }
+
+export type ApprovalAnswer = 'approved' | 'rejected' | 'expired' | 'superseded'
 
 export interface PipelineRun extends PipelineRunSummary {
   blocks: PipelineRunBlock[]
   alerts: PipelineRunAlert[]
+  // The Approval block's request, reminder, expired and superseded messages.
+  approval_messages: PipelineRunAlert[]
   baseline_run_id: string | null
   // The bounded diff summaries, by the block that triggered each.
   change_summary: Record<string, DiffSummary> | null
@@ -359,6 +376,42 @@ export interface PipelineRunCancel {
 export interface BlockProblem {
   block_id: string | null
   message: string
+}
+
+// ---------------------------------------------------------------------------
+// Approvals (ADR-016 §9 · PRD-018 R5, R9)
+// ---------------------------------------------------------------------------
+
+// The recorded answer, else where the block is.
+export type ApprovalState = 'not_requested' | 'waiting' | ApprovalAnswer | 'closed'
+
+export interface Approval {
+  pipeline_id: string
+  pipeline_name: string
+  run_id: string
+  block_id: string
+  // A monitor's check; null for a hand-run.
+  monitor_id: string | null
+  run_status: string
+  state: ApprovalState
+  requested_at: string | null
+  deadline: string | null
+  answered_at: string | null
+  answered_by: string | null
+  superseded_by_run_id: string | null
+  change_status: ChangeStatus | null
+  change_summary: Record<string, DiffSummary> | null
+  // What this run has already delivered: a reject keeps it.
+  deliveries: Array<{ block_id: string; kind: string; location: BucketLocation | Record<string, unknown> }>
+  // Admin routes only.
+  user_id?: string
+  user_email?: string | null
+}
+
+// 409 from an answer: the approval as it stands.
+export interface ApprovalRefused {
+  message: string
+  approval: Approval
 }
 
 // ---------------------------------------------------------------------------
@@ -597,7 +650,8 @@ export interface CatalogBlock {
   kind: 'content' | 'effect'
   config_schema_version: number
   consumes: string[]
-  destination_kind: DestinationKind | null
+  // The kinds of saved destination its destination_id may name; empty if it takes none.
+  destination_kinds: DestinationKind[]
   sink: { reversible: boolean; undo: CatalogTiming | null } | null
   timings: Record<string, CatalogTiming>
 }

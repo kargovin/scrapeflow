@@ -11,17 +11,20 @@ import {
   type RollbackEntry,
 } from '../api'
 import { useApi } from '../lib/useApi'
+import { useWaitingApprovals } from '../lib/useApprovals'
 import { useLiveSocket } from '../lib/useLiveSocket'
 import {
   UNDO_PILL,
   blockDetail,
   failedBlock,
   locationInWords,
+  approvalStopInWords,
   resultDeletedOnStop,
   undoLeft,
   verdictInWords,
 } from '../lib/runText'
 import { changeLabel, comparedWith } from '../lib/monitorText'
+import ApprovalPanel from '../components/ApprovalPanel'
 import DiffView from '../components/DiffView'
 import ErrorBox from '../components/ErrorBox'
 import LiveBadge from '../components/LiveBadge'
@@ -53,6 +56,13 @@ function byTime(iso: string): string {
   const at = new Date(iso)
   const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString()} ${time}`
+}
+
+const MESSAGE_EVENTS: Record<string, string> = {
+  'pipeline.approval_requested': 'request',
+  'pipeline.approval_expiring': 'reminder',
+  'pipeline.approval_expired': 'expired',
+  'pipeline.approval_superseded': 'superseded',
 }
 
 function rollbackLine(label: string, entries: RollbackEntry[]): string | null {
@@ -97,8 +107,20 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
 
   const destinationIds = new Set([
     ...(run?.blocks.flatMap(b => (b.delivery ? [b.delivery.destination_id] : [])) ?? []),
-    ...(run?.alerts.flatMap(a => (a.destination_id ? [a.destination_id] : [])) ?? []),
+    ...[...(run?.alerts ?? []), ...(run?.approval_messages ?? [])].flatMap(a =>
+      a.destination_id ? [a.destination_id] : [],
+    ),
   ])
+
+  // "Unchanged since the check waiting for approval" (ADR-016 §9e): that run is the
+  // monitor's waiting approval, while it still waits.
+  const matchedWaiting = !!run?.blocks.some(b => b.verdict?.matched === 'waiting')
+  const { data: waitingApprovals } = useWaitingApprovals({
+    mode,
+    monitorId: run?.monitor_id,
+    enabled: matchedWaiting && !!run?.monitor_id,
+  })
+  const waitingRun = waitingApprovals?.find(a => a.run_id !== run?.id)
   // Names for the destinations this run wrote to; the run carries ids only.
   const { data: destinations } = useQuery<Destination[]>({
     queryKey: ['destinations', mode, isAdmin ? run?.user_id : 'me'],
@@ -146,13 +168,56 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (isError || !run) return <p className="text-sm text-red-600">Run not found.</p>
 
-  const status = runStatus(run)
+  const approvalBlock = run.blocks.find(b => b.type === 'approval')
+  const awaitingApproval = approvalBlock?.status_reason === 'awaiting_approval' && !approvalBlock.approval_answer
+  const status = awaitingApproval && runStatus(run) === 'running' ? 'waiting' : runStatus(run)
   const cancelling = status === 'cancelling'
   const undoing = status === 'undoing'
   const delivered = run.blocks.filter(b => b.delivery || b.undo_status)
   const reported: PipelineRunAlert | undefined = run.alerts.find(a => a.rollback)
   const stopper = run.blocks.find(b => b.block_id === run.stopped_at_block_id)
   const brokeAt = failedBlock(run)
+  const refetchRun = () => {
+    qc.invalidateQueries({ queryKey: runKey })
+    qc.invalidateQueries({ queryKey: ['approvals'] })
+  }
+  const openRun = (id: string) => navigate(`${routeBase}/${pipelineId}/runs/${id}`)
+
+  const messageTable = (list: PipelineRunAlert[], withEvent: boolean) => (
+    <table className="min-w-full divide-y divide-gray-200 text-sm">
+      <thead className="bg-gray-50">
+        <tr>
+          {[...(withEvent ? ['Message'] : []), 'Sent by', 'To', 'Status', 'Attempts', 'Last error'].map(h => (
+            <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-gray-100">
+        {list.map(a => (
+          <tr key={`${a.block_id}-${a.event}`}>
+            {withEvent && <td className="px-4 py-3 text-gray-900">{MESSAGE_EVENTS[a.event] ?? a.event}</td>}
+            <td className="px-4 py-3 text-gray-900">{a.block_id}</td>
+            <td className="px-4 py-3 text-gray-500">
+              {a.kind}
+              {a.destination_id && <span className="ml-1">{destinationLink(a.destination_id)}</span>}
+            </td>
+            <td className="px-4 py-3">
+              <StatusPill status={a.status === 'exhausted' ? 'failed' : a.status === 'delivered' ? 'completed' : 'pending'} />
+              <span className="ml-2 text-xs text-gray-500">
+                {a.status === 'exhausted'
+                  ? 'gave up — undelivered'
+                  : a.status === 'delivered'
+                    ? `delivered ${new Date(a.delivered_at!).toLocaleString()}`
+                    : `next try ${new Date(a.next_attempt_at).toLocaleString()}`}
+              </span>
+            </td>
+            <td className="px-4 py-3 text-gray-500">{a.attempts}</td>
+            <td className="px-4 py-3 text-gray-500 max-w-sm break-words">{a.last_error ?? '—'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
 
   return (
     <div>
@@ -179,7 +244,18 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
               ['Started', new Date(run.created_at).toLocaleString()],
               ['Finished', run.finished_at ? new Date(run.finished_at).toLocaleString() : '—'],
               ...(run.stopped_at_block_id
-                ? [['Stopped at', `${run.stopped_at_block_id}${stopper?.verdict ? ` — ${verdictInWords(stopper.verdict)}` : ''}`]]
+                ? [
+                    [
+                      'Stopped at',
+                      `${run.stopped_at_block_id}${
+                        stopper?.verdict
+                          ? ` — ${verdictInWords(stopper.verdict)}`
+                          : approvalStopInWords(run.stop_reason)
+                            ? ` — ${approvalStopInWords(run.stop_reason)}`
+                            : ''
+                      }`,
+                    ],
+                  ]
                 : []),
               ...(brokeAt ? [['Failed at', brokeAt]] : []),
               ['Result', resultDeletedOnStop(run) ? 'result deleted when the run stopped' : (run.result_path ?? '—')],
@@ -193,6 +269,10 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
           ))}
         </dl>
       </div>
+
+      {approvalBlock && (
+        <ApprovalPanel run={run} block={approvalBlock} mode={mode} onAnswered={refetchRun} onOpenRun={openRun} />
+      )}
 
       {run.change_status && (
         <div className="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
@@ -214,7 +294,19 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
               <dt className="text-xs font-medium text-gray-500 uppercase">Change</dt>
               <dd className="text-sm text-gray-900 sm:col-span-3">
                 {changeLabel(run)}
-                {comparedWith(run) && (
+                {matchedWaiting ? (
+                  <span className="ml-1 text-gray-500">
+                    since{' '}
+                    {waitingRun ? (
+                      <button onClick={() => openRun(waitingRun.run_id)} className="text-indigo-600 hover:underline">
+                        the check waiting for approval ({waitingRun.run_id.slice(0, 8)})
+                      </button>
+                    ) : (
+                      'the check that was waiting for approval'
+                    )}
+                    ; the approval is left as it was
+                  </span>
+                ) : comparedWith(run) && (
                   <span className="ml-1 text-gray-500">
                     {run.change_status === 'unchanged' ? 'since' : 'compared with'}{' '}
                     {run.baseline_run_id ? (
@@ -386,38 +478,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
         <>
           <h3 className="text-sm font-semibold text-gray-900 mb-2">Failure alerts</h3>
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-gray-50">
-                <tr>
-                  {['Sent by', 'To', 'Status', 'Attempts', 'Last error'].map(h => (
-                    <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {run.alerts.map(a => (
-                  <tr key={a.block_id}>
-                    <td className="px-4 py-3 text-gray-900">{a.block_id}</td>
-                    <td className="px-4 py-3 text-gray-500">
-                      {a.kind}
-                      {a.destination_id && <span className="ml-1">{destinationLink(a.destination_id)}</span>}
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusPill status={a.status === 'exhausted' ? 'failed' : a.status === 'delivered' ? 'completed' : 'pending'} />
-                      <span className="ml-2 text-xs text-gray-500">
-                        {a.status === 'exhausted'
-                          ? 'gave up'
-                          : a.status === 'delivered'
-                            ? `delivered ${new Date(a.delivered_at!).toLocaleString()}`
-                            : `next try ${new Date(a.next_attempt_at).toLocaleString()}`}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-gray-500">{a.attempts}</td>
-                    <td className="px-4 py-3 text-gray-500 max-w-sm break-words">{a.last_error ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {messageTable(run.alerts, false)}
             {reported?.rollback && (
               <p className="px-4 py-2 border-t border-gray-100 text-xs text-gray-600">
                 The alert reports what rollback did —{' '}
@@ -431,6 +492,15 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
                 .
               </p>
             )}
+          </div>
+        </>
+      )}
+
+      {run.approval_messages.length > 0 && (
+        <>
+          <h3 className="text-sm font-semibold text-gray-900 mb-2">Approval messages</h3>
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden mb-6">
+            {messageTable(run.approval_messages, true)}
           </div>
         </>
       )}
@@ -462,8 +532,10 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
         <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
           <h3 className="text-sm font-semibold text-gray-900 mb-1">Cancel run</h3>
           <p className="text-xs text-gray-600 mb-3">
-            The step that is running finishes first; steps after it are skipped. Outputs already
-            stored are kept.
+            {awaitingApproval
+              ? 'The run is waiting for approval, so it ends cancelled at once; the request is closed. '
+              : 'The step that is running finishes first; steps after it are skipped. '}
+            Outputs already stored are kept.
           </p>
           <button
             onClick={() => cancel.mutate()}

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   type AdminMonitorDetail,
+  type Approval,
   type Destination,
   type Monitor,
   type MonitorNotice,
@@ -11,9 +12,10 @@ import {
   type ScheduledJobsUsage,
 } from '../api'
 import { useApi } from '../lib/useApi'
+import { useWaitingApprovals } from '../lib/useApprovals'
 import { describeCron } from '../lib/cron'
 import { STATE_LABELS, changeLabel, eventInWords } from '../lib/monitorText'
-import { stopLabel } from '../lib/runText'
+import { deadlineInWords, stopLabel } from '../lib/runText'
 import ErrorBox from '../components/ErrorBox'
 import StatusPill, { runStatus } from '../components/StatusPill'
 import { STATE_PILL } from './Monitors'
@@ -41,23 +43,34 @@ function NoticeState({ notice }: { notice: MonitorNotice }) {
 
 function HistoryLine({
   item,
+  waiting,
   onOpen,
 }: {
   item: MonitorHistoryItem
+  // The check's approval, while it waits for an answer.
+  waiting: Approval | undefined
   onOpen: (runId: string) => void
 }) {
   const at = new Date(item.at).toLocaleString()
   if (item.check) {
     const run = item.check
     const label = changeLabel(run)
+    // An approval ending is a stop past the change gate: show both (ADR-016 §10).
+    const approvalStop = run.stop_reason?.startsWith('approval_') ? stopLabel(run) : null
     return (
       <li
         onClick={() => onOpen(run.id)}
         className="px-4 py-2 flex items-center gap-3 hover:bg-gray-50 cursor-pointer text-sm"
       >
         <span className="w-44 text-xs text-gray-400">{at}</span>
-        <StatusPill status={runStatus(run)} />
-        <span className="text-gray-700">{label ?? (run.status === 'failed' ? run.error : stopLabel(run)) ?? ''}</span>
+        <StatusPill status={waiting && !run.cancel_requested_at ? 'waiting' : runStatus(run)} />
+        <span className="text-gray-700">
+          {label ?? (run.status === 'failed' ? run.error : stopLabel(run)) ?? ''}
+          {label && approvalStop && <span className="ml-1 text-gray-500">· {approvalStop}</span>}
+          {waiting?.deadline && (
+            <span className="ml-1 text-amber-700">· waiting for approval, expires {deadlineInWords(waiting.deadline)}</span>
+          )}
+        </span>
       </li>
     )
   }
@@ -108,6 +121,9 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
     queryFn: () => api.get('/destinations'),
     enabled: !isAdmin,
   })
+  // ADR-016 §9e: at most one check waits for approval; later checks keep running.
+  const { data: approvals } = useWaitingApprovals({ mode, monitorId, refetchInterval: 10_000 })
+  const waitingApproval = approvals?.[0]
   const noticeId = monitor?.notice_destination_id ?? null
   const { data: adminDestination } = useQuery<Destination>({
     queryKey: ['destination', 'admin', noticeId],
@@ -231,6 +247,26 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
           {warnings.map(w => <li key={w}>{w}</li>)}
         </ul>
       )}
+      {waitingApproval && (
+        <div className="mb-4 border border-amber-300 bg-amber-50 rounded p-3 text-xs text-amber-900">
+          <p>
+            <span className="font-semibold">
+              A check is waiting for {isAdmin ? 'the owner’s' : 'your'} approval
+            </span>
+            {waitingApproval.deadline && ` — expires ${deadlineInWords(waitingApproval.deadline)}`}.{' '}
+            <button
+              onClick={() => navigate(`${pipelinesBase}/${waitingApproval.pipeline_id}/runs/${waitingApproval.run_id}`)}
+              className="text-indigo-600 hover:underline"
+            >
+              {isAdmin ? 'Open the check' : 'Open the check to approve or reject'}
+            </button>
+          </p>
+          <p className="mt-1">
+            Checks keep running meanwhile: one that finds the same content leaves the approval
+            waiting; one that finds other content closes it as superseded.
+          </p>
+        </div>
+      )}
       {monitor.state === 'paused_itself' && (
         <p className="mb-4 border border-red-200 bg-red-50 rounded p-3 text-xs text-red-700">
           This monitor paused itself after five failed checks in a row. Fix what broke (see the
@@ -337,6 +373,7 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
             <HistoryLine
               key={item.check?.id ?? item.event!.id}
               item={item}
+              waiting={approvals?.find(a => a.run_id === item.check?.id)}
               onOpen={runId => navigate(`${pipelinesBase}/${monitor.pipeline_id}/runs/${runId}`)}
             />
           ))}

@@ -29,7 +29,8 @@ const TEMPLATE = {
 }
 
 const HELP = [
-  'Block types: scrape, clean, llm_extract, validate, webhook, bucket — each block names the block it reads from in "input".',
+  'Block types: scrape, clean, llm_extract, validate, approval, webhook, bucket — each block names the block it reads from in "input".',
+  'An approval block makes the run wait for your answer before the steps after it: {"deadline_hours": 24, "destination_id": "<id>"}. The request also goes to the destination, a saved webhook or email destination, if you name one (leave it out: this site only). Not the first or last block; one per pipeline.',
   'A bucket block writes its input to a saved bucket destination: {"destination_id": "<id>"}. A webhook block takes either "url" (+ "secret") or "destination_id" of a saved webhook destination.',
   'Put every bucket before the first webhook: if a later step fails, ScrapeFlow undoes what the buckets received — but not once a webhook has gone out.',
   'Secret fields (scrape proxy_url / cookies, webhook secret) are write-only: set them in config; they are stored encrypted and listed by name in "secrets".',
@@ -168,7 +169,7 @@ export default function PipelineEditor() {
                   <td className="pr-3 py-0.5 text-gray-900">{b.type}</td>
                   <td className="pr-3 text-gray-500">
                     {b.sink ? (b.sink.reversible ? 'undoable sink' : 'cannot be undone') : b.kind}
-                    {b.destination_kind && ` → ${b.destination_kind} destination`}
+                    {b.destination_kinds.length > 0 && ` → ${b.destination_kinds.join(' or ')} destination`}
                   </td>
                   <td className="pr-3 text-gray-500">
                     {Object.entries(b.timings)

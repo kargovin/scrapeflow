@@ -9,6 +9,7 @@ import {
   type RunInputValue,
 } from '../api'
 import { useApi } from '../lib/useApi'
+import { useWaitingApprovals } from '../lib/useApprovals'
 import { stopLabel } from '../lib/runText'
 import { STATE_LABELS, changeLabel } from '../lib/monitorText'
 import ErrorBox from '../components/ErrorBox'
@@ -37,6 +38,9 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
     refetchInterval: (query: Query<PipelineRunSummary[]>) =>
       (query.state.data ?? []).some(r => r.status === 'running') ? 5_000 : false,
   })
+  const anyRunning = !!runs?.some(r => r.status === 'running')
+  const { data: approvals } = useWaitingApprovals({ mode, enabled: anyRunning, refetchInterval: 30_000 })
+  const waiting = new Set(approvals?.map(a => a.run_id))
 
   const referenced = pipeline?.definition.blocks.some(b => typeof b.config.destination_id === 'string')
   const { data: destinations } = useQuery<Destination[]>({
@@ -226,7 +230,8 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
                   className="hover:bg-gray-50 cursor-pointer"
                 >
                   <td className="px-4 py-3">
-                    <StatusPill status={runStatus(r)} />
+                    <StatusPill status={waiting.has(r.id) && !r.cancel_requested_at ? 'waiting' : runStatus(r)} />
+                    {waiting.has(r.id) && <span className="ml-2 text-xs text-amber-700">for approval</span>}
                     {changeLabel(r) && <span className="ml-2 text-xs text-gray-700">{changeLabel(r)}</span>}
                     {stopLabel(r) && r.change_status !== 'unchanged' && (
                       <span className="ml-2 text-xs text-gray-500">{stopLabel(r)}</span>

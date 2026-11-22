@@ -20,6 +20,7 @@ import MonitorDetail from './pages/MonitorDetail'
 import Destinations from './pages/Destinations'
 import DestinationDetail from './pages/DestinationDetail'
 import DestinationEditor from './pages/DestinationEditor'
+import Approvals from './pages/Approvals'
 
 // Monaco stays out of the main chunk (frontend asset rule).
 const PipelineEditor = lazy(() => import('./pages/PipelineEditor'))
@@ -43,6 +44,7 @@ const ADMIN_NAV = [
   { path: '/app/admin/crawls', label: 'Crawls' },
   { path: '/app/admin/pipelines', label: 'Pipelines' },
   { path: '/app/admin/monitors', label: 'Monitors' },
+  { path: '/app/admin/approvals', label: 'Approvals' },
   { path: '/app/admin/destinations', label: 'Destinations' },
   { path: '/app/admin/stats', label: 'Usage Stats' },
 ]
@@ -53,6 +55,7 @@ const USER_NAV = [
   { path: '/app/dashboard/crawls', label: 'Crawls' },
   { path: '/app/dashboard/pipelines', label: 'Pipelines' },
   { path: '/app/dashboard/monitors', label: 'Monitors' },
+  { path: '/app/dashboard/approvals', label: 'Approvals' },
   { path: '/app/dashboard/destinations', label: 'Destinations' },
   { path: '/app/dashboard/api-keys', label: 'API Keys' },
 ]
@@ -81,6 +84,7 @@ export default function App() {
             />
             <Route path="/app/admin/monitors" element={<Monitors mode="admin" />} />
             <Route path="/app/admin/monitors/:monitorId" element={<MonitorDetail mode="admin" />} />
+            <Route path="/app/admin/approvals" element={<Approvals mode="admin" />} />
             <Route path="/app/admin/destinations" element={<Destinations mode="admin" />} />
             <Route path="/app/admin/destinations/:destinationId" element={<DestinationDetail mode="admin" />} />
             <Route path="/app/admin/stats" element={<UsageStats />} />
@@ -107,6 +111,7 @@ export default function App() {
           <Route path="/app/dashboard/monitors" element={<Monitors mode="user" />} />
           <Route path="/app/dashboard/monitors/new" element={monitorEditor} />
           <Route path="/app/dashboard/monitors/:monitorId" element={<MonitorDetail mode="user" />} />
+          <Route path="/app/dashboard/approvals" element={<Approvals mode="user" />} />
           <Route path="/app/dashboard/destinations" element={<Destinations mode="user" />} />
           <Route path="/app/dashboard/destinations/new" element={<DestinationEditor />} />
           <Route path="/app/dashboard/destinations/:destinationId" element={<DestinationDetail mode="user" />} />

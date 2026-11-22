@@ -1,11 +1,14 @@
 import type {
+  ApprovalState,
   BlockStatusReason,
   BucketLocation,
+  DiffSummary,
   PipelineRun,
   PipelineRunBlock,
   RollbackEntry,
   RunVerdict,
   SinkDelivery,
+  StopReason,
 } from '../api'
 
 // A Validate rule, as saved, in words (ADR-014 §3: the stored rule stays {kind, …, negate}).
@@ -80,6 +83,8 @@ export function skipReasonInWords(reason: BlockStatusReason | null, block: strin
       return 'skipped — the run could not start'
     case 'alert_only':
       return 'skipped — alert only (sends when the run breaks)'
+    case 'awaiting_approval':
+      return 'waiting for approval'
     case 'not_recorded':
       return 'skipped — reason not recorded'
     default:
@@ -87,9 +92,68 @@ export function skipReasonInWords(reason: BlockStatusReason | null, block: strin
   }
 }
 
+// ADR-016 §10's approval endings; a Validate stop is named by its block.
+const APPROVAL_STOPS: Partial<Record<StopReason, string>> = {
+  approval_rejected: 'approval rejected',
+  approval_expired: 'approval expired',
+  approval_superseded: 'superseded by a later check',
+}
+
+export function approvalStopInWords(reason: StopReason | null | undefined): string | null {
+  return (reason && APPROVAL_STOPS[reason]) ?? null
+}
+
 // The run list's label: from the run row alone, no block reads (PRD-019 D9).
-export function stopLabel(run: { stopped_at_block_id: string | null }): string | null {
-  return run.stopped_at_block_id ? `stopped at ${run.stopped_at_block_id}` : null
+export function stopLabel(run: { stopped_at_block_id: string | null; stop_reason?: StopReason | null }): string | null {
+  if (!run.stopped_at_block_id) return null
+  const approval = approvalStopInWords(run.stop_reason)
+  return approval ? `stopped: ${approval}` : `stopped at ${run.stopped_at_block_id}`
+}
+
+const ANSWERS: Record<ApprovalState, string> = {
+  not_requested: 'not asked yet',
+  waiting: 'waiting for an answer',
+  approved: 'approved',
+  rejected: 'rejected',
+  expired: 'expired — nobody answered by the deadline',
+  superseded: 'superseded — a later check found other content',
+  closed: 'closed without an answer',
+}
+
+export function approvalStateInWords(state: ApprovalState): string {
+  return ANSWERS[state]
+}
+
+// ApprovalResponse.state from a run's block (core/approvals.approval_state).
+export function approvalState(b: PipelineRunBlock): ApprovalState {
+  if (b.approval_answer) return b.approval_answer
+  if (b.status === 'waiting' && b.approval_deadline) return 'waiting'
+  if (b.status === 'pending' || b.status === 'waiting') return 'not_requested'
+  return 'closed'
+}
+
+// "15 Nov 06:00 (in 3 h)" — the deadline must be stated wherever the request shows (PRD-018 R5).
+export function deadlineInWords(iso: string, now: Date = new Date()): string {
+  const at = new Date(iso)
+  const minutes = Math.round((at.getTime() - now.getTime()) / 60_000)
+  const left =
+    minutes <= 0
+      ? 'passed'
+      : minutes < 120
+        ? `in ${minutes} min`
+        : minutes < 48 * 60
+          ? `in ${Math.round(minutes / 60)} h`
+          : `in ${Math.round(minutes / 1440)} days`
+  return `${at.toLocaleString()} (${left})`
+}
+
+// What changed against the baseline, in one line per block (the full diff is on the run page).
+export function changeSummaryInWords(summary: Record<string, DiffSummary> | null): string[] {
+  return Object.entries(summary ?? {}).map(([block, d]) => {
+    if (d.status !== 'ok') return `${block}: no diff (${d.reason ?? d.status.replace('_', ' ')})`
+    if (d.kind === 'extraction') return `${block}: ${d.paths_changed ?? d.changes?.length ?? 0} values changed`
+    return `${block}: +${d.lines_added ?? 0} −${d.lines_removed ?? 0} lines`
+  })
 }
 
 // Old failed runs have no failed_block_id; their error starts "<block>: ".
@@ -154,9 +218,19 @@ export function undoLeft(run: PipelineRun): number {
   return run.blocks.filter(b => b.delivery && (b.undo_status === null || b.undo_status === 'undoing')).length
 }
 
+function approvalDetail(b: PipelineRunBlock): string | null {
+  if (b.type !== 'approval' || !b.approval_deadline) return null
+  const state = approvalState(b)
+  if (state === 'waiting') return `waiting for approval — expires ${deadlineInWords(b.approval_deadline)}`
+  const at = b.answered_at ? ` ${new Date(b.answered_at).toLocaleString()}` : ''
+  if (b.status === 'waiting') return `${approvalStateInWords(state)}${at} — the run continues shortly`
+  return `${approvalStateInWords(state)}${at}`
+}
+
 export function blockDetail(b: PipelineRunBlock): string {
   return (
     b.error ??
+    approvalDetail(b) ??
     sinkInWords(b) ??
     (b.verdict ? verdictInWords(b.verdict) : null) ??
     skipReasonInWords(b.status_reason, b.reason_block_id) ??
