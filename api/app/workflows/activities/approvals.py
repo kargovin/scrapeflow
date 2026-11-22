@@ -6,7 +6,6 @@ Each takes the run's lock and refuses a run that is gone, no longer running or a
 
 import uuid
 
-import structlog
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -16,7 +15,6 @@ from app.core.pipeline_status import notify_run
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.workflows.activities.db import _cancel_requested, _lock_run
 from app.workflows.pipeline import (
-    APPROVAL_SIGNAL,
     REMIND_APPROVAL_ACTIVITY,
     REQUEST_APPROVAL_ACTIVITY,
     RESOLVE_APPROVAL_ACTIVITY,
@@ -28,8 +26,6 @@ from app.workflows.pipeline import (
     ResolveApprovalInput,
     SupersedeApprovalInput,
 )
-
-logger = structlog.get_logger()
 
 
 async def _locked(db, input: ApprovalRef) -> tuple[PipelineRun, PipelineRunBlock]:
@@ -105,11 +101,7 @@ async def resolve_approval(input: ResolveApprovalInput) -> ApprovalOutcome:
 
 
 async def _wake(run: PipelineRun) -> None:
-    """Best effort: a lost wake-up is found at the reminder or the deadline."""
-    try:
-        await activity.client().get_workflow_handle(run.workflow_id).signal(APPROVAL_SIGNAL)
-    except Exception as exc:
-        logger.warning("pipeline_approval_signal_not_sent", run_id=str(run.id), error=str(exc))
+    await approvals.wake(activity.client, run.id, run.workflow_id)
 
 
 @activity.defn(name=SUPERSEDE_APPROVAL_ACTIVITY)

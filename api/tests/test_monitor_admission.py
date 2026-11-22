@@ -390,8 +390,9 @@ async def test_a_firing_while_a_check_runs_is_skipped(db_user):
 # --- a check waiting for approval (ADR-016 §9e) ---------------------------------------------
 
 
-async def _waits_for_approval(run_id, fingerprint="f" * 64, answer=None):
-    """The check passed its first gate and its Approval block waits (the workflow's mirrors)."""
+async def _waits_for_approval(run_id, fingerprint="f" * 64, answer=None, by=None):
+    """The check passed its first gate and its Approval block waits (the workflow's mirrors);
+    ``by``: the owner who answered."""
     async with AsyncSessionLocal() as db:
         blocks = {
             b.block_id: b
@@ -406,6 +407,8 @@ async def _waits_for_approval(run_id, fingerprint="f" * 64, answer=None):
         approve.status, approve.status_reason = "waiting", "awaiting_approval"
         approve.approval_deadline = datetime.now(UTC) + timedelta(hours=24)
         approve.approval_answer = answer
+        if by is not None:
+            approve.answered_at, approve.answered_by = datetime.now(UTC), by
         await db.commit()
 
 
@@ -442,16 +445,43 @@ async def test_a_check_waiting_for_approval_is_not_in_flight_and_is_handed_over(
     assert await _events(monitor) == []
 
 
-async def test_an_answered_approval_is_not_in_flight_and_not_compared_with(db_user):
+@pytest.fixture
+def wake():
+    with patch("app.workflows.activities.monitor_checks.activity.client") as client:
+        client.return_value.get_workflow_handle.return_value.signal = AsyncMock()
+        yield client
+
+
+@pytest.mark.parametrize("answer", ["approved", "rejected"])
+async def test_an_answered_approval_not_yet_woken_stays_in_flight_and_is_woken_again(
+    db_user, wake, answer
+):
     monitor = await _monitor(db_user.id, approval="after_gate")
-    _, approved = await _admit(monitor)
-    # Answered; its workflow not woken yet.
-    await _waits_for_approval(approved, answer="approved")
+    _, answered = await _admit(monitor)
+    # The owner's answer recorded; its signal lost, so the workflow still waits.
+    await _waits_for_approval(answered, answer=answer, by=db_user.id)
+    async with AsyncSessionLocal() as db:
+        workflow_id = (await db.get(PipelineRun, uuid.UUID(answered))).workflow_id
 
-    admission, _ = await _admit(monitor)
+    # Not a second request for the same change.
+    assert (await _admit(monitor))[0].verdict == "skipped"
 
-    assert admission.verdict == "admitted"
-    assert (admission.run.monitor.waiting_run_id, admission.run.monitor.gates) == (None, {})
+    assert [r.id for r in await _runs(monitor)] == [uuid.UUID(answered)]
+    [event] = await _events(monitor)
+    assert event.kind == "skipped_check_in_progress"
+    wake.return_value.get_workflow_handle.assert_called_once_with(workflow_id)
+    wake.return_value.get_workflow_handle.return_value.signal.assert_awaited_once_with(
+        "approval_answered"
+    )
+
+
+async def test_a_lost_wake_up_is_only_logged(db_user, wake):
+    monitor = await _monitor(db_user.id, approval="after_gate")
+    _, answered = await _admit(monitor)
+    await _waits_for_approval(answered, answer="approved", by=db_user.id)
+    wake.return_value.get_workflow_handle.return_value.signal.side_effect = RuntimeError("down")
+
+    assert (await _admit(monitor))[0].verdict == "skipped"
 
 
 async def test_where_no_later_check_can_supersede_a_waiting_check_stays_in_flight(db_user):

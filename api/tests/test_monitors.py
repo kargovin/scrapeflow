@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from temporalio.client import ScheduleOverlapPolicy
 
 from app.core.db import AsyncSessionLocal
@@ -16,7 +16,7 @@ from app.main import app
 from app.models.job import Job
 from app.models.llm_keys import UserLLMKey
 from app.models.monitor import Monitor, MonitorEvent
-from app.models.pipeline import Pipeline
+from app.models.pipeline import Pipeline, PipelineRun
 from app.models.user_quota import UserQuota
 from app.settings import settings
 
@@ -1203,6 +1203,51 @@ async def test_check_now_runs_beside_a_check_waiting_for_approval_and_hands_it_o
     sent = temporal.start_workflow.await_args.args[1]
     assert sent.monitor.waiting_run_id == str(waiting)
     assert sent.monitor.gates["gate"].waiting == "b" * 64
+
+
+async def test_check_now_beside_an_answered_check_not_yet_woken_is_refused_and_wakes_it(
+    client, headers, key, db_user, temporal
+):
+    from app.models.pipeline import PipelineRunBlock
+
+    pipeline = await _pipeline(client, headers, gated(key.id, approval=True))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    first = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+    answered = uuid.UUID(first.json()["id"])
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(
+                PipelineRunBlock.pipeline_run_id == answered, PipelineRunBlock.block_id == "gate"
+            )
+            .values(status="completed", fingerprint="b" * 64)
+        )
+        # Approved; the signal lost.
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(
+                PipelineRunBlock.pipeline_run_id == answered,
+                PipelineRunBlock.block_id == "approve",
+            )
+            .values(
+                status="waiting",
+                status_reason="awaiting_approval",
+                approval_answer="approved",
+                answered_at=func.now(),
+                answered_by=db_user.id,
+            )
+        )
+        await db.commit()
+        workflow_id = (await db.get(PipelineRun, answered)).workflow_id
+    signal = temporal.get_workflow_handle.return_value.signal = AsyncMock()
+
+    again = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+
+    assert again.status_code == 409, again.text
+    assert again.json()["detail"]["run_id"] == str(answered)
+    assert len(await _runs(monitor["id"])) == 1
+    temporal.get_workflow_handle.assert_called_with(workflow_id)
+    signal.assert_awaited_once_with("approval_answered")
 
 
 async def test_a_check_now_that_could_not_start_is_a_counted_failed_check(

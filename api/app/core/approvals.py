@@ -7,12 +7,15 @@ by whichever writer commits first — the owner's answer, the expiry, or a super
 """
 
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client
 
 from app.models.destination import Destination
 from app.models.pipeline import PipelineRun, PipelineRunBlock, PipelineVersion
@@ -20,6 +23,9 @@ from app.models.webhook_delivery import WebhookDelivery
 from app.pipelines.catalog import APPROVAL
 from app.pipelines.definition import ApprovalBlock, parse_definition
 from app.settings import settings
+from app.workflows.pipeline import APPROVAL_SIGNAL
+
+logger = structlog.get_logger()
 
 REQUESTED_EVENT = "pipeline.approval_requested"
 EXPIRING_EVENT = "pipeline.approval_expiring"
@@ -141,6 +147,17 @@ async def queue_message(
             index_where=WebhookDelivery.pipeline_run_id.isnot(None),
         )
     )
+    return True
+
+
+async def wake(get_client: Callable[[], Client], run_id: uuid.UUID, workflow_id: str) -> bool:
+    """Tells the run's workflow an answer may be recorded. Best effort, after the commit: a lost
+    wake-up is found at the reminder, the deadline or the monitor's next firing."""
+    try:
+        await get_client().get_workflow_handle(workflow_id).signal(APPROVAL_SIGNAL)
+    except Exception as exc:
+        logger.warning("pipeline_approval_signal_not_sent", run_id=str(run_id), error=str(exc))
+        return False
     return True
 
 

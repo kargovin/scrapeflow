@@ -14,11 +14,12 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from app.auth.dependencies import get_current_admin_user, get_current_user
-from app.core import monitor_events, monitor_schedules
+from app.core import approvals, monitor_events, monitor_schedules
 from app.core.db import get_db
 from app.core.destinations import notice_destination_problem
 from app.core.minio import get_minio
 from app.core.monitors import (
+    answered_waiting,
     ceiling_problems,
     check_in_flight,
     find_baseline,
@@ -507,6 +508,10 @@ async def check_now(
     await lock_user(user_id, db)
     running = await check_in_flight(db, monitor.id, parsed)
     if running is not None:
+        unwoken = await answered_waiting(db, monitor.id)
+        await db.rollback()  # ends the user lock before the engine is called
+        for run_id, workflow_id in unwoken:
+            await approvals.wake(lambda: temporal, run_id, workflow_id)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={

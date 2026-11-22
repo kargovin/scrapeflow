@@ -173,13 +173,28 @@ async def check_in_flight(
     db: AsyncSession, monitor_id: uuid.UUID, parsed: ParsedDefinition | None
 ) -> uuid.UUID | None:
     """§3c's database rule: a running check — not one waiting for an approval that a later check
-    can supersede (§9e). Where none can, a waiting check stays in flight: at most one waits."""
+    can supersede (§9e). Where none can, a waiting check stays in flight: at most one waits.
+    One the owner has answered stays in flight until its workflow wakes (``answered_waiting``)."""
     query = select(PipelineRun.id).where(
         PipelineRun.monitor_id == monitor_id, PipelineRun.status == "running"
     )
     if parsed is not None and approval_after_first_gate(parsed.blocks):
-        query = query.where(~_approval_waiting())
+        # answered_at: the owner's answer only — expiry and supersede set none.
+        query = query.where(~_approval_waiting(PipelineRunBlock.answered_at.is_(None)))
     return await db.scalar(query.order_by(PipelineRun.created_at).limit(1))
+
+
+async def answered_waiting(db: AsyncSession, monitor_id: uuid.UUID) -> list[tuple[uuid.UUID, str]]:
+    """Running checks whose approval has an answer but whose workflow has not woken (a lost
+    signal): ``(run_id, workflow_id)``, for ``approvals.wake`` after the commit."""
+    rows = await db.execute(
+        select(PipelineRun.id, PipelineRun.workflow_id).where(
+            PipelineRun.monitor_id == monitor_id,
+            PipelineRun.status == "running",
+            _approval_waiting(PipelineRunBlock.approval_answer.is_not(None)),
+        )
+    )
+    return list(rows.tuples())
 
 
 async def waiting_check(db: AsyncSession, monitor_id: uuid.UUID) -> PipelineRun | None:

@@ -14,11 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 
-from app.core import monitor_events, webhook_delivery
+from app.core import approvals, monitor_events, webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.core.destinations import reference_problems
 from app.core.monitor_checks import after_commit, monitor_check_ended
-from app.core.monitors import check_in_flight, find_baseline, prepare_check
+from app.core.monitors import answered_waiting, check_in_flight, find_baseline, prepare_check
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_trigger import (
     build_run,
@@ -220,7 +220,11 @@ async def admit_monitor_check(input: AdmitMonitorCheckInput) -> MonitorAdmission
         if not settings.pipelines_enabled:
             return await _skip(db, monitor, "skipped_pipelines_disabled", now)
         if await check_in_flight(db, monitor.id, pinned[0] if pinned else None):
-            return await _skip(db, monitor, "skipped_check_in_progress", now)
+            unwoken = await answered_waiting(db, monitor.id)
+            skipped = await _skip(db, monitor, "skipped_check_in_progress", now)
+            for waiting_id, workflow_id in unwoken:
+                await approvals.wake(activity.client, waiting_id, workflow_id)
+            return skipped
         if await is_quota_exceeded(monitor.user_id, db, "monthly_runs"):
             detail = {"resets_at": _first_of_next_month(now).isoformat()}
             return await _skip(db, monitor, "skipped_monthly_runs", now, detail)

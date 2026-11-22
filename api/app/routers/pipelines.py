@@ -86,7 +86,7 @@ from app.schemas.pipelines import (
 )
 from app.settings import settings
 from app.workflows.client import get_temporal, get_temporal_or_none
-from app.workflows.pipeline import APPROVAL_SIGNAL, PipelineWorkflow
+from app.workflows.pipeline import PipelineWorkflow
 from app.workflows.queues import WORKFLOW_QUEUE
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
@@ -1054,13 +1054,9 @@ async def answer_approval(
     await notify_run(db, run, block.block_id, block.status, block.status_reason)
     await db.commit()
 
-    signalled = False
-    if temporal is not None:
-        try:
-            await temporal.get_workflow_handle(run.workflow_id).signal(APPROVAL_SIGNAL)
-            signalled = True
-        except Exception as exc:
-            logger.warning("pipeline_approval_signal_not_sent", run_id=str(run.id), error=str(exc))
+    signalled = temporal is not None and await approvals.wake(
+        lambda: temporal, run.id, run.workflow_id
+    )
     logger.info(
         "pipeline_approval_answered",
         run_id=str(run.id),
