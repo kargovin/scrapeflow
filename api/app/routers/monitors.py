@@ -20,6 +20,7 @@ from app.core.destinations import notice_destination_problem
 from app.core.minio import get_minio
 from app.core.monitors import (
     ceiling_problems,
+    check_in_flight,
     find_baseline,
     gate_problems,
     input_problems,
@@ -504,11 +505,7 @@ async def check_now(
         await ssrf_check(url)
 
     await lock_user(user_id, db)
-    running = await db.scalar(
-        select(PipelineRun.id).where(
-            PipelineRun.monitor_id == monitor.id, PipelineRun.status == "running"
-        )
-    )
+    running = await check_in_flight(db, monitor.id, parsed)
     if running is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

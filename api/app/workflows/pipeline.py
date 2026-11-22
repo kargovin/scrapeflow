@@ -835,6 +835,18 @@ class PipelineWorkflow:
                 None,
             )
         )
+        parent = workflow.info().parent
+        if parent is not None and input.monitor is not None:
+            # §9e: the tick closes, so the next firing is not dropped while this one waits.
+            try:
+                await self._finish(
+                    workflow.get_external_workflow_handle(
+                        parent.workflow_id, run_id=parent.run_id
+                    ).signal(CHECK_SETTLED_SIGNAL)
+                )
+            except Exception:
+                # The tick is gone: nothing waits for it.
+                workflow.logger.warning("check_settled not sent for run %s", input.run_id)
         started = workflow.now()
         remind_at = (
             deadline - APPROVAL_REMINDER_BEFORE
@@ -1206,7 +1218,24 @@ class PipelineWorkflow:
             check.change_status = "unchanged"
             return
         check.passed_first_gate = True
-        if not check.known(block.id):
+        monitor = check.monitor
+        if (
+            monitor is not None
+            and monitor.waiting_run_id is not None
+            and workflow.patched(APPROVAL_PATCH)
+        ):
+            # §9e: content that differs supersedes the waiting check, whatever this one does next.
+            await self._finish(
+                _db(
+                    SUPERSEDE_APPROVAL_ACTIVITY,
+                    SupersedeApprovalInput(
+                        run_id=monitor.waiting_run_id, superseded_by_run_id=input.run_id
+                    ),
+                    ApprovalOutcome,
+                )
+            )
+        # Compared with the baseline only, never the waiting check (§9e).
+        if "baseline" not in check.known(block.id):
             check.change_status = "first_check" if check.monitor is not None else "no_baseline"
             return
         check.change_status = "changed"

@@ -76,6 +76,15 @@ from tests.test_workflows_sinks import (
     _gone,
     _refused,
 )
+from tests.test_workflows_supersede import (
+    REACHES_APPROVAL,
+    SETTLING,
+    STOPS_AT_GUARD,
+    Settling,
+    _differs,
+    _first_check,
+    _matches_waiting,
+)
 
 
 async def _webhook_flaky(input):
@@ -266,6 +275,19 @@ SCENARIOS = {
         {"validate": _changed, "timeout": WAIT_TIMEOUT},
         MONITORED,
     ),
+    # N.3 — supersede at the first gate (patch "approval").
+    "harness_approval_supersede_then_approval": (
+        {"validate": _differs, "during": answers("approved"), "timeout": WAIT_TIMEOUT},
+        REACHES_APPROVAL,
+    ),
+    "harness_approval_supersede_then_validate_stop": (
+        {"validate": _differs, "timeout": WAIT_TIMEOUT},
+        STOPS_AT_GUARD,
+    ),
+    "harness_approval_check_matches_waiting": (
+        {"validate": _matches_waiting, "timeout": WAIT_TIMEOUT},
+        REACHES_APPROVAL,
+    ),
 }
 
 
@@ -393,6 +415,8 @@ MONITOR_SCENARIOS = {
     # Admission records the switched-off skip; the workflow's shape is a skip's.
     "harness_monitor_check_pipelines_disabled": (["skipped"], "completed"),
     "harness_monitor_check_failed": (["admitted"], "failed"),
+    # N.3 — the tick returns on check_settled (patch "approval-settled").
+    "harness_monitor_check_settled": (["admitted"], "settles"),
 }
 
 
@@ -462,6 +486,13 @@ async def main() -> None:
         h = MonitorHarness(verdicts, child=child)
         await h.run()
         path.write_text(h.history.to_json() + "\n")
+        print(path)
+    # N.3 — a check under a real tick: check_settled sent once its approval is requested.
+    path = HISTORIES / "harness_approval_check_settles_tick.json"
+    if not path.exists():
+        s = Settling(SETTLING, validate=_first_check)
+        await s.run()
+        path.write_text(s.check_history.to_json() + "\n")
         print(path)
     for name, sends in EMAIL_SCENARIOS.items():
         path = HISTORIES / f"{name}.json"

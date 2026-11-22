@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.core.db import AsyncSessionLocal
 from app.core.monitors import allowance_seconds
@@ -19,61 +19,69 @@ from app.models.webhook_delivery import WebhookDelivery
 from app.pipelines.definition import parse_definition
 from app.pipelines.validator import validate
 from app.settings import settings
+from app.workflows.activities.approvals import supersede_approval
 from app.workflows.activities.monitor_checks import STORAGE_FULL, admit_monitor_check
 from app.workflows.monitor_check import AdmitMonitorCheckInput
-from app.workflows.pipeline import CaptureSpec, GateFingerprints
+from app.workflows.pipeline import CaptureSpec, GateFingerprints, SupersedeApprovalInput
 
 SCHEMA = {"type": "object", "properties": {"price": {"type": "number"}}}
 PAGE = "https://shop.example.com/item"
 
 
-def definition(key_id):
-    return validate(
+APPROVE = {"id": "approve", "type": "approval", "config": {"deadline_hours": 24}}
+
+
+def definition(key_id, approval=None):
+    """fetch -> clean -> gate -> extract -> moved -> notify; ``approval``: an Approval block
+    ``after_gate`` (before notify) or ``before_gate`` (after fetch)."""
+    raw = [
+        {"id": "fetch", "type": "scrape", "config": {"url": {"$input": "page"}}},
+        {"id": "clean", "type": "clean", "input": "fetch"},
         {
-            "inputs": {"page": {"type": "url"}, "last_price": {"type": "number"}},
-            "blocks": [
-                {"id": "fetch", "type": "scrape", "config": {"url": {"$input": "page"}}},
-                {"id": "clean", "type": "clean", "input": "fetch"},
-                {
-                    "id": "gate",
-                    "type": "validate",
-                    "input": "clean",
-                    "config": {"rules": [{"kind": "changed"}], "when_unmet": "stop"},
-                },
-                {
-                    "id": "extract",
-                    "type": "llm_extract",
-                    "input": "gate",
-                    "config": {"llm_key_id": str(key_id), "model": "m", "output_schema": SCHEMA},
-                },
-                {
-                    "id": "moved",
-                    "type": "validate",
-                    "input": "extract",
-                    "config": {
-                        "rules": [
-                            {
-                                "kind": "compare",
-                                "path": "/price",
-                                "op": "ne",
-                                "value": {"$input": "last_price"},
-                            }
-                        ],
-                        "when_unmet": "stop",
-                    },
-                },
-                {
-                    "id": "notify",
-                    "type": "webhook",
-                    "input": "moved",
-                    "config": {
-                        "url": "https://example.com/hook",
-                        "events": ["pipeline.result", "pipeline.failed"],
-                    },
-                },
-            ],
-        }
-    ).definition
+            "id": "gate",
+            "type": "validate",
+            "input": "clean",
+            "config": {"rules": [{"kind": "changed"}], "when_unmet": "stop"},
+        },
+        {
+            "id": "extract",
+            "type": "llm_extract",
+            "input": "gate",
+            "config": {"llm_key_id": str(key_id), "model": "m", "output_schema": SCHEMA},
+        },
+        {
+            "id": "moved",
+            "type": "validate",
+            "input": "extract",
+            "config": {
+                "rules": [
+                    {
+                        "kind": "compare",
+                        "path": "/price",
+                        "op": "ne",
+                        "value": {"$input": "last_price"},
+                    }
+                ],
+                "when_unmet": "stop",
+            },
+        },
+        {
+            "id": "notify",
+            "type": "webhook",
+            "input": "moved",
+            "config": {
+                "url": "https://example.com/hook",
+                "events": ["pipeline.result", "pipeline.failed"],
+            },
+        },
+    ]
+    if approval is not None:
+        after = "moved" if approval == "after_gate" else "fetch"
+        at = next(i for i, b in enumerate(raw) if b["id"] == after) + 1
+        raw[at]["input"] = "approve"
+        raw.insert(at, APPROVE | {"input": after})
+    inputs = {"page": {"type": "url"}, "last_price": {"type": "number"}}
+    return validate({"inputs": inputs, "blocks": raw}).definition
 
 
 CARRIED = [{"input": "last_price", "from_block": "extract", "path": "/price", "start": 10}]
@@ -98,7 +106,7 @@ def no_engine():
         yield pause
 
 
-async def _monitor(user_id, state="active") -> Monitor:
+async def _monitor(user_id, state="active", approval=None) -> Monitor:
     async with AsyncSessionLocal() as db:
         key = UserLLMKey(user_id=user_id, name="k", provider="anthropic", encrypted_api_key="x")
         db.add(key)
@@ -106,7 +114,9 @@ async def _monitor(user_id, state="active") -> Monitor:
         pipeline = Pipeline(user_id=user_id, name=f"m-{uuid.uuid4().hex[:8]}")
         db.add(pipeline)
         await db.flush()
-        version = PipelineVersion(pipeline_id=pipeline.id, version=1, definition=definition(key.id))
+        version = PipelineVersion(
+            pipeline_id=pipeline.id, version=1, definition=definition(key.id, approval)
+        )
         db.add(version)
         await db.flush()
         monitor = Monitor(
@@ -375,6 +385,116 @@ async def test_a_firing_while_a_check_runs_is_skipped(db_user):
     assert len(await _runs(monitor)) == 1
     [event] = await _events(monitor)
     assert event.kind == "skipped_check_in_progress"
+
+
+# --- a check waiting for approval (ADR-016 §9e) ---------------------------------------------
+
+
+async def _waits_for_approval(run_id, fingerprint="f" * 64, answer=None):
+    """The check passed its first gate and its Approval block waits (the workflow's mirrors)."""
+    async with AsyncSessionLocal() as db:
+        blocks = {
+            b.block_id: b
+            for b in await db.scalars(
+                select(PipelineRunBlock).where(
+                    PipelineRunBlock.pipeline_run_id == uuid.UUID(run_id)
+                )
+            )
+        }
+        blocks["gate"].status, blocks["gate"].fingerprint = "completed", fingerprint
+        approve = blocks["approve"]
+        approve.status, approve.status_reason = "waiting", "awaiting_approval"
+        approve.approval_deadline = datetime.now(UTC) + timedelta(hours=24)
+        approve.approval_answer = answer
+        await db.commit()
+
+
+async def _unanswered_waits(monitor) -> list[uuid.UUID]:
+    async with AsyncSessionLocal() as db:
+        return list(
+            await db.scalars(
+                select(PipelineRunBlock.pipeline_run_id)
+                .join(PipelineRun, PipelineRun.id == PipelineRunBlock.pipeline_run_id)
+                .where(
+                    PipelineRun.monitor_id == monitor.id,
+                    PipelineRun.status == "running",
+                    PipelineRunBlock.status == "waiting",
+                    PipelineRunBlock.approval_answer.is_(None),
+                )
+            )
+        )
+
+
+async def test_a_check_waiting_for_approval_is_not_in_flight_and_is_handed_over(db_user):
+    monitor = await _monitor(db_user.id, approval="after_gate")
+    await _baseline(monitor, datetime.now(UTC) - timedelta(hours=1))
+    _, waiting = await _admit(monitor)
+    await _waits_for_approval(waiting, fingerprint="b" * 64)
+
+    admission, _ = await _admit(monitor)
+
+    assert admission.verdict == "admitted"
+    context = admission.run.monitor
+    assert context.waiting_run_id == waiting
+    # The first gate only; diffs and carried values still come from the baseline.
+    assert context.gates == {"gate": GateFingerprints(baseline="a" * 64, waiting="b" * 64)}
+    assert context.baseline_run_id != waiting
+    assert await _events(monitor) == []
+
+
+async def test_an_answered_approval_is_not_in_flight_and_not_compared_with(db_user):
+    monitor = await _monitor(db_user.id, approval="after_gate")
+    _, approved = await _admit(monitor)
+    # Answered; its workflow not woken yet.
+    await _waits_for_approval(approved, answer="approved")
+
+    admission, _ = await _admit(monitor)
+
+    assert admission.verdict == "admitted"
+    assert (admission.run.monitor.waiting_run_id, admission.run.monitor.gates) == (None, {})
+
+
+async def test_where_no_later_check_can_supersede_a_waiting_check_stays_in_flight(db_user):
+    monitor = await _monitor(db_user.id, approval="before_gate")
+    _, waiting = await _admit(monitor)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(
+                PipelineRunBlock.pipeline_run_id == uuid.UUID(waiting),
+                PipelineRunBlock.block_id == "approve",
+            )
+            .values(status="waiting", status_reason="awaiting_approval")
+        )
+        await db.commit()
+
+    assert (await _admit(monitor))[0].verdict == "skipped"
+    [event] = await _events(monitor)
+    assert event.kind == "skipped_check_in_progress"
+
+
+async def test_at_most_one_approval_waits_per_monitor(db_user):
+    monitor = await _monitor(db_user.id, approval="after_gate")
+    _, first = await _admit(monitor)
+    await _waits_for_approval(first)
+    assert await _unanswered_waits(monitor) == [uuid.UUID(first)]
+
+    # The next check's content differs: at its first gate it supersedes the waiting one...
+    admission, second = await _admit(monitor)
+    assert admission.run.monitor.waiting_run_id == first
+    with patch("app.workflows.activities.approvals.activity.client"):
+        outcome = await supersede_approval(
+            SupersedeApprovalInput(run_id=first, superseded_by_run_id=second)
+        )
+    assert outcome.answer == "superseded"
+    # ...before it asks for approval itself.
+    await _waits_for_approval(second)
+    assert await _unanswered_waits(monitor) == [uuid.UUID(second)]
+
+    # The superseded one has not woken yet: still not in flight, and no longer compared with.
+    third, _ = await _admit(monitor)
+    assert third.verdict == "admitted"
+    assert third.run.monitor.waiting_run_id == second
 
 
 async def test_monthly_runs_used_up_is_a_skip_with_no_run_and_no_unit(db_user):

@@ -10,7 +10,7 @@ from asyncio import get_running_loop
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import exists, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 
@@ -18,7 +18,7 @@ from app.core import monitor_events, webhook_delivery
 from app.core.db import AsyncSessionLocal
 from app.core.destinations import reference_problems
 from app.core.monitor_checks import after_commit, monitor_check_ended
-from app.core.monitors import find_baseline, prepare_check
+from app.core.monitors import check_in_flight, find_baseline, prepare_check
 from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_trigger import (
     build_run,
@@ -219,14 +219,7 @@ async def admit_monitor_check(input: AdmitMonitorCheckInput) -> MonitorAdmission
         now = datetime.now(UTC)
         if not settings.pipelines_enabled:
             return await _skip(db, monitor, "skipped_pipelines_disabled", now)
-        running = await db.scalar(
-            select(
-                exists().where(
-                    PipelineRun.monitor_id == monitor.id, PipelineRun.status == "running"
-                )
-            )
-        )
-        if running:
+        if await check_in_flight(db, monitor.id, pinned[0] if pinned else None):
             return await _skip(db, monitor, "skipped_check_in_progress", now)
         if await is_quota_exceeded(monitor.user_id, db, "monthly_runs"):
             detail = {"resets_at": _first_of_next_month(now).isoformat()}

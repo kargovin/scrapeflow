@@ -8,17 +8,19 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pipeline_trigger import CheckSetup
 from app.models.monitor import Monitor
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.pipelines.catalog import (
+    APPROVAL,
     CATALOG,
     EXTRACTION,
     LLM_EXTRACT,
     PAGE_JSON,
+    approval_after_first_gate,
     block_outputs,
     first_change_gate,
     is_change_gate,
@@ -158,6 +160,44 @@ def warnings(parsed: ParsedDefinition, has_notice_destination: bool = False) -> 
 # --- a check's setup: found at admission, handed to the check (§4, §6b) -------------------
 
 
+def _approval_waiting(*conditions: Any):
+    return exists().where(
+        PipelineRunBlock.pipeline_run_id == PipelineRun.id,
+        PipelineRunBlock.type == APPROVAL.name,
+        PipelineRunBlock.status == "waiting",
+        *conditions,
+    )
+
+
+async def check_in_flight(
+    db: AsyncSession, monitor_id: uuid.UUID, parsed: ParsedDefinition | None
+) -> uuid.UUID | None:
+    """§3c's database rule: a running check — not one waiting for an approval that a later check
+    can supersede (§9e). Where none can, a waiting check stays in flight: at most one waits."""
+    query = select(PipelineRun.id).where(
+        PipelineRun.monitor_id == monitor_id, PipelineRun.status == "running"
+    )
+    if parsed is not None and approval_after_first_gate(parsed.blocks):
+        query = query.where(~_approval_waiting())
+    return await db.scalar(query.order_by(PipelineRun.created_at).limit(1))
+
+
+async def waiting_check(db: AsyncSession, monitor_id: uuid.UUID) -> PipelineRun | None:
+    """§9e: the check whose approval is still unanswered. An answered one (its workflow not yet
+    woken) is not: a later check compares with it no more."""
+    return await db.scalar(
+        select(PipelineRun)
+        .where(
+            PipelineRun.monitor_id == monitor_id,
+            PipelineRun.status == "running",
+            PipelineRun.cancel_requested_at.is_(None),
+            _approval_waiting(PipelineRunBlock.approval_answer.is_(None)),
+        )
+        .order_by(PipelineRun.created_at.desc())
+        .limit(1)
+    )
+
+
 async def find_baseline(db: AsyncSession, monitor_id: uuid.UUID) -> PipelineRun | None:
     """The newest eligible check, by start (§4b) — a fresh lookup every time; DB only."""
     return await db.scalar(
@@ -206,6 +246,21 @@ async def prepare_check(
             if stored and block_type is not None and block_type.kind == "content":
                 outputs[row.block_id] = row.output_ref
 
+    waiting = (
+        await waiting_check(db, monitor.id) if approval_after_first_gate(parsed.blocks) else None
+    )
+    if waiting is not None:
+        # Only the first gate: past it, the waiting check is superseded (§9e).
+        gate = first_change_gate(parsed.blocks)
+        assert gate is not None
+        fingerprint = await db.scalar(
+            select(PipelineRunBlock.fingerprint).where(
+                PipelineRunBlock.pipeline_run_id == waiting.id, PipelineRunBlock.block_id == gate
+            )
+        )
+        known = gates.get(gate, GateFingerprints())
+        gates[gate] = known.model_copy(update={"waiting": fingerprint})
+
     inputs = dict(monitor.inputs)
     sources: dict[str, Any] = {}
     for entry in monitor.carried:
@@ -214,6 +269,7 @@ async def prepare_check(
     context = MonitorContext(
         monitor_id=str(monitor.id),
         baseline_run_id=str(baseline.id) if baseline is not None else None,
+        waiting_run_id=str(waiting.id) if waiting is not None else None,
         gates=gates,
         baseline_outputs=outputs,
         captures=[

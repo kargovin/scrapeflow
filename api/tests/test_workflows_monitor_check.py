@@ -1,6 +1,7 @@
 """L.7 — MonitorCheckWorkflow: one firing of a monitor's Schedule (time-skipping env, admission
 mocked, the child PipelineWorkflow faked)."""
 
+import asyncio
 import uuid
 from datetime import timedelta
 from itertools import pairwise
@@ -23,7 +24,7 @@ from app.workflows.monitor_check import (
     MonitorCheckWorkflow,
     workflow_id,
 )
-from app.workflows.pipeline import MonitorContext, PipelineRunInput
+from app.workflows.pipeline import CHECK_SETTLED_SIGNAL, MonitorContext, PipelineRunInput
 from app.workflows.queues import WORKFLOW_QUEUE
 
 # The sandbox re-imports this module to check the fake workflow; that one pulls in the DB.
@@ -67,6 +68,16 @@ class FakePipelineWorkflow:
         )
         if outcome == "failed":
             raise ApplicationError("fetch: blocked:akamai", non_retryable=True)
+        if outcome == "settles":
+            # As PipelineWorkflow once its approval is requested (ADR-016 §9e).
+            parent = workflow.info().parent
+            assert parent is not None
+            await workflow.get_external_workflow_handle(parent.workflow_id).signal(
+                CHECK_SETTLED_SIGNAL
+            )
+            await workflow.sleep(timedelta(hours=1))
+        if outcome == "waits":
+            await workflow.wait_condition(lambda: False)
         return None
 
 
@@ -77,7 +88,7 @@ class Harness:
         self.child = child
         self.asks: list[tuple[AdmitMonitorCheckInput, object]] = []
 
-    async def run(self):
+    async def run(self, during=None):
         CHILD.clear()
         CHILD["outcome"] = self.child
         env_box = {}
@@ -108,6 +119,8 @@ class Harness:
                     task_queue=WORKFLOW_QUEUE,
                     execution_timeout=timedelta(days=3),
                 )
+                if during:
+                    await during(handle)
                 result = await handle.result()
                 self.history = await handle.fetch_history()
                 return result
@@ -161,3 +174,29 @@ async def test_a_firing_gives_up_after_a_day_of_waiting():
     last, _ = h.asks[-1]
     assert last.last_chance and not any(ask.last_chance for ask, _ in h.asks[:-1])
     assert h.asks[-1][1] - h.asks[0][1] >= WAIT_CAP
+
+
+async def test_a_check_waiting_for_approval_closes_the_tick_and_runs_on():
+    h = Harness(["admitted"], child="settles")
+    assert await h.run() == "awaiting_approval"
+
+    events = h.history.events
+    assert any(e.HasField("workflow_execution_signaled_event_attributes") for e in events)
+    # The check was not waited for.
+    assert not any(
+        e.HasField("child_workflow_execution_completed_event_attributes") for e in events
+    )
+
+
+async def _child_started():
+    while "runs" not in CHILD:
+        await asyncio.sleep(0.05)
+
+
+async def test_a_cancelled_tick_cancels_its_check_as_before():
+    async def cancels(handle):
+        await _child_started()
+        await handle.cancel()
+
+    h = Harness(["admitted"], child="waits")
+    assert await h.run(during=cancels) == "cancelled"

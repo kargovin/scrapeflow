@@ -84,6 +84,7 @@ from app.workflows.pipeline import (
     REQUEST_APPROVAL_ACTIVITY,
     RESOLVE_APPROVAL_ACTIVITY,
     RUN_CANCELLED_ERROR,
+    SUPERSEDE_APPROVAL_ACTIVITY,
     WEBHOOK_ACTIVITY,
     ApprovalOutcome,
     ApprovalRef,
@@ -101,6 +102,7 @@ from app.workflows.pipeline import (
     RollbackStartedInput,
     RunRef,
     StorageUsage,
+    SupersedeApprovalInput,
     WebhookInput,
 )
 from app.workflows.queues import (
@@ -427,9 +429,14 @@ class Harness:
                 self.answer = "expired"
             return ApprovalOutcome(answer=self.answer)
 
+        @activity.defn(name=SUPERSEDE_APPROVAL_ACTIVITY)
+        async def supersede_approval(input: SupersedeApprovalInput) -> ApprovalOutcome:
+            self.calls.append(input)
+            return ApprovalOutcome(answer="superseded")
+
         workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
         workflow_queue += [release_outputs, load, rollback_started, mirror_undo]
-        workflow_queue += [request_approval, remind_approval, resolve_approval]
+        workflow_queue += [request_approval, remind_approval, resolve_approval, supersede_approval]
         self.delivery_queue = [deliver_bucket, undo_bucket]
         return workflow_queue, scrape, llm, [clean, validate, diff, capture]
 

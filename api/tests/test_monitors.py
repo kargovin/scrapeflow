@@ -73,8 +73,8 @@ async def key(db_user):
     return await _llm_key(db_user.id)
 
 
-def gated(key_id, *, gate=True, carried_rule=False, failure_route=True):
-    """scrape(page) -> clean -> gate -> extract -> [same price?] -> notify."""
+def gated(key_id, *, gate=True, carried_rule=False, failure_route=True, approval=False):
+    """scrape(page) -> clean -> gate -> extract -> [same price?] -> [approve] -> notify."""
     blocks = [
         {"id": "fetch", "type": "scrape", "config": {"url": {"$input": "page"}}},
         {"id": "clean", "type": "clean", "input": "fetch"},
@@ -117,6 +117,8 @@ def gated(key_id, *, gate=True, carried_rule=False, failure_route=True):
                 },
             }
         )
+    if approval:
+        blocks.append({"id": "approve", "type": "approval", "input": blocks[-1]["id"]})
     events = ["pipeline.result", "pipeline.failed"] if failure_route else ["pipeline.result"]
     blocks.append(
         {
@@ -491,6 +493,33 @@ def test_the_rollback_reserve_counts_against_a_checks_ceiling(monkeypatch):
     stored["time_budget_seconds"] = need + reserve
     parsed, _ = parse_definition(stored)
     assert check_ceiling_seconds(parsed, []) == need + allowance
+
+
+@pytest.mark.parametrize(
+    ("approval_after", "supersedes"), [(None, False), ("fetch", False), ("extract", True)]
+)
+def test_a_check_that_can_supersede_has_the_supersede_in_its_allowance(approval_after, supersedes):
+    from app.pipelines.catalog import (
+        DB_ACTIVITY_SECONDS,
+        approval_after_first_gate,
+        monitor_allowance_seconds,
+    )
+    from app.pipelines.definition import parse_definition
+    from app.pipelines.validator import validate
+
+    def parsed(approval_after):
+        blocks = gated(str(uuid.uuid4()))["blocks"]
+        if approval_after is not None:
+            at = next(i for i, b in enumerate(blocks) if b["id"] == approval_after) + 1
+            blocks[at]["input"] = "approve"
+            blocks.insert(at, {"id": "approve", "type": "approval", "input": approval_after})
+        stored = validate({"inputs": {"page": {"type": "url"}}, "blocks": blocks}).definition
+        return parse_definition(stored)[0].blocks
+
+    blocks = parsed(approval_after)
+    assert approval_after_first_gate(blocks) is supersedes
+    plain = monitor_allowance_seconds(parsed(None), [])
+    assert monitor_allowance_seconds(blocks, []) == plain + supersedes * DB_ACTIVITY_SECONDS
 
 
 async def _scheduled_jobs(user_id, count):
@@ -1140,6 +1169,40 @@ async def test_check_now_is_refused_while_a_check_runs_and_a_firing_is_skipped(
         ).all()
     assert event.kind == "skipped_check_in_progress"
     assert len(await _runs(monitor["id"])) == 1
+
+
+async def test_check_now_runs_beside_a_check_waiting_for_approval_and_hands_it_over(
+    client, headers, key, temporal
+):
+    from app.models.pipeline import PipelineRunBlock
+
+    pipeline = await _pipeline(client, headers, gated(key.id, approval=True))
+    monitor = await _monitor(client, headers, _body(pipeline))
+    first = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+    assert first.status_code == 202
+    waiting = uuid.UUID(first.json()["id"])
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(PipelineRunBlock.pipeline_run_id == waiting, PipelineRunBlock.block_id == "gate")
+            .values(status="completed", fingerprint="b" * 64)
+        )
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(
+                PipelineRunBlock.pipeline_run_id == waiting,
+                PipelineRunBlock.block_id == "approve",
+            )
+            .values(status="waiting", status_reason="awaiting_approval")
+        )
+        await db.commit()
+
+    again = await client.post(f"/monitors/{monitor['id']}/check", headers=headers)
+
+    assert again.status_code == 202, again.text
+    sent = temporal.start_workflow.await_args.args[1]
+    assert sent.monitor.waiting_run_id == str(waiting)
+    assert sent.monitor.gates["gate"].waiting == "b" * 64
 
 
 async def test_a_check_now_that_could_not_start_is_a_counted_failed_check(

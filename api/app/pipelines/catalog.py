@@ -680,11 +680,27 @@ DIFF_TIMING = _worker_retry(120)
 CAPTURE_TIMING = _worker_retry(60)
 
 
+def approval_after_first_gate(blocks: Iterable[_Block]) -> bool:
+    """A later check can supersede one waiting for approval (ADR-016 §9e) only when the first
+    change gate comes before the Approval block: the supersede is at that gate."""
+    blocks = list(blocks)
+    gate = first_change_gate(blocks)
+    ids = [b.id for b in blocks]
+    approval = next((b.id for b in blocks if _type_of(b) is APPROVAL), None)
+    return gate is not None and approval is not None and ids.index(gate) < ids.index(approval)
+
+
 def monitor_allowance_seconds(blocks: Iterable[_Block], capture_blocks: Iterable[str]) -> int:
     """What a check needs beyond its blocks: a Diff at the first change gate and after each
-    llm_extract (each recording its diff.json), and a Capture per distinct ``from_block``."""
+    llm_extract (each recording its diff.json), a Capture per distinct ``from_block``, and the
+    supersede at the first gate when an Approval follows it."""
     blocks = list(blocks)
     diffs = int(first_change_gate(blocks) is not None)
     diffs += sum(1 for b in blocks if _type_of(b) is LLM_EXTRACT)
     captures = len(set(capture_blocks))
-    return diffs * (DIFF_TIMING.budget + DB_ACTIVITY_SECONDS) + captures * CAPTURE_TIMING.budget
+    supersede = DB_ACTIVITY_SECONDS if approval_after_first_gate(blocks) else 0
+    return (
+        diffs * (DIFF_TIMING.budget + DB_ACTIVITY_SECONDS)
+        + captures * CAPTURE_TIMING.budget
+        + supersede
+    )

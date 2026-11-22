@@ -1,5 +1,6 @@
 """One firing of a monitor's Temporal Schedule (ADR-016 §3)."""
 
+import asyncio
 from datetime import timedelta
 from typing import Literal
 
@@ -11,8 +12,11 @@ from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
     from app.workflows import steps
-    from app.workflows.pipeline import PipelineRunInput, PipelineWorkflow
+    from app.workflows.pipeline import CHECK_SETTLED_SIGNAL, PipelineRunInput, PipelineWorkflow
     from app.workflows.queues import WORKFLOW_QUEUE
+
+# ADR-012: the tick returns once its check waits for an approval (ADR-016 §9e, N.3).
+APPROVAL_SETTLED_PATCH = "approval-settled"
 
 # The Schedule starts the workflow by this type name.
 MONITOR_CHECK_WORKFLOW = "MonitorCheckWorkflow"
@@ -56,9 +60,17 @@ class MonitorAdmission(BaseModel):
 class MonitorCheckWorkflow:
     """Admit a check against the monitor and the meters, then run it as a child.
 
-    Open until the check ends, so the Schedule's ``SKIP`` drops a firing that comes while one
-    waits or runs (§3c). It never fails because its check did: the Schedule must not pause.
+    Open until the check ends or waits for an approval, so the Schedule's ``SKIP`` drops a
+    firing that comes while one waits for a slot or runs (§3c, §9e). It never fails because its
+    check did: the Schedule must not pause.
     """
+
+    def __init__(self) -> None:
+        self._settled = False
+
+    @workflow.signal(name=CHECK_SETTLED_SIGNAL)
+    def check_settled(self) -> None:
+        self._settled = True
 
     @workflow.run
     async def run(self, input: MonitorCheckInput) -> str:
@@ -82,16 +94,34 @@ class MonitorCheckWorkflow:
         if admission.verdict != "admitted":
             return admission.verdict
 
+        settles = workflow.patched(APPROVAL_SETTLED_PATCH)
+        child = workflow.execute_child_workflow(
+            PipelineWorkflow.run,
+            admission.run,
+            id=f"pipeline-run-{run_id}",
+            task_queue=WORKFLOW_QUEUE,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            # The check outlives this workflow (terminated, or settled): its row is its record.
+            parent_close_policy=ParentClosePolicy.ABANDON,
+        )
         try:
-            await workflow.execute_child_workflow(
-                PipelineWorkflow.run,
-                admission.run,
-                id=f"pipeline-run-{run_id}",
-                task_queue=WORKFLOW_QUEUE,
-                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-                # The check outlives this workflow if it is terminated: its row is its record.
-                parent_close_policy=ParentClosePolicy.ABANDON,
-            )
+            if not settles:
+                await child
+            elif not await self._check_ends(asyncio.ensure_future(child)):
+                # §9e: it waits for an approval and runs on alone.
+                return "awaiting_approval"
         except ChildWorkflowError as exc:
             return "cancelled" if isinstance(exc.cause, CancelledError) else "failed"
         return "completed"
+
+    async def _check_ends(self, child: "asyncio.Future[object]") -> bool:
+        """True once the check has ended (raising as it did); False when it settles first."""
+        try:
+            await workflow.wait_condition(lambda: self._settled or child.done())
+        except asyncio.CancelledError:
+            # As the unpatched branch: the cancel goes on to the check.
+            child.cancel()
+        if not child.done() and self._settled:
+            return False
+        await child
+        return True
