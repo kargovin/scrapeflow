@@ -17,6 +17,7 @@ from app.core import approvals
 from app.core.db import AsyncSessionLocal
 from app.main import app
 from app.models.api_key import ApiKey
+from app.models.monitor import Monitor
 from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.models.user import User
 from app.models.webhook_delivery import WebhookDelivery
@@ -774,3 +775,55 @@ async def test_a_run_read_shows_the_approval_and_its_messages_apart_from_alerts(
         "pending",
         str(destination.id),
     )
+
+
+# --- admin (PRD-018 R9: read-only) -------------------------------------------------------------
+
+
+async def test_admins_see_every_users_waiting_approvals_with_the_owner(
+    client, headers, db_user, other_user, temporal, signal
+):
+    mine, monitored, answered = [await _triggered(client, headers) for _ in range(3)]
+    admin = await _key(other_user, admin=True)
+    theirs = await _triggered(client, admin)
+    for run in (mine, monitored, answered, theirs):
+        await _waiting(run)
+    await client.post(_answer_url(answered), json={"decision": "approved"}, headers=headers)
+    async with AsyncSessionLocal() as db:
+        monitor = Monitor(
+            user_id=db_user.id,
+            name="m",
+            pipeline_id=monitored.pipeline_id,
+            pipeline_version_id=monitored.pipeline_version_id,
+            schedule_cron="0 * * * *",
+            state="paused",
+        )
+        db.add(monitor)
+        await db.flush()
+        await db.execute(
+            update(PipelineRun).where(PipelineRun.id == monitored.id).values(monitor_id=monitor.id)
+        )
+        await db.commit()
+
+    everyone = await client.get("/admin/approvals?limit=200", headers=admin)
+    by_owner = await client.get(f"/admin/approvals?user_id={db_user.id}", headers=admin)
+    by_monitor = await client.get(f"/admin/approvals?monitor_id={monitor.id}", headers=admin)
+
+    assert by_owner.status_code == 200, by_owner.text
+    listed = {a["run_id"]: a for a in by_owner.json()}
+    assert set(listed) == {str(mine.id), str(monitored.id)}
+    assert (listed[str(mine.id)]["user_id"], listed[str(mine.id)]["user_email"]) == (
+        str(db_user.id),
+        db_user.email,
+    )
+    assert [a["run_id"] for a in by_monitor.json()] == [str(monitored.id)]
+    assert {str(mine.id), str(theirs.id)} <= {a["run_id"] for a in everyone.json()}
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Monitor).where(Monitor.id == monitor.id))
+        await db.commit()
+
+
+async def test_the_admin_approvals_list_is_for_admins_only(client, headers):
+    resp = await client.get("/admin/approvals", headers=headers)
+
+    assert resp.status_code == 403, resp.text

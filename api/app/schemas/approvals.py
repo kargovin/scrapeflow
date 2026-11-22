@@ -36,3 +36,8 @@ class ApprovalResponse(BaseModel):
     change_status: ChangeStatus | None
     change_summary: dict[str, Any] | None
     deliveries: list[dict[str, Any]]
+
+
+class AdminApprovalResponse(ApprovalResponse):
+    user_id: uuid.UUID
+    user_email: str | None
