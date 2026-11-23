@@ -162,6 +162,7 @@
 | N.4 | SPA: approvals | ✅ **RELEASED 2026-11-23** (Release N) · built 2026-11-22 (`4e99c9c` admin read, `c034bf9` SPA). API 1512 → 1514 (replay 116), no migration, no infra change; `tsc -b` + `vite build` pass, wording run under Node. **Not click-tested** (Clerk) — the items are N.5's. **Read:** `GET /admin/approvals` (`user_id`, `monitor_id`, `limit`, `offset`; `AdminApprovalResponse` = `ApprovalResponse` + `user_id`, `user_email`; the same waiting query as `GET /approvals`). **SPA:** Approvals page (user: Approve / Reject per row; admin: owner column, read-only, paged); run page Approval panel — state, deadline (date + time left), asked at, what changed (one line per diff, the diff below), what this run already delivered with "a reject keeps these; removed only if this run later fails", Approve / Reject for the owner, "Only the owner can approve or reject" for an admin, "Answer recorded — the run picks it up" between answer and wake, superseded-by link; an Approval messages table (request / reminder / expired / superseded, undelivered shown); header pill `waiting`; cancel text says a waiting run ends at once; "Stopped at approve — approval rejected / expired / superseded by a later check"; a change gate matched `waiting` reads "unchanged since the check waiting for approval" (linked while it still waits). Monitor page: a waiting banner (expires …, link, checks keep running — same content leaves it, other content supersedes) and the waiting check's history line; Monitors list gains an Approval column; a pipeline's run list marks a run waiting for approval. Editor: help for the `approval` block, catalog `destination_kinds`. **My calls:** an admin's monitor list and pipeline run list read the first 200 waiting approvals across users (no per-pipeline filter); no confirm step on Approve / Reject (the answer is final — 409 shows the state that won); the skip reason of the blocks after an approval stop stays "skipped — the run stopped at <approval>" (the run row names the reason) |
 | N.5 | 🚀 Release N | ✅ **RELEASED 2026-11-23 — Group N closed** (`main` `d36a114..c341af7`; api image, migration 4.15; owner ran the runbook — record in the N.5 section) · runbook ready 2026-11-23 — compose gate passed twice in a row (`ab3a619`): `scripts/approval-gate.sh`, 87/87 each run (≈ 1 h of it real waiting: a 1 h expiry with an answer held on the lock past it, a 3 h approval's reminder, a lost signal found at the reminder past a 2,440 s declared budget), then the M.12, J.10 and L.12 gates unchanged. **Fix found by the gate:** `7f81144` — every Approval with a destination failed at its request and `GET /approvals` 500'd once a block before it had completed (`delivery IS NOT NULL` vs the mirror's JSON `null`); trap added. API 1518 → 1519 (replay 116). Runbook in the N.5 section (step 0 → `main` → prod checks a–g → SPA items 1–9 → clean-up; rollback notes). **My calls:** a lost signal = the answer route's write without its wake-up (`record_answer` under the run lock), not a paused `temporal`; the reminder tested at a 3 h deadline (reachable 1 h in), expiry at 1 h, both waited out; the gate reuses the delivery gate's setup and runs it as the regression; prod checks reuse M's `D_HOOK`/`D_BUCKET`; `APPROVAL_MAX_DEADLINE_HOURS` not set in prod (default 168 = PRD-018 Q10). **Not on compose:** the SPA, a request's five tries, a 7-day wait |
 | **O** | **Postgres sink** (PRD-017 slice 2) | |
+| O.0 | Expiry sends a monitor notice (ADR-017) | ⬜ |
 | O.1 | The Postgres sink | ⬜ |
 | O.2 | 🚀 Release O | ⬜ |
 | **P** | **Email sink** (PRD-017 slice 3) | |
@@ -3147,6 +3148,7 @@ split costs one extra release and removes the note.
 | BUG-010 part 2 (worker-side SSRF) | partly covered by M.13's fence (private ranges refused at the network layer); the code check stays unscheduled | — |
 | BUG-019 (cleanup CronJob) | not taken; infra-only and unrelated to pipelines (the script is job-only). Could ride K as an owner step — its first good run is a real delete | — |
 | MinIO root password (8 characters, found at Release M 2026-11-21) | **owner's, infra-only, not scheduled.** Rotate it in Secret `scrapeflow-minio-credentials`; every reader of that Secret (MinIO, the api, the workflow worker, the scrape workers, the cleanup CronJob) must restart onto the new value, and the README's `mc` session uses it. The delivery worker is unaffected (its own user) | — |
+| **Expiry notice (ADR-017, owner 2026-11-24)** | **ride along on O.** An expired monitor check also records a `monitor_events` `approval_expired` row and queues a `monitor.notice` (ADR-016 §8 otherwise unchanged); migration widens the kind CHECK; no workflow change. Owner's other call the same day: an Approval before the first change gate stays allowed, with firings skipped while it waits (N.3's behaviour) | O.0 |
 | BUG-021, BUG-004, BUG-013 (`mcp/`), backups | not taken; nothing in J–P touches them | — |
 | `phase4-backlog.md` §4 — admin statistics have no pipeline-lane numbers | not taken (a feature). L.10 adds only ADR-016's two monitor counts | — |
 | ADR-012 housekeeping — `deprecate_patch("host-slot")` | optional ride-along on J.6, the first `PipelineWorkflow` change since E.9; drained in prod since 2026-10-27. ~15 histories predate the marker and move to `histories/retired/host-slot/` | J.6 |
@@ -4668,6 +4670,21 @@ run reads return 500 until the runs are deleted or the release is rolled forward
 - Lost replies: `NOT_WRITTEN` only on failures that cannot have inserted, and a `_bucket_record` twin (row key from run/block) so a maybe-inserted row is deleted on rollback.
 - Any new client sending to a destination is pinned (`pinned_http.pinned`, one session per try) or carries `_send_once()` — no hidden resend.
 - The SPA renders a Postgres `location` as `postgres {json}` until `runText.locationInWords` learns it. Add a Postgres scenario to `api/scripts/delivery_gate.py` (needs a TLS Postgres fixture; the secret search and fixture pattern carry over).
+
+#### O.0 — An expired approval sends a monitor notice (ADR-017)
+
+**Why:** owner, 2026-11-24 (Release N): PRD-018 R5 — expiry sends a monitor notice. ADR-017 (Draft) displaces
+ADR-016 §8/§9c's expiry clauses.
+**What:** migration: `monitor_events.kind` CHECK + `approval_expired`; `NOTICE_KINDS` gains it.
+`monitor_check_ended` (same transaction, lock order of ADR-016 §8): a monitor check ending `completed` with
+`stop_reason = approval_expired` records a closed `approval_expired` event (`ended_at = first_at`; closes no other
+open situation; one per run — `detail` carries `run_id`, the deadline, the run's SPA link) and queues its notice;
+the writer starts it after commit. The block's `pipeline.approval_expired` message is unchanged. Rejected and
+superseded send none. SPA: the monitor history shows the new event. No workflow change.
+**Verify:** an expired check → one event + one notice row to the notice destination (none without one); a retried
+writer adds nothing; rejected/superseded add none; an open skip situation stays open. The approval gate's expiry
+step checks the notice.
+**Depends on:** N.5
 
 #### O.1 — The Postgres sink
 
