@@ -160,7 +160,7 @@
 | N.2 | The wait (patch `approval`), answer route, `GET /approvals` | 🔧 **Built 2026-11-22** (`321fbeb`, `ed45eb9`, `1567c18`). API 1431 → 1484 (replay 106 → 111), no migration, no infra change (`PUBLIC_BASE_URL` was already in `.env.example`, `api.yaml` and `workflow-worker.yaml` since M.14). Activities `request_approval` / `remind_approval` / `resolve_approval` (workflow queue, each under the run lock, each refusing a cancelled or deleted run with `RunCancelled` — the fallback for a Temporal cancel lost during a days-long wait); `core/approvals.py` (`record_answer` = the one conditional write, `queue_message`, `approval_state`, `APPROVAL_EVENTS`); signal `approval_answered`. Histories: approved, rejected, expired after the reminder, cancelled while waiting, a monitor check expired. Lost signal found at the reminder or at the deadline; answer vs expiry tested in both orders, under a held lock and concurrently. Mutation-checked: the IS NULL condition, the deadline condition, the budget push-back, `lapsed` → not eligible, the waiting mirror's cancel refusal, the reason cleared on the ending mirror, the reminder's > 2 h rule, the cancel-requested refusal (the route's run lock is not load-bearing: the block row's own lock serialises the two conditional writes). **My calls:** the workflow computes the deadline (workflow time) and its timer decides expiry, `resolve_approval(expire=True)`; the route's condition uses the DB's `now()`; the reminder is its own activity (inside the waited interval, so not in `APPROVAL_TIMING`) and returns an answer already recorded; event names `pipeline.approval_requested` / `_expiring` / `_expired` / `_superseded`; payload `{event, run_id, pipeline_id, pipeline_run_id, block_id, monitor_id, deadline, change_status, change_summary, deliveries, deliveries_note?, answer?, superseded_by_run_id?, run_url, timestamp}`, `run_url` = `PUBLIC_BASE_URL/app/dashboard/pipelines/{pid}/runs/{rid}`; `request_approval` writes the run's `change_status` / `change_summary` early so the request, the run page and `GET /approvals` show the change; the destination is read from the pinned version (a deleted one → a row with none, as failure alerts); expiry leaves `answered_at/by` null; a cancel while waiting mirrors the block `failed` "cancelled while waiting for approval" (the bucket wait's shape) and the cancel response lists nothing as still running; a 409 body is `{message, approval}`; answering is refused once a cancel is requested; `GET /approvals` = waiting and unanswered only, no index (small set); run reads gain the block's approval columns and `approval_messages` (failure `alerts` exclude them; `PipelineRunAlert.event` added); expiry sends no monitor notice (ADR-016 §8/§9c over PRD-018 R5's "plus a monitor notice") Review fix: `d753937` — `record_answer` compares the deadline with `clock_timestamp()`, not `now()` (the transaction start, before the wait for the run's lock), so an answer that waited past the deadline is refused. |
 | N.3 | Supersede + the tick that closes early (patch `approval-settled`) | 🔧 **Built 2026-11-22** (`0adb8bb`, `fefb955`). API 1484 → 1512 (replay 111 → 116), no migration, no infra change. Activity `supersede_approval` (workflow queue; under the waiting run's lock, `record_answer(…, "superseded")` conditional on no answer, `superseded_by_run_id`, the `pipeline.approval_superseded` row to the block's destination, then `approval_answered` to that run best effort — a retry that finds its own supersede wakes it again; a run ended, cancel-requested or gone is left alone). `PipelineWorkflow` (patch `approval`, as ADR-016 §15): at the first gate's *met* with `waiting_run_id` set, the supersede, then Diff against the baseline; after `request_approval`, `check_settled` to the parent tick, best effort. `MonitorCheckWorkflow` (patch `approval-settled`): returns `awaiting_approval` on `check_settled`, the check runs on (ABANDON, unchanged); a cancelled tick still cancels its check. Admission and Check now share `core/monitors.check_in_flight` and `prepare_check` hands `waiting_run_id` + `gates[first gate].waiting` (`waiting_check`: running, not cancel-requested, Approval `waiting` with no answer). Histories: supersede then approval; supersede then a Validate stop; a check matching the waiting one; the tick closing on `check_settled`; a check under a real tick sending it. Tested: at most one unanswered approval per monitor across supersede, a supersede racing an answer (concurrently, ×5 — one wins), a retried supersede. Mutation-checked (12): the IS NULL condition, the in-flight filter both ways, the answered exclusion, the supersede call, baseline-only comparison, `check_settled` sent and heard, the tick's cancel, the wake-up, Check now's rule, the request skipped once superseded. **My calls:** a waiting check is out of flight only when the version's first change gate comes before its Approval block (`catalog.approval_after_first_gate`) — otherwise nothing can supersede it and a second approval could wait, so it stays in flight (`skipped_check_in_progress`); only the first gate gets the waiting fingerprint (past it the waiting check is already superseded); a check with a waiting fingerprint but no baseline is `first_check` (no Diff); an answered-not-yet-woken check is neither in flight nor compared with; `request_approval` queues no request once an answer is recorded (a supersede between the waiting mirror and the request); the monitor allowance gains one DB step for the supersede; the tick returns `"awaiting_approval"`; the waiting check is not stored on the new run, so a retried admission looks it up again. Review fix: `53d82b6` — an approval the owner answered (`answered_at`) whose workflow has not woken (a lost signal) now counts as in flight: firings skip as `skipped_check_in_progress`, Check now is 409, and both re-send the approval signal to it after releasing the user lock (`approvals.wake`, shared with the answer route and the activities) — no second request for the same change while the approved delivery is held. A superseded one not yet woken stays out of flight (the later check is the one waiting). No workflow change. |
 | N.4 | SPA: approvals | 🔧 **Built 2026-11-22** (`4e99c9c` admin read, `c034bf9` SPA). API 1512 → 1514 (replay 116), no migration, no infra change; `tsc -b` + `vite build` pass, wording run under Node. **Not click-tested** (Clerk) — the items are N.5's. **Read:** `GET /admin/approvals` (`user_id`, `monitor_id`, `limit`, `offset`; `AdminApprovalResponse` = `ApprovalResponse` + `user_id`, `user_email`; the same waiting query as `GET /approvals`). **SPA:** Approvals page (user: Approve / Reject per row; admin: owner column, read-only, paged); run page Approval panel — state, deadline (date + time left), asked at, what changed (one line per diff, the diff below), what this run already delivered with "a reject keeps these; removed only if this run later fails", Approve / Reject for the owner, "Only the owner can approve or reject" for an admin, "Answer recorded — the run picks it up" between answer and wake, superseded-by link; an Approval messages table (request / reminder / expired / superseded, undelivered shown); header pill `waiting`; cancel text says a waiting run ends at once; "Stopped at approve — approval rejected / expired / superseded by a later check"; a change gate matched `waiting` reads "unchanged since the check waiting for approval" (linked while it still waits). Monitor page: a waiting banner (expires …, link, checks keep running — same content leaves it, other content supersedes) and the waiting check's history line; Monitors list gains an Approval column; a pipeline's run list marks a run waiting for approval. Editor: help for the `approval` block, catalog `destination_kinds`. **My calls:** an admin's monitor list and pipeline run list read the first 200 waiting approvals across users (no per-pipeline filter); no confirm step on Approve / Reject (the answer is final — 409 shows the state that won); the skip reason of the blocks after an approval stop stays "skipped — the run stopped at <approval>" (the run row names the reason) |
-| N.5 | 🚀 Release N | ⬜ |
+| N.5 | 🚀 Release N | 📋 **Runbook ready 2026-11-23** — compose gate passed twice in a row (`ab3a619`): `scripts/approval-gate.sh`, 87/87 each run (≈ 1 h of it real waiting: a 1 h expiry with an answer held on the lock past it, a 3 h approval's reminder, a lost signal found at the reminder past a 2,440 s declared budget), then the M.12, J.10 and L.12 gates unchanged. **Fix found by the gate:** `7f81144` — every Approval with a destination failed at its request and `GET /approvals` 500'd once a block before it had completed (`delivery IS NOT NULL` vs the mirror's JSON `null`); trap added. API 1518 → 1519 (replay 116). Runbook in the N.5 section (step 0 → `main` → prod checks a–g → SPA items 1–9 → clean-up; rollback notes). **My calls:** a lost signal = the answer route's write without its wake-up (`record_answer` under the run lock), not a paused `temporal`; the reminder tested at a 3 h deadline (reachable 1 h in), expiry at 1 h, both waited out; the gate reuses the delivery gate's setup and runs it as the regression; prod checks reuse M's `D_HOOK`/`D_BUCKET`; `APPROVAL_MAX_DEADLINE_HOURS` not set in prod (default 168 = PRD-018 Q10). **Not on compose:** the SPA, a request's five tries, a 7-day wait |
 | **O** | **Postgres sink** (PRD-017 slice 2) | |
 | O.1 | The Postgres sink | ⬜ |
 | O.2 | 🚀 Release O | ⬜ |
@@ -3177,6 +3177,9 @@ split costs one extra release and removes the note.
   the delete-in-use 409 sees it.
 - **Activities before the workflow that calls them**, in every group: the mirror/activity task lands first (no
   patch needed, activity code is not replayed), then the workflow task that calls it.
+- **A completed block's JSONB columns hold JSON `null`, not SQL NULL** (`delivery`, `verdict`: the mirror writes
+  `None` into them). `IS NOT NULL` matches every completed block — filter in Python or on `jsonb_typeof`, and test
+  with rows the real mirror wrote. Found by N.5's gate (`7f81144`): every approval request to a destination failed.
 
 ---
 
@@ -4426,6 +4429,225 @@ delivered; the waiting state on the monitor page; admins see pending approvals (
 **What:** PRD-018's approval criteria on compose — all of them, including the bucket-stays-on-reject and the
 rollback-after-approval checks (the reason N follows M). `main` push → api.
 **Depends on:** N.1–N.4
+
+**Compose gate ✅ (2026-11-23, `ab3a619`; fix `7f81144`):** `scripts/approval-gate.sh` (repo root) drives
+`api/scripts/approval_gate.py` with the delivery gate's setup — the fixtures up, the delivery and workflow workers on
+the gate CA (`docker/delivery-gate.yml`), the gate's MinIO users from a fresh secret — then puts them back and runs
+`scripts/delivery-gate.sh` as the regression. No fixture change: the bucket is MinIO behind the TLS front, the approval
+and notice destinations are two webhook destinations on `hooks.deliveryfixture.com` (paths built from the secret),
+the email destination is the SMTP sink, the monitored page is `/watched/<key>`.
+
+```
+docker compose --profile gate up -d            # from ./docker
+systemd-inhibit --what=sleep:idle scripts/approval-gate.sh   # ≈ 70 min (a suspend stretches it); --no-waits skips the hour, --no-regression the M/J/L gates
+```
+
+**87 checks, all passed, twice in a row** (2026-11-23: run A 13:40–15:50 UTC — the host suspended for 70 min mid-wait and every check still passed, Temporal's timers firing on resume; run B 15:56–17:03 UTC, uninterrupted under `systemd-inhibit`), through the real API, the answer route,
+`PipelineWorkflow` (patch `approval`), `MonitorCheckWorkflow` (patch `approval-settled`) fired by its Schedule,
+`WebhookDeliveryWorkflow`, the delivery worker (bucket, SMTP) and the LLM worker:
+- **Save:** an Approval first, last, twice, `deadline_hours` 0 or 169 (naming 169 and the 168 maximum), a bucket
+  destination, another user's destination — each refused; a 168 h deadline saves (the wait is not in the ceiling).
+- **Wait and ask** (*scrape → bucket → Approval → webhook*): the block `waiting` / `awaiting_approval`, deadline 24 h
+  out; the run holds **no concurrency slot** and another run starts and ends at a limit of 1; `GET /approvals` lists
+  it with the bucket key; an admin's `/admin/approvals` lists it with the owner; the request reaches the block's
+  webhook destination, signed with its secret, naming the deliveries (with the "removed only if this run later
+  fails" note), the deadline and the run's SPA link — no answer link.
+- **Answer:** another user and an admin → `404`, nothing recorded; the owner approves → the tail sends, the run
+  completes, `answered_by`/`answered_at` set; a second answer → `409` with the state that stands, nothing changed;
+  the run lists the request delivered and no alert.
+- **Reject:** `completed`, stopped at approve, `approval_rejected`, the tail skipped; **the bucket file stays** (no
+  undo); nothing sent, no failure alert; approving after it → `409` `rejected`.
+- **Email:** an SMTP destination's request is a `kind = email` row, delivered — subject
+  `[ScrapeFlow] <pipeline>: pipeline.approval_requested`, the run link in the body.
+- **Cancel while waiting:** `still_running` `[]`, `cancelled` in ≈ 1 s, the block "cancelled while waiting for
+  approval"; an answer after it → `409`.
+- **Rollback after approval** (D9): *bucket → Approval → refusing webhook*: approved, the webhook fails, the bucket
+  file **undone** — the request was not an announcement.
+- **Approval before the gate:** no destination → no message rows (SPA only); Check now while it waits → `409`.
+- **A monitor's thread** (11 checks, *gate → extract → sane(fail ≥ 1000) → cheap(stop ≥ 500) → bucket → Approval
+  → webhook*, a notice destination set): a **real firing**'s first check waits and its tick **completes with
+  `awaiting_approval`** while the check runs on; the **next firing is admitted** and stops `unchanged`, gate
+  `matched: waiting`, no LLM call, nothing skipped; approve → the baseline. £70 → changed against it, request names
+  the monitor, change and bucket key; £70 again → unchanged since the waiting check, no LLM call, no new request.
+  £65 → **supersedes** (`approval_superseded`, `superseded_by_run_id`, not a baseline, destination told, copies and
+  bucket file kept) and compares with the baseline, not the superseded check; £600 → supersedes and **stops at a
+  Validate** — nothing waits; £70 then £2000 → supersedes and **fails**; £70 again compares with the £600 check — **a
+  superseded check is never the baseline** (R8). Reject → the baseline, nothing sent, the bucket file stays; £60
+  diffs against **the rejected check**. **Pause** leaves the approval waiting and it is approved while paused;
+  **delete** cancels a waiting check. 9 LLM calls for 11 checks; the block's destination got exactly 7 requests and 3
+  superseded; **the notice destination got nothing**. At most one approval waited throughout.
+- **A lost signal** (the answer route's write under the run lock, committed, no signal sent): the run does not wake
+  and leaves `GET /approvals`; a **firing** is skipped as `skipped_check_in_progress` and wakes it — `completed`;
+  a second one: **Check now → `409`** and wakes it in seconds; one request each, none asked again.
+- **Expiry** (1 h deadline, waited out): an answer sent 8 s before the deadline and held on the run lock until
+  after it → `409` (`clock_timestamp()`, `d753937`); `completed`, `approval_expired`, `answered_at` null, not a
+  baseline; the destination got requested + expired (no reminder: 1 h ≤ 2 h); an answer after → `409` `expired`;
+  the next check compares with the old baseline and **asks again**; a check during the wait matched the waiting one
+  with no LLM call; **no monitor notice** (ADR-016 §8 over PRD-018 R5's wording).
+- **Reminder** (3 h deadline): at deadline − 2 h (1 h in) the destination got `pipeline.approval_expiring`, the
+  approval still waiting; approved after it → `completed`.
+- **Lost signal found at the reminder** (3 h deadline, no monitor to wake it): found at the 1 h reminder point, the
+  run carries on — **the step after it runs after ≈ 3,600 s on a declared 2,440 s budget** (ADR-016 §9d: the wait
+  is not counted); no reminder sent for an answer already recorded.
+- **Unchanged:** the M.12 delivery gate, the J.10 pipeline gate and the L.12 monitor gate (`GATE PASSED` each, the
+  known secret in no log, one delivery-worker life, the rebinding test) — pipelines saved before N run as before.
+
+**Found by the gate:** every Approval with a destination failed at its request, and `GET /approvals` 500'd, once any
+block before it had completed — `approvals.deliveries` filtered `delivery IS NOT NULL`, but the mirror writes JSON
+`null` there on every completed block (the unit tests set the column by hand). Fixed in `7f81144` (filter in Python;
+a test with the real mirror's rows; mutation: the test fails without the fix); trap added to *Traps that span groups*.
+
+**Not run on compose:** the SPA (Clerk — step 3), a webhook request giving up after its five tries (unit-tested at
+M.8), an answer and the expiry racing inside one transaction (unit-tested, `d753937`; here the answer was held on the
+lock past the deadline), a 7-day wait. Suites: API 1519 (incl. replay 116); contracts and worker suites not re-run (no contract or worker change since M).
+
+**Ships** (`main` `d36a114..develop`): `api/` + `frontend/` — N.1–N.4, the review fixes and the gate's fix
+(commits in the status table); migration **4.15 `f2c328bcbfcc`** (approval columns, reason widenings; previous head
+`3af61135d943`) on api startup — no quota view touched. CI: `replay` → `build-api`; the http, playwright, LLM and
+delivery-worker builds skipped (`git diff --stat d36a114..develop -- http-worker llm-worker playwright-worker
+delivery-worker mcp contracts` is empty). Flux bumps `api`, `workflow-worker` and the cleanup CronJob. **No infra
+change:** `PUBLIC_BASE_URL` (the request's run link) is already on the api, the workflow worker and the CronJob since
+M (infra `9266ef7`). `APPROVAL_MAX_DEADLINE_HOURS` is **not set** in prod: its default, 168 h, is PRD-018's 7 days
+(Q10). New patches: `approval` (`PipelineWorkflow`), `approval-settled` (`MonitorCheckWorkflow`).
+
+**Rollout window** (one-line notes, owner's rule for Phase 4):
+- An old api pod answers `/approvals` `404` and refuses an `approval` block at save — save none until
+  `rollout status` says 2/2.
+- An old workflow-worker pod handed an approval run cannot decode its input and retries the task until a new pod
+  takes it; no approval run exists before the release, so nothing is stranded.
+- Old code runs fine on 4.15: the new columns are nullable and the CHECKs only widen.
+
+**Runbook** (owner-run, in your own terminal). It uses the destinations M's runbook left in prod: the webhook
+destination behind `m-watch`'s notices and `m-bucket`'s `notify` (`D_HOOK`, whose receiver you can read as `$HOOK`)
+and the bucket destination behind `m-bucket` (`D_BUCKET`). Variables, once:
+```bash
+export B=https://scrapeflow.govindappa.com
+export KEY=<an API key from the SPA>
+export D_HOOK=<the webhook destination's id>  D_BUCKET=<the bucket destination's id>
+q() { kubectl -n scrapeflow exec -i sts/scrapeflow-postgresql -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<< "$1"; }
+api() { curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$@"; }
+```
+(`q "SELECT id, name, kind FROM destinations ORDER BY created_at;"` lists both ids if you do not have them.)
+
+0. **Before (read-only).**
+   - `q "SELECT version_num FROM alembic_version;"` → **`3af61135d943`** (4.14, M).
+   - `q "SELECT count(*) FROM pipeline_runs WHERE status = 'running';"` and `q "SELECT count(*) FROM monitors;"` →
+     record both.
+   - Rollback tags (the api image also runs the workflow worker and the CronJob):
+     `kubectl -n scrapeflow get deploy scrapeflow-api scrapeflow-workflow-worker -o jsonpath='{range .items[*]}{.metadata.name} {.spec.template.spec.containers[0].image}{"\n"}{end}'`
+     and `kubectl -n scrapeflow get cronjob scrapeflow-cleanup -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}'`
+     → expected `main-1795276971-d36a114…` (M). The delivery worker's tag (unchanged by this release):
+     `kubectl -n scrapeflow get deploy scrapeflow-delivery-worker -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+   - `kubectl -n scrapeflow get deploy scrapeflow-api -o yaml | grep -A1 PUBLIC_BASE_URL` → `https://scrapeflow.govindappa.com`.
+1. **Push `develop`, ff `main`, push** (from the app repo):
+   `git push origin develop && git checkout main && git merge --ff-only develop && git push origin main && git checkout develop`.
+   - CI (`gh run watch`): `replay`, `build-api` green; http, playwright, LLM and delivery-worker builds **skipped**.
+   - `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → 2/2 on the new tag; the same for
+     `deploy/scrapeflow-workflow-worker`. Record the tag here.
+   - `q "SELECT version_num FROM alembic_version;"` → **`f2c328bcbfcc`** (4.15);
+     `q "SELECT count(*) FROM pipeline_run_blocks WHERE approval_answer IS NOT NULL;"` → `0`;
+     `q "SELECT count(*) FROM quota_active_submissions;"` returns.
+   - `api "$B/approvals"` → `[]`.
+2. **Product checks** (prod; the SPA items of step 3 drive some of them — do them side by side).
+   - **a. Wait, ask, approve.** A pipeline whose bucket delivery happens before the Approval:
+     ```bash
+     api -X POST "$B/pipelines" -d '{"name": "n-approve", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}},
+       {"id": "store", "type": "bucket", "input": "fetch", "config": {"destination_id": "'"$D_BUCKET"'"}},
+       {"id": "approve", "type": "approval", "input": "store", "config": {"deadline_hours": 1, "destination_id": "'"$D_HOOK"'"}},
+       {"id": "notify", "type": "webhook", "input": "approve", "config": {"destination_id": "'"$D_HOOK"'"}}]}}'
+     ```
+     → `201`, `export P1=<id>`. `api -X POST "$B/pipelines/$P1/runs" -d '{}'` → `202`, `export R1=<id>`.
+     `api "$B/pipelines/$P1/runs/$R1"` → `running`; `approve` **`waiting`**, `status_reason` `awaiting_approval`,
+     `approval_deadline` 1 h out; `store` delivered. `api "$B/approvals"` → one entry, `state` `waiting`, its
+     `deliveries` naming the bucket key. `$HOOK` got **`pipeline.approval_requested`**, signed with the destination's
+     secret, with `deliveries`, `deliveries_note` ("…removed only if this run later fails"), `deadline` and
+     `run_url` = `$B/app/dashboard/pipelines/$P1/runs/$R1` — and no other link. Approve it from the SPA (step 3,
+     item 3) or `api -X POST "$B/pipelines/$P1/runs/$R1/approval" -d '{"decision": "approved"}'` → `200`, `state`
+     `approved`; the run **`completed`**, `$HOOK` got the `notify` message (`pipeline.result`). The same POST again
+     (or `rejected`) → **`409`**, `detail.approval.state` `approved`.
+   - **b. Reject.** Run `n-approve` again (`R2`); when it waits, `-d '{"decision": "rejected"}'` (or the SPA, item 4)
+     → `completed`, `stopped_at_block_id` `approve`, `stop_reason` **`approval_rejected`**; `notify` `skipped`;
+     `store`'s object (its `delivery.location.key`) **still in your bucket**; `$HOOK` got only the request; the run's
+     `alerts` empty.
+   - **c. Rollback after an approval** (the reason N follows M):
+     ```bash
+     api -X POST "$B/pipelines" -d '{"name": "n-undo", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}},
+       {"id": "store", "type": "bucket", "input": "fetch", "config": {"destination_id": "'"$D_BUCKET"'"}},
+       {"id": "approve", "type": "approval", "input": "store", "config": {"deadline_hours": 1, "destination_id": "'"$D_HOOK"'"}},
+       {"id": "guard", "type": "validate", "input": "approve", "config": {"rules": [{"kind": "contains", "text": "Sold out"}]}},
+       {"id": "notify", "type": "webhook", "input": "guard", "config": {"destination_id": "'"$D_HOOK"'"}}]}}'
+     ```
+     → `P2`; run it (`R3`), approve when it waits → **`failed`**, `failed_block_id` `guard`; `store` `undo_status`
+     **`undone`**, the object **gone** from your bucket, though the request had gone out (it is not an announcement).
+   - **d. Cancel while waiting.** Run `n-approve` (`R4`); when it waits,
+     `api -X POST "$B/pipelines/$P1/runs/$R4/cancel" -d '{}'` → `202`, `still_running` `[]`; the run reads
+     **`cancelled`** within seconds, `approve` `failed` "cancelled while waiting for approval".
+   - **e. A monitor: the tick closes, the same content waits on.** A pipeline with a change gate before the Approval
+     (no LLM block, no key needed):
+     ```bash
+     api -X POST "$B/pipelines" -d '{"name": "n-watch", "definition": {"inputs": {"url": {"type": "url"}}, "blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": {"$input": "url"}}},
+       {"id": "clean", "type": "clean", "input": "fetch"},
+       {"id": "gate", "type": "validate", "input": "clean", "config": {"rules": [{"kind": "changed"}], "when_unmet": "stop"}},
+       {"id": "approve", "type": "approval", "input": "gate", "config": {"deadline_hours": 24, "destination_id": "'"$D_HOOK"'"}},
+       {"id": "notify", "type": "webhook", "input": "approve", "config": {"destination_id": "'"$D_HOOK"'"}}]}}'
+     ```
+     → `P3`. `api -X POST "$B/monitors" -d '{"name": "n-static", "pipeline_id": "'"$P3"'", "inputs": {"url": "https://example.com"}, "schedule_cron": "*/5 * * * *"}'`
+     → `M1`. After the first 5-minute mark: `api "$B/monitors/$M1/history"` → one check, `first_check`, its
+     `approve` waiting (`$HOOK` got its request). After the **next** mark: a **second check** exists (the first
+     firing's tick closed on `check_settled`; under `SKIP` an open tick would have dropped it), `change_status`
+     **`unchanged`**, its `gate` verdict `"matched": "waiting"`; the first check still waits (`api "$B/approvals"`);
+     no `skipped_check_in_progress` in the history. Pause the monitor (`api -X POST "$B/monitors/$M1/pause"`) → the
+     approval still waits and can be answered: approve it → the check `completed`.
+   - **f. Supersede.** `api -X POST "$B/monitors" -d '{"name": "n-changing", "pipeline_id": "'"$P3"'", "inputs": {"url": "https://httpbin.org/uuid"}, "schedule_cron": "0 3 1 1 *"}'`
+     → `M2`. `api -X POST "$B/monitors/$M2/check"` → `202` (`C1`); once it waits, again → **`202`**, not `409` (a
+     waiting check is not in flight) → `C2`: different content, so `C1` reads `completed`, `stop_reason`
+     **`approval_superseded`**, `approve.superseded_by_run_id` = `C2`; `$HOOK` got `pipeline.approval_superseded`
+     for `C1`; `api "$B/approvals"` lists `C2`, not `C1` (one waiting per monitor). Then
+     `api -X DELETE "$B/monitors/$M2"` → `204`, and `C2` reads **`cancelled`** within seconds.
+   - **g. Expiry (optional, 1 h):** run `n-approve` once more (`R5`) and leave it → after its deadline `completed`,
+     `stop_reason` **`approval_expired`**; `$HOOK` got `pipeline.approval_expired` (no reminder: a 1-hour deadline
+     is inside the 2-hour reminder point); an answer now → `409`, `state` `expired`. Also SPA item 9.
+   - Logs: `kubectl -n scrapeflow logs deploy/scrapeflow-workflow-worker --since=30m | grep -c Traceback` → `0`.
+3. **SPA** (signed in; N.4's list, nothing there was clicked before):
+   1. Pipeline editor: save a pipeline with an `approval` block (`deadline_hours`, a webhook or smtp
+      `destination_id`); "Block budgets" lists `approval … → webhook or smtp destination`; an approval first, last or
+      twice is refused with the block named.
+   2. A run waiting at Approval (2a): header pill `waiting`; the Approval panel shows the deadline with the time
+      left, what changed (on a monitor check) and what was already delivered (the bucket key) with the "a reject
+      keeps these" note; the Approval messages table shows the `request` row and its delivery state.
+   3. **Approvals** page lists it (pipeline, monitor link, asked, deadline, change, delivered); Approve from the
+      list → it leaves the list; the run continues and completes ("Answer recorded" until the run wakes).
+   4. Reject on the run page (2b) → `completed`, "Stopped at approve — approval rejected", later steps skipped, the
+      bucket delivery still listed as delivered, no failure alert.
+   5. Answer twice (a second tab, or the list and the run page) → the 409's message shows and the page shows the
+      state that won.
+   6. `n-static`'s page (2e): the amber banner (expires …, link) while its first check waits and that check's
+      history line "waiting for approval, expires …"; the Monitors list shows `waiting` in the Approval column; the
+      second check reads "unchanged since the check waiting for approval" (linked). `n-changing`'s superseded check
+      (2f) shows "superseded by a later check", linked to the later run, and a `superseded` row in Approval messages.
+   7. Cancel a waiting run (2d) → the cancel text says it ends at once; the run ends `cancelled` without waiting.
+   8. Admin (if you can sign in as a second, non-admin user, make it the owner of a waiting approval):
+      `/app/admin/approvals` lists it with the owner and no buttons; the admin run page shows the panel with "Only
+      the owner can approve or reject" and no buttons; the admin monitor page shows the banner. (On compose an
+      admin's answer is `404`.)
+   9. Expiry (2g, if you wait it out): "approval expired" on the run and in the monitor history (a monitor check
+      left 24 h does the same).
+4. **Clean up:** `api -X DELETE "$B/monitors/$M1?with_checks=true"` and `…/$M2?with_checks=true` → `204`;
+   `api -X DELETE "$B/pipelines/$P1?permanent=true"`, `$P2`, `$P3` → `204` (a run still waiting is cancelled
+   first). The bucket objects from 2a/2b are delivered results — ScrapeFlow does not delete them.
+5. Record step 0's values and each step's results here; mark N.1–N.5 ✅ in the status table.
+
+**Rollback:** prefer a forward fix. An api image revert (api, workflow worker, CronJob to step 0's tags) leaves 4.15
+applied (M's code maps none of its columns; do not downgrade). First: **no run with an Approval block still
+running** — answer or cancel each:
+`q "SELECT r.id, r.pipeline_id FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'approval';"`
+→ none (M's workflow code cannot replay patch `approval`); and **no monitor check running** (pause the monitors and
+let checks end — every admitted tick records patch `approval-settled`). ⚠️ After the revert, M's api cannot read a
+run that ended with an approval stop (its read schema lacks `approval_rejected` / `_expired` / `_superseded`): those
+run reads return 500 until the runs are deleted or the release is rolled forward.
 
 ---
 
