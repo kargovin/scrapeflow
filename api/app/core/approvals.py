@@ -68,11 +68,14 @@ async def deliveries(db: AsyncSession, run_id: uuid.UUID) -> list[dict[str, Any]
     """What the run's sinks have delivered so far (ADR-014 §5a records), chain order."""
     rows = await db.execute(
         select(PipelineRunBlock.block_id, PipelineRunBlock.delivery)
-        .where(PipelineRunBlock.pipeline_run_id == run_id, PipelineRunBlock.delivery.is_not(None))
+        .where(PipelineRunBlock.pipeline_run_id == run_id)
         .order_by(PipelineRunBlock.position)
     )
+    # ⚠️ Not SQL IS NOT NULL: the mirror writes JSON null on every completed block.
     return [
-        {"block_id": block_id, "kind": d["kind"], "location": d["location"]} for block_id, d in rows
+        {"block_id": block_id, "kind": d["kind"], "location": d["location"]}
+        for block_id, d in rows
+        if d is not None
     ]
 
 

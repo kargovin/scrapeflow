@@ -237,6 +237,30 @@ async def test_the_request_lists_what_has_already_been_delivered(
     assert "removed only if this run later fails" in message.payload["deliveries_note"]
 
 
+async def test_a_block_the_mirror_completed_without_a_delivery_is_not_one(
+    client, headers, db_user, temporal
+):
+    # The mirror writes delivery = JSON null, not SQL NULL, on every completed block.
+    destination = await _destination(db_user.id, "webhook")
+    run = await _triggered(client, headers, destination_id=str(destination.id))
+    for status in ("running", "completed"):
+        await mirror_block_status(
+            MirrorBlockInput(
+                run_id=str(run.id),
+                block_id="fetch",
+                status=status,
+                output_ref="scrapeflow-results/history/x/scrape.html",
+            )
+        )
+    await _waiting(run)
+
+    [message] = await _messages(run.id)
+    assert message.payload["deliveries"] == []
+    resp = await client.get("/approvals", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert [a["deliveries"] for a in resp.json() if a["run_id"] == str(run.id)] == [[]]
+
+
 async def test_a_request_on_a_cancelled_run_writes_nothing(client, headers, db_user, temporal):
     destination = await _destination(db_user.id, "webhook")
     run = await _triggered(client, headers, destination_id=str(destination.id))
