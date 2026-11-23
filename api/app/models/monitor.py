@@ -26,6 +26,8 @@ MONITOR_EVENT_KINDS = (
     "waiting_for_slot",
     "gave_up_waiting",
     "paused_itself",
+    # ADR-017: a point event, written closed.
+    "approval_expired",
 )
 # §7b/§8: the situations a notice is sent for when they start; the others are history only.
 NOTICE_KINDS = (
@@ -33,6 +35,7 @@ NOTICE_KINDS = (
     "skipped_pipelines_disabled",
     "gave_up_waiting",
     "paused_itself",
+    "approval_expired",
 )
 
 

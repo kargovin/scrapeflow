@@ -121,6 +121,7 @@ MonitorEventKind = Literal[
     "waiting_for_slot",
     "gave_up_waiting",
     "paused_itself",
+    "approval_expired",
 ]
 
 
