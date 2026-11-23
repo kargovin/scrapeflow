@@ -967,12 +967,26 @@ async def waits_finish(g: ApprovalGate, s: dict) -> None:
         and approval_of(c3).get("status") == "waiting",
         f"the next check compares with c0 and asks again ({c3['change_status']})",
     )
-    history = [
-        i["event"]["kind"] for i in await g.history(expiry["monitor"]) if i["type"] == "event"
-    ]
+    events = [i["event"] for i in await g.history(expiry["monitor"]) if i["type"] == "event"]
+    until = time.monotonic() + 40
+    mine = expiry["monitor"]["id"]
+    while (
+        notices := [
+            payload(p)
+            for p in await g.hook_posts(NOTICE_HOOK)
+            if payload(p).get("monitor_id") == mine
+        ]
+    ) == []:
+        if time.monotonic() > until:
+            break
+        await asyncio.sleep(1)
     g.check(
-        history == [] and await g.hook_posts(NOTICE_HOOK) == [],
-        f"no monitor notice for an expiry (ADR-016 §8) ({history})",
+        [(e["kind"], e["detail"]["run_id"], e["ended_at"] == e["first_at"]) for e in events]
+        == [("approval_expired", c1["id"], True)]
+        and [(n["event"], n["notice"], n["detail"]["run_id"]) for n in notices]
+        == [("monitor.notice", "approval_expired", c1["id"])],
+        f"the monitor records the expiry and its notice destination is told (ADR-017) "
+        f"({[e['kind'] for e in events]}, {len(notices)} notice(s))",
     )
 
     remind_at = max(
