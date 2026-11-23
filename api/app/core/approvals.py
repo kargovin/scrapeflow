@@ -176,7 +176,8 @@ async def record_answer(
     if open_until_deadline:
         conditions += [
             PipelineRunBlock.status == "waiting",
-            PipelineRunBlock.approval_deadline > func.now(),
+            # Not now(): that is the transaction's start, before the wait for the run's lock.
+            PipelineRunBlock.approval_deadline > func.clock_timestamp(),
         ]
     values: dict[str, Any] = {"approval_answer": answer}
     if answered_by is not None:

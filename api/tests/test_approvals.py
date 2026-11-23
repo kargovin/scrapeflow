@@ -566,6 +566,27 @@ async def test_an_answer_waits_for_an_expiry_holding_the_run_and_then_sees_it(
     assert (await _approval(run.id)).approval_answer == "expired"
 
 
+async def test_an_answer_that_waited_for_the_run_past_the_deadline_is_refused(
+    client, headers, temporal, signal
+):
+    run = await _triggered(client, headers)
+    await _waiting(run, deadline=datetime.now(UTC) + timedelta(seconds=1.5))
+    async with AsyncSessionLocal() as holder:
+        await holder.scalar(select(PipelineRun).where(PipelineRun.id == run.id).with_for_update())
+        task = asyncio.create_task(
+            client.post(_answer_url(run), json={"decision": "approved"}, headers=headers)
+        )
+        await asyncio.sleep(2)
+        assert not task.done(), "the answer did not wait for the run's lock"
+        await holder.rollback()
+    resp = await asyncio.wait_for(task, timeout=10)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["message"] == "The approval's deadline has passed"
+    assert (await _approval(run.id)).approval_answer is None
+    signal.assert_not_awaited()
+
+
 async def test_an_answer_and_the_expiry_together_one_wins(client, headers, temporal, signal):
     for _ in range(5):
         run = await _triggered(client, headers)
