@@ -6,7 +6,7 @@ scraping platform. Read @CLAUDE.md for the full architecture.
 ## Your role in this session
 
 ⚙️ **Mode since 2026-11-18: delegated build.** The owner is out of time and has handed over the build: work the
-implementation backlog in order (K.1 next) **without explaining first**, **one reviewable step per commit** (each
+implementation backlog in order (the status table's next ⬜ task) **without explaining first**, **one reviewable step per commit** (each
 commit does one thing, with its tests, suites green; a task is usually several commits, never two tasks in one).
 Each task's *Built* note in the backlog and this file list its commits **in order**, so the owner can later replay
 the work step by step. Open calls: make them, mark them "my call", keep them reversible; ask only for product
@@ -149,7 +149,32 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-21 *(clock)*
+## Current state — as of 2026-11-23 *(clock)*
+
+🔧 **N.1–N.4 BUILT, 🧪 N.5 COMPOSE GATE PASSED, 📋 RELEASE N RUNBOOK READY (2026-11-22 → 23, twenty-fourth session;
+delegated build).** Owner: "build everything until n's release runbook". Same way of working as M: I orchestrated,
+one builder subagent per task (brief `docs/process/builder-brief.md`, group lines updated `1de17f9`), full API suite
+re-run after each, one independent reviewer over all of N before the gate. **Order to replay** (each task's backlog
+row lists its calls):
+- **N.1** `c627c75` — migration 4.15 `f2c328bcbfcc` (approval columns on `pipeline_run_blocks`, approval stop/block reasons); `0d5be54` — the `approval` block: catalog, save rules, destination (`webhook`/`smtp`) at save + trigger; `APPROVAL_MAX_DEADLINE_HOURS` (168).
+- **N.2** `321fbeb` — `request_approval` / `remind_approval` / `resolve_approval`, the waiting mirror; `ed45eb9` — the wait in `PipelineWorkflow` (patch **`approval`**), 5 histories; `1567c18` — `POST …/runs/{rid}/approval`, `GET /approvals`, approval fields on run reads.
+- **N.3** `0adb8bb` — `supersede_approval`; `fefb955` — supersede at the first gate, `check_settled`, the tick that closes on it (patch **`approval-settled`**), 5 histories.
+- **N.4** `4e99c9c` — `GET /admin/approvals` (read-only); `c034bf9` — SPA: approvals list, answer on the run page, monitor waiting state, the block in the editor. **Not click-tested** (Clerk) — runbook step.
+- **Review fixes** `53d82b6` (an answered approval whose wake signal was lost stays in flight; the next firing / Check now re-sends it — before, the next check asked again), `d753937` (the answer route compares the deadline with `clock_timestamp()`, not the transaction start).
+- **N.5** `7f81144` — **a real bug the gate found**: every Approval with a destination failed at `request_approval` and `GET /approvals` 500'd once an earlier block had completed (the mirror writes JSON `null` to `delivery`; the filter skipped SQL NULL only — trap added to *Traps that span groups*); `ab3a619` — `scripts/approval-gate.sh` + `api/scripts/approval_gate.py` (≈ 70 min: an expiry and a reminder are waited out in real time; run it under `systemd-inhibit --what=sleep:idle`); `ead1b8a` — gate record + runbook in the backlog's N.5 section.
+- **Numbers:** API 1519 (incl. replay 116), gate 87/87 twice + the M.12/J.10/L.12 gates still pass. Contracts/worker suites unchanged since M (no worker diff).
+- **Release facts:** `main` `d36a114..<develop head>`, **api image only**, migration 4.15 on startup, **no infra change** (`PUBLIC_BASE_URL` already deployed). ⚠️ Rollback trap: M's api 500s reading a run that ended with an approval stop.
+- **Not proven on compose:** the SPA, a request giving up after five tries, a 7-day wait.
+- **For the owner (decide before or after the release — the build does not depend on them):**
+  1. **Approval placed before the first change gate** (e.g. `scrape → approval → gate`). ADR-016 §9e says a waiting check is "not in flight", but its at-most-one-approval argument assumes the gate comes first. N.3's call (conservative): for that shape a waiting check **counts as in flight**, so firings are skipped for up to the deadline (7 days max) — the "monitor goes blind" outcome PRD-018 D10 rejects. Reviewer's alternative: refuse an Approval before the first gate when a monitor is saved. Either is small; an ADR change is yours.
+  2. **Expiry sends no monitor notice** — ADR-016 §8/§9c followed; PRD-018 R5's wording says the opposite.
+- **Flake to watch:** one `-x` API run stopped once at test ~1244 (review-fix builder); not reproduced in four clean runs since.
+- **Hygiene:** a pytest from the N.3 build hung ~41 h inside the api container (killed 2026-11-23); it is why N.3's wall clock was long.
+- **Next:** **N.5 is the owner's** (backlog N.5 section: step 0 → push → migration check → prod approval checks with the M destinations → SPA). Then **O.1** (Postgres sink).
+
+---
+
+## Earlier state — 2026-11-21 *(clock)*
 
 🚀 **RELEASE M DONE — GROUP M CLOSED (2026-11-21).** The owner ran the M.12 runbook in their own terminal, step by step;
 I explained and checked each step's output. `main` `97eff8b..d36a114` (api image + the new delivery-worker image,
