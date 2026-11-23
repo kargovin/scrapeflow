@@ -15,6 +15,7 @@ const COLOURS: Record<string, string> = {
   'undo failed': 'bg-red-100 text-red-700',
   passed: 'bg-green-100 text-green-700',
   warning: 'bg-amber-100 text-amber-700',
+  expired: 'bg-amber-100 text-amber-700',
 }
 
 export default function StatusPill({ status }: { status: string }) {

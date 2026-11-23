@@ -6,6 +6,7 @@ import {
   type Approval,
   type Destination,
   type Monitor,
+  type MonitorEventKind,
   type MonitorNotice,
   type MonitorHistoryItem,
   type PipelineRun,
@@ -39,6 +40,11 @@ function NoticeState({ notice }: { notice: MonitorNotice }) {
       {new Date(notice.next_attempt_at).toLocaleString()}
     </span>
   )
+}
+
+const EVENT_PILL: Partial<Record<MonitorEventKind, string>> = {
+  paused_itself: 'failed',
+  approval_expired: 'expired',
 }
 
 function HistoryLine({
@@ -75,10 +81,14 @@ function HistoryLine({
     )
   }
   const event = item.event!
+  const runId = event.kind === 'approval_expired' && typeof event.detail?.run_id === 'string' ? event.detail.run_id : null
   return (
-    <li className="px-4 py-2 flex items-center gap-3 text-sm bg-gray-50">
+    <li
+      onClick={runId ? () => onOpen(runId) : undefined}
+      className={`px-4 py-2 flex items-center gap-3 text-sm bg-gray-50${runId ? ' hover:bg-gray-100 cursor-pointer' : ''}`}
+    >
       <span className="w-44 text-xs text-gray-400">{at}</span>
-      <StatusPill status={event.kind === 'paused_itself' ? 'failed' : 'skipped'} />
+      <StatusPill status={EVENT_PILL[event.kind] ?? 'skipped'} />
       <span className="text-gray-600">{eventInWords(event)}</span>
       {event.notice && <NoticeState notice={event.notice} />}
     </li>

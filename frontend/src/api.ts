@@ -543,6 +543,8 @@ export type MonitorEventKind =
   | 'waiting_for_slot'
   | 'gave_up_waiting'
   | 'paused_itself'
+  // ADR-017: a point event, written closed; detail = {run_id, deadline, run_url}.
+  | 'approval_expired'
 
 export interface MonitorEvent {
   id: string

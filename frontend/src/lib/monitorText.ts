@@ -48,6 +48,10 @@ export function eventInWords(e: MonitorEvent): string {
       const error = typeof e.detail?.error === 'string' ? `: ${e.detail.error}` : ''
       return `paused itself after ${String(e.detail?.failures ?? 5)} failed checks in a row${error}`
     }
+    case 'approval_expired': {
+      const by = typeof e.detail?.deadline === 'string' ? ` by ${new Date(e.detail.deadline).toLocaleString()}` : ''
+      return `approval expired — nobody answered${by}`
+    }
     default:
       return e.kind
   }
