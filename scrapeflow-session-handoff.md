@@ -151,6 +151,21 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-23 *(clock)*
 
+🚀 **RELEASE N DONE — GROUP N CLOSED (2026-11-23).** The owner ran the N.5 runbook in their own terminal; I checked
+each step. `main` `d36a114..c341af7` (CI `45225858689`; api image only, migration 4.15 `f2c328bcbfcc`, no infra
+change); api + workflow worker on `main-1795454251-c341af7…`. Steps 2a–2g all passed (2g's 1-hour expiry included),
+SPA items 1–9 passed (item 8 with a second user signed in by OAuth), workflow-worker Tracebacks 0. Full record: backlog
+N.5 section → *Release record*. **Deployed code is `c341af7`.**
+- **Found during the release (not blockers, not filed yet):** the cancel response carries no run messages; the SPA's
+  "same content as the check waiting for approval" line reads stale once answered; **Clerk email sign-in codes do not
+  arrive in prod** (OAuth works) — the owner checks the Clerk instance's email DNS records.
+- **Still open for the owner:** the two decisions below (an Approval before the first change gate; no notice on expiry).
+- **Next: O.1** (Postgres sink), same way of working; carry-forward starts fresh.
+
+---
+
+## Build state before the release — 2026-11-23 *(clock)*
+
 🔧 **N.1–N.4 BUILT, 🧪 N.5 COMPOSE GATE PASSED, 📋 RELEASE N RUNBOOK READY (2026-11-22 → 23, twenty-fourth session;
 delegated build).** Owner: "build everything until n's release runbook". Same way of working as M: I orchestrated,
 one builder subagent per task (brief `docs/process/builder-brief.md`, group lines updated `1de17f9`), full API suite
