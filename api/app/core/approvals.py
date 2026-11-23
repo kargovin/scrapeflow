@@ -4,6 +4,7 @@ The block row is the record: the answer is written once, conditionally on ``appr
 by whichever writer commits first — the owner's answer, the expiry, or a supersede. Every message
 (request, reminder, expired, superseded) is a ``webhook_deliveries`` row keyed
 ``(pipeline_run_id, block_id, event)`` to the block's own destination; none to a monitor's (§8).
+An expired check's monitor notice is the monitor's own (``monitor_checks``, ADR-017).
 """
 
 import uuid

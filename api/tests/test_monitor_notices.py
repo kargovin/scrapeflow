@@ -1,5 +1,6 @@
 """M.9 — monitor notices to a destination (ADR-016 §8, §13): a new situation queues a
-``monitor.notice`` row in the transaction that records it; the row is delivered like any other."""
+``monitor.notice`` row in the transaction that records it; the row is delivered like any other.
+O.0 — an expired approval on a check records a closed event and queues its notice (ADR-017)."""
 
 import hashlib
 import hmac
@@ -24,12 +25,14 @@ from app.core.quota import lock_user
 from app.main import app
 from app.models.destination import Destination
 from app.models.monitor import Monitor, MonitorEvent
-from app.models.pipeline import PipelineRun
+from app.models.pipeline import PipelineRun, PipelineRunBlock
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
+from app.workflows.activities.db import mirror_run_status
 from app.workflows.activities.monitor_checks import admit_monitor_check
 from app.workflows.activities.webhook_deliveries import _secret, attempt_webhook_delivery
 from app.workflows.monitor_check import AdmitMonitorCheckInput
+from app.workflows.pipeline import MirrorRunInput
 from app.workflows.webhook_delivery import DeliveryRef
 from tests.test_admin import admin_api_key, admin_headers, admin_user  # noqa: F401
 from tests.test_email_deliveries import SMTP_ADDRESS
@@ -750,3 +753,199 @@ async def test_an_admin_user_delete_takes_a_monitor_and_its_notice_destination(
     assert resp.status_code == 204
     assert await _get(Monitor, uuid.UUID(monitor["id"])) is None
     assert await _get(Destination, destination.id) is None
+
+
+# --- an expired approval (ADR-017) --------------------------------------------------------
+
+DEADLINE = datetime(2026, 11, 24, 9, 30, tzinfo=UTC)
+ANSWERS = {
+    "approval_expired": "expired",
+    "approval_rejected": "rejected",
+    "approval_superseded": "superseded",
+}
+
+
+async def _asking(monitor: Monitor | None, user_id=None, pipeline=None) -> PipelineRun:
+    """A check at its Approval block, its answer recorded, the run not yet ended."""
+    run_id = uuid.uuid4()
+    async with AsyncSessionLocal() as db:
+        run = PipelineRun(
+            id=run_id,
+            pipeline_id=pipeline[0] if pipeline else monitor.pipeline_id,
+            pipeline_version_id=pipeline[1] if pipeline else monitor.pipeline_version_id,
+            user_id=user_id or monitor.user_id,
+            status="running",
+            workflow_id=f"pipeline-run-{run_id}",
+            monitor_id=monitor.id if monitor else None,
+        )
+        db.add(run)
+        db.add(
+            PipelineRunBlock(
+                pipeline_run_id=run_id,
+                block_id="approve",
+                position=0,
+                type="approval",
+                status="completed",
+                approval_deadline=DEADLINE,
+            )
+        )
+        await db.commit()
+        return run
+
+
+async def _stop(run: PipelineRun, reason="approval_expired", client=None) -> str:
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRunBlock)
+            .where(PipelineRunBlock.pipeline_run_id == run.id)
+            .values(approval_answer=ANSWERS[reason])
+        )
+        await db.commit()
+    end = MirrorRunInput(
+        run_id=str(run.id), status="completed", stopped_at_block_id="approve", stop_reason=reason
+    )
+    if client is None:
+        return await mirror_run_status(end)
+    return await ActivityEnvironment(client=client).run(mirror_run_status, end)
+
+
+async def test_an_expired_check_records_a_closed_event_and_starts_its_notice(db_user):
+    destination = await _destination(db_user.id)
+    monitor = await _monitor(db_user.id, destination)
+    run = await _asking(monitor)
+    client = MagicMock()
+    client.start_workflow = AsyncMock()
+
+    assert await _stop(run, client=client) == "completed"
+
+    [event] = await _events(monitor.id)
+    assert (event.kind, event.count, event.ended_at, event.last_at) == (
+        "approval_expired",
+        1,
+        event.first_at,
+        event.first_at,
+    )
+    assert event.detail == {
+        "run_id": str(run.id),
+        "deadline": DEADLINE.isoformat(),
+        "run_url": f"{settings.public_base_url}/app/dashboard/pipelines/"
+        f"{run.pipeline_id}/runs/{run.id}",
+    }
+    [notice] = await _notices(monitor.id)
+    assert (
+        notice.event,
+        notice.kind,
+        notice.monitor_event_id,
+        notice.destination_id,
+        notice.status,
+        notice.payload["notice"],
+        notice.payload["detail"],
+    ) == (
+        "monitor.notice",
+        "webhook",
+        event.id,
+        destination.id,
+        "pending",
+        "approval_expired",
+        event.detail,
+    )
+    [call] = client.start_workflow.call_args_list
+    assert call.kwargs["id"] == f"webhook-delivery-{notice.id}"
+
+
+async def test_an_expired_check_with_no_notice_destination_records_only(db_user):
+    monitor = await _monitor(db_user.id)
+    await _stop(await _asking(monitor))
+
+    assert [e.kind for e in await _events(monitor.id)] == ["approval_expired"]
+    assert await _notices(monitor.id) == []
+
+
+async def test_a_retried_writer_adds_nothing(db_user):
+    monitor = await _monitor(db_user.id, await _destination(db_user.id))
+    run = await _asking(monitor)
+    await _stop(run)
+    await _stop(run)
+    # The call itself, again on the ended check: its event is keyed on the run.
+    async with AsyncSessionLocal() as db:
+        await lock_user(monitor.user_id, db)
+        ended = await monitor_check_ended(db, await db.get(PipelineRun, run.id))
+        await db.commit()
+
+    assert ended.notice_event_id is None
+    assert len(await _events(monitor.id)) == 1
+    assert len(await _notices(monitor.id)) == 1
+
+
+async def test_each_expired_check_records_its_own(db_user):
+    monitor = await _monitor(db_user.id, await _destination(db_user.id))
+    first, second = await _asking(monitor), await _asking(monitor)
+    await _stop(first)
+    await _stop(second)
+
+    assert sorted(e.detail["run_id"] for e in await _events(monitor.id)) == sorted(
+        [str(first.id), str(second.id)]
+    )
+    assert len(await _notices(monitor.id)) == 2
+
+
+@pytest.mark.parametrize("reason", ["approval_rejected", "approval_superseded"])
+async def test_a_rejected_or_superseded_check_records_nothing(db_user, reason):
+    monitor = await _monitor(db_user.id, await _destination(db_user.id))
+    await _stop(await _asking(monitor), reason)
+
+    assert await _events(monitor.id) == []
+    assert await _notices(monitor.id) == []
+
+
+async def test_an_expired_hand_run_records_nothing(db_user):
+    monitor = await _monitor(db_user.id, await _destination(db_user.id))
+    run = await _asking(
+        None, db_user.id, pipeline=(monitor.pipeline_id, monitor.pipeline_version_id)
+    )
+    await _stop(run)
+
+    async with AsyncSessionLocal() as db:
+        assert (
+            await db.scalar(
+                select(MonitorEvent).where(MonitorEvent.detail["run_id"].astext == str(run.id))
+            )
+            is None
+        )
+    assert await _events(monitor.id) == []
+
+
+async def test_an_expiry_leaves_an_open_situation_open(db_user):
+    monitor = await _monitor(db_user.id, await _destination(db_user.id))
+    await _used_up(db_user.id)
+    await _admit(monitor)
+    await _stop(await _asking(monitor))
+    await _admit(monitor)
+
+    events = await _events(monitor.id)
+    assert [(e.kind, e.count, e.ended_at is None) for e in events] == [
+        ("skipped_monthly_runs", 2, True),
+        ("approval_expired", 1, False),
+    ]
+    assert [n.payload["notice"] for n in await _notices(monitor.id)] == [
+        "skipped_monthly_runs",
+        "approval_expired",
+    ]
+
+
+async def test_the_history_shows_an_expired_approval_with_its_notice(
+    client,
+    db_user,
+    headers,  # noqa: F811
+):
+    monitor = await _monitor(db_user.id, await _destination(db_user.id))
+    run = await _asking(monitor)
+    await _stop(run)
+
+    [event] = await _history_events(client, f"/monitors/{monitor.id}/history", headers)
+    assert (event["kind"], event["detail"]["run_id"], event["notice"]["status"]) == (
+        "approval_expired",
+        str(run.id),
+        "pending",
+    )
+    assert event["ended_at"] == event["first_at"]

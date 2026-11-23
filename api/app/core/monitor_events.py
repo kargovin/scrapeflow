@@ -1,9 +1,10 @@
 """A monitor's own history (ADR-016 §7b): one ``monitor_events`` row per situation, and its notice (§8).
 
 Every write happens under ``quota.lock_user`` — "find the open row, then bump it or insert one"
-is a read followed by a write. A new situation of a ``NOTICE_KINDS`` kind queues a ``monitor.notice``
-row in the same transaction when the monitor names a notice destination; the writer starts it after
-its commit (``webhook_delivery.start_pending(..., monitor_event_id=...)``), the sweep otherwise.
+is a read followed by a write. A new situation, or a point event (``record_point``), of a
+``NOTICE_KINDS`` kind queues a ``monitor.notice`` row in the same transaction when the monitor
+names a notice destination; the writer starts it after its commit
+(``webhook_delivery.start_pending(..., monitor_event_id=...)``), the sweep otherwise.
 """
 
 import uuid
@@ -103,6 +104,25 @@ async def record(
         return None
     event = MonitorEvent(
         monitor_id=monitor_id, kind=kind, first_at=now, last_at=now, count=1, detail=detail
+    )
+    db.add(event)
+    await db.flush()
+    await queue_notice(db, monitor, event)
+    return event
+
+
+async def record_point(
+    db: AsyncSession, monitor: Monitor, kind: str, now: datetime, detail: dict[str, Any]
+) -> MonitorEvent:
+    """Something that happened once (ADR-017): written closed, and closes no open situation."""
+    event = MonitorEvent(
+        monitor_id=monitor.id,
+        kind=kind,
+        first_at=now,
+        last_at=now,
+        count=1,
+        ended_at=now,
+        detail=detail,
     )
     db.add(event)
     await db.flush()
