@@ -4536,7 +4536,7 @@ api() { curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$@"; }
    - Rollback tags (the api image also runs the workflow worker and the CronJob):
      `kubectl -n scrapeflow get deploy scrapeflow-api scrapeflow-workflow-worker -o jsonpath='{range .items[*]}{.metadata.name} {.spec.template.spec.containers[0].image}{"\n"}{end}'`
      and `kubectl -n scrapeflow get cronjob scrapeflow-cleanup -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}'`
-     → expected `main-1795276971-d36a114…` (M). The delivery worker's tag (unchanged by this release):
+     → expected `main-<stamp>-d36a114…` (M; each image has its own build stamp — prod: api `main-1795277013-d36a114…`, delivery worker `main-1795276971-d36a114…`). The delivery worker's tag (unchanged by this release):
      `kubectl -n scrapeflow get deploy scrapeflow-delivery-worker -o jsonpath='{.spec.template.spec.containers[0].image}'`.
    - `kubectl -n scrapeflow get deploy scrapeflow-api -o yaml | grep -A1 PUBLIC_BASE_URL` → `https://scrapeflow.govindappa.com`.
 1. **Push `develop`, ff `main`, push** (from the app repo):
