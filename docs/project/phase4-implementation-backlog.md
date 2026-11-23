@@ -4663,6 +4663,11 @@ run reads return 500 until the runs are deleted or the release is rolled forward
 
 ## Group O — Postgres sink (PRD-017 slice 2)
 
+**Carried from N's build (2026-11-24):**
+- N.1 replaced `BlockType.destination_kind` with `destination_kinds` (a tuple; the catalog response keeps `destination_kind`, null for approval) — read the M note below with that name.
+- Any new filter on a block's JSONB columns (`delivery`, `verdict`) must treat JSON `null` like SQL NULL (*Traps that span groups*).
+- O.0 (built 2026-11-24): migration 4.16 `7d79370b821e` is head — O.1's migration revises it; Release O carries both. **O.2 runs the full approval gate (≈ 70 min, under `systemd-inhibit --what=sleep:idle`)**: its expiry step changed at O.0 and was only import-checked. ADR-017 is Draft until the owner accepts it.
+
 **Carried from M's build (2026-11-21):**
 - A new sink = a `BlockType` with `sink=Sink(...)`, `destination_kind`, and (reversible) an undo `Timing`; the order rule, rollback reserve, save/trigger destination checks and version rows follow from those fields.
 - Register `TestPostgres` (`TEST_POSTGRES_ACTIVITY`) on the delivery worker with the 20 s deadline — until then a postgres destination's test fails and it cannot be saved; the API and the SPA form (host/port/database/schema/table/CA + login) need nothing.

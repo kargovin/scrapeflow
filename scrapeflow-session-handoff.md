@@ -159,8 +159,10 @@ N.5 section → *Release record*. **Deployed code is `c341af7`.**
 - **Found during the release (not blockers, not filed yet):** the cancel response carries no run messages; the SPA's
   "same content as the check waiting for approval" line reads stale once answered; **Clerk email sign-in codes do not
   arrive in prod** (OAuth works) — the owner checks the Clerk instance's email DNS records.
-- **Still open for the owner:** the two decisions below (an Approval before the first change gate; no notice on expiry).
-- **Next: O.1** (Postgres sink), same way of working; carry-forward starts fresh.
+- **Owner, 2026-11-24 — the two decisions:** (1) an Approval before the first change gate **stays allowed** (firings skipped while it waits — N.3's behaviour, no change); (2) **expiry sends a monitor notice** (PRD-018 R5) → **ADR-017** (`docs/adr/ADR-017-approval-expiry-notice.md`, **Draft** — the decision is the owner's, the text awaits review; displaces ADR-016 §8/§9c's expiry clauses only).
+- 🔧 **O.0 BUILT 2026-11-24** (local, unreleased; rides Release O): `a3b7b69` migration 4.16 `7d79370b821e` (`monitor_events.kind` + `approval_expired`), `0c3edef` writer (`monitor_events.record_point` — a closed point event, one per run, queues its notice), `d50605d` SPA, `9511b0e` approval gate's expiry step (import-checked only — **O.2 runs the full gate**), `cc3a5cb` docs. API 1528 (replay 116); mutation 8/8.
+- The review-fix builder was stopped at the owner's request (its work was committed).
+- **Next: O.1** (Postgres sink), same way of working; carry-forward starts fresh. N's notes for O are in the backlog under *Carried from N's build*.
 
 ---
 
