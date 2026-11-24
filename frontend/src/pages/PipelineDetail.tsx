@@ -41,6 +41,8 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
   const anyRunning = !!runs?.some(r => r.status === 'running')
   const { data: approvals } = useWaitingApprovals({ mode, enabled: anyRunning, refetchInterval: 30_000 })
   const waiting = new Set(approvals?.map(a => a.run_id))
+  // The approvals query stops when no run is running and keeps its last answer.
+  const isWaiting = (r: PipelineRunSummary) => r.status === 'running' && waiting.has(r.id)
 
   const referenced = pipeline?.definition.blocks.some(b => typeof b.config.destination_id === 'string')
   const { data: destinations } = useQuery<Destination[]>({
@@ -230,8 +232,8 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
                   className="hover:bg-gray-50 cursor-pointer"
                 >
                   <td className="px-4 py-3">
-                    <StatusPill status={waiting.has(r.id) && !r.cancel_requested_at ? 'waiting' : runStatus(r)} />
-                    {waiting.has(r.id) && <span className="ml-2 text-xs text-amber-700">for approval</span>}
+                    <StatusPill status={isWaiting(r) && !r.cancel_requested_at ? 'waiting' : runStatus(r)} />
+                    {isWaiting(r) && <span className="ml-2 text-xs text-amber-700">for approval</span>}
                     {changeLabel(r) && <span className="ml-2 text-xs text-gray-700">{changeLabel(r)}</span>}
                     {stopLabel(r) && r.change_status !== 'unchanged' && (
                       <span className="ml-2 text-xs text-gray-500">{stopLabel(r)}</span>
