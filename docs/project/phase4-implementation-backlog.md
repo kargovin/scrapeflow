@@ -4834,6 +4834,10 @@ private addresses are refused. Without one, skip 2b and 3's items 2–4 (the gat
    database are delivered results — ScrapeFlow does not delete them; drop the two tables and the login yourself.
 5. Record step 0's values and each step's results here; mark O.0–O.2 ✅ in the status table.
 
+**Release record (2026-11-24, owner ran it):**
+- **Step 0:** `alembic_version` `f2c328bcbfcc`; 0 running pipeline runs. Rollback tags: api, workflow worker, CronJob `k4rth/scrapeflow-api:main-1795454251-c341af777d0e2235e5f68d0e6d4a0356b835f795`; delivery worker `k4rth/scrapeflow-delivery-worker:main-1795276971-d36a1148f1e393b9b3a4cd9bfeff866194b93dae`.
+- **Step 1:** `main` `c341af7..cf73ade`; CI `45379002998` — `replay`, `build-api`, `build-delivery-worker` green, http/playwright/LLM builds skipped.
+
 **Rollback:** prefer a forward fix. An api image revert (api, workflow worker, CronJob to step 0's tags) leaves 4.16
 applied (do not downgrade — it deletes the `approval_expired` events). First: **no pipeline run with a postgres block
 running** (`q "SELECT r.id FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'postgres';"`
