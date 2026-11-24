@@ -1,6 +1,6 @@
 # Builder brief — delegated build, one builder subagent per backlog task
 
-Written for Group M (2026-11-20), group lines updated for Group N (2026-11-22) and Group O (2026-11-24); the orchestrator points each builder at this file. Update the group-specific lines (ADRs, patch ids, baselines) when a group starts.
+Written for Group M (2026-11-20), group lines updated for Group N (2026-11-22), Group O and Group P (2026-11-24); the orchestrator points each builder at this file. Update the group-specific lines (ADRs, patch ids, baselines) when a group starts.
 
 You are building ONE task of the implementation backlog, start to finish, then reporting back to the
 orchestrator. The owner has delegated the build: no explaining, no asking — build, test, commit.
@@ -15,8 +15,8 @@ orchestrator. The owner has delegated the build: no explaining, no asking — bu
   (§2d destination test, §3 egress, §4 the delivery worker, §5 duplicate-safe keys, §6 time budgets, §7 size),
   `docs/adr/ADR-014-block-outcomes-stop-rollback-alerts.md` (§7 rollback), `docs/adr/ADR-016-monitors.md`,
   `docs/adr/ADR-017-approval-expiry-notice.md`, `docs/adr/ADR-012-*` (workflow versioning). Product:
-  `docs/project/phase4-prd/PRD-017-delivery-sinks.md` (slice 2 acceptance criteria). Patch ids already in
-  `PipelineWorkflow` that a sink rides: `sinks`, `rollback` (M.8), `email-delivery` (M.14).
+  `docs/project/phase4-prd/PRD-017-delivery-sinks.md` (slice 3 acceptance criteria — email). Patch ids already in
+  `PipelineWorkflow` that a sink rides: `sinks`, `rollback` (M.8), `email-delivery` (M.14), `approval`, `approval-settled` (N); O.1's postgres sink added no patch.
 - Read the existing code a task touches before changing it; follow the patterns of the L/K/J tasks
   (e.g. `git log --oneline -40` and `git show <hash> --stat` for similar earlier steps).
 - Infra repo (infra tasks only): `/home/karthik/Documents/govindappa/govindappa-k8s-config`.
@@ -31,7 +31,7 @@ orchestrator. The owner has delegated the build: no explaining, no asking — bu
   `docker compose --profile gate up -d`. API: `docker compose exec api uv run pytest tests/ -q -x -p no:cacheprovider`
   (bare `python` in the container has no packages). Replay test: `tests/test_workflow_replay.py`. Contracts and
   worker tests: commands in `scrapeflow-session-handoff.md` → `## Commands`. Go: `cd http-worker && go test ./...`.
-  Baselines: the handoff's current state (after O.0: API 1528 incl. replay 116, contracts 217, delivery worker 161 + 7 skipped).
+  Baselines: the handoff's current state (after O: API 1552 incl. replay 125, contracts 227, delivery worker 243 + 23 skipped).
 - **The workflow worker does not hot-reload** — `docker compose restart workflow-worker` after `app/` changes it
   runs. Rebuild `llm-worker-temporal` after any `llm-worker/` change.
 - **Migrations:** model first, then autogenerate with the api paused (handoff `## Commands` → Migrations).
