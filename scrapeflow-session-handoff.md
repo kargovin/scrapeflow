@@ -116,7 +116,14 @@ cd http-worker && UPDATE_CONTRACT_FIXTURES=1 go test -count=1 ./internal/activit
 ```bash
 docker run --rm -v "$PWD/delivery-worker:/app" -w /app --entrypoint python docker-delivery-worker -m pytest -q -p no:cacheprovider
 ```
-**Delivery gate (M.12):** `scripts/delivery-gate.sh` (compose profile `gate`, ~6 min).
+**Delivery gate (M.12):** `scripts/delivery-gate.sh` (compose profile `gate`, ~6 min; since O.1 it brings up `delivery-postgres` too).
+
+**Delivery worker against the gate's TLS Postgres (O.1)** — from the repo root, with `docker compose --profile gate up -d --wait delivery-postgres delivery-fixture` (in `./docker`):
+```bash
+docker run --rm --network docker_crawl-fixture -v "$PWD/delivery-worker:/app" -w /app \
+    -e PG_TEST_HOST=pg.deliveryfixture.com -e PG_TEST_SUPERUSER_PASSWORD=delivery-gate \
+    --entrypoint python docker-delivery-worker -m pytest -q -p no:cacheprovider tests/test_postgres_db.py
+```
 
 **MCP tests** (standalone image, not in compose):
 ```bash
@@ -149,7 +156,21 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-23 *(clock)*
+## Current state — as of 2026-11-24 *(clock)*
+
+📋 **RELEASE O RUNBOOK READY (2026-11-24).** Owner: "start with o.1 and also get up to the release notes for ready".
+Same way of working as M/N (one builder subagent per task, one independent reviewer over the group, I verify).
+- **ADR-017 Accepted** by the owner (`db51be4`). Builder brief's group lines → O (`e36d114`).
+- **O.1 — the Postgres sink**, in replay order: `4e69f3d` catalog `postgres` block + `DeliverPostgres`/`UndoPostgres` contracts (both copies); `8993669` gate fixture (TLS front + `delivery-postgres`); `f5f2b81` delivery worker `worker/postgres.py` + `TestPostgres`, asyncpg 0.31 locked; `a7c9437` `PipelineWorkflow._deliver_bucket` → `_deliver_sink`, undo, a lost reply's row (no new patch — my builder's call: no recorded history can hold a postgres block, bucket commands unchanged, replay green); `ee34d80` SPA; `1740fcb` gate scenarios + 5 compose histories; `1dcb839` docs (user guide `docs/guides/pipelines-user-guide.md`, new — X.4 starts here).
+- **Review** (fresh reviewer over O.0 + O.1): no important findings; two nits fixed — `5527af7` content `jsonb` cannot hold (NaN/Infinity/NUL/unpaired surrogate/over-deep) refused before connecting, `502ba4e` the destination test names the check that met the error; docs `1df5608`.
+- **O.2 compose gate ✅** — one `scripts/approval-gate.sh` run 07:23–08:32 UTC through a ~30 min manual suspend: approval 87/87 (expiry now checks ADR-017's notice: 1), delivery gate with Postgres, J.10 + L.12 gates. Record + runbook: backlog O.2 section.
+- **Numbers:** API 1552 (replay 125), contracts 227, delivery worker 243 + 23 skipped (16 pass against the gate's Postgres — command in *Commands*).
+- **Release facts:** `main` `c341af7..develop`; **api + delivery-worker images**; migration 4.16 `7d79370b821e` on startup; no infra change. Step 2b needs an internet-reachable TLS Postgres the owner controls — skip it if there is none (the gate covers it).
+- **Next: O.2 is the owner's.** Then **P.1** (the Email block), same way of working.
+
+---
+
+## Earlier state — 2026-11-23 *(clock)*
 
 🚀 **RELEASE N DONE — GROUP N CLOSED (2026-11-23).** The owner ran the N.5 runbook in their own terminal; I checked
 each step. `main` `d36a114..c341af7` (CI `45225858689`; api image only, migration 4.15 `f2c328bcbfcc`, no infra

@@ -164,7 +164,7 @@
 | **O** | **Postgres sink** (PRD-017 slice 2) | |
 | O.0 | Expiry sends a monitor notice (ADR-017) | 🔧 **Built 2026-11-24** (`a3b7b69` migration, `0c3edef` writer, `d50605d` SPA, `9511b0e` gate). Migration 4.16 `7d79370b821e` widens `ck_monitor_events_kind` by `approval_expired` (round trip clean; downgrade deletes those events, their notice rows cascade; `alembic check` shows only the dedup false positive; no quota view reads the table); `MONITOR_EVENT_KINDS`, `NOTICE_KINDS`, the API and SPA kind types gain it. `monitor_events.record_point` writes a closed row (`ended_at = last_at = first_at`, count 1), closes nothing, queues the notice; `monitor_check_ended` calls it for a `completed` check with `stop_reason = approval_expired` (counter reset as before), `detail` = `{run_id, deadline, run_url}` (the Approval block's `approval_deadline`, `approvals.run_url`), and returns it as `CheckEnded.notice_event_id` — `mirror_run_status` (already user lock → run lock for a check) starts it after commit. No workflow change, no patch, no history. SPA: "approval expired — nobody answered by …", amber `expired` pill, the line opens the check. Gate: `waits_finish` now expects one closed `approval_expired` event for c1 and one `monitor.notice` to the notice hook (was: none) — **not run** (70 min), import-checked; to run in O's release gate. API 1519 → 1528 (replay 116). Mutation 8/8. **My calls:** one-per-run = the run-terminal guard in the mirror plus a lookup of `detail->>'run_id'` under the monitor row lock and `lock_user` (no expression unique index — `alembic check` cannot diff one); the deadline is read from the block row (null if none); a hand run's expiry records nothing (no monitor) |
 | O.1 | The Postgres sink | 🔧 **Built 2026-11-24** (`4e69f3d`, `8993669`, `f5f2b81`, `a7c9437`, `ee34d80`, `1740fcb`). API 1536 → 1547 (replay 116 → 125: four harness + five compose histories), contracts 217 → 227, delivery worker 161 → 216 (+15 against the gate's TLS Postgres, `tests/test_postgres_db.py`, skipped without `PG_TEST_HOST`). Catalog `postgres` (JSON input only, reversible, 30 s × 5 on the delivery ladder + per-try DB writes, undo in the reserve); `DeliverPostgres`/`UndoPostgres`/`TestPostgres` on the delivery worker (`worker/postgres.py`, asyncpg 0.31 locked); `PipelineWorkflow._deliver_bucket` → `_deliver_sink`, `_UNDO_ACTIVITIES` + `postgres`, `_postgres_record` for a lost reply; SPA `locationInWords`; user guide `docs/guides/pipelines-user-guide.md` (row shape + CREATE TABLE). **Compose gate passed in full** (`scripts/delivery-gate.sh`, 88 checks incl. 21 Postgres, pipeline + monitor gates unchanged): row shape, a lost reply retried to one row, undo, a 0-row undo reads undone, a refused login on undo = undo failed, no key/no TLS/wrong password refused at save, no DDL from ScrapeFlow's logins (the fixture's DDL log). Mutation checks 16/16 killed. **My calls:** asyncpg pinned to the vetted IP with an `ssl.SSLContext` subclass whose `wrap_bio` presents and verifies the host name (verified: SNI + name check; no resolver override needed); no new patch — no recorded history can hold a postgres block, the bucket's commands are unchanged (replay green); the location records `host, port, database, schema, table, run_id, block_id` (names only), the undo takes the destination's *current* CA with its login; NOT_WRITTEN = nothing sent, or the server answered with an error (SQLSTATE class 08 is asyncpg's own for a lost connection, so treated as maybe written); content must parse as JSON before sending; the test's delete removing no row is a warning like a refused one; the gate's fixture terminates TLS in front of a plain `delivery-postgres` (so faults can be injected after commit). **Review fixes 2026-11-24** (`5527af7`, `502ba4e`; delivery worker 216 → 243 + 16 against the gate's Postgres; mutation 15/15 killed): content `jsonb` cannot hold — `NaN`/`Infinity`/`-Infinity`, a NUL or an unpaired surrogate in any value or key, nesting deeper than the parser — fails as `ContentNotJson` naming the content, not written; the destination test fails the check that met the error. **My calls:** unpaired surrogates and over-deep nesting added beside the reviewed NaN/NUL (verified: `jsonb` refuses surrogates with 22P02; the parser's `RecursionError` escaped unclassified); a refused or timed-out connect fails `address` (no new name — webhook, bucket and smtp tests still report an unreachable host under `tls`), a timeout during the login itself does too (one exception for both); a failed `ROLLBACK` is a new check name, `rollback` (rendered as-is by the API and SPA); a write or delete with no answer from the server (class 08) fails that check, where a lost delete used to be a warning. |
-| O.2 | 🚀 Release O | ⬜ |
+| O.2 | 🚀 Release O | 📋 **Runbook ready 2026-11-24** — compose gate passed (approval 87/87, delivery gate with Postgres, J.10 + L.12 gates; record in the O.2 section). `main` `c341af7..develop`: api + delivery-worker images, migration 4.16, no infra change. Owner runs it |
 | **P** | **Email sink** (PRD-017 slice 3) | |
 | P.1 | The Email block (its sending, test and alert rows shipped in M.14) | ⬜ |
 | P.2 | 🚀 Release P | ⬜ |
@@ -4706,7 +4706,141 @@ its undo counts in the rollback reserve. Never DDL. User guide: the fixed row sh
 
 #### O.2 — 🚀 Release O
 
+**What:** PRD-017's slice-2 criteria and ADR-017's notice on compose; `main` push → api + delivery worker.
 **Depends on:** O.1
+
+**Compose gate ✅ (2026-11-24, 07:23–08:32 UTC, develop `1df5608`):** one run of
+`systemd-inhibit --what=sleep:idle scripts/approval-gate.sh` (the host was suspended by hand for about 30 min during the
+1-hour wait; every check still passed, Temporal's timers firing on resume, as in N.5's run A). **Approval gate 87/87**
+— N.5's checks unchanged, except the expiry step now checks ADR-017: the expired monitor check records one
+`approval_expired` event and its notice destination gets **1** `monitor.notice` (it got none before O.0); the block's
+destination still gets requested + expired. **Delivery gate passed** with O.1's Postgres scenarios (the builder's
+run: 88 checks, 21 of them Postgres — row shape, a lost reply retried to one row, undo, a 0-row undo reads undone, a
+refused login on undo = undo failed, no key / no TLS / wrong password refused at the test); **no DDL** in the
+fixture's Postgres log; the known secret in no container log; one delivery-worker life; the rebinding test against
+both egress copies. **J.10 pipeline gate and L.12 monitor gate passed** (pipelines saved before M, unchanged).
+Suites: API 1552 (incl. replay 125), contracts 227, delivery worker 243 + 23 skipped (16 of them pass against the
+gate's Postgres: `tests/test_postgres_db.py`). Review (one independent reviewer over O.0 + O.1): no important
+findings; two nits fixed (`5527af7`, `502ba4e`).
+
+**Not run on compose:** the SPA (Clerk — step 3); a Postgres with a certificate from a public CA (the fixture's is
+its own CA, pasted into the destination).
+
+**Ships** (`main` `c341af7..develop`): `api/` + `frontend/` — O.0 (ADR-017) and O.1 (the API, workflow and SPA
+halves), the review fixes; `delivery-worker/` — the Postgres sink (`DeliverPostgres`, `UndoPostgres`, `TestPostgres`;
+asyncpg 0.31 in `uv.lock`). Migration **4.16 `7d79370b821e`** (`ck_monitor_events_kind` + `approval_expired`;
+previous head `f2c328bcbfcc`) on api startup — no quota view touched; O.1 has no migration. CI: `replay` →
+`build-api` and `build-delivery-worker`; the http, playwright and LLM builds skipped (`git diff --stat
+c341af7..develop -- http-worker llm-worker playwright-worker mcp` is empty). Flux bumps `api`, `workflow-worker`,
+the cleanup CronJob and `delivery-worker`. **No infra change:** the delivery worker's NetworkPolicy already allows
+public addresses on any port (M.13), and the worker needs no new setting. No new workflow patch (a postgres block
+rides `sinks`/`rollback`; O.0 is an activity change).
+
+**Rollout window** (one-line notes, owner's rule for Phase 4):
+- The api and the delivery worker roll out separately: until **both** are on the new tag, a postgres destination's
+  test fails ("cannot test a postgres destination") and a postgres block cannot be saved — save none before step 1's
+  rollouts are complete.
+- Old code runs fine on 4.16: the CHECK only widens, and no `approval_expired` event exists until a check expires
+  on new code.
+
+**Runbook** (owner-run, in your own terminal). Same variables as N's (`B`, `KEY`, `D_HOOK`, `$HOOK`, `q`, `api`):
+```bash
+export B=https://scrapeflow.govindappa.com
+export KEY=<an API key from the SPA>
+export D_HOOK=<the webhook destination's id>
+q() { kubectl -n scrapeflow exec -i sts/scrapeflow-postgresql -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<< "$1"; }
+api() { curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$@"; }
+```
+Step 2b needs **a Postgres you control that is reachable from the internet over TLS** with a certificate valid for
+its host name (a public CA, or your own CA pasted into the destination). The cluster's own Postgres does not qualify:
+private addresses are refused. Without one, skip 2b and 3's items 2–4 (the gate covers them; record "skipped").
+
+0. **Before (read-only).**
+   - `q "SELECT version_num FROM alembic_version;"` → **`f2c328bcbfcc`** (4.15, N).
+   - `q "SELECT count(*) FROM pipeline_runs WHERE status = 'running';"` → record it.
+   - Rollback tags: `kubectl -n scrapeflow get deploy scrapeflow-api scrapeflow-workflow-worker scrapeflow-delivery-worker -o jsonpath='{range .items[*]}{.metadata.name} {.spec.template.spec.containers[0].image}{"\n"}{end}'`
+     and `kubectl -n scrapeflow get cronjob scrapeflow-cleanup -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}'`
+     → expected api, workflow worker, CronJob `main-1795454251-c341af7…` (N); delivery worker `main-1795276971-d36a114…` (M).
+1. **Push `develop`, ff `main`, push** (from the app repo):
+   `git push origin develop && git checkout main && git merge --ff-only develop && git push origin main && git checkout develop`.
+   - CI (`gh run watch`): `replay`, `build-api`, **`build-delivery-worker`** green; http, playwright and LLM builds **skipped**.
+   - `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → 2/2 on the new tag; the same for
+     `deploy/scrapeflow-workflow-worker` and **`deploy/scrapeflow-delivery-worker`**. Record the tags here.
+   - `q "SELECT version_num FROM alembic_version;"` → **`7d79370b821e`** (4.16).
+   - `kubectl -n scrapeflow logs deploy/scrapeflow-delivery-worker --since=5m | grep -ci -e traceback -e error` → `0`.
+2. **Product checks** (prod; the SPA items of step 3 drive some of them — do them side by side).
+   - **a. An expired approval sends a monitor notice (O.0, ≈ 1 h).** A monitor whose check waits at a 1-hour
+     Approval, with `$HOOK` as both the approval's and the monitor's notice destination:
+     ```bash
+     api -X POST "$B/pipelines" -d '{"name": "o-expire", "definition": {"inputs": {"url": {"type": "url"}}, "blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": {"$input": "url"}}},
+       {"id": "clean", "type": "clean", "input": "fetch"},
+       {"id": "gate", "type": "validate", "input": "clean", "config": {"rules": [{"kind": "changed"}], "when_unmet": "stop"}},
+       {"id": "approve", "type": "approval", "input": "gate", "config": {"deadline_hours": 1, "destination_id": "'"$D_HOOK"'"}},
+       {"id": "notify", "type": "webhook", "input": "approve", "config": {"destination_id": "'"$D_HOOK"'"}}]}}'
+     ```
+     → `P1`. `api -X POST "$B/monitors" -d '{"name": "o-expire", "pipeline_id": "'"$P1"'", "inputs": {"url": "https://example.com"}, "schedule_cron": "0 3 1 1 *", "notice_destination_id": "'"$D_HOOK"'"}'`
+     → `M1`; `api -X POST "$B/monitors/$M1/check"` → `202` (`C1`); its `approve` waits, `$HOOK` got
+     `pipeline.approval_requested`. Leave it. After the deadline: `C1` `completed`, `stop_reason`
+     **`approval_expired`**; `$HOOK` got **both** `pipeline.approval_expired` (the block's message, unchanged) **and**
+     a **`monitor.notice`** with `notice` `approval_expired`, naming `C1` and its run link;
+     `api "$B/monitors/$M1/history"` → one **`approval_expired`** event, closed (`ended_at` = `first_at`);
+     `q "SELECT count(*) FROM monitor_events WHERE kind = 'approval_expired';"` → `1`. SPA item 1.
+   - **b. The Postgres sink** (needs the database above). In **your** database, as its owner, create the table and a
+     login for ScrapeFlow — the statement in `docs/guides/pipelines-user-guide.md` → *Postgres* (`scrapeflow_deliveries`,
+     key on `(run_id, block_id)`, grants `SELECT, INSERT, UPDATE, DELETE`), and a second table **without** the key:
+     `CREATE TABLE scrapeflow_nokey (LIKE scrapeflow_deliveries); GRANT SELECT, INSERT, UPDATE, DELETE ON scrapeflow_nokey TO scrapeflow_writer;`.
+     Create the destination in the **SPA** (item 2, so the password is not typed in a terminal) → `export D_PG=<id>`.
+     - **Refused at save:** a pipeline with a postgres block after an HTML page →
+       `api -X POST "$B/pipelines" -d '{"name": "o-html", "definition": {"blocks": [{"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}}, {"id": "row", "type": "postgres", "input": "fetch", "config": {"destination_id": "'"$D_PG"'"}}]}}'`
+       → **`422`** naming JSON.
+     - **A row lands:**
+       ```bash
+       api -X POST "$B/pipelines" -d '{"name": "o-row", "definition": {"blocks": [
+         {"id": "fetch", "type": "scrape", "config": {"url": "https://httpbin.org/json", "output_format": "json"}},
+         {"id": "row", "type": "postgres", "input": "fetch", "config": {"destination_id": "'"$D_PG"'"}}]}}'
+       ```
+       → `P2`; `api -X POST "$B/pipelines/$P2/runs" -d '{}'` → `R1`; `completed`, `row` delivered, its
+       `delivery.location` naming host, database, schema, table, `run_id` `R1`, `block_id` `row`. In your database:
+       `SELECT run_id, pipeline_id, block_id, delivered_at, jsonb_typeof(content) FROM scrapeflow_deliveries;` →
+       **one** row, `R1`, `P2`, `row`, `object`.
+     - **A later failure deletes it:**
+       ```bash
+       api -X POST "$B/pipelines" -d '{"name": "o-undo", "definition": {"blocks": [
+         {"id": "fetch", "type": "scrape", "config": {"url": "https://httpbin.org/json", "output_format": "json"}},
+         {"id": "row", "type": "postgres", "input": "fetch", "config": {"destination_id": "'"$D_PG"'"}},
+         {"id": "guard", "type": "validate", "input": "row", "config": {"rules": [{"kind": "contains", "text": "Sold out"}]}},
+         {"id": "notify", "type": "webhook", "input": "guard", "config": {"destination_id": "'"$D_HOOK"'"}}]}}'
+       ```
+       → `P3`; run it (`R2`) → **`failed`** at `guard`; `row` `undo_status` **`undone`**; in your database no row for
+       `R2` (`SELECT count(*) FROM scrapeflow_deliveries WHERE run_id = '<R2>';` → `0`); `$HOOK` got nothing for it.
+     - **No DDL:** in your database, as its owner, `SELECT DISTINCT grantee, privilege_type FROM information_schema.role_table_grants WHERE grantee = 'scrapeflow_writer';`
+       → only the four grants above (the login cannot create anything; the gate proves no DDL is issued).
+   - Logs: `kubectl -n scrapeflow logs deploy/scrapeflow-workflow-worker --since=90m | grep -c Traceback` → `0`; the same
+     for `deploy/scrapeflow-delivery-worker`.
+3. **SPA** (signed in):
+   1. `o-expire`'s monitor page (2a): the history line "approval expired — nobody answered by …", linked to `C1`;
+      `C1`'s run page reads "approval expired".
+   2. Destinations → new **postgres** destination (host, port, database, schema, table, CA if your own, login):
+      **Test** → every check passes (address, tls, login, table, unique key, write, delete); save. The same
+      form pointed at `scrapeflow_nokey` → the **unique key** check fails and save is refused. A wrong password →
+      **login** fails.
+   3. Pipeline editor: the `postgres` block is offered with your destination; "Block budgets" lists it as an
+      undoable sink; after an HTML scrape it is refused with the block named.
+   4. `o-row`'s run (2b): the delivery reads "row run_id …, block_id row in public.scrapeflow_deliveries, database …
+      at <host>"; `o-undo`'s run shows `row` **undone**.
+4. **Clean up:** `api -X DELETE "$B/monitors/$M1?with_checks=true"` → `204`; `api -X DELETE "$B/pipelines/$P1?permanent=true"`,
+   `$P2`, `$P3` → `204`; delete the postgres destination in the SPA once no pipeline uses it. The rows in your
+   database are delivered results — ScrapeFlow does not delete them; drop the two tables and the login yourself.
+5. Record step 0's values and each step's results here; mark O.0–O.2 ✅ in the status table.
+
+**Rollback:** prefer a forward fix. An api image revert (api, workflow worker, CronJob to step 0's tags) leaves 4.16
+applied (do not downgrade — it deletes the `approval_expired` events). First: **no pipeline run with a postgres block
+running** (`q "SELECT r.id FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'postgres';"`
+→ none; N's workflow code has no postgres step). ⚠️ After the revert N's api cannot read a monitor history holding an
+`approval_expired` event (its kind type lacks it): those reads return 500 until the events are deleted
+(`DELETE FROM monitor_events WHERE kind = 'approval_expired'` — their notice rows cascade) or the release is rolled
+forward. A delivery-worker revert alone (to M's tag) makes every postgres destination test and postgres delivery fail.
 
 ---
 
