@@ -158,6 +158,21 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-24 *(clock)*
 
+🚀 **RELEASE O DONE — GROUP O CLOSED (2026-11-24).** The owner ran the O.2 runbook in their own terminal; I checked
+each step. `main` `c341af7..cf73ade` (CI `45379002998`; api + delivery-worker images, migration 4.16 `7d79370b821e`,
+no infra change); api + workflow worker on `main-1795517652-cf73ade…`, delivery worker on `main-1795517612-cf73ade…`.
+2a (expiry → one `approval_expired` event + a delivered `monitor.notice`) and 2b (the Postgres sink against the owner's
+hosted Postgres — session pooler, the provider's CA pasted, schema `scrapeflow`) passed; SPA items 1–4 passed. Full
+record: backlog O.2 section. **Deployed code is `cf73ade`.**
+- **Kept by the owner:** the hosted Postgres (schema `scrapeflow`, login `scrapeflow_writer`) and the `o-supabase`
+  destination — reuse them for P's and later checks.
+- **Found during the release:** the pipeline page's runs list kept "waiting for approval" on an ended run (stale
+  approvals cache, N.4's) — fixed on `develop` (`21f65af`, owner: keep it; rides P). User guide gained hosted-Postgres
+  notes (`9255b2e`).
+- **Next: P.1** (the Email block), same way of working.
+
+### Build before the release — 2026-11-24
+
 📋 **RELEASE O RUNBOOK READY (2026-11-24).** Owner: "start with o.1 and also get up to the release notes for ready".
 Same way of working as M/N (one builder subagent per task, one independent reviewer over the group, I verify).
 - **ADR-017 Accepted** by the owner (`db51be4`). Builder brief's group lines → O (`e36d114`).
@@ -166,7 +181,6 @@ Same way of working as M/N (one builder subagent per task, one independent revie
 - **O.2 compose gate ✅** — one `scripts/approval-gate.sh` run 07:23–08:32 UTC through a ~30 min manual suspend: approval 87/87 (expiry now checks ADR-017's notice: 1), delivery gate with Postgres, J.10 + L.12 gates. Record + runbook: backlog O.2 section.
 - **Numbers:** API 1552 (replay 125), contracts 227, delivery worker 243 + 23 skipped (16 pass against the gate's Postgres — command in *Commands*).
 - **Release facts:** `main` `c341af7..develop`; **api + delivery-worker images**; migration 4.16 `7d79370b821e` on startup; no infra change. Step 2b needs an internet-reachable TLS Postgres the owner controls — skip it if there is none (the gate covers it).
-- **Next: O.2 is the owner's.** Then **P.1** (the Email block), same way of working.
 
 ---
 
