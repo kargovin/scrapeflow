@@ -2,7 +2,9 @@
 destinations API and its test, PipelineWorkflow with sinks and rollback, the delivery worker against a
 real S3 server (MinIO behind the gate fixture's TLS front), WebhookDeliveryWorkflow, monitor notices to
 a webhook and an SMTP destination, and a known secret looked for in every API response and every
-workflow history the gate made.
+workflow history the gate made. O.1 — PRD-017 slice 2: the Postgres sink against a real Postgres
+(``delivery-postgres`` behind the fixture's TLS front), its tables and logins made here as the
+fixture's superuser.
 
 Run it with ``scripts/delivery-gate.sh`` (repo root): the driver brings the fixtures up, gives the
 workers the gate CA, makes the MinIO users with a fresh secret (``GATE_SECRET``), runs this, then looks
@@ -27,6 +29,7 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import asyncpg
 import httpx
 from sqlalchemy import delete, func, select, update
 
@@ -56,6 +59,21 @@ CONTROL = "http://mail.deliveryfixture.com"
 BUCKET, OTHER_BUCKET = "delivery-gate", "delivery-gate-2"
 PRIVATE = "https://minio:9000"
 INLINE_SECRET = "inline-gate-secret"
+PG = "pg.deliveryfixture.com"
+# The user's database, as its owner reaches it (plain, on the compose network).
+PG_SUPERUSER = {
+    "host": "delivery-postgres",
+    "port": 5432,
+    "user": "postgres",
+    "password": "delivery-gate",
+    "database": "postgres",
+}
+PG_SCHEMA, PG_TABLE = "gate", "Deliveries"
+# The documented row (PRD-017 R1; docs/guides/pipelines-user-guide.md), as a user creates it.
+PG_COLUMNS = (
+    "run_id UUID NOT NULL, pipeline_id UUID NOT NULL, block_id TEXT NOT NULL, "
+    "delivered_at TIMESTAMPTZ NOT NULL, content JSONB NOT NULL"
+)
 RESPONSES: list[str] = []
 
 
@@ -76,6 +94,7 @@ class DeliveryGate(Gate):
         self.dest: dict[str, str] = {}
         self.kept: tuple[str, str] | None = None
         self.sessions_before = 0
+        self.ca = ""
 
     # --- destinations ------------------------------------------------------------------------
 
@@ -106,6 +125,57 @@ class DeliveryGate(Gate):
             db.add(row)
             await db.commit()
             return str(row.id)
+
+    # --- the user's Postgres ------------------------------------------------------------------
+
+    @staticmethod
+    async def pg(quiet: bool = False) -> asyncpg.Connection:
+        conn = await asyncpg.connect(**PG_SUPERUSER)
+        if quiet:
+            # Passwords made from the gate's secret stay out of the server's statement log.
+            await conn.execute("SET log_statement = 'none'")
+        return conn
+
+    @staticmethod
+    def pg_password(role: str) -> str:
+        return f"{SECRET}-{role}"
+
+    async def pg_rows(self, run_id: str) -> list:
+        conn = await self.pg()
+        try:
+            return await conn.fetch(
+                f"SELECT run_id::text, pipeline_id::text, block_id, delivered_at, content::text "
+                f'FROM {PG_SCHEMA}."{PG_TABLE}" WHERE run_id = $1',
+                uuid.UUID(run_id),
+            )
+        finally:
+            await conn.close()
+
+    async def pg_log(self, run_id: str) -> list[tuple[str, str, str | None]]:
+        log = (await self.fixture.get(f"{CONTROL}/_pg")).json()
+        return [(e["statement"], e["outcome"], e["tag"]) for e in log if run_id in e["params"]]
+
+    def pg_address(self, table=PG_TABLE, port=5432, host=PG) -> dict:
+        return {
+            "host": host,
+            "port": port,
+            "database": "postgres",
+            "schema": PG_SCHEMA,
+            "table": table,
+            "ca_certificate": self.ca,
+        }
+
+    def pg_secret(self, role="gate_writer") -> dict:
+        return {"user": role, "password": self.pg_password(role)}
+
+    @staticmethod
+    def db(destination: str, id="db", input="extract") -> dict:
+        return {
+            "id": id,
+            "type": "postgres",
+            "input": input,
+            "config": {"destination_id": destination},
+        }
 
     # --- blocks ------------------------------------------------------------------------------
 
@@ -904,6 +974,280 @@ async def notices(g: DeliveryGate) -> None:
     )
 
 
+# --- PRD-017 slice 2: the Postgres sink ---------------------------------------------------------
+
+
+async def postgres_destinations(g: DeliveryGate) -> None:
+    print("R1/R5 — a postgres destination: its test, the unique key, TLS, the login")
+    g.ca = (await g.fixture.get(f"{CONTROL}/_ca")).text
+    conn = await g.pg(quiet=True)
+    try:
+        await conn.execute(f"DROP SCHEMA IF EXISTS {PG_SCHEMA} CASCADE")
+        for role in ("gate_writer", "gate_nodelete"):
+            await conn.execute(f"DROP ROLE IF EXISTS {role}")
+            await conn.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{g.pg_password(role)}'")
+        # The rest is logged: the shell checks the log shows DDL, none of it by those logins.
+        await conn.execute("RESET log_statement")
+        await conn.execute(f"CREATE SCHEMA {PG_SCHEMA}")
+        await conn.execute(
+            f'CREATE TABLE {PG_SCHEMA}."{PG_TABLE}" ({PG_COLUMNS}, PRIMARY KEY (run_id, block_id))'
+        )
+        await conn.execute(f"CREATE TABLE {PG_SCHEMA}.no_key ({PG_COLUMNS})")
+        await conn.execute(f"GRANT USAGE ON SCHEMA {PG_SCHEMA} TO gate_writer, gate_nodelete")
+        tables = f'{PG_SCHEMA}."{PG_TABLE}", {PG_SCHEMA}.no_key'
+        await conn.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {tables} TO gate_writer")
+        await conn.execute(f"GRANT SELECT, INSERT, UPDATE ON {tables} TO gate_nodelete")
+    finally:
+        await conn.close()
+
+    form = {"kind": "postgres", "address": g.pg_address(), "secret": g.pg_secret()}
+    resp = await g.api.post("/destinations/test", json=form)
+    checks = [(c["check"], c["outcome"]) for c in resp.json().get("checks", [])]
+    g.check(
+        resp.status_code == 200
+        and checks
+        == [
+            ("address", "passed"),
+            ("tls", "passed"),
+            ("login", "passed"),
+            ("table", "passed"),
+            ("unique key", "passed"),
+            ("write", "passed"),
+            ("delete", "passed"),
+        ],
+        f"a postgres form test passes against a real TLS Postgres ({resp.status_code} {checks})",
+    )
+    resp = await g.create(form)
+    g.check(resp.status_code == 201, f"…and it saves ({resp.status_code})")
+    g.dest["pg"] = resp.json().get("id")
+    conn = await g.pg()
+    try:
+        count = await conn.fetchval(f'SELECT count(*) FROM {PG_SCHEMA}."{PG_TABLE}"')
+    finally:
+        await conn.close()
+    g.check(count == 0, f"the test left no row ({count})")
+
+    resp = await g.create({**form, "address": g.pg_address("no_key")})
+    failed = [
+        (c["check"], c["message"])
+        for c in resp.json().get("detail", {}).get("checks", [])
+        if c["outcome"] == "failed"
+    ]
+    g.check(
+        resp.status_code == 422
+        and [c for c, _ in failed] == ["unique key"]
+        and "a retried delivery would add a second row" in failed[0][1],
+        f"a table without the unique key on (run_id, block_id) is refused at save ({resp.status_code} {failed})",
+    )
+    resp = await g.api.post(
+        "/destinations/test", json={**form, "secret": g.pg_secret("gate_nodelete")}
+    )
+    warned = [c for c in resp.json().get("checks", []) if c["outcome"] == "warning"]
+    g.check(
+        resp.status_code == 200
+        and resp.json()["passed"]
+        and [c["check"] for c in warned] == ["delete"]
+        and warned[0]["message"].startswith("delete refused — rollback to this table will fail"),
+        f"a login that cannot delete: the test warns before save ({warned})",
+    )
+    resp = await g.create({**form, "address": g.pg_address(port=5433)})
+    failed = [
+        (c["check"], c["message"])
+        for c in resp.json().get("detail", {}).get("checks", [])
+        if c["outcome"] == "failed"
+    ]
+    g.check(
+        resp.status_code == 422
+        and failed == [("tls", f"{PG} does not offer TLS; nothing is sent in plain text")],
+        f"a server without TLS is refused at save ({resp.status_code} {failed})",
+    )
+    resp = await g.create(
+        {**form, "secret": {"user": "gate_writer", "password": f"{SECRET}-wrong"}}
+    )
+    failed = [
+        c["check"]
+        for c in resp.json().get("detail", {}).get("checks", [])
+        if c["outcome"] == "failed"
+    ]
+    g.check(
+        resp.status_code == 422 and failed == ["login"],
+        f"a wrong password is refused at save ({resp.status_code} {failed})",
+    )
+    resp = await g.create({**form, "address": g.pg_address(host="delivery-postgres")})
+    g.check(
+        resp.status_code == 400 and "private address" in resp.text,
+        f"a private database host is refused at save ({resp.status_code})",
+    )
+    g.dest["private_pg"] = await g.insert(
+        "postgres", g.pg_address(host="delivery-postgres"), g.pg_secret(), "delivery-postgres"
+    )
+
+
+async def postgres_delivered(g: DeliveryGate) -> None:
+    print("R1 — scrape → extract → postgres: one row with the documented shape; HTML is refused")
+    resp = await g.api.post(
+        "/pipelines",
+        json={
+            "name": "gate-pg-html",
+            "definition": {
+                "inputs": {"url": {"type": "url"}},
+                "blocks": [g.fetch(), g.db(g.dest["pg"], input="fetch")],
+            },
+        },
+    )
+    g.check(
+        resp.status_code == 422 and "postgres consumes extraction, page:json" in resp.text,
+        f"a postgres block after an HTML page is refused at save ({resp.status_code})",
+    )
+    pid = await g.pipeline("pg", [g.fetch(), g.extract(), g.db(g.dest["pg"])])
+    run = await g.run(pid, {"url": item("80")})
+    rid = run["id"]
+    print(f"  run {rid}")
+    g.check(run["status"] == "completed", f"the run completes ({run['status']} {run.get('error')})")
+    g.check(
+        location(run, "db")
+        == {
+            "host": PG,
+            "port": 5432,
+            "database": "postgres",
+            "schema": PG_SCHEMA,
+            "table": PG_TABLE,
+            "run_id": rid,
+            "block_id": "db",
+        },
+        f"the run reports the row it wrote ({location(run, 'db')})",
+    )
+    rows = await g.pg_rows(rid)
+    extraction = (
+        await g.api.get(f"/pipelines/{pid}/runs/{rid}/result", params={"block": "extract"})
+    ).json()
+    g.check(
+        len(rows) == 1
+        and (rows[0]["pipeline_id"], rows[0]["block_id"]) == (pid, "db")
+        and rows[0]["delivered_at"] is not None
+        and json.loads(rows[0]["content"]) == json.loads(extraction["content"]),
+        f"one row: run_id, pipeline_id, block_id, delivered_at and the extraction as content ({len(rows)})",
+    )
+
+
+async def postgres_lost_reply(g: DeliveryGate) -> None:
+    print("R2 — an INSERT whose reply was lost after it committed is retried: one row")
+    pid = await g.pipeline(
+        "pg-lost", [g.fetch(), g.extract(), g.db(g.dest["pg"], id="db_lostreply")]
+    )
+    run = await g.run(pid, {"url": item("80")})
+    rid = run["id"]
+    print(f"  run {rid}")
+    g.check(run["status"] == "completed", f"the run completes ({run['status']} {run.get('error')})")
+    log = await g.pg_log(rid)
+    g.check(
+        log == [("INSERT", "reply dropped", "INSERT 0 1"), ("INSERT", "passed", "INSERT 0 1")],
+        f"two INSERTs reached the database, the first committed unanswered ({log})",
+    )
+    g.check(len(await g.pg_rows(rid)) == 1, "one row is there")
+
+
+async def postgres_undone(g: DeliveryGate) -> None:
+    print("R3 — the webhook refuses: the row is deleted by its key, the undo retried once")
+    pid = await g.pipeline(
+        "pg-undone",
+        [
+            g.fetch(),
+            g.extract(),
+            g.db(g.dest["pg"], id="db_waitundo"),
+            g.refusing(input="db_waitundo"),
+        ],
+    )
+    run = await g.run(pid, {"url": item("80")}, timeout=150)
+    rid = run["id"]
+    print(f"  run {rid}")
+    block = blocks_by_id(run)["db_waitundo"]
+    g.check(
+        (run["status"], run["failed_block_id"]) == ("failed", "notify")
+        and (block["status"], block["undo_status"]) == ("completed", "undone"),
+        f"the run fails naming the webhook; the row reads delivered, then undone ({block['undo_status']})",
+    )
+    g.check(await g.pg_rows(rid) == [], "the row is gone from the table")
+    deletes = [e for e in await g.pg_log(rid) if e[0] == "DELETE"]
+    g.check(
+        deletes == [("DELETE", "closed", None), ("DELETE", "passed", "DELETE 1")],
+        f"the undo was tried twice, the second deleted one row ({deletes})",
+    )
+
+
+async def postgres_gone_before_undo(g: DeliveryGate) -> None:
+    print("R3 — a row the user already deleted: the undo deletes 0 rows and reads undone")
+    pid = await g.pipeline(
+        "pg-gone",
+        [
+            g.fetch(),
+            g.extract(),
+            g.db(g.dest["pg"], id="db_waitundo"),
+            g.refusing(input="db_waitundo"),
+        ],
+    )
+    rid = await g.start(pid, {"url": item("80")})
+    run = await g.until(pid, rid, undoing("db_waitundo"), 90)
+    conn = await g.pg()
+    try:
+        gone = await conn.execute(
+            f'DELETE FROM {PG_SCHEMA}."{PG_TABLE}" WHERE run_id = $1', uuid.UUID(rid)
+        )
+    finally:
+        await conn.close()
+    run = await g.wait(pid, rid, 90)
+    deletes = [e for e in await g.pg_log(rid) if e[0] == "DELETE"]
+    g.check(
+        gone == "DELETE 1"
+        and blocks_by_id(run)["db_waitundo"]["undo_status"] == "undone"
+        and deletes[-1:] == [("DELETE", "passed", "DELETE 0")],
+        f"delivered, then undone, with 0 rows deleted ({blocks_by_id(run)['db_waitundo']['undo_status']}, {deletes})",
+    )
+
+
+async def postgres_login_refused(g: DeliveryGate) -> None:
+    print("R3 — the login is refused at the recorded database: undo failed, the row left in place")
+    pid = await g.pipeline(
+        "pg-login",
+        [
+            g.fetch(),
+            g.extract(),
+            g.db(g.dest["pg"], id="db_waitundo"),
+            g.refusing(input="db_waitundo"),
+        ],
+    )
+    rid = await g.start(pid, {"url": item("80")})
+    await g.until(pid, rid, undoing("db_waitundo"), 90)
+    conn = await g.pg(quiet=True)
+    try:
+        await conn.execute(f"ALTER ROLE gate_writer PASSWORD '{SECRET}-moved'")
+        run = await g.wait(pid, rid, 90)
+    finally:
+        await conn.execute(f"ALTER ROLE gate_writer PASSWORD '{g.pg_password('gate_writer')}'")
+        await conn.close()
+    block = blocks_by_id(run)["db_waitundo"]
+    g.check(
+        block["undo_status"] == "undo_failed"
+        and "refused the login" in (block["undo_error"] or "")
+        and location(run, "db_waitundo").get("run_id") == rid,
+        f"undo failed: left in place, at the recorded row ({block['undo_error']})",
+    )
+    g.check(len(await g.pg_rows(rid)) == 1, "the row is still there")
+
+
+async def postgres_private_at_delivery(g: DeliveryGate) -> None:
+    print("R5 — a database host resolving to a private address is refused at delivery, not retried")
+    pid = await g.pipeline("pg-private", [g.fetch(), g.extract(), g.db(g.dest["private_pg"])])
+    run = await g.run(pid, {"url": item("80")})
+    block = blocks_by_id(run)["db"]
+    g.check(
+        run["status"] == "failed"
+        and (block["error"] or "").startswith("EgressBlocked")
+        and "attempt" not in block["error"],
+        f"failed at once ({block['error']})",
+    )
+
+
 def _payload_texts(value) -> list[str]:
     """Every payload's decoded bytes in a history's JSON form."""
     found = []
@@ -976,6 +1320,13 @@ SCENARIOS = {
     "private_at_delivery": private_at_delivery,
     "budget": budget,
     "in_use": in_use,
+    "postgres_destinations": postgres_destinations,
+    "postgres_delivered": postgres_delivered,
+    "postgres_lost_reply": postgres_lost_reply,
+    "postgres_undone": postgres_undone,
+    "postgres_gone_before_undo": postgres_gone_before_undo,
+    "postgres_login_refused": postgres_login_refused,
+    "postgres_private_at_delivery": postgres_private_at_delivery,
     "notices": notices,
     "secrets": secrets,
     "admin_delete": admin_delete,
@@ -1039,7 +1390,10 @@ async def gate(only: list[str]) -> list[str]:
             )
             g = DeliveryGate(api, admin, fixture, key.json()["id"], user.id, minio)
             for name, scenario in SCENARIOS.items():
-                if not only or name in only or name == "destinations":
+                always = name == "destinations" or (
+                    name == "postgres_destinations" and any(n.startswith("postgres") for n in only)
+                )
+                if not only or name in only or always:
                     await scenario(g)
             return g.problems
     finally:

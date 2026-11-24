@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# delivery-gate.sh — the M.12 compose gate (PRD-017 slice 1, PRD-019's bucket criterion, ADR-015 §8's
-# rebinding and known-secret checks). Run from anywhere, with the compose stack up:
+# delivery-gate.sh — the M.12 compose gate (PRD-017 slices 1 and 2, PRD-019's bucket criterion, ADR-015
+# §8's rebinding and known-secret checks). Run from anywhere, with the compose stack up:
 #
 #   scripts/delivery-gate.sh [--no-regression] [scenario …]
 #
@@ -9,7 +9,8 @@
 # 2. makes the gate's MinIO buckets and users, their secret keys built from a fresh known secret;
 # 3. runs api/scripts/delivery_gate.py (API responses and workflow histories searched for the secret);
 # 4. unless --no-regression: the pipeline and monitor gates, unchanged (pipelines saved before M);
-# 5. searches the containers' logs since step 1 for the secret, checks the delivery worker was not
+# 5. searches the containers' logs since step 1 for the secret, checks the user's Postgres logged DDL
+#    from the gate's setup and none from ScrapeFlow's logins, checks the delivery worker was not
 #    restarted, and runs the rebinding test against both egress copies;
 # 6. always: removes the MinIO users and buckets and puts both workers back on the plain config.
 #
@@ -21,7 +22,7 @@ cd "$REPO/docker"
 GATE=(docker compose -f docker-compose.yml -f delivery-gate.yml --profile gate)
 MC=("${GATE[@]}" run --rm --no-deps -v "$REPO/contracts/fixtures/delivery-gate:/gate:ro" --entrypoint sh)
 LOGGED=(api workflow-worker delivery-worker llm-worker-temporal http-worker-temporal
-        playwright-worker-temporal temporal postgres)
+        playwright-worker-temporal temporal postgres delivery-postgres)
 
 regression=1
 if [ "${1:-}" = "--no-regression" ]; then regression=0; shift; fi
@@ -37,7 +38,7 @@ restore() {
 }
 trap restore EXIT
 
-"${GATE[@]}" up -d --wait delivery-fixture pipeline-fixture || exit 1
+"${GATE[@]}" up -d --wait delivery-fixture pipeline-fixture delivery-postgres || exit 1
 "${GATE[@]}" up -d --wait --force-recreate delivery-worker workflow-worker || exit 1
 GATE_SECRET="$SECRET" "${MC[@]}" -e GATE_SECRET minio-users /gate/minio.sh setup >/dev/null || exit 1
 worker="$("${GATE[@]}" ps -q delivery-worker)"
@@ -60,6 +61,13 @@ for service in "${LOGGED[@]}"; do
     echo "  $service: $(wc -l <<<"$logs") lines, $hits with the secret"
     [ "$hits" = 0 ] || failed=1
 done
+
+echo "== DDL in the user's Postgres since $STARTED (PRD-017 slice 2: ScrapeFlow issues none)"
+pglog="$("${GATE[@]}" logs --since "$STARTED" --no-log-prefix delivery-postgres 2>&1)"
+setup="$(grep -c '^postgres .*LOG:  statement: ' <<<"$pglog")"
+ours="$(grep -cE '^gate_(writer|nodelete) .*LOG:  statement: ' <<<"$pglog")"
+echo "  $setup by the gate's setup, $ours by ScrapeFlow's logins"
+[ "$setup" -gt 0 ] && [ "$ours" = 0 ] || failed=1
 
 if [ "$(docker inspect -f '{{.State.StartedAt}}' "$worker")" = "$life" ]; then
     echo "== one delivery-worker life for the whole gate (started $life)"
