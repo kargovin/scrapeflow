@@ -78,7 +78,10 @@ export default function DestinationEditor() {
         Every address must be public: private, local and loopback addresses are refused. The test
         connects from ScrapeFlow{kind === 'bucket' ? ', writes one empty object and deletes it' : ''}
         {kind === 'smtp' ? ' and logs in; it sends no mail' : ''}
-        {kind === 'webhook' ? '; it sends no request' : ''}.
+        {kind === 'webhook' ? '; it sends no request' : ''}
+        {kind === 'postgres'
+          ? ', checks the table has a unique key on exactly (run_id, block_id), writes a test row and deletes it, then rolls back: nothing is kept'
+          : ''}.
       </p>
 
       <div className="flex flex-wrap items-center gap-2">

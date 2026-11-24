@@ -5,6 +5,7 @@ import type {
   DiffSummary,
   PipelineRun,
   PipelineRunBlock,
+  PostgresLocation,
   RollbackEntry,
   RunVerdict,
   SinkDelivery,
@@ -171,6 +172,11 @@ function isBucket(location: unknown): location is BucketLocation {
   return !!location && typeof location === 'object' && 'bucket' in location && 'key' in location
 }
 
+function isPostgres(d: { kind: string; location: unknown }): d is { kind: string; location: PostgresLocation } {
+  const l = d.location
+  return d.kind === 'postgres' && !!l && typeof l === 'object' && 'table' in l && 'run_id' in l && 'block_id' in l
+}
+
 function host(url: string): string {
   try {
     return new URL(url).host
@@ -184,6 +190,11 @@ export function locationInWords(d: Pick<SinkDelivery, 'kind' | 'location'> | Rol
   if (isBucket(d.location)) {
     const region = d.location.region ? ` (${d.location.region})` : ''
     return `bucket ${d.location.bucket}, key ${d.location.key} at ${host(d.location.endpoint)}${region}`
+  }
+  if (isPostgres(d)) {
+    const l = d.location
+    const port = l.port === 5432 ? '' : `:${l.port}`
+    return `row run_id ${l.run_id}, block_id ${l.block_id} in ${l.schema}.${l.table}, database ${l.database} at ${l.host}${port}`
   }
   return `${d.kind} ${JSON.stringify(d.location)}`
 }

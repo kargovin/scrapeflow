@@ -257,7 +257,7 @@ export interface PipelineRunAlert {
 export interface RollbackEntry {
   block_id: string
   kind: string
-  location: BucketLocation | Record<string, unknown>
+  location: BucketLocation | PostgresLocation | Record<string, unknown>
 }
 
 export interface RollbackLists {
@@ -274,10 +274,21 @@ export interface BucketLocation {
   key: string
 }
 
+// Where a postgres sink wrote (ADR-015 §5): the row's key in the table, as recorded at delivery.
+export interface PostgresLocation {
+  host: string
+  port: number
+  database: string
+  schema: string
+  table: string
+  run_id: string
+  block_id: string
+}
+
 export interface SinkDelivery {
   destination_id: string
   kind: string
-  location: BucketLocation | Record<string, unknown>
+  location: BucketLocation | PostgresLocation | Record<string, unknown>
 }
 
 // ADR-014 §5a: after a delivery, on a failed run. Null = nothing to undo.
@@ -402,7 +413,11 @@ export interface Approval {
   change_status: ChangeStatus | null
   change_summary: Record<string, DiffSummary> | null
   // What this run has already delivered: a reject keeps it.
-  deliveries: Array<{ block_id: string; kind: string; location: BucketLocation | Record<string, unknown> }>
+  deliveries: Array<{
+    block_id: string
+    kind: string
+    location: BucketLocation | PostgresLocation | Record<string, unknown>
+  }>
   // Admin routes only.
   user_id?: string
   user_email?: string | null
