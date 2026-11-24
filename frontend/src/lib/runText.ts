@@ -208,6 +208,7 @@ export const UNDO_PILL: Record<string, string> = {
 
 export function sinkInWords(b: PipelineRunBlock): string | null {
   if (b.undo_status === 'not_undoable') return 'delivered (irreversible) — could not be undone'
+  if (b.type === 'email' && b.status === 'completed' && !b.delivery) return 'sent — an email cannot be taken back'
   if (!b.delivery) return null
   const where = locationInWords(b.delivery)
   switch (b.undo_status) {

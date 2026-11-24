@@ -29,11 +29,12 @@ const TEMPLATE = {
 }
 
 const HELP = [
-  'Block types: scrape, clean, llm_extract, validate, approval, webhook, bucket, postgres — each block names the block it reads from in "input".',
+  'Block types: scrape, clean, llm_extract, validate, approval, webhook, bucket, postgres, email — each block names the block it reads from in "input".',
   'An approval block makes the run wait for your answer before the steps after it: {"deadline_hours": 24, "destination_id": "<id>"}. The request also goes to the destination, a saved webhook or email destination, if you name one (leave it out: this site only). Not the first or last block; one per pipeline.',
   'A bucket block writes its input to a saved bucket destination: {"destination_id": "<id>"}. A webhook block takes either "url" (+ "secret") or "destination_id" of a saved webhook destination.',
   'A postgres block writes its input — JSON only: an extraction, or a page scraped as JSON — as one row of a saved postgres destination\'s table: {"destination_id": "<id>"}. The table needs the documented columns and a unique key on (run_id, block_id).',
-  'Put every bucket and postgres block before the first webhook: if a later step fails, ScrapeFlow undoes what they received — but not once a webhook has gone out.',
+  'An email block sends its input — the page or extraction, inline up to 256 KiB — to a saved email destination\'s recipients: {"destination_id": "<id>"}. The subject names the pipeline and the run; on a monitor\'s check the message also says what changed. Like a webhook, "events" picks when it sends: ["pipeline.result"] (default), ["pipeline.failed"] (only when the run breaks) or both.',
+  'Put every bucket and postgres block before the first webhook or email: if a later step fails, ScrapeFlow undoes what they received — but not once a webhook or email has gone out.',
   'Secret fields (scrape proxy_url / cookies, webhook secret) are write-only: set them in config; they are stored encrypted and listed by name in "secrets".',
   'Leaving a secret field out of a kept block keeps its stored value; null clears it.',
 ]
