@@ -9,7 +9,12 @@ import asyncio
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from app.workflows.activities.contracts import DiffOutput, DiffSummary, SendEmailOutput
+from app.workflows.activities.contracts import (
+    NOT_WRITTEN,
+    DiffOutput,
+    DiffSummary,
+    SendEmailOutput,
+)
 from app.workflows.job import RECORD_JOB_OBJECTS_ACTIVITY, JobLLM
 from app.workflows.pipeline import OUTPUTS_LEFT_ERROR, RUN_CANCELLED_ERROR, StorageUsage
 from app.workflows.steps import HostSlot
@@ -57,6 +62,10 @@ from tests.test_workflows_pipeline import (
     _not_met,
     _stop_guard,
 )
+from tests.test_workflows_postgres_sink import DB, DB_ONLY
+from tests.test_workflows_postgres_sink import _failing as _pg_failing
+from tests.test_workflows_postgres_sink import _refused as _pg_refused
+from tests.test_workflows_postgres_sink import _unavailable as _pg_unavailable
 from tests.test_workflows_rollback import (
     HOOK_THEN_BUCKET,
     TWO_BUCKETS_THEN_HOOK,
@@ -72,9 +81,12 @@ from tests.test_workflows_scheduled_job import Harness as ScheduledHarness
 from tests.test_workflows_sinks import (
     BUCKET_ONLY,
     BUCKET_THEN_HOOKS,
+    HOOK,
+    STORE,
     _flaky_bucket,
     _gone,
     _refused,
+    _sinks,
 )
 from tests.test_workflows_supersede import (
     REACHES_APPROVAL,
@@ -256,6 +268,23 @@ SCENARIOS = {
     "harness_rollback_lost_reply_cancelled": (
         {"bucket": _unanswered(), "during": _cancel_in_sink_wait},
         BUCKET_ONLY,
+    ),
+    # O.1 — the postgres block (patches "sinks", "rollback"): a row, its undo, a lost reply's row.
+    "harness_sinks_postgres_retried_then_written": (
+        {"postgres": _pg_failing(_pg_unavailable(NOT_WRITTEN))},
+        DB_ONLY,
+    ),
+    "harness_rollback_postgres_undone_after_webhook_refused": (
+        {"webhook": _hook_refused},
+        _sinks(STORE, {**DB, "input": "store"}, {**HOOK, "input": "db"}),
+    ),
+    "harness_rollback_postgres_lost_reply_then_refused": (
+        {"postgres": _pg_failing(_pg_unavailable(), _pg_refused(NOT_WRITTEN))},
+        DB_ONLY,
+    ),
+    "harness_sinks_postgres_refused": (
+        {"postgres": _pg_failing(_pg_refused(NOT_WRITTEN))},
+        DB_ONLY,
     ),
     # N.2 — an Approval block's wait (patch "approval").
     "harness_approval_approved": (

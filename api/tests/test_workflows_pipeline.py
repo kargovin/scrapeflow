@@ -37,10 +37,12 @@ from app.workflows.activities.contracts import (
     CAPTURE_ACTIVITY,
     CLEAN_ACTIVITY,
     DELIVER_BUCKET_ACTIVITY,
+    DELIVER_POSTGRES_ACTIVITY,
     DIFF_ACTIVITY,
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
     UNDO_BUCKET_ACTIVITY,
+    UNDO_POSTGRES_ACTIVITY,
     VALIDATE_ACTIVITY,
     CapturedValue,
     CaptureInput,
@@ -50,6 +52,8 @@ from app.workflows.activities.contracts import (
     Credentials,
     DeliverBucketInput,
     DeliverBucketOutput,
+    DeliverPostgresInput,
+    DeliverPostgresOutput,
     DiffInput,
     DiffOutput,
     DiffSummary,
@@ -60,8 +64,11 @@ from app.workflows.activities.contracts import (
     StoredObject,
     UndoBucketInput,
     UndoBucketOutput,
+    UndoPostgresInput,
+    UndoPostgresOutput,
     ValidateInput,
     ValidateVerdict,
+    row_location,
 )
 from app.workflows.activities.db import (
     check_cancelled,
@@ -223,7 +230,19 @@ async def _webhook_ok(input: WebhookInput) -> None:
 BUCKET_ADDRESS = {"endpoint": "https://s3.example.com/", "bucket": "exports", "prefix": "out"}
 
 
+POSTGRES_ADDRESS = {
+    "host": "db.example.com",
+    "port": 5432,
+    "database": "shop",
+    "schema": "sink",
+    "table": "rows",
+    "ca_certificate": "CA-PEM",
+}
+
+
 async def _load_ok(input: LoadDestinationInput) -> LoadedDestination:
+    if input.kind == "postgres":
+        return LoadedDestination(address=POSTGRES_ADDRESS, encrypted_secret="db-ciphertext")
     return LoadedDestination(address=BUCKET_ADDRESS, encrypted_secret="bucket-ciphertext")
 
 
@@ -239,6 +258,15 @@ async def _bucket_ok(input: DeliverBucketInput) -> DeliverBucketOutput:
 
 async def _undo_ok(input: UndoBucketInput) -> UndoBucketOutput:
     return UndoBucketOutput()
+
+
+async def _postgres_ok(input: DeliverPostgresInput) -> DeliverPostgresOutput:
+    location = row_location(input.address, input.run_id, input.block_id)
+    return DeliverPostgresOutput(location=location, size=3)
+
+
+async def _postgres_undo_ok(input: UndoPostgresInput) -> UndoPostgresOutput:
+    return UndoPostgresOutput()
 
 
 class Harness:
@@ -260,6 +288,8 @@ class Harness:
         bucket=_bucket_ok,
         undo=_undo_ok,
         answer=None,
+        postgres=_postgres_ok,
+        postgres_undo=_postgres_undo_ok,
     ):
         self.calls: list = []
         self.acquired: list[HostSlotInput] = []
@@ -294,6 +324,11 @@ class Harness:
         self._undo = undo
         self.undo_inputs: list[UndoBucketInput] = []
         self.undo_info: list = []
+        self._postgres = postgres
+        self.postgres_inputs: list[DeliverPostgresInput] = []
+        self.postgres_info: list = []
+        self._postgres_undo = postgres_undo
+        self.postgres_undo_inputs: list[UndoPostgresInput] = []
         # What the rollback mirrors answer: the run's status.
         self.rollback_reply = "running"
         # The Approval block's recorded answer, as its row holds it; an expiry writes "expired".
@@ -405,6 +440,17 @@ class Harness:
             self.undo_info.append(activity.info())
             return await self._undo(input)
 
+        @activity.defn(name=DELIVER_POSTGRES_ACTIVITY)
+        async def deliver_postgres(input: DeliverPostgresInput) -> DeliverPostgresOutput:
+            self.postgres_inputs.append(input)
+            self.postgres_info.append(activity.info())
+            return await self._postgres(input)
+
+        @activity.defn(name=UNDO_POSTGRES_ACTIVITY)
+        async def undo_postgres(input: UndoPostgresInput) -> UndoPostgresOutput:
+            self.postgres_undo_inputs.append(input)
+            return await self._postgres_undo(input)
+
         @activity.defn(name=REQUEST_APPROVAL_ACTIVITY)
         async def request_approval(input: RequestApprovalInput) -> None:
             self.calls.append(input)
@@ -437,7 +483,7 @@ class Harness:
         workflow_queue = [mirror_block, mirror_run, record, webhook, acquire, release]
         workflow_queue += [release_outputs, load, rollback_started, mirror_undo]
         workflow_queue += [request_approval, remind_approval, resolve_approval, supersede_approval]
-        self.delivery_queue = [deliver_bucket, undo_bucket]
+        self.delivery_queue = [deliver_bucket, undo_bucket, deliver_postgres, undo_postgres]
         return workflow_queue, scrape, llm, [clean, validate, diff, capture]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):

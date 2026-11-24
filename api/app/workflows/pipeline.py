@@ -42,6 +42,7 @@ with workflow.unsafe.imports_passed_through():
         BucketBlock,
         CleanBlock,
         LLMExtractBlock,
+        PostgresBlock,
         RunBlock,
         ScrapeBlock,
         ValidateBlock,
@@ -53,11 +54,13 @@ with workflow.unsafe.imports_passed_through():
         CAPTURE_ACTIVITY,
         CLEAN_ACTIVITY,
         DELIVER_BUCKET_ACTIVITY,
+        DELIVER_POSTGRES_ACTIVITY,
         DIFF_ACTIVITY,
         LLM_EXTRACT_ACTIVITY,
         NOT_WRITTEN,
         SCRAPE_ACTIVITY,
         UNDO_BUCKET_ACTIVITY,
+        UNDO_POSTGRES_ACTIVITY,
         VALIDATE_ACTIVITY,
         BucketLocation,
         CaptureInput,
@@ -68,6 +71,8 @@ with workflow.unsafe.imports_passed_through():
         Credentials,
         DeliverBucketInput,
         DeliverBucketOutput,
+        DeliverPostgresInput,
+        DeliverPostgresOutput,
         DiffInput,
         DiffOutput,
         LLMInput,
@@ -78,9 +83,12 @@ with workflow.unsafe.imports_passed_through():
         StoredObject,
         UndoBucketInput,
         UndoBucketOutput,
+        UndoPostgresInput,
+        UndoPostgresOutput,
         ValidateInput,
         ValidateVerdict,
         object_key,
+        row_location,
     )
     from app.workflows.queues import (
         CONTENT_QUEUE,
@@ -359,6 +367,7 @@ _APPROVAL_STOPS: dict[str, StopReason] = {
 # A reversible sink's undo by its delivery record's kind: activity, input, output (ADR-015 §5).
 _UNDO_ACTIVITIES: dict[str, tuple[str, type[BaseModel], type[BaseModel]]] = {
     "bucket": (UNDO_BUCKET_ACTIVITY, UndoBucketInput, UndoBucketOutput),
+    "postgres": (UNDO_POSTGRES_ACTIVITY, UndoPostgresInput, UndoPostgresOutput),
 }
 
 
@@ -465,8 +474,26 @@ def _bucket_record(
     }
 
 
+def _postgres_record(
+    destination_id: str, address: dict[str, Any], input: PipelineRunInput, block_id: str
+) -> dict[str, Any]:
+    """The record a try against ``address`` would return: the worker builds the row the same way."""
+    location = row_location(address, input.run_id, block_id)
+    return {
+        "destination_id": destination_id,
+        "kind": "postgres",
+        "location": location.model_dump(mode="json", by_alias=True),
+    }
+
+
 def _lost_reply(record: dict[str, Any]) -> str:
     loc = record["location"]
+    if record["kind"] == "postgres":
+        return (
+            f"a try whose reply was lost may have written the row (run_id {loc['run_id']}, "
+            f"block_id {loc['block_id']}) to {loc['schema']}.{loc['table']} in database "
+            f"{loc['database']} at {loc['host']}"
+        )
     return (
         f"a try whose reply was lost may have written bucket {loc['bucket']}, "
         f"key {loc['key']} at {loc['endpoint']}"
@@ -628,8 +655,8 @@ class PipelineWorkflow:
                     # §9d: the run's budget does not run during the wait.
                     deadline += waited
                     objects = []
-                elif isinstance(block, BucketBlock) and self._sinks:
-                    delivery = await self._deliver_bucket(block, input, input_ref, deadline, timing)
+                elif isinstance(block, BucketBlock | PostgresBlock) and self._sinks:
+                    delivery = await self._deliver_sink(block, input, input_ref, deadline, timing)
                     objects = []
                 elif isinstance(block, ScrapeBlock) and workflow.patched(steps.HOST_SLOT_PATCH):
                     objects = await self._scrape_in_host_slot(
@@ -948,9 +975,9 @@ class PipelineWorkflow:
             raise asyncio.CancelledError()
         return None
 
-    async def _deliver_bucket(
+    async def _deliver_sink(
         self,
-        block: BucketBlock,
+        block: BucketBlock | PostgresBlock,
         input: PipelineRunInput,
         input_ref: str | None,
         deadline: datetime,
@@ -960,6 +987,7 @@ class PipelineWorkflow:
         queue; a transient failure mirrors ``waiting``, sleeps (a cancel ends the sleep) and mirrors
         ``running`` again. Returns the delivery record; raises on a final failure."""
         assert input_ref is not None and block.input is not None
+        kind = block.type
         destination_id = str(block.config.destination_id)
         ext = _BUCKET_EXT[block_outputs(input.blocks)[block.input]]
         error = ""
@@ -994,7 +1022,7 @@ class PipelineWorkflow:
                 _db(
                     LOAD_DESTINATION_ACTIVITY,
                     LoadDestinationInput(
-                        run_id=input.run_id, destination_id=destination_id, kind="bucket"
+                        run_id=input.run_id, destination_id=destination_id, kind=kind
                     ),
                     LoadedDestination,
                 )
@@ -1004,21 +1032,14 @@ class PipelineWorkflow:
             remaining_s = (deadline - workflow.now()).total_seconds()
             if remaining_s <= 0:
                 raise ApplicationError("the run's time budget is spent", non_retryable=True)
+            name, arg, result_type = self._sink_try(block, input, input_ref, loaded, ext)
             try:
-                out: DeliverBucketOutput = await self._finish(
+                out: DeliverBucketOutput | DeliverPostgresOutput = await self._finish(
                     workflow.execute_activity(
-                        DELIVER_BUCKET_ACTIVITY,
-                        DeliverBucketInput(
-                            address=loaded.address,
-                            encrypted_secret=loaded.encrypted_secret,
-                            source_path=input_ref,
-                            pipeline_id=input.pipeline_id,
-                            run_id=input.run_id,
-                            block_id=block.id,
-                            ext=ext,
-                        ),
+                        name,
+                        arg,
                         task_queue=DELIVERY_QUEUE,
-                        result_type=DeliverBucketOutput,
+                        result_type=result_type,
                         schedule_to_start_timeout=timedelta(seconds=timing.schedule_to_start),
                         start_to_close_timeout=timedelta(seconds=timing.start_to_close),
                         schedule_to_close_timeout=timedelta(
@@ -1034,7 +1055,9 @@ class PipelineWorkflow:
                 if _may_have_written(exc.cause):
                     self._unsure = (
                         block.id,
-                        _bucket_record(destination_id, loaded.address, input, block.id, ext),
+                        _postgres_record(destination_id, loaded.address, input, block.id)
+                        if kind == "postgres"
+                        else _bucket_record(destination_id, loaded.address, input, block.id, ext),
                     )
                 error, final = _sink_failure(exc.cause)
                 if final:
@@ -1045,11 +1068,47 @@ class PipelineWorkflow:
             # Names only (ADR-014 §5a): never an address or a credential.
             return {
                 "destination_id": destination_id,
-                "kind": "bucket",
-                "location": out.location.model_dump(mode="json"),
+                "kind": kind,
+                "location": out.location.model_dump(mode="json", by_alias=True),
             }
         raise ApplicationError(
             f"{error} (gave up after {timing.maximum_attempts} attempts)", non_retryable=True
+        )
+
+    @staticmethod
+    def _sink_try(
+        block: BucketBlock | PostgresBlock,
+        input: PipelineRunInput,
+        input_ref: str,
+        loaded: LoadedDestination,
+        ext: Literal["html", "md", "json"],
+    ) -> tuple[str, BaseModel, type[BaseModel]]:
+        """One try's activity, input and result type, against the destination as it is now."""
+        if isinstance(block, PostgresBlock):
+            return (
+                DELIVER_POSTGRES_ACTIVITY,
+                DeliverPostgresInput(
+                    address=loaded.address,
+                    encrypted_secret=loaded.encrypted_secret,
+                    source_path=input_ref,
+                    pipeline_id=input.pipeline_id,
+                    run_id=input.run_id,
+                    block_id=block.id,
+                ),
+                DeliverPostgresOutput,
+            )
+        return (
+            DELIVER_BUCKET_ACTIVITY,
+            DeliverBucketInput(
+                address=loaded.address,
+                encrypted_secret=loaded.encrypted_secret,
+                source_path=input_ref,
+                pipeline_id=input.pipeline_id,
+                run_id=input.run_id,
+                block_id=block.id,
+                ext=ext,
+            ),
+            DeliverBucketOutput,
         )
 
     async def _mirror_undo(
@@ -1168,7 +1227,14 @@ class PipelineWorkflow:
                     workflow.execute_activity(
                         name,
                         input_type(
-                            location=record["location"], encrypted_secret=loaded.encrypted_secret
+                            location=record["location"],
+                            encrypted_secret=loaded.encrypted_secret,
+                            # The destination's current CA, as its login.
+                            **(
+                                {"ca_certificate": loaded.address.get("ca_certificate")}
+                                if record["kind"] == "postgres"
+                                else {}
+                            ),
                         ),
                         task_queue=DELIVERY_QUEUE,
                         result_type=result_type,
