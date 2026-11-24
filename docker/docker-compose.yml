@@ -385,7 +385,7 @@ services:
       crawl-fixture:
         aliases: [shop.pipelinefixture.com, llm.pipelinefixture.com, hooks.pipelinefixture.com]
 
-  # The delivery gate's TLS front (bucket, webhook receiver), SMTP sink and CA (M.12) — names on the
+  # The delivery gate's TLS front (bucket, webhook receiver, Postgres), SMTP sink and CA (M.12, O.1) — names on the
   # public-range network. The workers trust its CA only under docker/delivery-gate.yml.
   delivery-fixture:
     build:
@@ -403,7 +403,22 @@ services:
     networks:
       default:
       crawl-fixture:
-        aliases: [s3.deliveryfixture.com, hooks.deliveryfixture.com, mail.deliveryfixture.com]
+        aliases:
+          [s3.deliveryfixture.com, hooks.deliveryfixture.com, mail.deliveryfixture.com, pg.deliveryfixture.com]
+
+  # The Postgres behind the delivery fixture's TLS front (O.1): a user's database. Fresh on every start;
+  # every DDL statement is logged with its user, so the gate can see ScrapeFlow issued none.
+  delivery-postgres:
+    image: postgres:16-alpine
+    profiles: [gate]
+    environment:
+      POSTGRES_PASSWORD: delivery-gate
+    command: [postgres, -c, log_statement=ddl, -c, 'log_line_prefix=%u ']
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres]
+      interval: 2s
+      retries: 15
 
 networks:
   default:
