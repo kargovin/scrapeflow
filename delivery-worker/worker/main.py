@@ -30,7 +30,7 @@ from .checks import test_bucket, test_postgres, test_smtp, test_webhook  # noqa:
 from .config import settings  # noqa: E402
 from .contracts import DELIVERY_QUEUE  # noqa: E402
 from .postgres import PostgresActivities  # noqa: E402
-from .smtp import send_email  # noqa: E402
+from .smtp import EmailActivities  # noqa: E402
 from .source import Source  # noqa: E402
 
 log = structlog.get_logger()
@@ -43,6 +43,7 @@ MAX_CONCURRENT_ACTIVITIES = 8
 def activities(source: Source) -> list:
     bucket = BucketActivities(source)
     db = PostgresActivities(source)
+    mail = EmailActivities(source)
     return [
         test_webhook,
         test_bucket,
@@ -52,7 +53,7 @@ def activities(source: Source) -> list:
         bucket.undo_bucket,
         db.deliver_postgres,
         db.undo_postgres,
-        send_email,
+        mail.send_email,
     ]
 
 

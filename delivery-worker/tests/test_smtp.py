@@ -7,15 +7,19 @@ import json
 import socket
 import ssl
 
+import aiohttp
 import aiosmtplib
 import pytest
 from cryptography.fernet import Fernet
+from miniopy_async.error import S3Error
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from tests.smtp_server import PASSWORD, USER, smtp_server
+from tests.test_bucket import FakeSource
 from worker import checks, egress, pinned_tcp, smtp
 from worker.config import settings
+from worker.source import source_error
 from worker.contracts import DestinationTestInput, SendEmailInput
 
 HOST = "mail.example.com"
@@ -51,13 +55,13 @@ def _send_input(server, body: str = "the run failed", run_id: str | None = "0b1f
     )
 
 
-async def _send(inp: SendEmailInput):
-    return await ActivityEnvironment().run(smtp.send_email, inp)
+async def _send(inp: SendEmailInput, source=None):
+    return await ActivityEnvironment().run(smtp.EmailActivities(source).send_email, inp)
 
 
-async def _send_error(inp: SendEmailInput) -> ApplicationError:
+async def _send_error(inp: SendEmailInput, source=None) -> ApplicationError:
     with pytest.raises(ApplicationError) as exc:
-        await _send(inp)
+        await _send(inp, source)
     return exc.value
 
 
@@ -132,6 +136,79 @@ def test_the_inline_cap_is_inclusive_and_a_runless_note_names_no_run():
     at_cap = "y" * smtp.INLINE_MAX_BYTES
     assert smtp.body_text(at_cap, "r") == at_cap
     assert smtp.body_text("é" * smtp.INLINE_MAX_BYTES, None) == "result too large to include (512 KiB)"
+
+
+# --- an Email block's content (P.1; ADR-015 §7) --------------------------------------------------
+
+SOURCE = "scrapeflow-results/history/0b1f/llm.json"
+
+
+def _text(raw: bytes) -> str:
+    return _parsed(raw).get_content().replace("\r\n", "\n")
+
+
+def _block_input(server) -> SendEmailInput:
+    inp = _send_input(server, body="pipeline.result — run 0b1f\n\n")
+    return inp.model_copy(update={"source_path": SOURCE})
+
+
+async def test_an_email_blocks_content_follows_the_body_read_from_scrapeflows_copy(lookups):
+    source = FakeSource(b'{"price": 8}')
+    async with smtp_server(HOST) as server:
+        await _send(_block_input(server), source)
+
+    assert source.paths == [SOURCE]
+    content = _text(server.messages[0])
+    assert content == 'pipeline.result — run 0b1f\n\n{"price": 8}\n'
+
+
+async def test_content_at_the_cap_is_inline_and_over_it_is_the_note_unread(lookups):
+    at_cap = b"a" * smtp.INLINE_MAX_BYTES
+    over = FakeSource(at_cap + b"b", fail_mid=True)
+    async with smtp_server(HOST) as server:
+        await _send(_block_input(server), FakeSource(at_cap))
+        await _send(_block_input(server), over)
+
+    inline, noted = (_text(m) for m in server.messages)
+    assert inline.endswith(at_cap.decode() + "\n")
+    # Not read: a read would have failed mid-stream.
+    assert noted == (
+        "pipeline.result — run 0b1f\n\nresult too large to include (256 KiB); fetch it with run 0b1f\n"
+    )
+
+
+async def test_content_that_is_not_utf_8_is_sent_with_replacement_characters(lookups):
+    async with smtp_server(HOST) as server:
+        await _send(_block_input(server), FakeSource(b"caf\xe9"))
+
+    assert _text(server.messages[0]).endswith("caf\ufffd\n")
+
+
+async def test_a_message_without_a_source_reads_nothing(lookups):
+    source = FakeSource()
+    async with smtp_server(HOST) as server:
+        await _send(_send_input(server), source)
+
+    assert source.paths == []
+
+
+@pytest.mark.parametrize(
+    "source, type_, final",
+    [
+        (lambda: FakeSource(error=source_error(aiohttp.ClientConnectionError())), "SourceUnavailable", False),
+        (lambda: FakeSource(error=source_error(S3Error("NoSuchKey", "m", "/k", None, None, None))), "SourceFailed", True),
+        (lambda: FakeSource(b"x" * 200_000, fail_mid=True), "SourceUnavailable", False),
+    ],
+)
+async def test_a_source_that_cannot_be_read_is_classified_and_nothing_is_sent(
+    lookups, source, type_, final
+):
+    async with smtp_server(HOST) as server:
+        err = await _send_error(_block_input(server), source())
+
+    assert (err.type, err.non_retryable) == (type_, final)
+    assert server.messages == []
+    assert lookups[0] == []
 
 
 async def test_recipients_refused_while_another_is_accepted_are_reported(lookups):

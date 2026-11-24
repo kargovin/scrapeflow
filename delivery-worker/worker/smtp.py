@@ -1,5 +1,8 @@
 """Email (ADR-015 §2d, §3–§7): one SMTP session per attempt, pinned to a checked address.
 
+An Email block's message carries its input's content after the body, read from ScrapeFlow's copy and
+inline up to INLINE_MAX_BYTES; above it, a note naming the run.
+
 TLS before anything else: STARTTLS (refused if the server does not offer it) or implicit TLS, with
 the configured host as the server name; AUTH only on the encrypted connection. The client never
 retries: the workflow is the one retry layer.
@@ -26,6 +29,7 @@ from .contracts import (
     SmtpAddress,
 )
 from .destinations import final_error, parse
+from .source import Source, source_error
 
 log = structlog.get_logger()
 
@@ -53,22 +57,40 @@ def tls_context(ca_certificate: str | None) -> ssl.SSLContext:
         raise ValueError("CA certificate could not be read") from None
 
 
-def body_text(body: str, run_id: str | None) -> str:
-    size = len(body.encode())
-    if size <= INLINE_MAX_BYTES:
-        return body
+def too_large(size: int, run_id: str | None) -> str:
     note = f"result too large to include ({size // 1024} KiB)"
     return f"{note}; fetch it with run {run_id}" if run_id else note
 
 
-def message(address: SmtpAddress, inp: SendEmailInput) -> EmailMessage:
+def body_text(body: str, run_id: str | None) -> str:
+    size = len(body.encode())
+    return body if size <= INLINE_MAX_BYTES else too_large(size, run_id)
+
+
+async def read_content(source: Source, path: str, run_id: str | None) -> str:
+    """ScrapeFlow's copy as text, or the note when it is over the cap (never read). Raises
+    ApplicationError."""
+    async with source.open(path) as obj:
+        if obj.length > INLINE_MAX_BYTES:
+            return too_large(obj.length, run_id)
+        data = bytearray()
+        try:
+            async for chunk in obj.chunks():
+                data += chunk
+        except Exception as exc:
+            raise source_error(obj.failure or exc) from None
+    return data.decode(errors="replace")
+
+
+def message(address: SmtpAddress, inp: SendEmailInput, content: str | None = None) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = address.sender
     msg["To"] = ", ".join(address.to)
     msg["Subject"] = inp.subject
     msg["Date"] = formatdate(usegmt=True)
     msg["Message-ID"] = inp.message_id
-    msg.set_content(body_text(inp.body, inp.run_id))
+    text = body_text(inp.body, inp.run_id)
+    msg.set_content(text if content is None else text + content)
     return msg
 
 
@@ -195,24 +217,35 @@ def _parsed(address: dict, encrypted_secret: str) -> tuple[SmtpAddress, LoginSec
     return parsed, secret
 
 
-@activity.defn(name=SEND_EMAIL_ACTIVITY)
-async def send_email(inp: SendEmailInput) -> SendEmailOutput:
-    """One message to the destination's recipients. A resend carries the same Message-ID."""
-    address, secret = _parsed(inp.address, inp.encrypted_secret)
-    try:
-        msg = message(address, inp)
-    except ValueError:
-        raise final_error("DeliveryFailed", "the message has an invalid header") from None
-    timeout = EMAIL_SEND_ATTEMPT_SECONDS - ATTEMPT_MARGIN_SECONDS
-    try:
-        async with asyncio.timeout(timeout):
-            refused = await pinned_tcp.pinned(
-                address.host, address.port, lambda sock: _send(sock, address, secret, msg, timeout)
-            )
-    except Exception as exc:
-        raise classified(exc, address.host, address.port, "send") from None
-    log.info(
-        "email_sent",
-        host=address.host, message_id=inp.message_id, recipients=len(address.to), refused=refused,
-    )
-    return SendEmailOutput(refused=refused)
+class EmailActivities:
+    def __init__(self, source: Source | None) -> None:
+        self._source = source
+
+    @activity.defn(name=SEND_EMAIL_ACTIVITY)
+    async def send_email(self, inp: SendEmailInput) -> SendEmailOutput:
+        """One message to the destination's recipients. A resend carries the same Message-ID."""
+        address, secret = _parsed(inp.address, inp.encrypted_secret)
+        content = None
+        if inp.source_path is not None:
+            assert self._source is not None
+            content = await read_content(self._source, inp.source_path, inp.run_id)
+        try:
+            msg = message(address, inp, content)
+        except ValueError:
+            raise final_error("DeliveryFailed", "the message has an invalid header") from None
+        timeout = EMAIL_SEND_ATTEMPT_SECONDS - ATTEMPT_MARGIN_SECONDS
+        try:
+            async with asyncio.timeout(timeout):
+                refused = await pinned_tcp.pinned(
+                    address.host,
+                    address.port,
+                    lambda sock: _send(sock, address, secret, msg, timeout),
+                )
+        except Exception as exc:
+            raise classified(exc, address.host, address.port, "send") from None
+        log.info(
+            "email_sent",
+            host=address.host, message_id=inp.message_id, recipients=len(address.to),
+            refused=refused,
+        )
+        return SendEmailOutput(refused=refused)
