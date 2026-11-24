@@ -4854,6 +4854,13 @@ forward. A delivery-worker revert alone (to M's tag) makes every postgres destin
 
 ## Group P — Email sink (PRD-017 slice 3)
 
+**Carried from O's build (2026-11-24):**
+- `PipelineWorkflow._sink_try` is where a new delivery-queue sink plugs in (O.1 turned `_deliver_bucket` into `_deliver_sink`); `_UNDO_ACTIVITIES` passes `ca_certificate` only for postgres.
+- The sink-order refusal now reads "put every bucket and postgres block before the first webhook" — update it again if the Email block changes the rule.
+- The postgres destination test reports an unreachable host under `address`; the webhook, bucket and smtp tests still report it under `tls`. Aligning them is a small call (O.1 row).
+- `21f65af` (the pipeline page's stale "waiting for approval", N.4's) is on `develop` and rides Release P.
+- The owner kept a hosted Postgres and the prod destination `o-supabase` for later checks (session pooler, schema `scrapeflow`, the provider's CA pasted).
+
 **Carried from M's build (2026-11-21):**
 - The send uses `SendEmailInput` with Message-ID `<{run_id}.{block_id}@{public_host}>` (no suffix) and the same single-attempt / `non_retryable` loop as the bucket sink; `queue_failure_alerts` writes `kind="email"`, `destination_id`, no `webhook_url`.
 - It is an irreversible sink: once its activity returns it is `announced` (`sink and not sink.reversible`), so D13 holds with no change; a send that gave up never announces. The SPA already reads it as "could not be undone" (`undo_status = not_undoable`) and shows `email` in the alert's To column.
