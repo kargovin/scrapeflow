@@ -396,6 +396,8 @@ class SendEmailInput(BaseModel):
     body: str
     # Named by the "too large" note; None when the message belongs to no run.
     run_id: str | None = None
+    # An Email block's input, {bucket}/{key}: its content follows the body, inline up to the cap.
+    source_path: str | None = None
 
 
 class SendEmailOutput(BaseModel):

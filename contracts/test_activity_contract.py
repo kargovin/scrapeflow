@@ -820,6 +820,23 @@ def test_the_email_input_reaches_the_delivery_worker_whole(run_id):
     assert address.model_validate(received.address).sender == stored[0].sender
 
 
+def test_an_email_blocks_input_reaches_the_delivery_worker_with_its_source():
+    run_id = "0b1f6c1e-6a1d-4c39-9f0b-6f1d2b3c4d5e"
+    stored = STORED_DESTINATIONS["smtp"]
+    sent = api.SendEmailInput(
+        address=api_destinations.stored(stored[0]),
+        encrypted_secret="gAAAAAB_secret",
+        message_id="<0b1f.mail@scrapeflow.example.org>",
+        subject=f"[ScrapeFlow] prices: run {run_id}",
+        body="pipeline.result\n",
+        run_id=run_id,
+        source_path="scrapeflow-results/history/0b1f/llm.json",
+    )
+    received = _decode(_encode(sent), delivery.SendEmailInput)
+    assert received.model_dump() == sent.model_dump()
+    assert received.source_path == "scrapeflow-results/history/0b1f/llm.json"
+
+
 def test_the_api_parses_the_email_output():
     out = delivery.SendEmailOutput(refused=["oncall@example.org"])
     assert _decode(_encode(out), api.SendEmailOutput).refused == ["oncall@example.org"]

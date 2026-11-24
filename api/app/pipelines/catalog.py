@@ -38,6 +38,7 @@ from app.schemas.jobs import Engine, PlaywrightOptions, validate_page_actions
 from app.workflows.activities.contracts import (
     BUCKET_DELIVER_ATTEMPT_SECONDS,
     BUCKET_UNDO_ATTEMPT_SECONDS,
+    EMAIL_SEND_ATTEMPT_SECONDS,
     POSTGRES_DELIVER_ATTEMPT_SECONDS,
     POSTGRES_UNDO_ATTEMPT_SECONDS,
 )
@@ -404,6 +405,22 @@ class WebhookConfigV1(_Config):
         return None if v is None else str(v)
 
 
+class EmailConfigV1(_Config):
+    """An smtp destination; the result as one message to its recipients (ADR-015 §5, §7)."""
+
+    destination_id: uuid.UUID
+    events: list[Literal["pipeline.result", "pipeline.failed"]] = Field(
+        default_factory=lambda: ["pipeline.result"], min_length=1
+    )
+
+    @field_validator("events")
+    @classmethod
+    def _no_repeats(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("each event may be listed once")
+        return v
+
+
 class BucketConfigV1(_Config):
     # A bucket destination; the key under its prefix is the run's and the block's (ADR-015 §5).
     destination_id: uuid.UUID
@@ -617,6 +634,24 @@ POSTGRES = BlockType(
     destination_kinds=("postgres",),
 )
 
+EMAIL = BlockType(
+    name="email",
+    kind="effect",
+    config_versions={1: EmailConfigV1},
+    consumes=ALL_REFS,
+    produces=_pass_through,
+    # ADR-015 §6: 60 s tries on the delivery ladder; an alert-only Email calls nothing (ADR-014 §8d).
+    timing=lambda config: _delivery_retry(
+        EMAIL_SEND_ATTEMPT_SECONDS,
+        db_per_try=1,
+        db_between_tries=2,
+        calls_activity=WEBHOOK_RESULT_EVENT in config.events,
+    ),
+    sink=Sink(reversible=False),
+    destination_kinds=("smtp",),
+    catalog_configs={"default": {}, "alert only": {"events": ["pipeline.failed"]}},
+)
+
 # ADR-016 §9a: request_approval and resolve_approval, each one DB step; the wait is not in it (§9d).
 APPROVAL_TIMING = Timing(
     start_to_close=DB_ACTIVITY_SECONDS,
@@ -640,7 +675,8 @@ APPROVAL = BlockType(
 )
 
 CATALOG: Mapping[str, BlockType] = {
-    t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK, BUCKET, POSTGRES, APPROVAL)
+    t.name: t
+    for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK, BUCKET, POSTGRES, EMAIL, APPROVAL)
 }
 
 

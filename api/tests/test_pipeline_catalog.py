@@ -37,6 +37,7 @@ async def test_every_block_type_is_listed_with_its_kind_and_sink(client, headers
         "webhook": ("effect", False),
         "bucket": ("effect", True),
         "postgres": ("effect", True),
+        "email": ("effect", False),
         "approval": ("effect", None),
     }
     assert blocks["bucket"]["destination_kind"] == "bucket"
@@ -48,6 +49,13 @@ async def test_every_block_type_is_listed_with_its_kind_and_sink(client, headers
     assert blocks["postgres"]["destination_kind"] == "postgres"
     # One JSON value in one parameter (ADR-015 §7).
     assert sorted(blocks["postgres"]["consumes"]) == ["extraction", "page:json"]
+    assert blocks["email"]["destination_kind"] == "smtp"
+    assert sorted(blocks["email"]["consumes"]) == [
+        "extraction",
+        "page:html",
+        "page:json",
+        "page:markdown",
+    ]
 
 
 async def test_a_sinks_timing_and_its_undo_add_up(client, headers):
@@ -76,6 +84,12 @@ async def test_a_sinks_timing_and_its_undo_add_up(client, headers):
     assert postgres["sink"]["undo"]["need_seconds"] == POSTGRES_UNDO_TIMING.need
     # An alert-only Webhook calls nothing on a run's way through.
     alert = blocks["webhook"]["timings"]["alert only"]
+    assert (alert["budget_seconds"], alert["need_seconds"]) == (0, 60)
+    # ADR-015 §6: 60 s tries on the ladder, the per-try DB writes counted; nothing to undo.
+    email = blocks["email"]
+    assert email["timings"]["default"]["need_seconds"] == 5 * 120 + 10530 + 13 * 20 + 60
+    assert email["sink"]["undo"] is None
+    alert = email["timings"]["alert only"]
     assert (alert["budget_seconds"], alert["need_seconds"]) == (0, 60)
 
 

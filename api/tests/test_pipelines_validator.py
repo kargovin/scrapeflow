@@ -11,6 +11,7 @@ from app.pipelines.catalog import (
     BUCKET_UNDO_TIMING,
     CATALOG,
     DB_ACTIVITY_SECONDS,
+    EMAIL,
     LLM_EXTRACT,
     POSTGRES,
     POSTGRES_UNDO_TIMING,
@@ -999,7 +1000,8 @@ def test_a_bucket_after_a_webhook_is_refused_naming_both():
     )
     assert found == (
         "block 'late': bucket 'late' cannot follow webhook 'notify': if 'late' failed, "
-        "'notify' could not be undone; put every bucket and postgres block before the first webhook"
+        "'notify' could not be undone; put every bucket and postgres block before the first webhook "
+        "or email"
     )
 
 
@@ -1045,6 +1047,7 @@ def test_the_catalog_says_which_blocks_are_sinks_and_which_can_be_undone():
         "bucket": True,
         "postgres": True,
         "webhook": False,
+        "email": False,
     }
     assert sinks["bucket"].undo is BUCKET_UNDO_TIMING
     assert sinks["postgres"].undo is POSTGRES_UNDO_TIMING
@@ -1053,6 +1056,7 @@ def test_the_catalog_says_which_blocks_are_sinks_and_which_can_be_undone():
         "bucket": ("bucket",),
         "postgres": ("postgres",),
         "webhook": ("webhook",),
+        "email": ("smtp",),
         "approval": ("webhook", "smtp"),
     }
 
@@ -1175,3 +1179,91 @@ def test_prd_017s_worked_example_with_a_postgres_sink():
     reserve = BUCKET_UNDO_TIMING.need + POSTGRES_UNDO_TIMING.need
     assert 6 * 3600 < reserve < 6.5 * 3600
     assert validator.rollback_reserve(validate(worked).blocks) == (reserve, 2)
+
+
+# --- P.1: the Email block (PRD-017 slice 3; ADR-015 §5-§7) ----------------------------------
+
+
+def mail(id="mail", input="extract", destination_id=DEST_ID, **config):
+    return {
+        "id": id,
+        "type": "email",
+        "input": input,
+        "config": {"destination_id": destination_id, **config},
+    }
+
+
+@pytest.mark.parametrize("output_format", ["html", "markdown", "json"])
+def test_an_email_block_takes_any_page_and_sends_the_result_by_default(output_format):
+    result = validate(pipeline(scrape(output_format=output_format), mail(input="fetch")))
+    block = result.blocks[-1]
+    assert block.type is EMAIL
+    assert result.definition["blocks"][-1]["config"] == {
+        "destination_id": DEST_ID,
+        "events": ["pipeline.result"],
+    }
+
+
+def test_an_email_block_after_an_extraction_and_another_sink_is_accepted():
+    validate(pipeline(scrape(), llm(), bucket(), hook_to(), mail(input="notify")))
+    validate(pipeline(scrape(), llm(), bucket(), mail(input="store"), webhook(input="mail")))
+
+
+def test_an_email_block_needs_a_destination():
+    block = mail()
+    del block["config"]["destination_id"]
+    assert one_problem(pipeline(scrape(), llm(), block)) == (
+        "block 'mail': config.destination_id: Field required"
+    )
+
+
+@pytest.mark.parametrize(
+    "events, expected",
+    [
+        ([], "config.events: List should have at least 1 item after validation, not 0"),
+        (
+            ["pipeline.result", "pipeline.result"],
+            "config.events: each event may be listed once",
+        ),
+    ],
+)
+def test_an_email_blocks_events_are_checked_as_a_webhooks(events, expected):
+    found = one_problem(pipeline(scrape(), llm(), mail(events=events)))
+    assert found == f"block 'mail': {expected}"
+
+
+def test_a_bucket_after_an_email_is_refused_naming_both():
+    found = one_problem(pipeline(scrape(), llm(), mail(), bucket(input="mail")))
+    assert found == (
+        "block 'store': bucket 'store' cannot follow email 'mail': if 'store' failed, 'mail' "
+        "could not be undone; put every bucket and postgres block before the first webhook or "
+        "email"
+    )
+
+
+def test_a_postgres_block_after_an_email_is_refused_naming_both():
+    found = one_problem(pipeline(scrape(), llm(), mail(), db(input="mail")))
+    assert found.startswith("block 'db': postgres 'db' cannot follow email 'mail'")
+
+
+def test_a_bucket_after_an_alert_only_email_is_accepted():
+    # It sends nothing on the way through, so nothing is announced before the bucket.
+    validate(pipeline(scrape(), llm(), mail(events=["pipeline.failed"]), bucket(input="mail")))
+
+
+def test_the_email_timing_is_60_s_tries_on_the_delivery_ladder_plus_its_loop_writes():
+    timing = EMAIL.timing(EMAIL.config_versions[1](destination_id=DEST_ID))
+    assert (timing.start_to_close, timing.schedule_to_start, timing.maximum_attempts) == (60, 60, 5)
+    assert timing.budget == 5 * (60 + 60) + 30 + 300 + 3000 + 7200
+    assert timing.loop_db == 13 * DB_ACTIVITY_SECONDS
+    assert timing.budget < 3.1 * 3600
+    assert EMAIL.sink is not None and not EMAIL.sink.reversible and EMAIL.sink.undo is None
+    alert = EMAIL.timing(
+        EMAIL.config_versions[1](destination_id=DEST_ID, events=["pipeline.failed"])
+    )
+    assert not alert.calls_activity
+    assert alert.need == BLOCK_OVERHEAD_SECONDS
+
+
+def test_an_email_reserves_no_undo():
+    assert validator.rollback_reserve(validate(pipeline(scrape(), llm(), mail())).blocks) == (0, 0)

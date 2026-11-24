@@ -1,5 +1,6 @@
-"""A pipeline run's failure alerts (ADR-014 §8) — one ``webhook_deliveries`` row per Webhook block
-whose ``events`` include ``pipeline.failed``, delivered by ``WebhookDeliveryWorkflow``.
+"""A pipeline run's failure alerts (ADR-014 §8) — one ``webhook_deliveries`` row per Webhook or Email
+block whose ``events`` include ``pipeline.failed``, delivered by ``WebhookDeliveryWorkflow`` (an Email
+block's as ``kind = 'email'``, ADR-015 §4).
 
 Both writers of a ``failed`` run call ``queue_failure_alerts`` in the transaction that sets it (the
 mirror activity and the trigger's could-not-start branch), so "run failed" and "alert queued" are
@@ -16,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.destination import Destination
 from app.models.pipeline import PipelineRun, PipelineRunBlock, PipelineVersion
 from app.models.webhook_delivery import WebhookDelivery
-from app.pipelines.definition import WebhookBlock, parse_definition
+from app.pipelines.definition import EmailBlock, WebhookBlock, parse_definition
 
 FAILED_EVENT = "pipeline.failed"
 
@@ -74,7 +75,9 @@ async def queue_failure_alerts(db: AsyncSession, run: PipelineRun) -> int:
     assert version is not None
     parsed, _ = parse_definition(version.definition)
     senders = [
-        b for b in parsed.blocks if isinstance(b, WebhookBlock) and FAILED_EVENT in b.config.events
+        b
+        for b in parsed.blocks
+        if isinstance(b, WebhookBlock | EmailBlock) and FAILED_EVENT in b.config.events
     ]
     rollback = await rollback_lists(db, run.id) if senders else None
     named = {b.config.destination_id for b in senders if b.config.destination_id is not None}
@@ -98,8 +101,13 @@ async def queue_failure_alerts(db: AsyncSession, run: PipelineRun) -> int:
                 pipeline_run_id=run.id,
                 block_id=block.id,
                 event=FAILED_EVENT,
+                kind="email" if isinstance(block, EmailBlock) else "webhook",
                 # A destination's URL is read at each attempt and never stored (ADR-014 §8b).
-                webhook_url=str(block.config.url) if block.config.url is not None else None,
+                webhook_url=(
+                    str(block.config.url)
+                    if isinstance(block, WebhookBlock) and block.config.url is not None
+                    else None
+                ),
                 destination_id=(
                     block.config.destination_id if block.config.destination_id in existing else None
                 ),

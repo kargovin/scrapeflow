@@ -487,3 +487,78 @@ async def test_a_destination_row_with_no_owner_it_can_send_for_raises():
     async with AsyncSessionLocal() as db:
         with pytest.raises(Exception, match="no owner it can send for"):
             await _destination_target(db, orphan)
+
+
+# --- P.1: an Email block's failure alert is a kind = 'email' row (PRD-019 R5; ADR-015 §4) -------
+
+
+def _email_block(block_id, destination_id, events):
+    return {
+        "id": block_id,
+        "type": "email",
+        "input": "fetch",
+        "config_schema_version": 1,
+        "config": {"destination_id": str(destination_id), "events": events},
+        "secrets": {},
+    }
+
+
+async def test_an_email_blocks_alert_is_an_email_row_to_its_destination(db_user):
+    from tests.test_email_deliveries import _destination as _mail_destination
+
+    mail = await _mail_destination(db_user.id)
+    run = await _run(
+        db_user.id,
+        _definition(
+            _email_block("mailed", mail.id, ["pipeline.result", "pipeline.failed"]),
+            _email_block("result_only", mail.id, ["pipeline.result"]),
+            _webhook("hook", ALERT_URL, ["pipeline.failed"]),
+        ),
+    )
+    await _fail(run)
+
+    rows = await _alerts(run.id)
+    assert [(r.block_id, r.kind, r.destination_id, r.webhook_url) for r in rows] == [
+        ("hook", "webhook", None, ALERT_URL),
+        ("mailed", "email", mail.id, None),
+    ]
+    assert rows[1].payload["block_id"] == "mailed"
+    assert rows[1].payload["failed_block_id"] == "fetch"
+
+    outcome = await attempt_webhook_delivery(DeliveryRef(delivery_id=str(rows[1].id)))
+    assert outcome.status == "email"
+    assert outcome.email.message_id == f"<{run.id}.mailed.failed@{settings.public_host}>"
+
+
+async def test_an_email_alert_whose_destination_was_deleted_still_fails_the_run_and_alerts(
+    db_user,
+):
+    from tests.test_email_deliveries import _destination as _mail_destination
+
+    mail = await _mail_destination(db_user.id)
+    run = await _run(db_user.id, _definition(_email_block("mailed", mail.id, ["pipeline.failed"])))
+    async with AsyncSessionLocal() as db:
+        await db.delete(await db.get(Destination, mail.id))
+        await db.commit()
+
+    assert await _fail(run) == "failed"
+
+    [row] = await _alerts(run.id)
+    assert (row.kind, row.destination_id, row.webhook_url) == ("email", None, None)
+    outcome = await attempt_webhook_delivery(DeliveryRef(delivery_id=str(row.id)))
+    assert outcome.status == "exhausted"
+
+
+def test_a_monitor_on_a_pipeline_whose_email_block_alerts_is_not_warned():
+    from app.core.monitors import warnings
+    from app.pipelines.definition import parse_definition
+
+    alerting, _ = parse_definition(
+        _definition(_email_block("mailed", uuid.uuid4(), ["pipeline.failed"]))
+    )
+    quiet, _ = parse_definition(
+        _definition(_email_block("mailed", uuid.uuid4(), ["pipeline.result"]))
+    )
+    nothing_sent = "nothing is sent when a check fails"
+    assert not any(w.startswith(nothing_sent) for w in warnings(alerting))
+    assert any(w.startswith(nothing_sent) for w in warnings(quiet))

@@ -28,7 +28,12 @@ from app.pipelines.catalog import (
     rollback_reserve,
     run_need_seconds,
 )
-from app.pipelines.definition import ParsedDefinition, WebhookBlock, input_value_problems
+from app.pipelines.definition import (
+    EmailBlock,
+    ParsedDefinition,
+    WebhookBlock,
+    input_value_problems,
+)
 from app.pipelines.validator import Problem
 from app.settings import settings
 from app.workflows.pipeline import CaptureSpec, GateFingerprints, MonitorContext
@@ -147,12 +152,13 @@ def warnings(parsed: ParsedDefinition, has_notice_destination: bool = False) -> 
             "no LLM block and no change gate: every check stores a copy and runs every block"
         )
     if not has_notice_destination and not any(
-        isinstance(b, WebhookBlock) and FAILED_EVENT in b.config.events for b in parsed.blocks
+        isinstance(b, WebhookBlock | EmailBlock) and FAILED_EVENT in b.config.events
+        for b in parsed.blocks
     ):
         found.append(
-            "nothing is sent when a check fails: add pipeline.failed to a Webhook block's "
-            "events or choose a notice destination, or a failing monitor is visible only on "
-            "its page"
+            "nothing is sent when a check fails: add pipeline.failed to a Webhook or Email "
+            "block's events or choose a notice destination, or a failing monitor is visible "
+            "only on its page"
         )
     return found
 

@@ -304,3 +304,35 @@ def test_a_webhook_destination_adds_no_url_to_the_triggers_ssrf_list():
     ).definition
     parsed, _ = parse_definition(stored)
     assert run_urls(parsed, {}, {}) == ["https://example.com/"]
+
+
+# --- P.1: an Email block names an smtp destination -------------------------------------------
+
+
+def _mail(destination_id, id="mail", input="fetch"):
+    return {
+        "id": id,
+        "type": "email",
+        "input": input,
+        "config": {"destination_id": str(destination_id)},
+    }
+
+
+async def test_an_email_block_records_its_smtp_destination_and_refuses_another_kind(
+    client, headers, db_user
+):
+    smtp = await _destination(db_user.id, "smtp")
+    resp = await _save(client, headers, _definition(_mail(smtp.id)))
+    assert resp.status_code == 201, resp.text
+    assert await _references(resp.json()["id"]) == {1: {smtp.id}}
+
+    hook = await _destination(db_user.id, "webhook", name="wrong-hook")
+    resp = await _save(client, headers, _definition(_mail(hook.id)), name="wrong")
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == [
+        {
+            "block_id": "mail",
+            "message": "destination 'wrong-hook' is a webhook destination; this block needs a "
+            "smtp destination",
+        }
+    ]
