@@ -26,9 +26,10 @@ from temporalio.contrib.pydantic import pydantic_data_converter  # noqa: E402
 from temporalio.worker import Worker  # noqa: E402
 
 from .bucket import BucketActivities  # noqa: E402
-from .checks import test_bucket, test_smtp, test_webhook  # noqa: E402
+from .checks import test_bucket, test_postgres, test_smtp, test_webhook  # noqa: E402
 from .config import settings  # noqa: E402
 from .contracts import DELIVERY_QUEUE  # noqa: E402
+from .postgres import PostgresActivities  # noqa: E402
 from .smtp import send_email  # noqa: E402
 from .source import Source  # noqa: E402
 
@@ -41,12 +42,16 @@ MAX_CONCURRENT_ACTIVITIES = 8
 
 def activities(source: Source) -> list:
     bucket = BucketActivities(source)
+    db = PostgresActivities(source)
     return [
         test_webhook,
         test_bucket,
         test_smtp,
+        test_postgres,
         bucket.deliver_bucket,
         bucket.undo_bucket,
+        db.deliver_postgres,
+        db.undo_postgres,
         send_email,
     ]
 

@@ -2,7 +2,8 @@
 name = "delivery-worker"
 version = "0.1.0"
 requires-python = ">=3.12"
-# No database driver or ORM: this worker must not be able to reach the app database (ADR-015 §4).
+# No ORM and no app code: this worker must not be able to reach the app database (ADR-015 §4).
+# asyncpg is the Postgres sink's client only, upper-bounded: postgres.py relies on its TLS handshake.
 dependencies = [
     "temporalio>=1.33.0",
     "pydantic>=2.0.0",
@@ -12,6 +13,7 @@ dependencies = [
     "aiohttp>=3.10.0",
     "miniopy-async>=1.23.0",
     "aiosmtplib>=5.1.0",
+    "asyncpg>=0.31.0,<0.32",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]

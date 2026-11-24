@@ -3,12 +3,15 @@ from temporalio import activity
 from worker import main
 from worker.contracts import (
     DELIVER_BUCKET_ACTIVITY,
+    DELIVER_POSTGRES_ACTIVITY,
     DELIVERY_QUEUE,
     SEND_EMAIL_ACTIVITY,
     TEST_BUCKET_ACTIVITY,
+    TEST_POSTGRES_ACTIVITY,
     TEST_SMTP_ACTIVITY,
     TEST_WEBHOOK_ACTIVITY,
     UNDO_BUCKET_ACTIVITY,
+    UNDO_POSTGRES_ACTIVITY,
 )
 
 
@@ -22,5 +25,8 @@ def test_the_worker_serves_the_delivery_queue_eight_at_a_time():
         DELIVER_BUCKET_ACTIVITY,
         UNDO_BUCKET_ACTIVITY,
         TEST_SMTP_ACTIVITY,
+        TEST_POSTGRES_ACTIVITY,
+        DELIVER_POSTGRES_ACTIVITY,
+        UNDO_POSTGRES_ACTIVITY,
         SEND_EMAIL_ACTIVITY,
     }
