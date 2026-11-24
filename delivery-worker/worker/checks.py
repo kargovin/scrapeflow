@@ -192,69 +192,107 @@ async def test_postgres(inp: DestinationTestInput) -> DestinationTestOutput:
     except ValueError as exc:
         return DestinationTestOutput(checks=[_failed("address", str(exc))])
 
+    steps = _Steps()
     try:
         async with asyncio.timeout(TEST_SECONDS):
-            table_checks = await postgres.session(
-                address, secret, lambda conn: _table_checks(conn, address)
-            )
+            await postgres.session(address, secret, lambda conn: _table_checks(conn, address, steps))
     except egress.EgressBlocked as exc:
         checks = [_failed("address", str(exc))]
     except Exception as exc:
-        _, message, _ = postgres.describe(exc, postgres.host_of(address), address.port, "test")
-        # The server answered the login: TLS was up.
-        if isinstance(exc, asyncpg.PostgresError):
-            checks = [_passed("address"), _passed("tls"), _failed("login", message)]
-        else:
-            checks = [_passed("address"), _failed("tls", message)]
+        if not steps.checks:
+            steps.checks, steps.running, steps.action = _login_steps(exc)
+        _, message, _ = postgres.describe(
+            exc, postgres.host_of(address), address.port, steps.action
+        )
+        checks = [*steps.checks, _failed(steps.running, message)]
     else:
-        checks = [_passed("address"), _passed("tls"), _passed("login"), *table_checks]
+        checks = steps.checks
     log.info(
         "destination_test", kind=inp.kind, host=address.host, **{c.check: c.outcome for c in checks}
     )
     return DestinationTestOutput(checks=checks)
 
 
-async def _table_checks(conn: asyncpg.Connection, address: PostgresAddress) -> list[CheckResult]:
-    name = f"{address.db_schema}.{address.table}"
+class _Steps:
+    """The checks so far and the one running: an exception is that check's failure."""
+
+    def __init__(self) -> None:
+        self.checks: list[CheckResult] = []
+        self.running = ""
+        self.action = ""
+
+    def start(self, check: str, action: str) -> None:
+        self.running, self.action = check, action
+
+
+def _login_steps(exc: Exception) -> tuple[list[CheckResult], str, str]:
+    """Where a connect that never logged in stopped, from the exception alone."""
+    if isinstance(exc, (egress.CertificateMismatch, postgres.NoTls, ssl.SSLError)):
+        return [_passed("address")], "tls", "login"
+    # ssl.SSLError is an OSError: caught above.
+    if isinstance(exc, (OSError, TimeoutError)):
+        return [], "address", "login"
+    # The server answered the login: TLS was up.
+    return [_passed("address"), _passed("tls")], "login", "login"
+
+
+async def _table_checks(conn: asyncpg.Connection, address: PostgresAddress, steps: _Steps) -> None:
+    """Appends each check's outcome to ``steps``. An exception leaves the transaction to the
+    connection's end: the server drops it uncommitted."""
+    steps.checks += [_passed("address"), _passed("tls"), _passed("login")]
+    steps.start("table", "table lookup")
     transaction = conn.transaction()
     await transaction.start()
-    try:
-        oid = await conn.fetchval(postgres.TABLE_SQL, address.db_schema, address.table)
-        if oid is None:
-            return [_failed("table", f"no table {name} in database {address.database}")]
-        checks = [_passed("table")]
-        if not await postgres.has_row_key(conn, oid):
-            return [
-                *checks,
-                _failed(
-                    "unique key",
-                    f"{name} has no unique index on exactly (run_id, block_id): a retried "
-                    "delivery would add a second row",
-                ),
-            ]
-        checks.append(_passed("unique key"))
-        run_id, pipeline_id, block_id, content = postgres.probe_values()
-        try:
-            await conn.execute(postgres.upsert_sql(address), run_id, pipeline_id, block_id, content)
-        except asyncpg.PostgresError as exc:
-            _, message, _ = postgres.describe(exc, postgres.host_of(address), address.port, "write")
-            return [*checks, _failed("write", message)]
-        checks.append(_passed("write"))
-        try:
-            status = await conn.execute(postgres.delete_sql(address), run_id, block_id)
-        except asyncpg.PostgresError as exc:
-            _, message, _ = postgres.describe(
-                exc, postgres.host_of(address), address.port, "delete"
+    await _in_transaction(conn, address, steps)
+    steps.start("rollback", "rollback")
+    await transaction.rollback()
+
+
+async def _in_transaction(conn: asyncpg.Connection, address: PostgresAddress, steps: _Steps) -> None:
+    """A PostgresError with no answer from the server (class 08) is raised: the check did not run."""
+    checks = steps.checks
+    name = f"{address.db_schema}.{address.table}"
+    host = postgres.host_of(address)
+    oid = await conn.fetchval(postgres.TABLE_SQL, address.db_schema, address.table)
+    if oid is None:
+        checks.append(_failed("table", f"no table {name} in database {address.database}"))
+        return
+    checks.append(_passed("table"))
+    steps.start("unique key", "unique key lookup")
+    if not await postgres.has_row_key(conn, oid):
+        checks.append(
+            _failed(
+                "unique key",
+                f"{name} has no unique index on exactly (run_id, block_id): a retried "
+                "delivery would add a second row",
             )
-            return [
-                *checks,
-                _warning("delete", f"delete refused — rollback to this table will fail ({message})"),
-            ]
-        if status != "DELETE 1":
-            return [
-                *checks,
-                _warning("delete", "the delete removed no row — rollback to this table will fail"),
-            ]
-        return [*checks, _passed("delete")]
-    finally:
-        await transaction.rollback()
+        )
+        return
+    checks.append(_passed("unique key"))
+    steps.start("write", "write")
+    run_id, pipeline_id, block_id, content = postgres.probe_values()
+    try:
+        await conn.execute(postgres.upsert_sql(address), run_id, pipeline_id, block_id, content)
+    except asyncpg.PostgresError as exc:
+        if not postgres.answered(exc):
+            raise
+        checks.append(_failed("write", postgres.describe(exc, host, address.port, "write")[1]))
+        return
+    checks.append(_passed("write"))
+    steps.start("delete", "delete")
+    try:
+        status = await conn.execute(postgres.delete_sql(address), run_id, block_id)
+    except asyncpg.PostgresError as exc:
+        if not postgres.answered(exc):
+            raise
+        message = postgres.describe(exc, host, address.port, "delete")[1]
+        checks.append(
+            _warning("delete", f"delete refused — rollback to this table will fail ({message})")
+        )
+        return
+    if status != "DELETE 1":
+        checks.append(
+            _warning("delete", "the delete removed no row — rollback to this table will fail")
+        )
+        return
+    checks.append(_passed("delete"))

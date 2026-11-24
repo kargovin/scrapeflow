@@ -2,6 +2,7 @@
 content cap. The statements against a real server: ``tests/test_postgres_db.py``."""
 
 import json
+import ssl
 
 import asyncpg
 import pytest
@@ -442,3 +443,203 @@ async def test_an_unreadable_ca_is_refused_before_any_lookup(lookups):
     found = await _test(_address(ca="not a certificate"))
     assert found == [("address", "failed", "CA certificate could not be read")]
     assert seen == []
+
+
+async def test_the_test_reports_a_refused_connect_as_the_address(lookups):
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    found = await _test(_address(port=port))
+    assert found == [
+        ("address", "failed", f"could not reach {HOST}:{port} (ConnectionRefusedError)")
+    ]
+
+
+async def test_the_test_reports_a_certificate_for_another_name_as_tls(lookups):
+    async with pg_server("other.example.com") as server:
+        found = await _test(_address(server))
+    assert found == [("address", "passed", None), ("tls", "failed", f"certificate not valid for {HOST}")]
+
+
+class FakeTransaction:
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    async def start(self):
+        self.conn.calls.append("begin")
+
+    async def rollback(self):
+        self.conn.calls.append("rollback")
+        await self.conn.step("rollback")
+
+
+class FakeTestConnection:
+    """Answers each statement of the test; ``fail`` maps a step to the exception it raises."""
+
+    def __init__(self, fail: dict) -> None:
+        self.fail = fail
+        self.calls: list[str] = []
+
+    async def step(self, name: str):
+        exc = self.fail.get(name)
+        if callable(exc) and not isinstance(exc, BaseException):
+            await exc()
+        elif exc is not None:
+            raise exc
+
+    def transaction(self):
+        return FakeTransaction(self)
+
+    async def fetchval(self, sql, *args):
+        await self.step("table")
+        return 42
+
+    async def execute(self, sql, *args):
+        name = "write" if sql.startswith("INSERT") else "delete"
+        self.calls.append(name)
+        await self.step(name)
+        return "INSERT 0 1" if name == "write" else "DELETE 1"
+
+
+@pytest.fixture
+def test_session(monkeypatch):
+    """postgres.session for the destination test: a scripted login, then a scripted connection."""
+    state: dict = {"login": None, "fail": {}, "conn": None}
+
+    async def session(address, secret, work):
+        if state["login"] is not None:
+            raise state["login"]
+        state["conn"] = FakeTestConnection(state["fail"])
+        return await work(state["conn"])
+
+    async def has_row_key(conn, oid):
+        await conn.step("unique key")
+        return True
+
+    monkeypatch.setattr(postgres, "session", session)
+    monkeypatch.setattr(postgres, "has_row_key", has_row_key)
+    return state
+
+
+LOGGED_IN = [("address", "passed", None), ("tls", "passed", None), ("login", "passed", None)]
+GONE = asyncpg.exceptions.ConnectionDoesNotExistError("x")
+
+
+@pytest.mark.parametrize(
+    ("exc", "found"),
+    [
+        (ConnectionRefusedError(), [("address", "failed", f"could not reach {HOST}:5432 (ConnectionRefusedError)")]),
+        (TimeoutError(), [("address", "failed", f"{HOST}:5432 did not answer in time")]),
+        (
+            ssl.SSLError("x"),
+            [("address", "passed", None), ("tls", "failed", f"TLS handshake with {HOST} failed")],
+        ),
+        (
+            postgres.NoTls(),
+            [
+                ("address", "passed", None),
+                ("tls", "failed", f"{HOST} does not offer TLS; nothing is sent in plain text"),
+            ],
+        ),
+        (
+            asyncpg.exceptions.InvalidCatalogNameError("x"),
+            [
+                ("address", "passed", None),
+                ("tls", "passed", None),
+                ("login", "failed", f"{HOST} refused the login (InvalidCatalogNameError, SQLSTATE 3D000)"),
+            ],
+        ),
+        (
+            asyncpg.exceptions.TooManyConnectionsError("x"),
+            [
+                ("address", "passed", None),
+                ("tls", "passed", None),
+                ("login", "failed", f"{HOST} could not take the login now (TooManyConnectionsError, SQLSTATE 53300)"),
+            ],
+        ),
+    ],
+)
+async def test_a_connect_that_never_logs_in_fails_the_check_it_stopped_at(test_session, exc, found):
+    test_session["login"] = exc
+    assert await _test(_address()) == found
+
+
+@pytest.mark.parametrize(
+    ("step", "exc", "found"),
+    [
+        (
+            "table",
+            asyncpg.exceptions.InsufficientPrivilegeError("x"),
+            [("table", "failed", f"{HOST} refused the table lookup (InsufficientPrivilegeError, SQLSTATE 42501)")],
+        ),
+        (
+            "unique key",
+            GONE,
+            [("table", "passed", None), ("unique key", "failed", f"{HOST}:5432 closed the connection")],
+        ),
+        (
+            "write",
+            GONE,
+            [
+                ("table", "passed", None),
+                ("unique key", "passed", None),
+                ("write", "failed", f"{HOST}:5432 closed the connection"),
+            ],
+        ),
+        (
+            "delete",
+            GONE,
+            [
+                ("table", "passed", None),
+                ("unique key", "passed", None),
+                ("write", "passed", None),
+                ("delete", "failed", f"{HOST}:5432 closed the connection"),
+            ],
+        ),
+        (
+            "rollback",
+            GONE,
+            [
+                ("table", "passed", None),
+                ("unique key", "passed", None),
+                ("write", "passed", None),
+                ("delete", "passed", None),
+                ("rollback", "failed", f"{HOST}:5432 closed the connection"),
+            ],
+        ),
+    ],
+)
+async def test_an_error_after_the_login_fails_the_check_that_was_running(test_session, step, exc, found):
+    test_session["fail"] = {step: exc}
+    assert await _test(_address()) == [*LOGGED_IN, *found]
+
+
+async def test_the_test_deadline_fails_the_check_that_was_running(test_session, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(checks, "TEST_SECONDS", 0.05)
+    test_session["fail"] = {"write": lambda: asyncio.sleep(1)}
+    found = await _test(_address())
+    assert found[-1] == ("write", "failed", f"{HOST}:5432 did not answer in time")
+    assert found[:-1] == [*LOGGED_IN, ("table", "passed", None), ("unique key", "passed", None)]
+
+
+async def test_a_write_or_delete_the_server_answered_is_that_checks_outcome_and_rolled_back(test_session):
+    refused = asyncpg.exceptions.InsufficientPrivilegeError("x")
+    test_session["fail"] = {"delete": refused}
+    found = await _test(_address())
+    assert found[-1] == (
+        "delete",
+        "warning",
+        f"delete refused — rollback to this table will fail ({HOST} refused the delete "
+        "(InsufficientPrivilegeError, SQLSTATE 42501))",
+    )
+    assert test_session["conn"].calls == ["begin", "write", "delete", "rollback"]
+    test_session["fail"] = {"write": refused}
+    found = await _test(_address())
+    assert found[-1] == (
+        "write", "failed", f"{HOST} refused the write (InsufficientPrivilegeError, SQLSTATE 42501)"
+    )
+    assert test_session["conn"].calls == ["begin", "write", "rollback"]
