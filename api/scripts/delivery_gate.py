@@ -4,7 +4,9 @@ real S3 server (MinIO behind the gate fixture's TLS front), WebhookDeliveryWorkf
 a webhook and an SMTP destination, and a known secret looked for in every API response and every
 workflow history the gate made. O.1 — PRD-017 slice 2: the Postgres sink against a real Postgres
 (``delivery-postgres`` behind the fixture's TLS front), its tables and logins made here as the
-fixture's superuser.
+fixture's superuser. P.1 — PRD-017 slice 3: the Email block through the fixture's SMTP sink (its
+``defer-once`` recipient answers 451 once per Message-ID), its failure alert, a monitor check's change
+summary in the body.
 
 Run it with ``scripts/delivery-gate.sh`` (repo root): the driver brings the fixtures up, gives the
 workers the gate CA, makes the MinIO users with a fresh secret (``GATE_SECRET``), runs this, then looks
@@ -49,7 +51,8 @@ from app.models.user import User
 from app.models.user_quota import UserQuota
 from app.settings import settings
 from app.workflows.client import connect
-from scripts.pipeline_gate import API, HOOKS, LLM, TERMINAL, Gate, blocks_by_id, item
+from scripts.monitor_gate import watched
+from scripts.pipeline_gate import API, HOOKS, LLM, SHOP, TERMINAL, Gate, blocks_by_id, item
 
 SECRET = os.environ.get("GATE_SECRET", "")
 STARTED = os.environ.get("GATE_STARTED", "")
@@ -198,6 +201,25 @@ class DeliveryGate(Gate):
         if events is not None:
             config["events"] = events
         return {"id": id, "type": "webhook", "input": input, "config": config}
+
+    @staticmethod
+    def mail(destination: str, id="mail", input="store", events=None) -> dict:
+        config: dict = {"destination_id": destination}
+        if events is not None:
+            config["events"] = events
+        return {"id": id, "type": "email", "input": input, "config": config}
+
+    async def mails(self, message_id: str) -> list[dict]:
+        sink = (await self.fixture.get(f"{CONTROL}/_mail")).json()
+        return [m for m in sink["messages"] if m["message_id"] == message_id]
+
+    async def mails_after(self, message_id: str, count: int, timeout: float = 60) -> list[dict]:
+        deadline = time.monotonic() + timeout
+        while True:
+            found = await self.mails(message_id)
+            if len(found) >= count or time.monotonic() > deadline:
+                return found
+            await asyncio.sleep(0.5)
 
     def refusing(self, id="notify", input="store") -> dict:
         return self.hook(id=id, input=input, destination=self.dest["private_hook"])
@@ -974,6 +996,260 @@ async def notices(g: DeliveryGate) -> None:
     )
 
 
+# --- PRD-017 slice 3: the Email block -----------------------------------------------------------
+
+
+def message_id(rid: str, block_id: str, suffix: str = "") -> str:
+    return f"<{rid}.{block_id}{suffix}@{settings.public_host}>"
+
+
+def content_of(body: str) -> str:
+    """What follows the block's text: the content inline, or the note."""
+    return body.replace("\r\n", "\n").split("output (", 1)[-1].split("):\n\n", 1)[-1]
+
+
+async def email_sent(g: DeliveryGate) -> None:
+    print("Slice 3 — scrape → extract → bucket → email: one message through the user's SMTP server")
+    resp = await g.api.post(
+        "/pipelines",
+        json={
+            "name": "gate-email-order",
+            "definition": {
+                "inputs": {"url": {"type": "url"}},
+                "blocks": [
+                    g.fetch(),
+                    g.mail(g.dest["mail"], input="fetch"),
+                    g.store(g.dest["rw"], input="mail"),
+                ],
+            },
+        },
+    )
+    g.check(
+        resp.status_code == 422 and "'store' cannot follow email 'mail'" in resp.text,
+        f"an email before a bucket is refused at save, naming both ({resp.status_code} {resp.text[:160]})",
+    )
+    pid = await g.pipeline(
+        "email",
+        [g.fetch(), g.extract(), g.store(g.dest["rw"], input="extract"), g.mail(g.dest["mail"])],
+    )
+    name = (await g.api.get(f"/pipelines/{pid}")).json()["name"]
+    run = await g.run(pid, {"url": item("80")})
+    rid, blocks = run["id"], blocks_by_id(run)
+    print(f"  run {rid}")
+    g.check(
+        run["status"] == "completed"
+        and blocks["mail"]["status"] == "completed"
+        and blocks["mail"].get("delivery") is None,
+        f"the run completes, the email block sent and recorded no delivery ({run['status']} {run.get('error')})",
+    )
+    found = await g.mails_after(message_id(rid, "mail"), 1)
+    extraction = (
+        await g.api.get(f"/pipelines/{pid}/runs/{rid}/result", params={"block": "extract"})
+    ).json()
+    body = found[0]["body"] if found else ""
+    password = hashlib.sha256(f"{SECRET}-smtp".encode()).hexdigest()
+    g.check(
+        len(found) == 1
+        and found[0]["subject"] == f"[ScrapeFlow] {name}: run {rid}"
+        and found[0]["to"] == "ops@deliveryfixture.com"
+        and (found[0]["user"], found[0]["password_sha256"]) == ("gate-mailer", password),
+        f"one message, Message-ID {message_id(rid, 'mail')}, its subject naming the pipeline and run",
+    )
+    g.check(
+        f"run_id: {rid}" in body
+        and "block_id: mail" in body
+        and json.loads(content_of(body)) == json.loads(extraction["content"]),
+        "the body names the run and the block and holds the extraction inline",
+    )
+    g.check(
+        (blocks["store"]["undo_status"], blocks["mail"]["undo_status"]) == (None, None),
+        "nothing to undo on a completed run",
+    )
+
+
+async def email_too_large(g: DeliveryGate) -> None:
+    print("Slice 3 — a page over 256 KiB: the note naming the run, not the page")
+    key = uuid.uuid4().hex[:8]
+    (
+        await g.fixture.post(f"{SHOP}/_watched/{key}", json={"name": "k" * 300_000})
+    ).raise_for_status()
+    pid = await g.pipeline("email-large", [g.fetch(), g.mail(g.dest["mail"], input="fetch")])
+    run = await g.run(pid, {"url": watched(key)})
+    rid = run["id"]
+    found = await g.mails_after(message_id(rid, "mail"), 1)
+    note = content_of(found[0]["body"]).strip() if found else ""
+    g.check(
+        run["status"] == "completed"
+        and len(found) == 1
+        and note.startswith("result too large to include (")
+        and note.endswith(f"KiB); fetch it with run {rid}"),
+        f"one message with the note ({run['status']} {note[:100]})",
+    )
+    small = await g.run(pid, {"url": item("80")})
+    found = await g.mails_after(message_id(small["id"], "mail"), 1)
+    g.check(
+        len(found) == 1 and "<h1>Blue Kettle</h1>" in content_of(found[0]["body"]),
+        "a small page arrives inline",
+    )
+
+
+async def email_deferred(g: DeliveryGate) -> None:
+    print("R2 — a deferred email is sent again with the same Message-ID")
+    resp = await g.create(
+        {
+            "kind": "smtp",
+            "address": {
+                "host": "mail.deliveryfixture.com",
+                "port": 587,
+                "tls_mode": "starttls",
+                "from": "alerts@deliveryfixture.com",
+                "to": ["defer-once@deliveryfixture.com"],
+                "ca_certificate": (await g.fixture.get(f"{CONTROL}/_ca")).text,
+            },
+            "secret": {"user": "gate-mailer", "password": f"{SECRET}-smtp"},
+        }
+    )
+    g.check(resp.status_code == 201, f"a second SMTP destination is saved ({resp.status_code})")
+    pid = await g.pipeline(
+        "email-deferred", [g.fetch(), g.mail(resp.json().get("id", ""), input="fetch")]
+    )
+    rid = await g.start(pid, {"url": item("80")})
+    waiting = await g.until(
+        pid,
+        rid,
+        lambda r: r["status"] in TERMINAL or blocks_by_id(r)["mail"]["status"] == "waiting",
+    )
+    mail = blocks_by_id(waiting)["mail"]
+    g.check(
+        mail["status"] == "waiting" and "(451)" in (mail["error"] or ""),
+        f"the 451 leaves the block waiting ({mail['status']} {mail['error']})",
+    )
+    g.check(await g.holds_slot(rid) == 0, "a waiting email holds no concurrency slot")
+    run = await g.wait(pid, rid, 120)
+    sink = (await g.fixture.get(f"{CONTROL}/_mail")).json()
+    mid = message_id(rid, "mail")
+    g.check(
+        run["status"] == "completed"
+        and sink["deferred"].count(mid) == 1
+        and len(await g.mails(mid)) == 1,
+        f"the second try delivers the message the first one was refused with ({run['status']})",
+    )
+
+
+async def email_alert(g: DeliveryGate) -> None:
+    print("PRD-019 R5 — an Email block set to the run breaks: one failure message, after rollback")
+    pid = await g.pipeline(
+        "email-alert",
+        [
+            g.fetch(),
+            g.store(g.dest["rw"]),
+            g.guard([{"kind": "contains", "text": "Sold out"}], input="store"),
+            g.mail(g.dest["mail"], id="alert_mail", input="guard", events=["pipeline.failed"]),
+            g.mail(g.dest["mail"], id="result_mail", input="alert_mail"),
+        ],
+    )
+    run = await g.run(pid, {"url": item("80")})
+    rid, blocks = run["id"], blocks_by_id(run)
+    g.check(
+        (run["status"], run["failed_block_id"], blocks["store"]["undo_status"])
+        == ("failed", "guard", "undone"),
+        f"failed at guard, the bucket undone ({run['status']} {run['failed_block_id']} {blocks['store']['undo_status']})",
+    )
+    found = await g.mails_after(message_id(rid, "alert_mail", ".failed"), 1)
+    text = found[0]["body"].replace("\r\n", "\n") if found else ""
+    payload = json.loads(text.split("\n", 2)[-1]) if found else {}
+    g.check(
+        len(found) == 1
+        and payload.get("failed_block_id") == "guard"
+        and [e["block_id"] for e in payload.get("rollback", {}).get("undone", [])] == ["store"],
+        f"one failure email naming the failed block and what was undone ({payload.get('rollback')})",
+    )
+    await asyncio.sleep(3)
+    sink = (await g.fixture.get(f"{CONTROL}/_mail")).json()
+    g.check(
+        not [m for m in sink["messages"] if m["message_id"].startswith(f"<{rid}.result_mail")],
+        "the email block set to finishes OK only sends nothing",
+    )
+    run = await g.get(pid, rid)
+    alerts = [(a["block_id"], a["kind"], a["status"]) for a in run.get("alerts", [])]
+    g.check(
+        alerts == [("alert_mail", "email", "delivered")],
+        f"the run lists one email alert, delivered ({alerts})",
+    )
+
+
+async def email_monitor(g: DeliveryGate) -> None:
+    print("PRD-018 R4 — a monitor's check emails what changed")
+    key = uuid.uuid4().hex[:8]
+    await g.fixture.post(f"{SHOP}/_watched/{key}", json={"price": "80"})
+    gate = {
+        "id": "gate",
+        "type": "validate",
+        "input": "clean",
+        "config": {"rules": [{"kind": "changed"}], "when_unmet": "stop"},
+    }
+    pid = await g.pipeline(
+        "email-monitor",
+        [
+            g.fetch(),
+            g.clean(),
+            gate,
+            g.extract(input="gate"),
+            g.mail(g.dest["mail"], input="extract"),
+        ],
+    )
+    resp = await g.api.post(
+        "/monitors",
+        json={
+            "name": f"gate-email-{key}",
+            "pipeline_id": pid,
+            "inputs": {"url": watched(key)},
+            "schedule_cron": "0 3 1 1 *",
+        },
+    )
+    if resp.status_code != 201:
+        g.check(False, f"monitor created ({resp.status_code} {resp.text[:200]})")
+        return
+    mid = resp.json()["id"]
+
+    async def check_now() -> dict:
+        r = await g.api.post(f"/monitors/{mid}/check")
+        return (
+            await g.wait(pid, r.json()["id"])
+            if r.status_code == 202
+            else {"id": "", "status": r.text}
+        )
+
+    try:
+        first = await check_now()
+        await g.fixture.post(f"{SHOP}/_watched/{key}", json={"price": "70"})
+        second = await check_now()
+        third = await check_now()
+    finally:
+        await g.api.delete(f"/monitors/{mid}")
+    one = await g.mails_after(message_id(first["id"], "mail"), 1)
+    two = await g.mails_after(message_id(second["id"], "mail"), 1)
+    body = two[0]["body"].replace("\r\n", "\n") if two else ""
+    g.check(
+        len(one) == 1 and "Change: first check — nothing to compare" in one[0]["body"],
+        "the first check's email says there is nothing to compare",
+    )
+    g.check(
+        len(two) == 1
+        and f"monitor_id: {mid}" in body
+        and f"Change: changed since check {first['id']}" in body
+        and "+Price: £70" in body
+        and "/price: 80" in body
+        and "→ 70" in body,
+        f"the changed check's email carries the page lines and the value that changed ({body[:400]!r})",
+    )
+    g.check(
+        third.get("stopped_at_block_id") == "gate"
+        and not await g.mails(message_id(third["id"], "mail")),
+        "an unchanged check stops at the gate and sends nothing",
+    )
+
+
 # --- PRD-017 slice 2: the Postgres sink ---------------------------------------------------------
 
 
@@ -1328,6 +1604,12 @@ SCENARIOS = {
     "postgres_login_refused": postgres_login_refused,
     "postgres_private_at_delivery": postgres_private_at_delivery,
     "notices": notices,
+    # After notices: it counts the SMTP sessions since the destinations scenario.
+    "email_sent": email_sent,
+    "email_too_large": email_too_large,
+    "email_deferred": email_deferred,
+    "email_alert": email_alert,
+    "email_monitor": email_monitor,
     "secrets": secrets,
     "admin_delete": admin_delete,
 }

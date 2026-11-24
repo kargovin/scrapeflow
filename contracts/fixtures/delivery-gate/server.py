@@ -7,7 +7,9 @@ Postgres server, an SMTP sink, and the CA that signed their certificate.
                                        PUT    "lostreply"  written by MinIO, the reply dropped
                                        DELETE "waitundo"   closed unanswered (nothing deleted)
     hooks.deliveryfixture.com  :443  TLS, then the pipeline fixture's receiver (pipeline-fixture:80)
-    mail.deliveryfixture.com   :587  SMTP: STARTTLS, then AUTH PLAIN; a password starting "wrong" → 535
+    mail.deliveryfixture.com   :587  SMTP: STARTTLS, then AUTH PLAIN; a password starting "wrong" → 535;
+                                     a recipient starting "defer-once" → 451 at the end of DATA, the
+                                     first time each Message-ID arrives (listed under "deferred")
     pg.deliveryfixture.com     :5432 Postgres: TLS (the client's SSLRequest), then delivery-postgres:5432
                                      in plain text. Two faults, each on the FIRST statement of its kind
                                      for a run whose parameters hold the word:
@@ -58,6 +60,7 @@ SEEN: dict[tuple[bytes, bytes], int] = {}
 S3_LOG: list[dict] = []
 SESSIONS: list[dict] = []
 MESSAGES: list[dict] = []
+DEFERRED: list[str] = []
 PG_SEEN: set[tuple[str, str]] = set()
 PG_LOG: list[dict] = []
 
@@ -217,6 +220,7 @@ async def front(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 async def smtp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     session = {"tls": False, "user": None, "password_sha256": None, "auth": None, "messages": 0}
     SESSIONS.append(session)
+    recipients: list[str] = []
 
     def send(line: str) -> None:
         writer.write((line + "\r\n").encode())
@@ -259,10 +263,17 @@ async def smtp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> No
                 while (chunk := await reader.readline()) not in (b".\r\n", b""):
                     data += chunk
                 message = email.message_from_bytes(bytes(data), policy=email.policy.default)
+                message_id = str(message["Message-ID"])
+                if any(r.startswith("defer-once") for r in recipients) and message_id not in DEFERRED:
+                    DEFERRED.append(message_id)
+                    print("mail deferred", message_id, flush=True)
+                    send("451 try again later")
+                    await writer.drain()
+                    continue
                 session["messages"] += 1
                 MESSAGES.append(
                     {
-                        "message_id": str(message["Message-ID"]),
+                        "message_id": message_id,
                         "subject": str(message["Subject"]),
                         "from": str(message["From"]),
                         "to": str(message["To"]),
@@ -274,6 +285,12 @@ async def smtp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> No
                 )
                 print("mail", message["Message-ID"], flush=True)
                 send("250 queued")
+            elif verb == "MAIL":
+                recipients.clear()
+                send("250 ok")
+            elif verb == "RCPT":
+                recipients.append(text.split(":", 1)[1].strip().strip("<>").lower())
+                send("250 ok")
             elif verb == "QUIT":
                 send("221 bye")
                 await writer.drain()
@@ -420,7 +437,9 @@ async def control(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             status, body, kind = 200, (PKI / "ca.pem").read_bytes(), "application/x-pem-file"
         elif path == "/_mail":
             status, kind = 200, "application/json"
-            body = json.dumps({"sessions": SESSIONS, "messages": MESSAGES}).encode()
+            body = json.dumps(
+                {"sessions": SESSIONS, "messages": MESSAGES, "deferred": DEFERRED}
+            ).encode()
         elif path == "/_s3":
             status, body, kind = 200, json.dumps(S3_LOG).encode(), "application/json"
         elif path == "/_pg":
