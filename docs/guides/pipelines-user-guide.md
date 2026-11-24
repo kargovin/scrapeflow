@@ -57,7 +57,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON scrapeflow_deliveries TO scrapeflow_writ
 **Connection.** The database must be reachable from the internet (private, local and loopback
 addresses are refused, when saved and on every attempt) and must speak **TLS with a certificate valid
 for the host name you give**. A server without TLS is refused: nothing is sent in plain text. For a
-certificate from your own CA, paste the CA certificate into the destination. The login (user and
+certificate from your own CA, paste the CA certificate into the destination. A hosted Postgres whose certificate
+is signed by the provider's own CA needs that CA pasted the same way (the test fails at *tls* without it). Behind a
+connection pooler, use its session mode: a transaction-mode pooler cannot hold the prepared statements ScrapeFlow
+uses. If the provider exposes a schema through a public API (often `public`), put the table in a schema of its own. The login (user and
 password) is stored encrypted and never shown again.
 
 **The test.** Testing or saving the destination connects, logs in, and in one transaction that is
