@@ -41,6 +41,7 @@ from app.workflows.activities.contracts import (
     DIFF_ACTIVITY,
     LLM_EXTRACT_ACTIVITY,
     SCRAPE_ACTIVITY,
+    SEND_EMAIL_ACTIVITY,
     UNDO_BUCKET_ACTIVITY,
     UNDO_POSTGRES_ACTIVITY,
     VALIDATE_ACTIVITY,
@@ -61,6 +62,8 @@ from app.workflows.activities.contracts import (
     LLMOutput,
     ScrapeInput,
     ScrapeOutput,
+    SendEmailInput,
+    SendEmailOutput,
     StoredObject,
     UndoBucketInput,
     UndoBucketOutput,
@@ -95,6 +98,7 @@ from app.workflows.pipeline import (
     WEBHOOK_ACTIVITY,
     ApprovalOutcome,
     ApprovalRef,
+    EmailEnvelope,
     LLMKey,
     LoadDestinationInput,
     LoadedDestination,
@@ -240,9 +244,28 @@ POSTGRES_ADDRESS = {
 }
 
 
+SMTP_ADDRESS = {
+    "host": "mail.example.com",
+    "port": 587,
+    "tls_mode": "starttls",
+    "from": "alerts@example.org",
+    "to": ["ops@example.org"],
+    "ca_certificate": None,
+}
+ENVELOPE = EmailEnvelope(
+    pipeline_name="prices",
+    run_url="https://scrapeflow.example.org/app/dashboard/pipelines/p1/runs/r1",
+    message_host="scrapeflow.example.org",
+)
+
+
 async def _load_ok(input: LoadDestinationInput) -> LoadedDestination:
     if input.kind == "postgres":
         return LoadedDestination(address=POSTGRES_ADDRESS, encrypted_secret="db-ciphertext")
+    if input.kind == "smtp":
+        return LoadedDestination(
+            address=SMTP_ADDRESS, encrypted_secret="mail-ciphertext", email=ENVELOPE
+        )
     return LoadedDestination(address=BUCKET_ADDRESS, encrypted_secret="bucket-ciphertext")
 
 
@@ -269,6 +292,10 @@ async def _postgres_undo_ok(input: UndoPostgresInput) -> UndoPostgresOutput:
     return UndoPostgresOutput()
 
 
+async def _email_ok(input: SendEmailInput) -> SendEmailOutput:
+    return SendEmailOutput()
+
+
 class Harness:
     """Mocked activities on their real queues; records every DB-activity call in order."""
 
@@ -290,6 +317,7 @@ class Harness:
         answer=None,
         postgres=_postgres_ok,
         postgres_undo=_postgres_undo_ok,
+        email=_email_ok,
     ):
         self.calls: list = []
         self.acquired: list[HostSlotInput] = []
@@ -329,6 +357,9 @@ class Harness:
         self.postgres_info: list = []
         self._postgres_undo = postgres_undo
         self.postgres_undo_inputs: list[UndoPostgresInput] = []
+        self._email = email
+        self.email_inputs: list[SendEmailInput] = []
+        self.email_info: list = []
         # What the rollback mirrors answer: the run's status.
         self.rollback_reply = "running"
         # The Approval block's recorded answer, as its row holds it; an expiry writes "expired".
@@ -451,6 +482,12 @@ class Harness:
             self.postgres_undo_inputs.append(input)
             return await self._postgres_undo(input)
 
+        @activity.defn(name=SEND_EMAIL_ACTIVITY)
+        async def send_email(input: SendEmailInput) -> SendEmailOutput:
+            self.email_inputs.append(input)
+            self.email_info.append(activity.info())
+            return await self._email(input)
+
         @activity.defn(name=REQUEST_APPROVAL_ACTIVITY)
         async def request_approval(input: RequestApprovalInput) -> None:
             self.calls.append(input)
@@ -484,6 +521,7 @@ class Harness:
         workflow_queue += [release_outputs, load, rollback_started, mirror_undo]
         workflow_queue += [request_approval, remind_approval, resolve_approval, supersede_approval]
         self.delivery_queue = [deliver_bucket, undo_bucket, deliver_postgres, undo_postgres]
+        self.delivery_queue += [send_email]
         return workflow_queue, scrape, llm, [clean, validate, diff, capture]
 
     async def run(self, run_input=RUN_INPUT, timeout=timedelta(days=1), during=None, **kw):

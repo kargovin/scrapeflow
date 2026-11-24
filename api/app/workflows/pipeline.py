@@ -41,6 +41,7 @@ with workflow.unsafe.imports_passed_through():
         ApprovalBlock,
         BucketBlock,
         CleanBlock,
+        EmailBlock,
         LLMExtractBlock,
         PostgresBlock,
         RunBlock,
@@ -49,7 +50,7 @@ with workflow.unsafe.imports_passed_through():
         WebhookBlock,
     )
     from app.schemas.jobs import Engine
-    from app.workflows import steps
+    from app.workflows import email_text, steps
     from app.workflows.activities.contracts import (
         CAPTURE_ACTIVITY,
         CLEAN_ACTIVITY,
@@ -59,6 +60,7 @@ with workflow.unsafe.imports_passed_through():
         LLM_EXTRACT_ACTIVITY,
         NOT_WRITTEN,
         SCRAPE_ACTIVITY,
+        SEND_EMAIL_ACTIVITY,
         UNDO_BUCKET_ACTIVITY,
         UNDO_POSTGRES_ACTIVITY,
         VALIDATE_ACTIVITY,
@@ -80,6 +82,8 @@ with workflow.unsafe.imports_passed_through():
         ScrapeInput,
         ScrapeOptions,
         ScrapeOutput,
+        SendEmailInput,
+        SendEmailOutput,
         StoredObject,
         UndoBucketInput,
         UndoBucketOutput,
@@ -304,11 +308,22 @@ class LoadDestinationInput(BaseModel):
     kind: str
 
 
+class EmailEnvelope(BaseModel):
+    """What an Email block's message names, read with its smtp destination (PRD-017 R1)."""
+
+    pipeline_name: str
+    run_url: str
+    # PUBLIC_BASE_URL's host: the Message-ID's right-hand side (ADR-015 §5).
+    message_host: str
+
+
 class LoadedDestination(BaseModel):
     """The destination as it is now (ADR-015 §2b); the secret stays ciphertext."""
 
     address: dict[str, Any]
     encrypted_secret: str
+    # An smtp destination's only.
+    email: EmailEnvelope | None = None
 
 
 class RollbackStartedInput(BaseModel):
@@ -619,7 +634,7 @@ class PipelineWorkflow:
             verdict: ValidateVerdict | None = None
             answer: ApprovalAnswer | None = None
             if (
-                isinstance(block, WebhookBlock)
+                isinstance(block, WebhookBlock | EmailBlock)
                 and WEBHOOK_RESULT_EVENT not in block.config.events
                 and workflow.patched(WEBHOOK_EVENTS_PATCH)
             ):
@@ -646,6 +661,7 @@ class PipelineWorkflow:
 
             timing = block_type.timing(block.config)
             delivery: dict[str, Any] | None = None
+            note: str | None = None
             try:
                 # ADR-009 15a/15d: an effect block may wait between attempts, and a cancel
                 # interrupts that wait; a running attempt still finishes (R3).
@@ -655,8 +671,10 @@ class PipelineWorkflow:
                     # §9d: the run's budget does not run during the wait.
                     deadline += waited
                     objects = []
-                elif isinstance(block, BucketBlock | PostgresBlock) and self._sinks:
-                    delivery = await self._deliver_sink(block, input, input_ref, deadline, timing)
+                elif isinstance(block, BucketBlock | PostgresBlock | EmailBlock) and self._sinks:
+                    delivery, note = await self._deliver_sink(
+                        block, input, input_ref, deadline, timing
+                    )
                     objects = []
                 elif isinstance(block, ScrapeBlock) and workflow.patched(steps.HOST_SLOT_PATCH):
                     objects = await self._scrape_in_host_slot(
@@ -757,6 +775,8 @@ class PipelineWorkflow:
                 self._delivered.append((block.id, delivery))
             elif block_type.sink is not None and not block_type.sink.reversible:
                 self._announced.append(block.id)
+            if note is not None:
+                extra["error"] = note
             await self._mirror_block(
                 input.run_id, block.id, "completed", output_ref=output_ref, **extra
             )
@@ -977,17 +997,20 @@ class PipelineWorkflow:
 
     async def _deliver_sink(
         self,
-        block: BucketBlock | PostgresBlock,
+        block: BucketBlock | PostgresBlock | EmailBlock,
         input: PipelineRunInput,
         input_ref: str | None,
         deadline: datetime,
         timing: Timing,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any] | None, str | None]:
         """The workflow-driven tries (ADR-015 §4): load the destination, one attempt on the delivery
         queue; a transient failure mirrors ``waiting``, sleeps (a cancel ends the sleep) and mirrors
-        ``running`` again. Returns the delivery record; raises on a final failure."""
+        ``running`` again. Returns the delivery record (none for an email) and a note for the
+        completed block; raises on a final failure."""
         assert input_ref is not None and block.input is not None
         kind = block.type
+        sink = CATALOG[kind].sink
+        assert sink is not None
         destination_id = str(block.config.destination_id)
         ext = _BUCKET_EXT[block_outputs(input.blocks)[block.input]]
         error = ""
@@ -1022,7 +1045,9 @@ class PipelineWorkflow:
                 _db(
                     LOAD_DESTINATION_ACTIVITY,
                     LoadDestinationInput(
-                        run_id=input.run_id, destination_id=destination_id, kind=kind
+                        run_id=input.run_id,
+                        destination_id=destination_id,
+                        kind=CATALOG[kind].destination_kind or kind,
                     ),
                     LoadedDestination,
                 )
@@ -1034,7 +1059,9 @@ class PipelineWorkflow:
                 raise ApplicationError("the run's time budget is spent", non_retryable=True)
             name, arg, result_type = self._sink_try(block, input, input_ref, loaded, ext)
             try:
-                out: DeliverBucketOutput | DeliverPostgresOutput = await self._finish(
+                out: (
+                    DeliverBucketOutput | DeliverPostgresOutput | SendEmailOutput
+                ) = await self._finish(
                     workflow.execute_activity(
                         name,
                         arg,
@@ -1052,7 +1079,7 @@ class PipelineWorkflow:
                     )
                 )
             except ActivityError as exc:
-                if _may_have_written(exc.cause):
+                if sink.reversible and _may_have_written(exc.cause):
                     self._unsure = (
                         block.id,
                         _postgres_record(destination_id, loaded.address, input, block.id)
@@ -1065,25 +1092,55 @@ class PipelineWorkflow:
                 if self._cancel_requested:
                     raise _run_cancelled() from None
                 continue
+            if isinstance(out, SendEmailOutput):
+                refused = ", ".join(out.refused)
+                return None, f"recipients refused: {refused}" if refused else None
             # Names only (ADR-014 §5a): never an address or a credential.
             return {
                 "destination_id": destination_id,
                 "kind": kind,
                 "location": out.location.model_dump(mode="json", by_alias=True),
-            }
+            }, None
         raise ApplicationError(
             f"{error} (gave up after {timing.maximum_attempts} attempts)", non_retryable=True
         )
 
-    @staticmethod
     def _sink_try(
-        block: BucketBlock | PostgresBlock,
+        self,
+        block: BucketBlock | PostgresBlock | EmailBlock,
         input: PipelineRunInput,
         input_ref: str,
         loaded: LoadedDestination,
         ext: Literal["html", "md", "json"],
     ) -> tuple[str, BaseModel, type[BaseModel]]:
         """One try's activity, input and result type, against the destination as it is now."""
+        if isinstance(block, EmailBlock):
+            envelope = loaded.email
+            if envelope is None:
+                raise ApplicationError("the email's envelope was not loaded", non_retryable=True)
+            assert block.input is not None
+            return (
+                SEND_EMAIL_ACTIVITY,
+                SendEmailInput(
+                    address=loaded.address,
+                    encrypted_secret=loaded.encrypted_secret,
+                    message_id=email_text.message_id(input.run_id, block.id, envelope.message_host),
+                    subject=email_text.subject(envelope.pipeline_name, input.run_id),
+                    body=email_text.body(
+                        pipeline_name=envelope.pipeline_name,
+                        pipeline_id=input.pipeline_id,
+                        run_id=input.run_id,
+                        block_id=block.id,
+                        run_url=envelope.run_url,
+                        input_block=block.input,
+                        input_type=block_outputs(input.blocks)[block.input],
+                        **self._webhook_check_fields(),
+                    ),
+                    run_id=input.run_id,
+                    source_path=input_ref,
+                ),
+                SendEmailOutput,
+            )
         if isinstance(block, PostgresBlock):
             return (
                 DELIVER_POSTGRES_ACTIVITY,

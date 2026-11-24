@@ -15,6 +15,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.core import webhook_delivery
+from app.core.approvals import run_url
 from app.core.db import AsyncSessionLocal
 from app.core.destinations import DestinationGone, current_destination
 from app.core.ledger import objects_for_pipeline_run, record_object, release_objects
@@ -23,8 +24,9 @@ from app.core.pipeline_alerts import queue_failure_alerts
 from app.core.pipeline_status import notify_run
 from app.core.quota import lock_user, storage_usage
 from app.core.storage import delete_minio_object
-from app.models.pipeline import PipelineRun, PipelineRunBlock
+from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock
 from app.models.storage_object import StorageObject
+from app.settings import settings
 from app.workflows.activities.job_runs import get_minio
 from app.workflows.pipeline import (
     CHECK_CANCELLED_ACTIVITY,
@@ -38,6 +40,7 @@ from app.workflows.pipeline import (
     RECORD_STORAGE_ACTIVITY,
     RELEASE_RUN_OUTPUTS_ACTIVITY,
     RUN_CANCELLED_ERROR,
+    EmailEnvelope,
     LoadDestinationInput,
     LoadedDestination,
     MirrorBlockInput,
@@ -320,25 +323,36 @@ async def check_cancelled(input: RunRef) -> bool:
 
 @activity.defn(name=LOAD_DESTINATION_ACTIVITY)
 async def load_destination(input: LoadDestinationInput) -> LoadedDestination:
-    """A sink's destination as it is now, before each try (ADR-015 §4); the run's owner's only."""
+    """A sink's destination as it is now, before each try (ADR-015 §4); the run's owner's only.
+
+    An smtp destination's comes with what the message names: the pipeline, the run page, the
+    Message-ID's host."""
     async with AsyncSessionLocal() as db:
-        user_id = await db.scalar(
-            select(PipelineRun.user_id).where(PipelineRun.id == uuid.UUID(input.run_id))
-        )
-        if user_id is None:
+        run = await db.get(PipelineRun, uuid.UUID(input.run_id))
+        if run is None:
             raise ApplicationError(
                 "the run was deleted", type=RUN_CANCELLED_ERROR, non_retryable=True
             )
         try:
             destination = await current_destination(
-                db, uuid.UUID(input.destination_id), user_id, input.kind
+                db, uuid.UUID(input.destination_id), run.user_id, input.kind
             )
         except DestinationGone as exc:
             raise ApplicationError(
                 str(exc), type=DESTINATION_GONE_ERROR, non_retryable=True
             ) from None
+        email = None
+        if destination.kind == "smtp":
+            pipeline = await db.get(Pipeline, run.pipeline_id)
+            email = EmailEnvelope(
+                pipeline_name=pipeline.name if pipeline is not None else str(run.pipeline_id),
+                run_url=run_url(run),
+                message_host=settings.public_host,
+            )
         return LoadedDestination(
-            address=destination.address, encrypted_secret=destination.encrypted_secret
+            address=destination.address,
+            encrypted_secret=destination.encrypted_secret,
+            email=email,
         )
 
 

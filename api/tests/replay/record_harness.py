@@ -40,6 +40,15 @@ from tests.test_workflows_batch import Harness as BatchHarness
 from tests.test_workflows_batch import _batch_input, _scrape_ok, _scraped
 from tests.test_workflows_crawl import SITE, Frontier, _sitemaps, crawl_input
 from tests.test_workflows_crawl import Harness as CrawlHarness
+from tests.test_workflows_email_block import (
+    MAIL_ONLY,
+    _deferred,
+    _diffs,
+    _mail,
+    _monitored_email,
+    _unanswered_then_refused,
+)
+from tests.test_workflows_email_block import _refused as _mail_refused
 from tests.test_workflows_job import KEY
 from tests.test_workflows_job import Harness as JobHarness
 from tests.test_workflows_monitor_check import Harness as MonitorHarness
@@ -285,6 +294,26 @@ SCENARIOS = {
     "harness_sinks_postgres_refused": (
         {"postgres": _pg_failing(_pg_refused(NOT_WRITTEN))},
         DB_ONLY,
+    ),
+    # P.1 — the email block (patches "sinks", "rollback", "webhook-events"): no new path elsewhere.
+    "harness_sinks_email_sent": ({}, MAIL_ONLY),
+    "harness_sinks_email_deferred_then_sent": ({"email": _deferred(1)}, MAIL_ONLY),
+    "harness_sinks_email_refused": ({"email": _mail_refused}, MAIL_ONLY),
+    "harness_rollback_email_sent_then_webhook_refused": (
+        {"webhook": _hook_refused},
+        _sinks(STORE, _mail(input="store"), {**HOOK, "input": "mail"}),
+    ),
+    "harness_rollback_email_gave_up_bucket_undone": (
+        {"email": _unanswered_then_refused()},
+        _sinks(STORE, _mail(input="store")),
+    ),
+    "harness_alert_only_email_skipped_before_bucket": (
+        {},
+        _sinks(_mail(events=["pipeline.failed"]), {**STORE, "input": "mail"}),
+    ),
+    "harness_monitor_email_change_summary": (
+        {"validate": _changed, "diff": _diffs},
+        _monitored_email(WITH_BASELINE),
     ),
     # N.2 — an Approval block's wait (patch "approval").
     "harness_approval_approved": (
