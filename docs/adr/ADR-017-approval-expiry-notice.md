@@ -1,6 +1,7 @@
 # ADR-017: An Expired Approval on a Monitor Check Sends a Monitor Notice
 
-**Status:** **Draft** — the decision is the owner's (2026-11-24); the text awaits the owner's review.
+**Status:** **Accepted** 2026-11-24 (owner) — the decision is the owner's (2026-11-24). Immutable from here: a change
+is a new, superseding ADR.
 **Date:** 2026-11-24
 **Supersedes:** ADR-016 §8's last bullet and §9c's first bullet, **for the expiry of a monitor check's approval
 only**. Everything else in ADR-016 stands.

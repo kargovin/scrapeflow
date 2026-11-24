@@ -4666,7 +4666,7 @@ run reads return 500 until the runs are deleted or the release is rolled forward
 **Carried from N's build (2026-11-24):**
 - N.1 replaced `BlockType.destination_kind` with `destination_kinds` (a tuple; the catalog response keeps `destination_kind`, null for approval) — read the M note below with that name.
 - Any new filter on a block's JSONB columns (`delivery`, `verdict`) must treat JSON `null` like SQL NULL (*Traps that span groups*).
-- O.0 (built 2026-11-24): migration 4.16 `7d79370b821e` is head — O.1's migration revises it; Release O carries both. **O.2 runs the full approval gate (≈ 70 min, under `systemd-inhibit --what=sleep:idle`)**: its expiry step changed at O.0 and was only import-checked. ADR-017 is Draft until the owner accepts it.
+- O.0 (built 2026-11-24): migration 4.16 `7d79370b821e` is head — O.1's migration revises it; Release O carries both. **O.2 runs the full approval gate (≈ 70 min, under `systemd-inhibit --what=sleep:idle`)**: its expiry step changed at O.0 and was only import-checked. ADR-017 Accepted 2026-11-24 (owner).
 
 **Carried from M's build (2026-11-21):**
 - A new sink = a `BlockType` with `sink=Sink(...)`, `destination_kind`, and (reversible) an undo `Timing`; the order rule, rollback reserve, save/trigger destination checks and version rows follow from those fields.
@@ -4678,7 +4678,7 @@ run reads return 500 until the runs are deleted or the release is rolled forward
 
 #### O.0 — An expired approval sends a monitor notice (ADR-017)
 
-**Why:** owner, 2026-11-24 (Release N): PRD-018 R5 — expiry sends a monitor notice. ADR-017 (Draft) displaces
+**Why:** owner, 2026-11-24 (Release N): PRD-018 R5 — expiry sends a monitor notice. ADR-017 (Accepted 2026-11-24) displaces
 ADR-016 §8/§9c's expiry clauses.
 **What:** migration: `monitor_events.kind` CHECK + `approval_expired`; `NOTICE_KINDS` gains it.
 `monitor_check_ended` (same transaction, lock order of ADR-016 §8): a monitor check ending `completed` with

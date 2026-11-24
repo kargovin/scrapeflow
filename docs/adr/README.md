@@ -39,7 +39,7 @@ An ADR captures a significant architectural decision: what was decided, why, wha
 | [ADR-014](ADR-014-block-outcomes-stop-rollback-alerts.md) | Block Outcomes — Stopping Early, Rollback, and Failure Alerts | **Accepted** 2026-11-18 (owner review 2026-11-03, 10 rounds) | 2026-10-30 | — | — |
 | [ADR-015](ADR-015-delivery-sinks.md) | Delivery Sinks — Destinations, Egress, and the Delivery Worker | **Accepted** 2026-11-18 (owner review 2026-11-18, 9 rounds) | 2026-10-30 | — | — |
 | [ADR-016](ADR-016-monitors.md) | Monitors — Schedules, the Baseline, the Change Gate, Approval | **Accepted** 2026-11-18 (owner review 2026-11-18, 12 rounds) | 2026-11-18 | — | ADR-017 (expiry notice only) |
-| [ADR-017](ADR-017-approval-expiry-notice.md) | An Expired Approval on a Monitor Check Sends a Monitor Notice | **Draft** (decision: owner, 2026-11-24) | 2026-11-24 | ADR-016 §8 + §9c (expiry clauses only) | — |
+| [ADR-017](ADR-017-approval-expiry-notice.md) | An Expired Approval on a Monitor Check Sends a Monitor Notice | **Accepted** 2026-11-24 (decision and text: owner) | 2026-11-24 | ADR-016 §8 + §9c (expiry clauses only) | — |
 
 **ADR-009 is Accepted as of 2026-09-08.** Its section-by-section review completed 2026-09-05 —
 **§1–§17 and both closing blocks**, several reversed in the process — and the owner took the
