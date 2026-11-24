@@ -22,6 +22,7 @@ from app.pipelines.catalog import (
     ContainsRule,
     InputBinding,
     LLMExtractConfigV1,
+    PostgresConfigV1,
     ScrapeConfigV1,
     ValidateConfigV1,
     WebhookConfigV1,
@@ -86,6 +87,11 @@ class BucketBlock(_RunBlock):
     config: BucketConfigV1
 
 
+class PostgresBlock(_RunBlock):
+    type: Literal["postgres"] = "postgres"
+    config: PostgresConfigV1
+
+
 class ApprovalBlock(_RunBlock):
     type: Literal["approval"] = "approval"
     config: ApprovalConfigV1
@@ -98,6 +104,7 @@ RunBlock = Annotated[
     | ValidateBlock
     | WebhookBlock
     | BucketBlock
+    | PostgresBlock
     | ApprovalBlock,
     Field(discriminator="type"),
 ]
@@ -111,6 +118,7 @@ _RUN_BLOCKS: dict[str, type[_RunBlock]] = {
     "validate": ValidateBlock,
     "webhook": WebhookBlock,
     "bucket": BucketBlock,
+    "postgres": PostgresBlock,
     "approval": ApprovalBlock,
 }
 

@@ -38,6 +38,8 @@ from app.schemas.jobs import Engine, PlaywrightOptions, validate_page_actions
 from app.workflows.activities.contracts import (
     BUCKET_DELIVER_ATTEMPT_SECONDS,
     BUCKET_UNDO_ATTEMPT_SECONDS,
+    POSTGRES_DELIVER_ATTEMPT_SECONDS,
+    POSTGRES_UNDO_ATTEMPT_SECONDS,
 )
 
 # Reference types: what a block's output object holds (ADR-009 §5 — types of reference, not
@@ -407,6 +409,11 @@ class BucketConfigV1(_Config):
     destination_id: uuid.UUID
 
 
+class PostgresConfigV1(_Config):
+    # A postgres destination; one row keyed by (run_id, block_id) in its table (ADR-015 §5).
+    destination_id: uuid.UUID
+
+
 class ApprovalConfigV1(_Config):
     """ADR-016 §9a. The maximum is an operator setting, so the validator checks it."""
 
@@ -594,6 +601,22 @@ BUCKET = BlockType(
     destination_kinds=("bucket",),
 )
 
+POSTGRES_UNDO_TIMING = _delivery_retry(POSTGRES_UNDO_ATTEMPT_SECONDS, db_per_try=1)
+
+POSTGRES = BlockType(
+    name="postgres",
+    kind="effect",
+    config_versions={1: PostgresConfigV1},
+    # One JSON value in one parameter (ADR-015 §7).
+    consumes=JSON_DOCUMENTS,
+    produces=_pass_through,
+    timing=lambda _config: _delivery_retry(
+        POSTGRES_DELIVER_ATTEMPT_SECONDS, db_per_try=1, db_between_tries=2
+    ),
+    sink=Sink(reversible=True, undo=POSTGRES_UNDO_TIMING),
+    destination_kinds=("postgres",),
+)
+
 # ADR-016 §9a: request_approval and resolve_approval, each one DB step; the wait is not in it (§9d).
 APPROVAL_TIMING = Timing(
     start_to_close=DB_ACTIVITY_SECONDS,
@@ -617,7 +640,7 @@ APPROVAL = BlockType(
 )
 
 CATALOG: Mapping[str, BlockType] = {
-    t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK, BUCKET, APPROVAL)
+    t.name: t for t in (SCRAPE, CLEAN, LLM_EXTRACT, VALIDATE, WEBHOOK, BUCKET, POSTGRES, APPROVAL)
 }
 
 

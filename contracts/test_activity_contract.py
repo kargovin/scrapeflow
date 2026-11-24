@@ -651,6 +651,11 @@ def test_the_api_parses_the_destination_test_output():
         (delivery.UndoBucketOutput, api.UndoBucketOutput),
         (api.SendEmailInput, delivery.SendEmailInput),
         (delivery.SendEmailOutput, api.SendEmailOutput),
+        (api.DeliverPostgresInput, delivery.DeliverPostgresInput),
+        (delivery.DeliverPostgresOutput, api.DeliverPostgresOutput),
+        (api.PostgresLocation, delivery.PostgresLocation),
+        (api.UndoPostgresInput, delivery.UndoPostgresInput),
+        (delivery.UndoPostgresOutput, api.UndoPostgresOutput),
     ],
 )
 def test_the_delivery_queue_carries_every_field_both_ways(producer, consumer):
@@ -666,12 +671,16 @@ def test_the_delivery_worker_registers_the_names_and_queue_the_api_calls():
     assert delivery.TEST_SMTP_ACTIVITY == api.TEST_SMTP_ACTIVITY
     assert delivery.TEST_POSTGRES_ACTIVITY == api.TEST_POSTGRES_ACTIVITY
     assert delivery.SEND_EMAIL_ACTIVITY == api.SEND_EMAIL_ACTIVITY
+    assert delivery.DELIVER_POSTGRES_ACTIVITY == api.DELIVER_POSTGRES_ACTIVITY
+    assert delivery.UNDO_POSTGRES_ACTIVITY == api.UNDO_POSTGRES_ACTIVITY
 
 
 def test_both_sides_agree_on_the_bucket_attempt_budgets():
     assert delivery.BUCKET_DELIVER_ATTEMPT_SECONDS == api.BUCKET_DELIVER_ATTEMPT_SECONDS
     assert delivery.BUCKET_UNDO_ATTEMPT_SECONDS == api.BUCKET_UNDO_ATTEMPT_SECONDS
     assert delivery.EMAIL_SEND_ATTEMPT_SECONDS == api.EMAIL_SEND_ATTEMPT_SECONDS
+    assert delivery.POSTGRES_DELIVER_ATTEMPT_SECONDS == api.POSTGRES_DELIVER_ATTEMPT_SECONDS
+    assert delivery.POSTGRES_UNDO_ATTEMPT_SECONDS == api.POSTGRES_UNDO_ATTEMPT_SECONDS
 
 
 def test_both_sides_agree_on_the_not_written_detail():
@@ -737,6 +746,61 @@ def test_a_recorded_location_reaches_the_undo_whole():
 def test_the_api_parses_the_undo_output(already_gone):
     out = delivery.UndoBucketOutput(already_gone=already_gone)
     assert _decode(_encode(out), api.UndoBucketOutput).already_gone is already_gone
+
+
+RUN_ID = "9d2e1b3c-0000-4000-8000-000000000002"
+
+
+def test_the_postgres_delivery_input_reaches_the_delivery_worker_whole():
+    address, _ = STORED_DESTINATIONS["postgres"]
+    sent = api.DeliverPostgresInput(
+        address=api_destinations.stored(address),
+        encrypted_secret="gAAAAAB_secret",
+        source_path="scrapeflow-results/history/3f8b7a12/llm.json",
+        pipeline_id="4c1f0e7a-0000-4000-8000-000000000001",
+        run_id=RUN_ID,
+        block_id="db",
+    )
+    received = _decode(_encode(sent), delivery.DeliverPostgresInput)
+
+    assert received.model_dump() == sent.model_dump()
+    parsed = delivery.KIND_MODELS["postgres"][0].model_validate(received.address)
+    assert (parsed.db_schema, parsed.table, parsed.port) == ("sf", "rows", 5432)
+
+
+def test_the_workflow_derives_the_row_the_worker_writes():
+    # A lost reply's row is rebuilt in the workflow to undo it (ADR-015 §5).
+    stored = api_destinations.stored(STORED_DESTINATIONS["postgres"][0])
+    built = api.row_location(stored, RUN_ID, "db").model_dump(mode="json", by_alias=True)
+    assert built == delivery.row_location(stored, RUN_ID, "db").model_dump(
+        mode="json", by_alias=True
+    )
+    assert built["schema"] == "sf" and built["block_id"] == "db"
+
+
+def test_a_recorded_row_reaches_the_undo_whole():
+    stored = api_destinations.stored(STORED_DESTINATIONS["postgres"][0])
+    out = delivery.DeliverPostgresOutput(
+        location=delivery.row_location(stored, RUN_ID, "db"), size=12
+    )
+    # The workflow records the location by alias and hands that dict to the undo.
+    recorded = _decode(_encode(out), api.DeliverPostgresOutput).location.model_dump(
+        mode="json", by_alias=True
+    )
+    sent = api.UndoPostgresInput(
+        location=recorded, encrypted_secret="gAAAAAB_secret", ca_certificate="PEM"
+    )
+
+    received = _decode(_encode(sent), delivery.UndoPostgresInput)
+
+    assert received.location.model_dump(mode="json", by_alias=True) == recorded
+    assert received.ca_certificate == "PEM"
+
+
+@pytest.mark.parametrize("already_gone", [False, True])
+def test_the_api_parses_the_postgres_undo_output(already_gone):
+    out = delivery.UndoPostgresOutput(already_gone=already_gone)
+    assert _decode(_encode(out), api.UndoPostgresOutput).already_gone is already_gone
 
 
 @pytest.mark.parametrize("run_id", ["0b1f6c1e-6a1d-4c39-9f0b-6f1d2b3c4d5e", None])

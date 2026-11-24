@@ -412,7 +412,7 @@ def _sink_order_problems(parsed: list[ValidatedBlock]) -> list[Problem]:
                     block.id,
                     f"{block.type.name} {block.id!r} cannot follow {announcer.type.name} "
                     f"{announcer.id!r}: if {block.id!r} failed, {announcer.id!r} could not be "
-                    "undone; put every bucket before the first webhook",
+                    "undone; put every bucket and postgres block before the first webhook",
                 )
             )
         elif announcer is None and announces(block):

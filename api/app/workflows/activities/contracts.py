@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # min_length=1 also rejects "", which Go's encoding/json produces from a JSON null.
 ArtifactId = Annotated[str, StringConstraints(min_length=1)]
@@ -233,12 +233,16 @@ DELIVER_BUCKET_ACTIVITY = "DeliverBucket"
 UNDO_BUCKET_ACTIVITY = "UndoBucket"
 TEST_SMTP_ACTIVITY = "TestSmtp"
 TEST_POSTGRES_ACTIVITY = "TestPostgres"
+DELIVER_POSTGRES_ACTIVITY = "DeliverPostgres"
+UNDO_POSTGRES_ACTIVITY = "UndoPostgres"
 SEND_EMAIL_ACTIVITY = "SendEmail"
 
 # One attempt's start_to_close (ADR-015 §6); the worker gives up a few seconds sooner.
 BUCKET_DELIVER_ATTEMPT_SECONDS = 60
 BUCKET_UNDO_ATTEMPT_SECONDS = 30
 EMAIL_SEND_ATTEMPT_SECONDS = 60
+POSTGRES_DELIVER_ATTEMPT_SECONDS = 30
+POSTGRES_UNDO_ATTEMPT_SECONDS = 30
 
 
 class DestinationTestInput(BaseModel):
@@ -267,8 +271,8 @@ class DestinationTestOutput(BaseModel):
 # Single attempt each, retry policy maximum_attempts=1: a failure is an ApplicationError whose
 # non_retryable says final; the workflow retries a transient one (ADR-015 §4).
 
-# A DeliverBucket failure's detail when its request cannot have written the object. Without it
-# the try may have written: a failed block's rollback undoes its key.
+# A DeliverBucket or DeliverPostgres failure's detail when its request cannot have written.
+# Without it the try may have written: a failed block's rollback undoes its key or row.
 NOT_WRITTEN = "not_written"
 
 
@@ -312,6 +316,68 @@ class UndoBucketInput(BaseModel):
 
 class UndoBucketOutput(BaseModel):
     # The server said the object was missing; most answer a delete the same either way.
+    already_gone: bool = False
+
+
+# --- the Postgres sink (ADR-015 §5, §7) -------------------------------------------------------
+#
+# Single attempt each, as the bucket sink. NOT_WRITTEN on a DeliverPostgres failure: the INSERT
+# cannot have committed.
+
+
+class PostgresLocation(BaseModel):
+    """The row a delivery wrote, by its key: names only, never an address or a credential."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: Annotated[str, StringConstraints(min_length=1)]
+    port: int
+    database: Annotated[str, StringConstraints(min_length=1)]
+    db_schema: Annotated[str, StringConstraints(min_length=1)] = Field(alias="schema")
+    table: Annotated[str, StringConstraints(min_length=1)]
+    run_id: Annotated[str, StringConstraints(min_length=1)]
+    block_id: Annotated[str, StringConstraints(min_length=1)]
+
+
+def row_location(address: dict[str, Any], run_id: str, block_id: str) -> PostgresLocation:
+    """The row a try against ``address`` writes: a retry updates it (ADR-015 §5)."""
+    return PostgresLocation(
+        host=address["host"],
+        port=address["port"],
+        database=address["database"],
+        db_schema=address["schema"],
+        table=address["table"],
+        run_id=run_id,
+        block_id=block_id,
+    )
+
+
+class DeliverPostgresInput(BaseModel):
+    # The destination as it is now (load_destination); the secret is ciphertext.
+    address: dict[str, Any]
+    encrypted_secret: Annotated[str, StringConstraints(min_length=1)]
+    # ScrapeFlow's copy, as {bucket}/{key}: one JSON document.
+    source_path: Annotated[str, StringConstraints(min_length=1)]
+    pipeline_id: Annotated[str, StringConstraints(min_length=1)]
+    run_id: Annotated[str, StringConstraints(min_length=1)]
+    block_id: Annotated[str, StringConstraints(min_length=1)]
+
+
+class DeliverPostgresOutput(BaseModel):
+    location: PostgresLocation
+    size: int
+
+
+class UndoPostgresInput(BaseModel):
+    """The location recorded at delivery, with the destination's current login and CA."""
+
+    location: PostgresLocation
+    encrypted_secret: Annotated[str, StringConstraints(min_length=1)]
+    ca_certificate: str | None = None
+
+
+class UndoPostgresOutput(BaseModel):
+    # The DELETE found no row.
     already_gone: bool = False
 
 

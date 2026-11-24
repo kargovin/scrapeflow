@@ -7,7 +7,7 @@ the API checked them at save. Pinned by ``contracts/test_activity_contract.py``.
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 
@@ -20,15 +20,19 @@ DELIVER_BUCKET_ACTIVITY = "DeliverBucket"
 UNDO_BUCKET_ACTIVITY = "UndoBucket"
 TEST_SMTP_ACTIVITY = "TestSmtp"
 TEST_POSTGRES_ACTIVITY = "TestPostgres"
+DELIVER_POSTGRES_ACTIVITY = "DeliverPostgres"
+UNDO_POSTGRES_ACTIVITY = "UndoPostgres"
 SEND_EMAIL_ACTIVITY = "SendEmail"
 
 # One attempt's start_to_close (ADR-015 §6); the activity gives up a few seconds sooner.
 BUCKET_DELIVER_ATTEMPT_SECONDS = 60
 BUCKET_UNDO_ATTEMPT_SECONDS = 30
 EMAIL_SEND_ATTEMPT_SECONDS = 60
+POSTGRES_DELIVER_ATTEMPT_SECONDS = 30
+POSTGRES_UNDO_ATTEMPT_SECONDS = 30
 
-# A DeliverBucket failure's detail when its request cannot have written the object: the bucket
-# answered, or nothing was sent. Without it the workflow treats the try as maybe written.
+# A DeliverBucket or DeliverPostgres failure's detail when its request cannot have written: the
+# destination answered with a refusal, or nothing was sent. Without it the workflow treats the try as maybe written.
 NOT_WRITTEN = "not_written"
 
 DestinationKind = Literal["bucket", "postgres", "smtp", "webhook"]
@@ -158,6 +162,68 @@ class UndoBucketInput(BaseModel):
 
 class UndoBucketOutput(BaseModel):
     # The server said the object was missing; most answer a delete the same either way.
+    already_gone: bool = False
+
+
+# --- the Postgres sink (ADR-015 §5, §7) -------------------------------------------------------
+#
+# Single attempt each, as the bucket sink. NOT_WRITTEN on a DeliverPostgres failure: the INSERT
+# cannot have committed.
+
+
+class PostgresLocation(BaseModel):
+    """The row a delivery wrote, by its key: names only, never an address or a credential."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: NonEmptyStr
+    port: int
+    database: NonEmptyStr
+    db_schema: NonEmptyStr = Field(alias="schema")
+    table: NonEmptyStr
+    run_id: NonEmptyStr
+    block_id: NonEmptyStr
+
+
+def row_location(address: dict[str, Any], run_id: str, block_id: str) -> PostgresLocation:
+    """The row a try against ``address`` writes: a retry updates it (ADR-015 §5)."""
+    return PostgresLocation(
+        host=address["host"],
+        port=address["port"],
+        database=address["database"],
+        db_schema=address["schema"],
+        table=address["table"],
+        run_id=run_id,
+        block_id=block_id,
+    )
+
+
+class DeliverPostgresInput(BaseModel):
+    # The destination as it is now (load_destination); the secret is ciphertext.
+    address: dict[str, Any]
+    encrypted_secret: NonEmptyStr
+    # ScrapeFlow's copy, as {bucket}/{key}: one JSON document.
+    source_path: NonEmptyStr
+    pipeline_id: NonEmptyStr
+    run_id: NonEmptyStr
+    block_id: NonEmptyStr
+
+
+class DeliverPostgresOutput(BaseModel):
+    location: PostgresLocation
+    size: int
+
+
+class UndoPostgresInput(BaseModel):
+    """The location recorded at delivery, with the destination's current login and CA."""
+
+    location: PostgresLocation
+    encrypted_secret: NonEmptyStr
+    ca_certificate: str | None = None
+
+
+class UndoPostgresOutput(BaseModel):
+    # The DELETE found no row.
     already_gone: bool = False
 
 

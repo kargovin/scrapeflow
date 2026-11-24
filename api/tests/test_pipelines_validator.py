@@ -12,6 +12,8 @@ from app.pipelines.catalog import (
     CATALOG,
     DB_ACTIVITY_SECONDS,
     LLM_EXTRACT,
+    POSTGRES,
+    POSTGRES_UNDO_TIMING,
     SCRAPE,
     WEBHOOK,
     BucketConfigV1,
@@ -997,7 +999,7 @@ def test_a_bucket_after_a_webhook_is_refused_naming_both():
     )
     assert found == (
         "block 'late': bucket 'late' cannot follow webhook 'notify': if 'late' failed, "
-        "'notify' could not be undone; put every bucket before the first webhook"
+        "'notify' could not be undone; put every bucket and postgres block before the first webhook"
     )
 
 
@@ -1039,11 +1041,17 @@ def test_the_bucket_timing_is_the_delivery_ladder_plus_its_loop_writes():
 
 def test_the_catalog_says_which_blocks_are_sinks_and_which_can_be_undone():
     sinks = {name: t.sink for name, t in CATALOG.items() if t.sink is not None}
-    assert {n: s.reversible for n, s in sinks.items()} == {"bucket": True, "webhook": False}
+    assert {n: s.reversible for n, s in sinks.items()} == {
+        "bucket": True,
+        "postgres": True,
+        "webhook": False,
+    }
     assert sinks["bucket"].undo is BUCKET_UNDO_TIMING
+    assert sinks["postgres"].undo is POSTGRES_UNDO_TIMING
     assert sinks["webhook"].undo is None
     assert {n: t.destination_kinds for n, t in CATALOG.items() if t.destination_kinds} == {
         "bucket": ("bucket",),
+        "postgres": ("postgres",),
         "webhook": ("webhook",),
         "approval": ("webhook", "smtp"),
     }
@@ -1104,3 +1112,66 @@ def test_a_declared_budget_leaves_room_for_the_reserve(monkeypatch):
         f"time_budget_seconds {forward + 1} plus {reserve} s to undo 1 delivery is over the "
         f"limit of {forward + reserve} s"
     )
+
+
+# --- O.1: the Postgres sink (PRD-017 slice 2; ADR-015 §5-§7) --------------------------------
+
+
+def db(id="db", input="extract", destination_id=DEST_ID):
+    return {
+        "id": id,
+        "type": "postgres",
+        "input": input,
+        "config": {"destination_id": destination_id},
+    }
+
+
+@pytest.mark.parametrize(
+    "chain", [[scrape(output_format="json"), db(input="fetch")], [scrape(), llm(), db()]]
+)
+def test_a_postgres_block_takes_json_and_passes_it_on(chain):
+    result = validate(pipeline(*chain))
+    block = result.blocks[-1]
+    assert block.type is POSTGRES
+    assert result.definition["blocks"][-1]["config"] == {"destination_id": DEST_ID}
+
+
+@pytest.mark.parametrize("output_format", ["html", "markdown"])
+def test_a_postgres_block_after_a_page_is_refused(output_format):
+    found = one_problem(pipeline(scrape(output_format=output_format), db(input="fetch")))
+    assert found.startswith(
+        "block 'db': postgres consumes extraction, page:json; 'fetch' produces page:"
+    )
+
+
+def test_a_postgres_block_needs_a_destination_and_nothing_else():
+    block = db()
+    block["config"]["table"] = "rows"
+    assert one_problem(pipeline(scrape(), llm(), block)).startswith(
+        "block 'db': config.table: Extra inputs"
+    )
+
+
+def test_a_postgres_block_after_a_webhook_is_refused_naming_both():
+    found = one_problem(pipeline(scrape(), llm(), webhook(), db(input="notify")))
+    assert found.startswith("block 'db': postgres 'db' cannot follow webhook 'notify'")
+
+
+def test_the_postgres_timing_is_30_s_tries_on_the_delivery_ladder_plus_its_loop_writes():
+    timing = POSTGRES.timing(POSTGRES.config_versions[1](destination_id=DEST_ID))
+    assert (timing.start_to_close, timing.maximum_attempts) == (30, 5)
+    assert timing.budget == 5 * (60 + 30) + 30 + 300 + 3000 + 7200
+    assert timing.loop_db == 13 * DB_ACTIVITY_SECONDS
+    assert timing.budget < 3.1 * 3600
+    undo = POSTGRES_UNDO_TIMING
+    assert undo.need == 5 * (60 + 30) + 10530 + 5 * DB_ACTIVITY_SECONDS + BLOCK_OVERHEAD_SECONDS
+
+
+def test_prd_017s_worked_example_with_a_postgres_sink():
+    # scrape -> extract -> bucket -> db -> webhook: ≈ 10 h forward + ≈ 6 h reserve (R6).
+    worked = pipeline(scrape(), llm(), bucket(), db(input="store"), hook_to(input="db"))
+    forward = _forward(worked)
+    assert 9.5 * 3600 < forward < 11 * 3600
+    reserve = BUCKET_UNDO_TIMING.need + POSTGRES_UNDO_TIMING.need
+    assert 6 * 3600 < reserve < 6.5 * 3600
+    assert validator.rollback_reserve(validate(worked).blocks) == (reserve, 2)

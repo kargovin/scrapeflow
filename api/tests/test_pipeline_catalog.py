@@ -2,7 +2,12 @@
 
 import pytest_asyncio
 
-from app.pipelines.catalog import BUCKET_UNDO_TIMING, CATALOG, ScrapeConfigV1
+from app.pipelines.catalog import (
+    BUCKET_UNDO_TIMING,
+    CATALOG,
+    POSTGRES_UNDO_TIMING,
+    ScrapeConfigV1,
+)
 from app.settings import settings
 
 
@@ -31,6 +36,7 @@ async def test_every_block_type_is_listed_with_its_kind_and_sink(client, headers
         "validate": ("effect", None),
         "webhook": ("effect", False),
         "bucket": ("effect", True),
+        "postgres": ("effect", True),
         "approval": ("effect", None),
     }
     assert blocks["bucket"]["destination_kind"] == "bucket"
@@ -39,6 +45,9 @@ async def test_every_block_type_is_listed_with_its_kind_and_sink(client, headers
     assert blocks["scrape"]["destination_kinds"] == []
     assert blocks["scrape"]["consumes"] == []
     assert "extraction" in blocks["bucket"]["consumes"]
+    assert blocks["postgres"]["destination_kind"] == "postgres"
+    # One JSON value in one parameter (ADR-015 §7).
+    assert sorted(blocks["postgres"]["consumes"]) == ["extraction", "page:json"]
 
 
 async def test_a_sinks_timing_and_its_undo_add_up(client, headers):
@@ -60,6 +69,11 @@ async def test_a_sinks_timing_and_its_undo_add_up(client, headers):
     }
     assert bucket["sink"]["undo"]["need_seconds"] == BUCKET_UNDO_TIMING.need
     assert blocks["webhook"]["sink"]["undo"] is None
+    # ADR-015 §6: 30 s tries on the same ladder, the per-try DB writes counted, the undo reserved.
+    postgres = blocks["postgres"]
+    assert postgres["timings"]["default"]["attempt_seconds"] == 30
+    assert postgres["timings"]["default"]["need_seconds"] == 5 * 90 + 10530 + 13 * 20 + 60
+    assert postgres["sink"]["undo"]["need_seconds"] == POSTGRES_UNDO_TIMING.need
     # An alert-only Webhook calls nothing on a run's way through.
     alert = blocks["webhook"]["timings"]["alert only"]
     assert (alert["budget_seconds"], alert["need_seconds"]) == (0, 60)
