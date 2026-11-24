@@ -11,6 +11,8 @@ ScrapeFlow never creates, alters or drops anything there: it only runs `INSERT â
 **What it takes.** JSON only: an `llm_extract` block's extraction, or a page scraped with
 `output_format: json`. A postgres block after an HTML or Markdown page is refused when the pipeline is
 saved. The content is held in memory and capped at 10 MiB; a larger input fails the block.
+JSON that a `JSONB` column cannot hold fails the block before anything is sent: `NaN`, `Infinity`,
+`-Infinity`, a NUL character (`\u0000`) or an unpaired surrogate (`\ud800`â€“`\udfff`) anywhere in it.
 
 **The row.** One row per run and block, in this fixed shape:
 
@@ -61,6 +63,9 @@ password) is stored encrypted and never shown again.
 **The test.** Testing or saving the destination connects, logs in, and in one transaction that is
 rolled back: checks the table exists, checks the key, inserts a probe row and deletes it. Nothing is
 kept, except that a `SERIAL` or identity column, if you added one, skips a number.
+Each problem is reported under the step that met it: an address that cannot be reached under
+*address*, the certificate or a server without TLS under *tls*, a refused login under *login*, a lost
+connection under the step that was running (*table*, *unique key*, *write*, *delete*, *rollback*).
 
 **Retries and timing.** Each try has 30 s. A connection error, a server shutting down or not yet
 accepting connections, too many connections, a full disk, a serialization failure or a deadlock is
