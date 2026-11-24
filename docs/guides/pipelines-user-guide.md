@@ -76,3 +76,51 @@ tried again — five tries, waiting 30 s, 5 min, 50 min and 2 h between them (ab
 it waits the run holds no concurrency slot. A refused login, a missing table or permission, or a
 certificate that does not match is final. The undo, on rollback, follows the same ladder and always
 goes to the database and table the row was written to, with the destination's current login.
+
+### Email
+
+An **email** block sends its input as one message to the recipients of a saved **email (SMTP)**
+destination, through **your own mail server**: ScrapeFlow runs no mail relay. Name the destination in
+the block: `{"destination_id": "<id>"}`.
+
+**What it sends.** Any input: a page (HTML, Markdown or JSON) or an extraction. The subject is
+`[ScrapeFlow] <pipeline name>: run <run id>`. The body names the run, the block and the pipeline, links
+to the run page, and is followed by the input itself, inline, up to **256 KiB**. A larger input is not
+attached; the body says `result too large to include (N KiB); fetch it with run <run id>` instead. On a
+monitor's check the body also says what changed: *first check — nothing to compare*, or *changed since
+check …* followed by the lines of the page that changed and each extracted value that changed
+(`/price: 80 → 70`), as the run page shows them; a long diff is cut and says so.
+
+**When it sends — `events`.** As for a webhook block:
+- `["pipeline.result"]` (the default): the result, when the run reaches the block;
+- `["pipeline.failed"]`: only when the run breaks — a failure message naming the block that failed, the
+  error, and what rollback undid, left in place or kept. It is sent after rollback has finished, even if
+  the run broke before reaching the email block. On a run that succeeds this block is skipped
+  (*alert only*);
+- both.
+
+**It cannot be undone.** An email that has gone out stays sent. So every bucket and postgres block must
+come **before** the first email (or webhook) block that sends the result; a pipeline that puts one after
+it is refused when it is saved, naming both blocks. Once the email has gone out, a later failure fails
+the run but undoes nothing before it: those deliveries read *kept*. An *alert only* email block sends
+nothing on the way through, so it may sit anywhere.
+
+**Duplicates.** Each message carries a fixed `Message-ID`, `<run id>.<block id>@<this site's host>`
+(a failure message adds `.failed`). A message whose server reply was lost is sent again with the same
+`Message-ID`; most inboxes still show both, and a mail filter can match on it. Every message carries the
+run id and the block id in its body.
+
+**Connection.** The mail server must be reachable from the internet (private, local and loopback
+addresses are refused, when saved and on every attempt) and must offer **TLS**: STARTTLS (usually port
+587) or implicit TLS (usually 465). A server that does not offer STARTTLS gets no login and no mail.
+The login is sent only over TLS; for a certificate from your own CA, paste the CA certificate into the
+destination. The login is stored encrypted and never shown again. Testing or saving the destination
+connects, starts TLS and logs in; **it sends no mail**.
+
+**Retries and timing.** Each try has 60 s. An unreachable server, a timeout or a `4xx` reply (the
+server deferring the message) is tried again — five tries, waiting 30 s, 5 min, 50 min and 2 h between
+them (about 3 h in all); while it waits the run holds no concurrency slot. A refused login, a `5xx`
+reply, a certificate that does not match or a private address is final, and fails the run — which
+undoes the bucket and postgres deliveries before it, since nothing had gone out. Recipients the server
+refused while it accepted others are listed on the block (`recipients refused: …`); the run still
+completes.
