@@ -8,6 +8,7 @@ the workflow is the one retry layer.
 
 import asyncio
 import json
+import re
 import ssl
 import uuid
 from collections.abc import Awaitable, Callable
@@ -217,8 +218,38 @@ def parsed(address: dict, encrypted_secret: str) -> tuple[PostgresAddress, Login
     return address_, secret
 
 
+class _NotStorable(ValueError):
+    pass
+
+
+def _no_constant(name: str) -> None:
+    raise _NotStorable(name)
+
+
+# Postgres jsonb refuses \u0000 (22P05) and a surrogate escape not in a pair (22P02).
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
+
+
+def _unstorable_text(value) -> bool:
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, str):
+            if _UNSTORABLE.search(v):
+                return True
+        elif isinstance(v, dict):
+            for key, item in v.items():
+                if _UNSTORABLE.search(key):
+                    return True
+                stack.append(item)
+        elif isinstance(v, list):
+            stack.extend(v)
+    return False
+
+
 async def read_json(source: Source, path: str) -> str:
-    """ScrapeFlow's copy, whole, as one JSON text: at most CONTENT_MAX_BYTES. Raises ApplicationError."""
+    """ScrapeFlow's copy, whole, as one JSON text jsonb takes: at most CONTENT_MAX_BYTES.
+    Raises ApplicationError."""
     async with source.open(path) as obj:
         if obj.length > CONTENT_MAX_BYTES:
             raise final_error(
@@ -234,9 +265,19 @@ async def read_json(source: Source, path: str) -> str:
             raise source_error(obj.failure or exc) from None
     try:
         text = data.decode()
-        json.loads(text)
-    except ValueError:
+        value = json.loads(text, parse_constant=_no_constant)
+    except _NotStorable as exc:
+        raise final_error(
+            "ContentNotJson", f"the input has {exc}, which JSON in Postgres cannot hold"
+        ) from None
+    except (ValueError, RecursionError):
         raise final_error("ContentNotJson", "the input is not a JSON document") from None
+    if _unstorable_text(value):
+        raise final_error(
+            "ContentNotJson",
+            "the input has a NUL character (\\u0000) or an unpaired surrogate (\\ud800–\\udfff), "
+            "which JSON in Postgres cannot hold",
+        )
     return text
 
 

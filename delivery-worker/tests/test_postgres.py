@@ -330,6 +330,54 @@ async def test_content_that_is_not_json_is_final(lookups):
     assert (err.type, err.non_retryable, err.details) == ("ContentNotJson", True, (NOT_WRITTEN,))
 
 
+@pytest.mark.parametrize(
+    ("doc", "has"),
+    [
+        (b'{"price": NaN}', "NaN"),
+        (b"[1, Infinity]", "Infinity"),
+        (b'{"low": -Infinity}', "-Infinity"),
+    ],
+)
+async def test_nan_and_infinity_are_final_and_name_the_content(lookups, doc, has):
+    seen, _ = lookups
+    err = await _deliver_error(_deliver_input(), FakeSource(doc))
+    assert (err.type, err.non_retryable, err.details) == ("ContentNotJson", True, (NOT_WRITTEN,))
+    assert err.message == f"the input has {has}, which JSON in Postgres cannot hold"
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        rb'"a\u0000b"',
+        rb'{"k": ["x", {"y": "\u0000"}]}',
+        rb'{"\u0000key": 1}',
+        rb'{"outer": {"in\u0000ner": true}}',
+        rb'["\ud800"]',
+        rb'{"t": "x\udc00"}',
+    ],
+)
+async def test_a_nul_or_an_unpaired_surrogate_anywhere_is_final_and_names_the_content(lookups, doc):
+    seen, _ = lookups
+    err = await _deliver_error(_deliver_input(), FakeSource(doc))
+    assert (err.type, err.non_retryable, err.details) == ("ContentNotJson", True, (NOT_WRITTEN,))
+    assert err.message.startswith("the input has a NUL character")
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "doc", [rb'"\\u0000"', rb'{"e": "\ud83d\ude00", "n": -1.5e300, "z": null}']
+)
+async def test_an_escaped_backslash_a_surrogate_pair_and_finite_numbers_are_written(connection, doc):
+    await _deliver(_deliver_input(), FakeSource(doc))
+    assert connection["conn"].args[3] == doc.decode()
+
+
+async def test_nesting_deeper_than_the_parser_is_final(lookups):
+    err = await _deliver_error(_deliver_input(), FakeSource(b"[" * 200_000))
+    assert (err.type, err.non_retryable, err.details) == ("ContentNotJson", True, (NOT_WRITTEN,))
+
+
 async def test_a_source_dropped_mid_read_is_transient_and_not_written(lookups):
     err = await _deliver_error(_deliver_input(), FakeSource(b"[" + b"1," * 100_000 + b"1]", fail_mid=True))
     assert (err.type, err.non_retryable, err.details) == ("SourceUnavailable", False, (NOT_WRITTEN,))

@@ -169,6 +169,15 @@ async def test_a_delivery_writes_the_documented_row(db):
     assert out.location == postgres.row_location(_address(ca), run_id, "db")
 
 
+async def test_what_the_content_check_lets_through_jsonb_holds(db):
+    conn, ca = db
+    run_id = str(uuid.uuid4())
+    doc = {"pair": "\U0001f600", "backslash": "\\u0000", "n": -2.5, "z": None}
+    await _deliver(ca, run_id, doc=doc)
+    [row] = await _rows(conn, run_id=run_id)
+    assert json.loads(row["content"]) == doc
+
+
 async def test_a_second_try_updates_the_same_row(db):
     conn, ca = db
     run_id = str(uuid.uuid4())
