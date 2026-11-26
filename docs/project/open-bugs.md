@@ -1886,8 +1886,17 @@ lost — nothing is deleted wrongly, nothing else depends on it)
 **Discovered:** 2026-09-25, noticed while verifying A.3: `scrapeflow-cleanup-29838420` `Failed`
 (`BackoffLimitExceeded`, 7 attempts 03:00–03:06 UTC). The pod was gone with the Job, so the cause
 was reproduced on the deployed image (`421cbfe`), not read from its log.
-**Status:** 🔴 **Open — owner's call 2026-09-25: file it, pick it up later.** Not a Phase 4 item
-(backlog §4); the CronJob survives the migration. Infra repo only.
+**Status:** 🔧 **Fixed 2026-11-26, unreleased** — infra `19dc680` (the command and the two keys, as below) **and**
+app `b01f7d6` (`scripts/cleanup_old_runs.py`): **owner's call 2026-11-26 — retention covers scheduled history
+only**: finished runs of a scheduled job (active or paused) past 90 days, **keeping each job's newest run**. As
+specified (Phase 2) it deleted *every* run past 90 days, which would have made old one-off jobs vanish from every job
+read (the reads inner-join the latest run; the job row and a paused schedule stay, still counted by the scheduled-jobs
+cap) and made old batch items' result reads 500 (the item keeps `result_path`, the object goes). One-off jobs,
+batches, crawls and pipelines are now never touched. Verified: the fixed command in a fresh production-target
+container on compose (`cleanup: starting` → `finished`); a test pins what is kept and fails on the old script.
+⚠️ **Order:** the app's api image must be deployed before the infra push — the CronJob runs Flux's api image. Runbook:
+infra README → *Nightly cleanup CronJob* (count query, manual first run).
+*Before:* 🔴 **Open — owner's call 2026-09-25: file it, pick it up later.** Infra repo only.
 
 ### What happens
 

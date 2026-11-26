@@ -190,6 +190,15 @@ Owner's job checks (http, playwright, pipeline + LLM) not yet run.
   policies (diffed equal). Kustomize + dry-run clean. **Release = the owner's infra push**, no image: run the README
   section's host check and the probe **before** (node `open`), push, Flux applies, probe **after** (node `blocked`,
   Postgres/Redis/Temporal/MinIO/example.com `open`), then one job with a webhook delivered. Rollback: revert + push.
+- 🔧 **BUG-019 fixed (unreleased)** — owner chose **scheduled history only**: `cleanup_old_runs.py` prunes finished
+  runs of scheduled jobs past 90 days, keeping each job's newest (test fails on the old script); infra `19dc680`:
+  `/app/.venv/bin/python -m scripts.cleanup_old_runs` + `LLM_KEY_ENCRYPTION_KEY`/`CREDENTIALS_ENCRYPTION_KEY`.
+- 📋 **Combined release, in this order:** (1) `main` ← `develop` (BUG-035 + BUG-019's script; **api image only**, no
+  migration) and wait until the api pods **and the CronJob's image** carry the new SHA (Flux commits that to the infra
+  repo — `git pull --rebase` there before pushing); (2) BUG-032's pre-checks + "before" probe; (3) infra push
+  (`d363457` policy + `19dc680` CronJob); (4) BUG-032 "after" probe + a webhook delivered; (5) BUG-019: the count
+  query, then `kubectl create job --from=cronjob/scrapeflow-cleanup cleanup-manual`, read the log; (6) BUG-035's
+  check. ⚠️ An older api image in the CronJob deletes **every** run past 90 days — hence the order.
   Owner checks: the pod `Running`, `browser_launched` args include the new flag, a playwright job on an http-only
   site (e.g. `http://neverssl.com/`) completes, one https playwright job completes; Dependabot → 0.
 
