@@ -8,7 +8,7 @@ require (
 	github.com/fernet/fernet-go v0.0.0-20240119011108-303da6aec611
 	github.com/minio/minio-go/v7 v7.0.70
 	go.temporal.io/sdk v1.49.0
-	golang.org/x/net v0.58.0
+	golang.org/x/net v0.63.0
 )
 
 require (
@@ -34,10 +34,10 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
 	go.temporal.io/api v1.63.5 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
