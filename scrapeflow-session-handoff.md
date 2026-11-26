@@ -166,8 +166,12 @@ sent from production**; a recipient on a mail-forwarding service received it aft
 passed; Tracebacks 0. Full record: backlog P.2 section. **Deployed code is `2ae9801`.**
 - **Step 4 (clean up) is the owner's:** the three `p-*` pipelines, the Gmail app password (the email destination stops
   working once it is revoked). The owner's bucket destination's prefix reads `scrapeflow=m` (probably meant `-`).
-- **Next:** the deferred background items (memory: background items after the backlog — deferred reviews,
-  BUG-029/032/019/021/018, Dependabot) and P's known email limits (P.2 section). Ask the owner which first.
+- **Next session: bug fixes (owner, 2026-11-26).** Candidates: BUG-029 (list pages' Engine column), BUG-032 (a user
+  URL can reach the node's own public IP), BUG-019 (nightly cleanup CronJob never succeeded — infra-only; first good
+  run is a real delete), BUG-021 (API PID 1 `uv run` ignores SIGTERM during startup), P's known email limits (P.2
+  section); then the deferred reviews and Dependabot. `docs/project/open-bugs.md` has the writeups. Ask the owner
+  which bug first, and whether the delegated-build way of working (builder subagent per fix) still applies.
+- `develop` is ahead of `origin/develop` by the docs-only release-record commits — the owner pushes them.
 
 ---
 
