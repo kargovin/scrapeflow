@@ -175,8 +175,12 @@ BUG-032's scrape half released, BUG-018's "recurrence" = BUG-033).
   change. Owner checks: api pods `Running`, `/health` 200 with `version` `0.1.0`, `kubectl exec … cat /proc/1/cmdline`
   shows the venv python; Jobs list shows `playwright → markdown` for a playwright job; JobDetail shows Engine; a detail
   page left open across a network drop keeps its content with the amber note; an unknown id still says "not found".
-- **Next candidates:** BUG-013 + BUG-006 (`mcp/` lockfile + Dependabot), BUG-019 (infra; first run is a real delete),
-  BUG-032's webhook half (needs a call), P's email limits.
+- **Next session: keep closing out bugs (owner, 2026-11-26).** Way of working this session: built inline, one step per
+  commit, no builder subagent; the owner picks the order. Suggested next: BUG-013 + BUG-006 (`mcp/` lockfile +
+  Dependabot), then BUG-019 (infra; first run is a real delete — owner triggers it), BUG-032's webhook half (needs the
+  owner's call on `EGRESS_DENY_CIDRS`), P's email limits, BUG-004 (product call), BUG-010 part 2, Postgres backups.
+  The release of BUG-033/029/021 is the owner's whenever they choose; close BUG-018 once BUG-033 is out and nothing recurs.
+- `develop` is ahead of `origin/develop` (13 commits before this one) — the owner pushes.
 
 ## Earlier state — 2026-11-26 *(clock)*
 
