@@ -26,12 +26,15 @@ type Result struct {
 
 // RefusedError is the egress proxy refusing an address: the target (or a redirect, or the job's
 // own proxy) resolves to an address that is not public unicast. Final — a retry resolves the same
-// name again.
+// name again. Error() names the host only: Reason carries the resolved internal address, for logs.
 type RefusedError struct {
+	Host   string
 	Reason string
 }
 
-func (e *RefusedError) Error() string { return "address refused: " + e.Reason }
+func (e *RefusedError) Error() string {
+	return "address refused: " + e.Host + " is not a public address"
+}
 
 // Fetcher performs HTTP GET requests with a configurable timeout.
 // It is safe to use from multiple goroutines.
@@ -101,7 +104,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	defer resp.Body.Close() //nolint:errcheck // best-effort cleanup
 
 	if f.egress != nil {
-		if err := refusal(resp); err != nil {
+		if err := refusal(resp, resp.Request.URL.Host); err != nil {
 			return nil, fmt.Errorf("fetching %s: %w", rawURL, err)
 		}
 	}
@@ -121,22 +124,22 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	return &Result{Body: body, FinalURL: finalURL}, nil
 }
 
-// refusal is the egress proxy's refusal carried by resp, or nil. A 407 without the header is a
-// job proxy asking for credentials, not a refusal.
-func refusal(resp *http.Response) error {
+// refusal is the egress proxy's refusal of host carried by resp, or nil. A 407 without the header
+// is a job proxy asking for credentials, not a refusal.
+func refusal(resp *http.Response, host string) error {
 	if resp.StatusCode != http.StatusProxyAuthRequired {
 		return nil
 	}
 	if reason := resp.Header.Get(refusalHeader); reason != "" {
-		return &RefusedError{Reason: reason}
+		return &RefusedError{Host: host, Reason: reason}
 	}
 	return nil
 }
 
 // refuseOnConnect turns the egress proxy's refusal of an https CONNECT into a RefusedError;
 // net/http otherwise reports only the status text.
-func refuseOnConnect(_ context.Context, _ *url.URL, _ *http.Request, resp *http.Response) error {
-	return refusal(resp)
+func refuseOnConnect(_ context.Context, _ *url.URL, req *http.Request, resp *http.Response) error {
+	return refusal(resp, req.Host)
 }
 
 // tunnelThrough dials an address by asking the egress proxy for a CONNECT tunnel to it.
@@ -169,7 +172,7 @@ func tunnelThrough(egress *url.URL) func(ctx context.Context, network, addr stri
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			_ = conn.Close()
-			if err := refusal(resp); err != nil {
+			if err := refusal(resp, addr); err != nil {
 				return nil, err
 			}
 			return nil, fmt.Errorf("egress proxy CONNECT to %s: %s", addr, resp.Status)
@@ -190,8 +193,11 @@ type bufferedConn struct {
 
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
-// IsRefused reports whether err carries an egress refusal.
-func IsRefused(err error) bool {
+// AsRefused returns the egress refusal err carries, or nil.
+func AsRefused(err error) *RefusedError {
 	var re *RefusedError
-	return errors.As(err, &re)
+	if errors.As(err, &re) {
+		return re
+	}
+	return nil
 }

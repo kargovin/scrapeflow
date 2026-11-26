@@ -106,8 +106,9 @@ func (a *Activities) Scrape(ctx context.Context, in ScrapeInput) (ScrapeOutput, 
 		if scrape.Classify(err) == scrape.Transient {
 			return ScrapeOutput{}, temporal.NewApplicationError(err.Error(), ErrStorageTransient)
 		}
-		if fetcher.IsRefused(err) {
-			return ScrapeOutput{}, temporal.NewNonRetryableApplicationError(err.Error(), ErrAddressRefused, nil)
+		if re := fetcher.AsRefused(err); re != nil {
+			logger.Warn("Egress refused", "artifact_id", in.ArtifactID, "host", re.Host, "reason", re.Reason)
+			return ScrapeOutput{}, temporal.NewNonRetryableApplicationError(re.Error(), ErrAddressRefused, nil)
 		}
 		return ScrapeOutput{}, temporal.NewNonRetryableApplicationError(err.Error(), ErrScrapeFailed, nil)
 	}

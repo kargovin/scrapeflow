@@ -91,11 +91,15 @@ func wantRefused(t *testing.T, err error) {
 	if err == nil {
 		t.Fatal("expected a refusal, got nil")
 	}
-	if !IsRefused(err) {
+	re := AsRefused(err)
+	if re == nil {
 		t.Fatalf("expected a RefusedError, got %T: %v", err, err)
 	}
-	if !strings.Contains(err.Error(), "Deny: Private Range") {
-		t.Errorf("the refusal should carry the proxy's reason: %v", err)
+	if !strings.Contains(re.Reason, "Deny: Private Range") {
+		t.Errorf("the refusal should keep the proxy's reason: %q", re.Reason)
+	}
+	if strings.Contains(err.Error(), "10.0.0.9") {
+		t.Errorf("the error a user sees must not name the internal address: %v", err)
 	}
 }
 
@@ -180,7 +184,7 @@ func TestEgress_JobProxyAskingForCredentialsIsNotARefusal(t *testing.T) {
 		t.Fatalf("WithProxy: %v", err)
 	}
 	_, err = f.Fetch(context.Background(), "http://example.invalid/")
-	if err == nil || IsRefused(err) {
+	if err == nil || AsRefused(err) != nil {
 		t.Fatalf("a job proxy's own 407 is an ordinary failure, got %v", err)
 	}
 }
