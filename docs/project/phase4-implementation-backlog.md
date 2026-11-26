@@ -5007,6 +5007,9 @@ submission server with an app password. Without one, skip steps 2 and 3's items 
 - **Step 1:** `main` `cf73ade..2ae9801`; CI `45744291517` — `replay`, `build-api`, `build-delivery-worker` green, http/playwright/LLM builds skipped. api + workflow worker on `main-1795661046-2ae9801…`, delivery worker on `main-1795661011-2ae9801…`; `alembic_version` still `7d79370b821e`.
 - **Step 2a ✅** an smtp destination on a Gmail account (`smtp.gmail.com:587`, STARTTLS, an app password): the test passed address, tls and login.
 - **Step 2b ✅** `p-mail` (scrape → bucket → email) — **the first email sent from production**: Gmail accepted it (in the sender's Sent at once); the recipient, a personal domain forwarded by a mail-forwarding service, received it after a delay on the forwarder's side.
+- **Step 2c ✅** `p-big` (run `ab2ff9a7…`, a 2914 KiB Wikipedia page): the body names run, block, pipeline and the run page, then "result too large to include (2914 KiB); fetch it with run ab2ff9a7…" — no page.
+- **Step 2d ✅** an email before a bucket → `422`: "bucket 'store' cannot follow email 'mail': if 'store' failed, 'mail' could not be undone; put every bucket and postgres block before the first webhook or email".
+- **Step 2e ✅** `p-alert` (run `a6c72c14…`): one email `pipeline.failed`, `error` "guard: ValidationFailed: rules[0] (contains): 'Sold out' not found", `failed_block_id` `guard`, `rollback.undone` = the bucket block `store` (its key on the owner's R2 bucket), `kept` and `left_in_place` empty — sent after the undo.
 
 **Rollback:** prefer a forward fix. An api image revert (api, workflow worker, CronJob to step 0's tags): first **no
 pipeline run with an email block running** (`q "SELECT r.id FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'email';"`
