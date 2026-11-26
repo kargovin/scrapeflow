@@ -2537,8 +2537,10 @@ loaded list; not changed.
 **Severity:** High (every playwright scrape of a plain-http site fails; https sites and the http engine are unaffected).
 **Discovered:** 2026-11-26, moving the Playwright worker to a Python 3.12 image: the E.6 crawl gate's playwright run
 failed on its fixture (`http://www.crawlfixture.com/`) with `net::ERR_BLOCKED_BY_CLIENT`.
-**Status:** 🔧 **Fixed locally 2026-11-26 (`0ccb487`), unreleased.** ⚠️ **Probably live in production since the
-release of `ef97bfe` (2026-11-26 07:10 UTC)** — that image runs Chrome 158 (checked on the registry image); the
+**Status:** ✅ **FIXED — RELEASED + VERIFIED 2026-11-26** (`0ccb487`, `main` `59f439a`, playwright image only; rolled
+out 09:05 UTC, `browser_launched` lists the flag; the owner's playwright job on `http://neverssl.com/` completed — a first
+try timed out at 60 s, which `neverssl.com` also did once locally, a site quirk, not the block). Was probably live in
+production from the release of `ef97bfe` (2026-11-26 07:10 UTC) to 09:05 UTC — that image runs Chrome 158 (checked on the registry image); the
 previous playwright image (Release K or earlier) had an older Chrome. Not checked in the cluster (no exec access here).
 
 Chrome 158 auto-enables *HTTPS-First balanced mode*. A navigation to a site with no https answer shows an interstitial,

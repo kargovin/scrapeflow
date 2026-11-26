@@ -175,6 +175,12 @@ Owner's job checks (http, playwright, pipeline + LLM) not yet run.
   fails the same, so it is the browser, not the base. **Production's playwright image from `ef97bfe` has Chrome 158 →
   probably live since 07:10 UTC today.** Fix: `--disable-features=HttpsFirstBalancedModeAutoEnable`. E.6's playwright
   crawl gate passes (6 pages, 1,122 B). Release asap: **playwright-worker image only**, no migration, no infra.
+  🚀 **RELEASED 2026-11-26 (`main` `bdd59b2..59f439a`, owner's go)** — build green (playwright only), pod rolled out
+  09:05 UTC, 0 restarts, `browser_launched` shows the flag; **owner verified** a playwright job on `http://neverssl.com/`
+  (completed on a rerun; the first try timed out — the site, not the block) and one on `https://example.com/`.
+  Dependabot still 3 right after the push — expect 0 once GitHub re-scans (took > 1 h last time).
+  ⚠️ Found on the way: `POST /jobs` 422s `Playwright options missing` for `engine=playwright` without
+  `playwright_options`, though the schema marks it optional — not filed yet.
   Owner checks: the pod `Running`, `browser_launched` args include the new flag, a playwright job on an http-only
   site (e.g. `http://neverssl.com/`) completes, one https playwright job completes; Dependabot → 0.
 
