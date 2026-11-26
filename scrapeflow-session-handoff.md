@@ -184,19 +184,22 @@ Owner's job checks (http, playwright, pipeline + LLM) not yet run.
   `engine="playwright"` failed**). `create_job` now uses `PlaywrightOptions()`'s defaults. Release: **api image only**,
   no migration; check = a playwright `POST /jobs` with no `playwright_options` → 201 and completes.
   **Owner: push it together with the next fix.**
-- 🔧 **BUG-032's webhook half fixed in infra (`govindappa-k8s-config` `d363457`, rebased on the Flux commits, not
+- 🔧 **BUG-032's webhook half fixed in infra (`govindappa-k8s-config` `ccf4aa5`, rebased on the Flux commits, not
   pushed)** — owner chose a NetworkPolicy over `EGRESS_DENY_CIDRS`. `app/workflow-worker-networkpolicy.yaml`: DNS,
   Temporal 7233, Postgres 5432, Redis 6379, MinIO 9000 by pod; `0.0.0.0/0` except the same list as the other two
   policies (diffed equal). Kustomize + dry-run clean. **Release = the owner's infra push**, no image: run the README
   section's host check and the probe **before** (node `open`), push, Flux applies, probe **after** (node `blocked`,
   Postgres/Redis/Temporal/MinIO/example.com `open`), then one job with a webhook delivered. Rollback: revert + push.
 - 🔧 **BUG-019 fixed (unreleased)** — owner chose **scheduled history only**: `cleanup_old_runs.py` prunes finished
-  runs of scheduled jobs past 90 days, keeping each job's newest (test fails on the old script); infra `19dc680`:
+  runs of scheduled jobs past 90 days, keeping each job's newest (test fails on the old script); infra `0bed224`:
   `/app/.venv/bin/python -m scripts.cleanup_old_runs` + `LLM_KEY_ENCRYPTION_KEY`/`CREDENTIALS_ENCRYPTION_KEY`.
+- ✅ **Step 1 done 2026-11-26** — `main` `59f439a..4573f27` (api image; build + replay green); api pods, workflow worker
+  **and the CronJob** on `main-1795706761-4573f27…`; Dependabot **0 open**. Infra rebased on Flux's commit (`ccf4aa5`,
+  `0bed224`, ahead 2) — **next: steps 2–6, the owner's.**
 - 📋 **Combined release, in this order:** (1) `main` ← `develop` (BUG-035 + BUG-019's script; **api image only**, no
   migration) and wait until the api pods **and the CronJob's image** carry the new SHA (Flux commits that to the infra
   repo — `git pull --rebase` there before pushing); (2) BUG-032's pre-checks + "before" probe; (3) infra push
-  (`d363457` policy + `19dc680` CronJob); (4) BUG-032 "after" probe + a webhook delivered; (5) BUG-019: the count
+  (`ccf4aa5` policy + `0bed224` CronJob); (4) BUG-032 "after" probe + a webhook delivered; (5) BUG-019: the count
   query, then `kubectl create job --from=cronjob/scrapeflow-cleanup cleanup-manual`, read the log; (6) BUG-035's
   check. ⚠️ An older api image in the CronJob deletes **every** run past 90 days — hence the order.
   Owner checks: the pod `Running`, `browser_launched` args include the new flag, a playwright job on an http-only
