@@ -199,7 +199,11 @@ Owner's job checks (http, playwright, pipeline + LLM) not yet run.
 - ✅ **Steps 2–5 done 2026-11-26 (owner):** pre-checks as expected, probe before all `open`; infra pushed, Flux applied
   `0bed224` (policy present, CronJob on the venv command with the three keys); probe after: node `6443`/`10250`
   `blocked`, the other five `open`; a job's webhook `delivered` → **BUG-032 closed**. `cleanup-manual` completed on
-  `4573f27` (~35 s) → **BUG-019 released** (counts not recorded). **Left: step 6 (BUG-035's check).**
+  `4573f27` (~35 s) → **BUG-019 released** (counts not recorded). ✅ **Step 6:** a playwright job without
+  `playwright_options` accepted and ran → **BUG-035 closed. The combined release is done.**
+- **Next session:** open items are BUG-010 part 2 (fetch-time SSRF hardening, unscheduled), BUG-004 facet 1 (product
+  call: surfacing screenshots), BUG-034's follow-up (Chrome unpinned per build), P's email limits, Postgres backups,
+  the owner's deferred code reviews (C.4–C.7 first); close BUG-018 once BUG-033 has run clean for a while.
 - 📋 **Combined release, in this order:** (1) `main` ← `develop` (BUG-035 + BUG-019's script; **api image only**, no
   migration) and wait until the api pods **and the CronJob's image** carry the new SHA (Flux commits that to the infra
   repo — `git pull --rebase` there before pushing); (2) BUG-032's pre-checks + "before" probe; (3) infra push

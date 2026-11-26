@@ -2583,7 +2583,8 @@ Disabling `HttpsUpgrades` as well is not needed and was not taken.
 
 **Severity:** Low (a request the documented schema allows fails with 422; the SPA always sends the options).
 **Discovered:** 2026-11-26, by the owner, running BUG-034's production check with a minimal body.
-**Status:** 🔧 **Fixed locally 2026-11-26, unreleased.**
+**Status:** ✅ **CLOSED 2026-11-26 — RELEASED + VERIFIED** (`08c18c8`, api `main` `4573f27`; the owner's playwright
+`POST /jobs` with no `playwright_options` was accepted and ran).
 
 `JobCreate.playwright_options` is optional with a default for every field, but `create_job` answered
 `422 Playwright options missing` when `engine=playwright` came without it. The MCP server's `scrape_url` tool sends
