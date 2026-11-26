@@ -148,7 +148,14 @@ async def render(
 
             async def _inject_csp(route: Any) -> None:
                 if route.request.resource_type == "document":
-                    response = await route.fetch()
+                    try:
+                        response = await route.fetch()
+                    except Exception:
+                        # A fetch error raised here would surface at the page's next call
+                        # (page.content) and fail the run; as a network error, Chrome handles it
+                        # as it would unrouted.
+                        await route.abort("connectionfailed")
+                        return
                     if response.status != 407 and response.headers.get(REFUSAL_HEADER):
                         # The egress proxy could not connect (a 502 carrying its header): the
                         # network error Chrome would see unproxied, so an https upgrade of an

@@ -358,6 +358,27 @@ async def test_csp_handler_under_the_egress_proxy(status, smokescreen_error, out
         route.abort.assert_not_called()
 
 
+async def test_csp_handler_turns_a_fetch_error_into_a_network_error():
+    """A route.fetch exception would otherwise fail the run at page.content ("socket hang up")."""
+    browser, _, page = make_browser(html=PAGE)
+    captured_handlers: dict = {}
+
+    async def track_route(pattern, handler):
+        captured_handlers[pattern] = handler
+
+    page.route = AsyncMock(side_effect=track_route)
+    with _no_actions():
+        await _render(browser, actions=[{"type": "wait", "milliseconds": 100}])
+
+    route = AsyncMock()
+    route.request.resource_type = "document"
+    route.fetch = AsyncMock(side_effect=Exception("Route.fetch: socket hang up"))
+    await captured_handlers["**"](route)
+
+    route.abort.assert_awaited_once_with("connectionfailed")
+    route.fulfill.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
