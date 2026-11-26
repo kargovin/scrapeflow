@@ -2484,7 +2484,13 @@ P8 / the ledger (the 503 rule the fix must keep).
 credentials today (the kubelet on 10250 and the k3s API on 6443 both require authentication).
 **Discovered:** 2026-11-18, in the owner's ADR-015 review (round 6), designing the delivery worker's NetworkPolicy.
 By reasoning only — **not reproduced**.
-**Status:** 🟡 **OPEN — the workflow worker's half only.** The scrape workers' fence was **RELEASED 2026-11-21** with Release M (M.13, infra `0f6828c`; six node probes went `open` → `blocked`). NetworkPolicy `scrapeflow-scrape-workers` gives the http, playwright and LLM workers the delivery worker's fence — DNS, Temporal, MinIO, public IPv4 except private ranges and `139.99.121.44/32`. **Stays open:** the workflow worker's half — a job, batch, crawl or pipeline-alert webhook to the node's IP (the `EGRESS_DENY_CIDRS` idea below, unscheduled).
+**Status:** 🔧 **Fixed in infra 2026-11-26 (infra `d363457`), push pending — the owner's.** The workflow worker gets
+its own NetworkPolicy `scrapeflow-workflow-worker` (owner's choice over an `EGRESS_DENY_CIDRS` setting): the scrape
+workers' rules plus Postgres (`app: scrapeflow-postgresql`, 5432) and Redis (`app: scrapeflow-redis`, 6379) by pod. The
+premise below that it "cannot take that policy" was wrong — a policy allows Postgres and Redis by pod as it allows
+Temporal and MinIO; the worker has no ingress, ports or probes, and no outbound client but the webhook send. Runbook:
+infra README → *Workflow worker NetworkPolicy* (host check, before/after probes, a webhook delivered). A webhook to the
+node then times out and retries until it fails. *Before:* 🟡 **OPEN — the workflow worker's half only.** The scrape workers' fence was **RELEASED 2026-11-21** with Release M (M.13, infra `0f6828c`; six node probes went `open` → `blocked`). NetworkPolicy `scrapeflow-scrape-workers` gives the http, playwright and LLM workers the delivery worker's fence — DNS, Temporal, MinIO, public IPv4 except private ranges and `139.99.121.44/32`. **Stays open:** the workflow worker's half — a job, batch, crawl or pipeline-alert webhook to the node's IP (the `EGRESS_DENY_CIDRS` idea below, unscheduled).
 
 `core/security.is_public_address` admits any globally reachable address, and the k3s node's own public IP
 (production egress shows `139.99.121.44`) is one. A connection from a pod to its own node's IP is delivered to the

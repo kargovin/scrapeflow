@@ -183,6 +183,13 @@ Owner's job checks (http, playwright, pipeline + LLM) not yet run.
   `engine=playwright` without `playwright_options` (schema says optional; **every MCP `scrape_url` with
   `engine="playwright"` failed**). `create_job` now uses `PlaywrightOptions()`'s defaults. Release: **api image only**,
   no migration; check = a playwright `POST /jobs` with no `playwright_options` → 201 and completes.
+  **Owner: push it together with the next fix.**
+- 🔧 **BUG-032's webhook half fixed in infra (`govindappa-k8s-config` `d363457`, rebased on the Flux commits, not
+  pushed)** — owner chose a NetworkPolicy over `EGRESS_DENY_CIDRS`. `app/workflow-worker-networkpolicy.yaml`: DNS,
+  Temporal 7233, Postgres 5432, Redis 6379, MinIO 9000 by pod; `0.0.0.0/0` except the same list as the other two
+  policies (diffed equal). Kustomize + dry-run clean. **Release = the owner's infra push**, no image: run the README
+  section's host check and the probe **before** (node `open`), push, Flux applies, probe **after** (node `blocked`,
+  Postgres/Redis/Temporal/MinIO/example.com `open`), then one job with a webhook delivered. Rollback: revert + push.
   Owner checks: the pod `Running`, `browser_launched` args include the new flag, a playwright job on an http-only
   site (e.g. `http://neverssl.com/`) completes, one https playwright job completes; Dependabot → 0.
 
