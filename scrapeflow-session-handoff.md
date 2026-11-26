@@ -202,6 +202,18 @@ or already fixed); the hosted LLM APIs go direct.
   `httpbin.org/redirect-to?url=http://scrapeflow-minio:9000/` request, owner's call to use a third party); a pipeline
   with an LLM block on a `base_url` completes; `POST /jobs` with `proxy_url` `http://scrapeflow-minio:9000` → 400.
   Rollback: re-tag the app first, then revert the infra commit.
+- 🚀 **Steps 1–2 done 2026-11-26/27 (owner):** infra `73b2794` pushed + README probes passed; `main` pushed. Check 3
+  (`http://neverssl.com/` with page actions) **failed in prod**: `Page.content: Route.fetch: socket hang up` on
+  `https://neverssl.com/`. Cause, pre-existing (reproduced without the proxy — the route hangs to the job timeout):
+  Chrome's automatic https upgrade, whose fallback page actions' `route.fetch` takes away. Fixed (local, unreleased):
+  `b60798f` a `route.fetch` error becomes a network error (abort) instead of failing at `page.content`; `857f46b`
+  `--disable-features=…,HttpsUpgrades` — the playwright engine fetches an `http://` URL as given, like the http engine
+  (my call; one flag — Chrome reads a single list); `ada5c4f` + infra `31f0763` the proxy's connect timeout 10 → 30 s
+  (neverssl sometimes takes 20 s to accept a connection; before the proxy nothing cut that short). Compose: egress +
+  crawl gates both engines pass; real neverssl jobs: actions ✅, plain ✅, one actions run failed on neverssl's own
+  30 s connect (proxy log `conn_establish_time_ms: 30000`; `curl` without the proxy fails the same way).
+  **Release: infra push (ConfigMap + annotation bump rolls the proxy) and `main` (playwright image only); then rerun
+  check 3 (retry once if neverssl stalls) and checks 4–6.**
 - **Not covered (recorded in BUG-010):** WebRTC/UDP from a rendered page; the api's front-door 400 still names the
   resolved address (pre-existing). Chrome's own background traffic (update checks) now goes through the proxy too.
 
