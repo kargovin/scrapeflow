@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Chrome exhausts and crashes on. Routes shared memory to /tmp instead. Neither
     # this nor --no-sandbox is JS-detectable (both are process-level flags).
     playwright_disable_dev_shm: bool = True
+    # --disable-features=HttpsFirstBalancedModeAutoEnable (BUG-034): from Chrome 158 a
+    # navigation to an http-only site fails with net::ERR_BLOCKED_BY_CLIENT without it.
+    playwright_allow_http: bool = True
 
     @field_validator("credentials_encryption_key")
     def validate_fernet_key(cls, v):
@@ -69,3 +72,16 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def browser_launch_args(s: Settings) -> list[str]:
+    args: list[str] = []
+    if s.playwright_no_sandbox:
+        args.append("--no-sandbox")
+    if s.playwright_disable_dev_shm:
+        args.append("--disable-dev-shm-usage")
+    if s.playwright_disable_automation:
+        args.append("--disable-blink-features=AutomationControlled")
+    if s.playwright_allow_http:
+        args.append("--disable-features=HttpsFirstBalancedModeAutoEnable")
+    return args

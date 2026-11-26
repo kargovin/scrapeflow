@@ -34,7 +34,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter  # noqa: E402
 from temporalio.worker import Worker  # noqa: E402
 
 from .activity import PlayWrightScrapeActivities  # noqa: E402
-from .config import settings  # noqa: E402
+from .config import browser_launch_args, settings  # noqa: E402
 from .contracts import CRAWL_QUEUE, SCRAPE_PLAYWRIGHT_QUEUE  # noqa: E402
 from .crawl import CrawlActivities, discover_sitemaps, fetch_sitemap  # noqa: E402
 
@@ -66,13 +66,7 @@ async def run() -> None:
         await minio.make_bucket(settings.minio_bucket)
     log.info("minio_connected", bucket=settings.minio_bucket)
 
-    launch_args: list[str] = []
-    if settings.playwright_no_sandbox:
-        launch_args.append("--no-sandbox")
-    if settings.playwright_disable_dev_shm:
-        launch_args.append("--disable-dev-shm-usage")
-    if settings.playwright_disable_automation:
-        launch_args.append("--disable-blink-features=AutomationControlled")
+    launch_args = browser_launch_args(settings)
 
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(
