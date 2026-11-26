@@ -358,6 +358,20 @@ services:
     # The crawl gate fixture (E.6).
     networks: [default, crawl-fixture]
 
+  # ── Egress proxy (BUG-010 part 2) ────────────────────────────────────────────
+
+  # Every worker fetch of a user-chosen address goes through it: it resolves the name once, refuses
+  # any address that is not public unicast (a 407 with X-Smokescreen-Error), and connects to
+  # the address it checked. Config: docker/egress/smokescreen.yaml.
+  egress:
+    image: ghcr.io/stripe/smokescreen:v1.0.1@sha256:e62052a184ce5ef97c32b00a32583fc5376d4ca5d9ec941cf9a4566eef0556e8
+    command: [--config-file, /etc/smokescreen/smokescreen.yaml, --listen-port, '4750']
+    volumes:
+      - ./egress/smokescreen.yaml:/etc/smokescreen/smokescreen.yaml:ro
+    restart: unless-stopped
+    # The gate fixtures' public-range names resolve on crawl-fixture; internal names on default.
+    networks: [default, crawl-fixture]
+
   # ── Crawl gate fixture site (E.6) ───────────────────────────────────────────
   # contracts/fixtures/crawl-site/README.md. Its own network sits in a public range, so the SSRF
   # check (unchanged) sees www./docs.crawlfixture.com as outside sites; on the default network

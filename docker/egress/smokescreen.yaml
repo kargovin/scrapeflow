@@ -1,0 +1,26 @@
+# The egress proxy's config (BUG-010 part 2): every worker fetch of a user-chosen address goes
+# through it. Canonical copy — the infra repo's ConfigMap mirrors this file.
+#
+# Smokescreen already refuses loopback, link-local, multicast, unspecified, broadcast, private
+# (RFC 1918, fc00::/7), 100.64.0.0/10, every IPv4-embedding IPv6 prefix (NAT64, 6to4, Teredo) and
+# its own addresses. The ranges below close the rest of ScrapeFlow's rule, public unicast only
+# (core/security.is_public_address): the special-purpose blocks Python's is_global refuses.
+# ⚠️ Command-line --deny-range/--deny-address flags append to this list (production adds the
+# node's public IP that way); they never replace it.
+
+allow_missing_role: true # no mTLS client identity: every caller gets the default (open) ACL
+connect_timeout: 10s
+dns_timeout: 5s
+
+deny_ranges:
+  - 0.0.0.0/8 # "this network"
+  - 192.0.0.0/24 # IETF protocol assignments
+  - 192.0.2.0/24 # TEST-NET-1
+  - 198.18.0.0/15 # benchmarking
+  - 198.51.100.0/24 # TEST-NET-2
+  - 203.0.113.0/24 # TEST-NET-3
+  - 240.0.0.0/4 # reserved
+  - 100::/64 # discard-only
+  - 2001::/23 # IETF protocol assignments (Teredo included)
+  - 2001:db8::/32 # documentation
+  - 3fff::/20 # documentation
