@@ -1886,7 +1886,9 @@ lost — nothing is deleted wrongly, nothing else depends on it)
 **Discovered:** 2026-09-25, noticed while verifying A.3: `scrapeflow-cleanup-29838420` `Failed`
 (`BackoffLimitExceeded`, 7 attempts 03:00–03:06 UTC). The pod was gone with the Job, so the cause
 was reproduced on the deployed image (`421cbfe`), not read from its log.
-**Status:** 🔧 **Fixed 2026-11-26, unreleased** — infra `0bed224` (the command and the two keys, as below) **and**
+**Status:** ✅ **RELEASED 2026-11-26** (api `main` `4573f27`, then infra `0bed224`) — **the first successful run in
+production**: the owner's manual `cleanup-manual` Job completed on the new image (~35 s); the 03:00 runs follow. *Build:*
+infra `0bed224` (the command and the two keys, as below) **and**
 app `b01f7d6` (`scripts/cleanup_old_runs.py`): **owner's call 2026-11-26 — retention covers scheduled history
 only**: finished runs of a scheduled job (active or paused) past 90 days, **keeping each job's newest run**. As
 specified (Phase 2) it deleted *every* run past 90 days, which would have made old one-off jobs vanish from every job
@@ -2493,7 +2495,10 @@ P8 / the ledger (the 503 rule the fix must keep).
 credentials today (the kubelet on 10250 and the k3s API on 6443 both require authentication).
 **Discovered:** 2026-11-18, in the owner's ADR-015 review (round 6), designing the delivery worker's NetworkPolicy.
 By reasoning only — **not reproduced**.
-**Status:** 🔧 **Fixed in infra 2026-11-26 (infra `ccf4aa5`), push pending — the owner's.** The workflow worker gets
+**Status:** ✅ **CLOSED 2026-11-26 — RELEASED + VERIFIED** (infra `ccf4aa5`, applied by Flux at `0bed224`; the owner's
+probe from the workflow worker: node `139.99.121.44:6443` and `10.42.0.1:10250` `open` → `blocked`; Postgres, Redis,
+Temporal, MinIO and `example.com:443` `open` before and after; a job's webhook to a public receiver `delivered`).
+*Build note:* The workflow worker gets
 its own NetworkPolicy `scrapeflow-workflow-worker` (owner's choice over an `EGRESS_DENY_CIDRS` setting): the scrape
 workers' rules plus Postgres (`app: scrapeflow-postgresql`, 5432) and Redis (`app: scrapeflow-redis`, 6379) by pod. The
 premise below that it "cannot take that policy" was wrong — a policy allows Postgres and Redis by pod as it allows

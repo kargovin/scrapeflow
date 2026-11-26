@@ -196,6 +196,10 @@ Owner's job checks (http, playwright, pipeline + LLM) not yet run.
 - ✅ **Step 1 done 2026-11-26** — `main` `59f439a..4573f27` (api image; build + replay green); api pods, workflow worker
   **and the CronJob** on `main-1795706761-4573f27…`; Dependabot **0 open**. Infra rebased on Flux's commit (`ccf4aa5`,
   `0bed224`, ahead 2) — **next: steps 2–6, the owner's.**
+- ✅ **Steps 2–5 done 2026-11-26 (owner):** pre-checks as expected, probe before all `open`; infra pushed, Flux applied
+  `0bed224` (policy present, CronJob on the venv command with the three keys); probe after: node `6443`/`10250`
+  `blocked`, the other five `open`; a job's webhook `delivered` → **BUG-032 closed**. `cleanup-manual` completed on
+  `4573f27` (~35 s) → **BUG-019 released** (counts not recorded). **Left: step 6 (BUG-035's check).**
 - 📋 **Combined release, in this order:** (1) `main` ← `develop` (BUG-035 + BUG-019's script; **api image only**, no
   migration) and wait until the api pods **and the CronJob's image** carry the new SHA (Flux commits that to the infra
   repo — `git pull --rebase` there before pushing); (2) BUG-032's pre-checks + "before" probe; (3) infra push
