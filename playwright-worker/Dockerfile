@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy AS builder
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble AS builder
 
 WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -11,7 +11,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 FROM builder AS dev-builder
 RUN uv sync --frozen --no-install-project
 
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy AS runtime
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble AS runtime
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -37,7 +37,8 @@ RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
 # --create-home: headed Chrome writes its profile/cache under $HOME, so the
 # runtime user needs a writable home directory.
-RUN useradd --create-home --uid 1001 appuser
+# noble's base image already holds uid 1001 (pwuser).
+RUN userdel --remove pwuser && useradd --create-home --uid 1001 appuser
 ENV HOME=/home/appuser
 USER appuser
 
