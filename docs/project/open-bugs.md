@@ -2345,7 +2345,7 @@ all-users numbers were right). The scope now goes through job, batch or crawl ow
 
 **Severity:** Low (SPA display) — the Jobs list mislabels a field.
 **Discovered:** 2026-10-28, by the owner, verifying the H.1 release in prod.
-**Status:** 🔧 **Fixed locally 2026-11-26, unreleased** (`22ace97` API, then the SPA commit). `engine` is on
+**Status:** 🔧 **Fixed locally 2026-11-26, unreleased** (`22ace97` API, `c3ac2a5` SPA). `engine` is on
 `JobResponse` (every user and admin job read). My call on the rendering: all three lists show `engine → format`
 under "Engine", as Batches did; the three detail pages show *Engine* and *Output format* as two rows.
 

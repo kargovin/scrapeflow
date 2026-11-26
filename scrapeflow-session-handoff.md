@@ -39,7 +39,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Accepted 2026-10-27**; cap 20, paused not counted, catch-up 365 d) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-032) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-033) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass complete — **ADR-014** + **ADR-015** Accepted 2026-11-18); **PRD-018** (Draft, owner review complete 2026-11-05; Architect pass **ADR-016**, Accepted 2026-11-18 after a 12-round owner review) |
@@ -156,7 +156,24 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-26 *(clock)*
+## Current state — bug fixes, 2026-11-26 *(clock)*
+
+🔧 **BUG-033 filed + fixed, BUG-029 fixed — local, unreleased; ship together as one api-image release.** Built inline
+(no builder subagent; small SPA + one schema field).
+- **BUG-033** (owner found it: a pipeline page left open through a laptop standby showed "Pipeline not found."; a reload
+  showed it). Seven detail pages rendered "X not found." for *any* error, and dropped a loaded page when a background
+  refetch failed. `4305bec` — `components/LoadError.tsx`: `LoadFailed` ("not found" on a 404 only, else the error +
+  *Try again*), `RefreshFailed` (a note above a loaded page). List pages unchanged (they say "Failed to load", correctly).
+- **BUG-029** — `22ace97` `engine` on `JobResponse` (all 7 construction sites, required field), tests user + admin;
+  `c3ac2a5` SPA: lists show `engine → format` (my call, Batches' existing form), detail pages *Engine* + *Output format*.
+- **Numbers:** API 1592. SPA: `tsc -b` + `vite build` clean; no SPA test suite exists. Not checked in a browser.
+- **Release facts:** `main` `2ae9801..develop`; **api image only**; no migration, no infra change. Owner checks: Jobs list
+  shows `playwright → markdown` for a playwright job; JobDetail shows Engine; a detail page left open across a network drop
+  keeps its content with the amber note; an unknown id still says "not found".
+- **Next candidates:** BUG-021, BUG-019 (infra; first run is a real delete), BUG-032's webhook half (needs a call),
+  P's email limits.
+
+## Earlier state — 2026-11-26 *(clock)*
 
 🚀 **RELEASE P DONE — GROUP P CLOSED (2026-11-26). Every implementation-backlog group A–P is done.** The owner ran the
 P.2 runbook in their own terminal; I checked each step. `main` `cf73ade..2ae9801` (CI `45744291517`; api + delivery-worker
