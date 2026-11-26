@@ -6,9 +6,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never
 
 COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+FROM builder AS dev-builder
 RUN uv sync --frozen --no-install-project
 
-FROM python:3.12-slim
+FROM python:3.12-slim AS runtime
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -20,3 +23,9 @@ RUN useradd --no-create-home --uid 1000 appuser
 USER appuser
 
 CMD ["python", "-m", "worker.main"]
+
+# Tests: docker build --target test -t llm-worker-test llm-worker/ (source mounted over /app)
+FROM runtime AS test
+COPY --from=dev-builder /opt/venv /opt/venv
+
+FROM runtime

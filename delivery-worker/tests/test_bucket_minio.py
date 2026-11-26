@@ -9,7 +9,7 @@ streaming with a length, the delete and MinIO's refusals are real. Skipped unles
         -e S3_TEST_ENDPOINT=minio:9000 -e S3_TEST_ROOT_USER=scrapeflow \\
         -e S3_TEST_ROOT_PASSWORD=scrapeflow_secret -e MINIO_ENDPOINT=minio:9000 \\
         -e MINIO_ACCESS_KEY=scrapeflow-delivery -e MINIO_SECRET_KEY=scrapeflow_delivery_secret \\
-        --entrypoint python docker-delivery-worker -m pytest -q -p no:cacheprovider tests/test_bucket_minio.py
+        --entrypoint python delivery-worker-test -m pytest -q -p no:cacheprovider tests/test_bucket_minio.py
 """
 
 import asyncio

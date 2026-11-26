@@ -6,7 +6,7 @@ after. Skipped unless ``PG_TEST_HOST`` is set. From the repo root, with the gate
 
     docker run --rm --network docker_crawl-fixture -v "$PWD/delivery-worker:/app" -w /app \\
         -e PG_TEST_HOST=pg.deliveryfixture.com -e PG_TEST_SUPERUSER_PASSWORD=delivery-gate \\
-        --entrypoint python docker-delivery-worker -m pytest -q -p no:cacheprovider tests/test_postgres_db.py
+        --entrypoint python delivery-worker-test -m pytest -q -p no:cacheprovider tests/test_postgres_db.py
 """
 
 import json

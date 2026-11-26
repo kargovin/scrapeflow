@@ -6,9 +6,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never
 
 COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+FROM builder AS dev-builder
 RUN uv sync --frozen --no-install-project
 
-FROM python:3.12-slim
+FROM python:3.12-slim AS runtime
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1
@@ -21,3 +24,9 @@ USER appuser
 
 # The venv's python as PID 1 (not `uv run`, BUG-021): SIGTERM reaches worker.main's handler.
 CMD ["python", "-m", "worker.main"]
+
+# Tests: docker build --target test -t delivery-worker-test delivery-worker/ (source mounted over /app)
+FROM runtime AS test
+COPY --from=dev-builder /opt/venv /opt/venv
+
+FROM runtime

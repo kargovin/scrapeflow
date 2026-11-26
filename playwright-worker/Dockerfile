@@ -6,9 +6,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never UV_PYTHON=python3
 
 COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+FROM builder AS dev-builder
 RUN uv sync --frozen --no-install-project
 
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy AS runtime
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -42,3 +45,9 @@ USER appuser
 # needs a virtual display), waits for it, then exec's the worker as pid 1 so a
 # crash surfaces to k8s instead of being masked by an xvfb-run wrapper.
 CMD ["/app/entrypoint.sh"]
+
+# Tests: docker build --target test -t playwright-worker-test playwright-worker/
+FROM runtime AS test
+COPY --from=dev-builder /opt/venv /opt/venv
+
+FROM runtime
