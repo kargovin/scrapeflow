@@ -33,6 +33,7 @@ from app.core.pipeline_trigger import (
 )
 from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
+from app.core.security import validate_proxy_url
 from app.models.destination import PipelineVersionDestination
 from app.models.monitor import Monitor
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
@@ -236,6 +237,10 @@ async def _prepare_definition(
             and not isinstance(config.url, InputBinding)
         ):
             await ssrf_check(str(config.url))
+        if isinstance(config, ScrapeConfigV1) and config.proxy_url:
+            await asyncio.get_running_loop().run_in_executor(
+                None, validate_proxy_url, config.proxy_url
+            )
     for key in keys.values():
         if key.base_url:
             await ssrf_check(key.base_url)

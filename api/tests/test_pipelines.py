@@ -181,6 +181,22 @@ async def test_secret_fields_are_stored_encrypted_and_never_returned(client, hea
     assert json.loads(_decrypt(fetch["secrets"]["cookies"])) == cookies
 
 
+async def test_a_private_proxy_is_refused_at_save(client, headers, key):
+    definition = recipe(key.id)
+    definition["blocks"][0]["config"]["proxy_url"] = "http://proxy.internal:3128"
+
+    def resolve(host, *_):
+        ip = "10.0.0.7" if host == "proxy.internal" else "93.184.216.34"
+        return [(None, None, None, None, (ip, 0))]
+
+    with patch("app.core.security.socket.getaddrinfo", side_effect=resolve):
+        resp = await client.post(
+            "/pipelines", json={"name": "proxy", "definition": definition}, headers=headers
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "proxy_url: URL resolves to a private address: 10.0.0.7"
+
+
 async def test_other_users_llm_key_is_404_and_nothing_stored(client, headers, db_user, other_user):
     foreign = await _llm_key(other_user.id)
     resp = await client.post(

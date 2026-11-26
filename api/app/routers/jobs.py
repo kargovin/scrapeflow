@@ -39,7 +39,7 @@ from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
 from app.core.quota import Admit, admission, check_scheduled_jobs_quota, lock_user
 from app.core.rate_limit import check_rate_limit
-from app.core.security import validate_no_ssrf
+from app.core.security import validate_no_ssrf, validate_proxy_url
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.job_secrets import JobSecrets, JobSecretType
@@ -216,6 +216,9 @@ async def create_job(
 
     if body.webhook_url:
         await get_running_loop().run_in_executor(None, validate_no_ssrf, str(body.webhook_url))
+
+    if body.proxy_url:
+        await get_running_loop().run_in_executor(None, validate_proxy_url, body.proxy_url)
 
     if body.llm_config:
         key_id = body.llm_config.llm_key_id
@@ -565,6 +568,8 @@ async def patch_jobs(
     # Pop secrets now so they don't reach the setattr loop, but defer DB writes until after all validations.
     proxy_url_pending = updates.pop("proxy_url", _UNSET)
     cookies_pending = updates.pop("cookies", _UNSET)
+    if proxy_url_pending is not _UNSET and proxy_url_pending:
+        await get_running_loop().run_in_executor(None, validate_proxy_url, proxy_url_pending)
     schedule_changes = {
         f: updates.pop(f) for f in ("schedule_cron", "schedule_status") if f in updates
     }

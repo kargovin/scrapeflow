@@ -865,7 +865,15 @@ async def test_create_job_v2_payload_defaults(client, auth_headers, mock_tempora
 # ---------------------------------------------------------------------------
 
 
-async def test_create_job_with_proxy_url(client, auth_headers, mock_temporal):
+@pytest.fixture
+def public_dns():
+    """Every name resolves to a public address: the proxy hosts below are made up."""
+    with patch("app.core.security.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
+        yield
+
+
+async def test_create_job_with_proxy_url(client, auth_headers, mock_temporal, public_dns):
     """POST /jobs with proxy_url stores encrypted secret, sets has_proxy=True,
     omits proxy_url from response body, and injects encrypted credentials into the scrape input."""
     proxy_url = "http://user:pass@proxy.example.com:8080"
@@ -925,7 +933,7 @@ async def test_create_job_default_proxy(client, auth_headers, mock_temporal):
         settings.default_proxy_url = original
 
 
-async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_temporal):
+async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_temporal, public_dns):
     """PATCH /jobs/{id} with proxy_url upserts the job_secrets row and has_proxy becomes True."""
     from app.models.job_secrets import JobSecrets, JobSecretType
 
@@ -955,7 +963,7 @@ async def test_patch_job_proxy_url_upsert(client, auth_headers, mock_temporal):
     assert secret is not None
 
 
-async def test_patch_job_remove_proxy(client, auth_headers, mock_temporal):
+async def test_patch_job_remove_proxy(client, auth_headers, mock_temporal, public_dns):
     """PATCH /jobs/{id} with proxy_url=null removes the secret and has_proxy becomes False."""
     from app.models.job_secrets import JobSecrets, JobSecretType
 
@@ -1028,7 +1036,7 @@ async def test_create_job_with_cookies(client, auth_headers, mock_temporal):
     assert secret.encrypted_value != json.dumps(cookies)  # stored encrypted, not plaintext
 
 
-async def test_create_job_cookies_and_proxy(client, auth_headers, mock_temporal):
+async def test_create_job_cookies_and_proxy(client, auth_headers, mock_temporal, public_dns):
     """POST /jobs with both cookies and proxy_url produces a credentials dict containing both."""
     cookies = [{"name": "auth", "value": "tok", "domain": "example.com"}]
     proxy_url = "http://user:pass@proxy.example.com:8080"
@@ -1316,3 +1324,38 @@ async def test_patch_job_webhook_events(client, auth_headers, mock_temporal):
     )
     assert patch_resp.status_code == 200
     assert patch_resp.json()["webhook_events"] == ["job.failed"]
+
+
+# BUG-010 part 2: a worker connects to a job's proxy itself, not through the egress proxy.
+
+
+async def test_create_job_refuses_a_private_proxy(client, auth_headers, mock_temporal):
+    def resolve(host, *_):
+        ip = "10.43.0.5" if host == "minio.internal" else "93.184.216.34"
+        return [(None, None, None, None, (ip, 0))]
+
+    with patch("app.core.security.socket.getaddrinfo", side_effect=resolve):
+        response = await client.post(
+            "/jobs",
+            json={"url": "https://example.com", "proxy_url": "http://u:p@minio.internal:9000"},
+            headers=auth_headers,
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "proxy_url: URL resolves to a private address: 10.43.0.5"
+    mock_temporal.start_workflow.assert_not_awaited()
+
+
+async def test_patch_job_refuses_a_private_proxy(client, auth_headers, mock_temporal):
+    with patch("app.core.security.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [(None, None, None, None, ("93.184.216.34", 0))]
+        created = await client.post(
+            "/jobs", json={"url": "https://example.com"}, headers=auth_headers
+        )
+        mock_gai.return_value = [(None, None, None, None, ("127.0.0.1", 0))]
+        response = await client.patch(
+            f"/jobs/{created.json()['id']}",
+            json={"proxy_url": "http://localhost:3128"},
+            headers=auth_headers,
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("proxy_url: ")

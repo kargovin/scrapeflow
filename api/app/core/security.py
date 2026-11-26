@@ -52,3 +52,14 @@ def validate_no_ssrf(url: str) -> None:
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=msg
             ) from exc
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg) from exc
+
+
+def validate_proxy_url(url: str) -> None:
+    """validate_no_ssrf for a job's or Scrape block's proxy, with the field named in the detail.
+
+    A worker connects to the proxy itself, not through the egress proxy (BUG-010 part 2).
+    """
+    try:
+        validate_no_ssrf(url)
+    except HTTPException as exc:
+        raise HTTPException(status_code=exc.status_code, detail=f"proxy_url: {exc.detail}") from exc
