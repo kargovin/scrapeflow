@@ -838,7 +838,7 @@ case: the plumbing goes, the mistake stays unless it is fixed first.
 **Severity:** High (the feature cannot work at all — pages dispatch and never complete, with no
 error anywhere) — **but entirely latent: no crawl has ever been run in production**
 **Discovered:** 2026-08-23 (tracing ADR-009 §9's option-(a) bridge against the live NATS stream)
-**Status:** Open — **WILL NOT FIX on the v1/NATS path.** See *Disposition*.
+**Status:** ⛔ **CLOSED as dissolved 2026-10-27 (E.7, `261f931`)** — see the note below. *(Was: Open — will not fix on the v1/NATS path; see* Disposition*.)*
 > ⛔ **CLOSED as dissolved, not fixed — 2026-10-27 (E.7, `261f931`).** `coordinator/` is deleted and
 > its Deployment pruned from prod; crawls run on `CrawlWorkflow`, whose result handling is the
 > workflow itself. Owner verified a crawl completing in prod.
@@ -971,8 +971,8 @@ takes its bugs along; plumbing is replaced.
 that anything is wrong, and it gets worse under Phase 4's longer runs)
 **Discovered:** 2026-08-26 (reviewing ADR-009 §11, which preserves this mechanism and leans on it
 harder)
-**Status:** ✅ **FIXED locally 2026-10-11 (`88e8024`, C.11) — not released**; ships with the pipeline lane
-(C.14). All three parts of the fix sketch: asyncpg's termination listener logs
+**Status:** ✅ **CLOSED — fixed 2026-10-11 (`88e8024`, C.11), RELEASED 2026-10-12 with the pipeline lane
+(C.14, `main` `6675f17..1793c60`).** All three parts of the fix sketch: asyncpg's termination listener logs
 `job_notifier_connection_lost` at **error**, a reconnect loop (1/2/5/10/30 s) re-registers **every** channel
 (`job_status`, `batch_status`, `pipeline_status`) and logs `job_notifier_reconnected`, and a 30 s `SELECT 1`
 health check terminates a half-open connection so the same path fires. Updates sent during the gap are
@@ -1276,7 +1276,8 @@ this, and P9 was a fresh visit on 2026-09-11.)*
 crawl-lane outage, not a degradation)
 **Discovered:** 2026-09-04, restarting the rebuilt workers after P6. Not caused by P6 — the
 restart is only what ran the startup path against a database that had stalled items in it.
-**Status:** Open — **owner deferred on 2026-09-04, deliberately not fixed** (triage below).
+**Status:** ⛔ **CLOSED as dissolved 2026-10-27 (E.7, `261f931`)** — `reenqueue_stalled` was deleted with
+`coordinator/`; crawls run on `CrawlWorkflow`. *(Was: Open — owner deferred on 2026-09-04, deliberately not fixed; triage below.)*
 
 ### What happens
 
@@ -1797,7 +1798,7 @@ random)
 **Discovered:** 2026-09-19, owner's report after the queue release — "after some time the
 frontend shows failed to load in the job list and user list". Pre-existing; not introduced by the
 `react-router-dom` 6 → 7 or `clerk-backend-api` 6 → 7 bumps in that release.
-**Status:** ✅ **FIXED and RELEASED 2026-11-19 (J.9, `4fc099f`, J-b `036870c..a10f698`)** — the two-minute check was not run at release; the owner reports a recurrence. Close it if none is seen. `Jobs`, `JobDetail`, `Users`, `ApiKeys`, `UsageStats` and `ResultViewer` call `useApi()` (a fresh `getToken()` per request); no `['token']` query is left in the SPA. The *a page left open > 2 min keeps loading* check is J.10's (it needs a signed-in browser). *(Was: 🔴 Open — owner's call 2026-09-19: tabled until after the Temporal pipeline.)*
+**Status:** ✅ **FIXED and RELEASED 2026-11-19 (J.9, `4fc099f`, J-b `036870c..a10f698`)** — the two-minute check was not run at release. The recurrence the owner reported on 2026-11-26 (a page left open through a laptop standby showed "not found") is **BUG-033**, a different fault — the token was fresh. Close this one once BUG-033 is released and nothing recurs. `Jobs`, `JobDetail`, `Users`, `ApiKeys`, `UsageStats` and `ResultViewer` call `useApi()` (a fresh `getToken()` per request); no `['token']` query is left in the SPA. The *a page left open > 2 min keeps loading* check is J.10's (it needs a signed-in browser). *(Was: 🔴 Open — owner's call 2026-09-19: tabled until after the Temporal pipeline.)*
 Not a Phase 4 item (backlog §4). Root cause read from the code; not yet confirmed against a
 captured 401 — the confirmation step is in *What to capture*.
 
@@ -2462,7 +2463,7 @@ P8 / the ledger (the 503 rule the fix must keep).
 credentials today (the kubelet on 10250 and the k3s API on 6443 both require authentication).
 **Discovered:** 2026-11-18, in the owner's ADR-015 review (round 6), designing the delivery worker's NetworkPolicy.
 By reasoning only — **not reproduced**.
-**Status:** 🟡 **OPEN — scrape workers' fix built 2026-11-21, unreleased** (M.13, infra repo `release-m` step 4 `61a0843`; ships as the last step of Release M's runbook, after M.12's gate proves this cluster enforces NetworkPolicy). NetworkPolicy `scrapeflow-scrape-workers` gives the http, playwright and LLM workers the delivery worker's fence — DNS, Temporal, MinIO, public IPv4 except private ranges and `139.99.121.44/32`. **Stays open:** the workflow worker's half — a job, batch, crawl or pipeline-alert webhook to the node's IP (the `EGRESS_DENY_CIDRS` idea below, unscheduled).
+**Status:** 🟡 **OPEN — the workflow worker's half only.** The scrape workers' fence was **RELEASED 2026-11-21** with Release M (M.13, infra `0f6828c`; six node probes went `open` → `blocked`). NetworkPolicy `scrapeflow-scrape-workers` gives the http, playwright and LLM workers the delivery worker's fence — DNS, Temporal, MinIO, public IPv4 except private ranges and `139.99.121.44/32`. **Stays open:** the workflow worker's half — a job, batch, crawl or pipeline-alert webhook to the node's IP (the `EGRESS_DENY_CIDRS` idea below, unscheduled).
 
 `core/security.is_public_address` admits any globally reachable address, and the k3s node's own public IP
 (production egress shows `139.99.121.44`) is one. A connection from a pod to its own node's IP is delivered to the
