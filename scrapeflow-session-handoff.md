@@ -120,6 +120,15 @@ cd http-worker && UPDATE_CONTRACT_FIXTURES=1 go test -count=1 ./internal/activit
 ```bash
 docker run --rm -v "$PWD/delivery-worker:/app" -w /app --entrypoint python delivery-worker-test -m pytest -q -p no:cacheprovider
 ```
+**Egress proxy (BUG-010 part 2)** — the address table through the live compose proxy, and the end-to-end gate
+(needs `docker compose --profile gate up -d pipeline-fixture crawl-fixture`):
+```bash
+docker run --rm --network docker_default -e EGRESS_PROXY_URL=http://egress:4750 -v "$PWD:/repo" -w /repo docker-api \
+  /app/.venv/bin/python -m pytest contracts/test_egress_proxy.py -q
+docker compose exec -T api uv run python -m scripts.egress_gate --engine http      # from ./docker; and playwright
+```
+⚠️ The three scrape-side workers need `EGRESS_PROXY_URL` (compose sets it); their unit tests set a dummy one.
+
 **Delivery gate (M.12):** `scripts/delivery-gate.sh` (compose profile `gate`, ~6 min; since O.1 it brings up `delivery-postgres` too).
 
 **Delivery worker against the gate's TLS Postgres (O.1)** — from the repo root, with `docker compose --profile gate up -d --wait delivery-postgres delivery-fixture` (in `./docker`):
@@ -160,7 +169,43 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — BUG-013 + BUG-006 + every Dependabot alert, 2026-11-26 *(clock)*
+## Current state — BUG-010 part 2 (egress proxy), 2026-11-26 *(clock)*
+
+🔧 **BUG-010 part 2 fixed — local, unreleased.** Built inline, one step per commit (owner: "lets do bug10"). Owner's
+calls: **borrow, don't build** — Stripe **Smokescreen** (v1.0.1, digest-pinned) — run as **one shared service**, and
+**include the LLM `base_url`**. Workflow worker (webhooks) and delivery worker keep their own pinning (not HTTP-proxyable
+or already fixed); the hosted LLM APIs go direct.
+- Commits in replay order: `2344ff5` compose `egress` + `docker/egress/smokescreen.yaml` (deny ranges to match
+  `is_public_address`) + `contracts/test_egress_proxy.py` (the shared address table through the live proxy);
+  `48982c4` API refuses a non-public `proxy_url` at save (jobs create/edit, pipeline Scrape block) — **it was never
+  checked**; `808f732` Go: fetch + robots via the proxy, a job proxy through a CONNECT tunnel, `AddressRefused`;
+  `d2ddf13` the error names the host only; `9533010` compose wiring + `scripts.egress_gate` + fixture `/redirect`;
+  `c815c95` Playwright: Chrome launched on the proxy, robots/sitemap clients, refusal detection (407 + header on a
+  main-frame navigation, or CONNECT refused), a job proxy pinned to its checked IP, address-rule copy in
+  `contracts/test_egress.py`; `c26b43a` LLM: base_url client + warm-up probe via the proxy, terminal refusal (the SDK
+  runs on `httpx2` — refusals matched by shape); `0412914` **regression I caused and fixed before commit-to-release**:
+  with page actions, `route.fetch` served the proxy's 502 for Chrome's https upgrade of an http-only site — the route
+  now aborts so Chrome falls back; `37e2092` gate covers page actions and checks stored content.
+- **Numbers:** API 1597, contracts 261 + 33 (proxy table, needs compose), Go green + integration vet, playwright 230,
+  llm 286. Gates on compose: `egress_gate` both engines (Playwright also with page actions), E.6 crawl gate both
+  engines, J.10 pipeline gate. Mutation-checked: every guard has a test that fails without it.
+- **Infra (`govindappa-k8s-config` `73b2794`, local, not pushed):** `infrastructure/egress.yaml` (ConfigMap copy,
+  Deployment ×2 read-only/non-root, `--deny-address 139.99.121.44`, Service :4750), `app/egress-networkpolicy.yaml`
+  (in from the three workers only; out DNS + public minus the usual list), scrape-workers policy allows the proxy,
+  `EGRESS_PROXY_URL` on the three workers, README *Egress proxy* section (probe commands tested on compose).
+- 📋 **Release (the owner's), in this order:** (1) infra push → Flux applies; `scrapeflow-egress` 2/2 Ready; README
+  probes: example.com ok, `scrapeflow-minio:9000` / node `:6443` / `169.254.169.254` → 407. Old images ignore the new
+  env. (2) `main` ← `develop`: **api + http-worker + playwright-worker + llm-worker images**, no migration; wait for all
+  rollouts; each worker logs its egress at start. (3) Owner checks: one http + one playwright job on a public page
+  completes; a playwright job with page actions on `http://neverssl.com/` completes; a job whose URL redirects to an
+  internal address fails `address refused: … is not a public address` (needs a public redirector — e.g. a
+  `httpbin.org/redirect-to?url=http://scrapeflow-minio:9000/` request, owner's call to use a third party); a pipeline
+  with an LLM block on a `base_url` completes; `POST /jobs` with `proxy_url` `http://scrapeflow-minio:9000` → 400.
+  Rollback: re-tag the app first, then revert the infra commit.
+- **Not covered (recorded in BUG-010):** WebRTC/UDP from a rendered page; the api's front-door 400 still names the
+  resolved address (pre-existing). Chrome's own background traffic (update checks) now goes through the proxy too.
+
+## Earlier state — BUG-013 + BUG-006 + every Dependabot alert, 2026-11-26 *(clock)*
 
 🚀 **Released by the owner's request 2026-11-26 (`main` `2ae9801..ef97bfe`, then docs `bdd59b2`)** — every image rebuilt;
 all pods `Running`, 0 restarts, each worker logged its start. Dependabot **104 → 3** (the 3: playwright's `soupsieve`).

@@ -1067,6 +1067,22 @@ unsubscribed is gone; that is another argument for the client-side re-read in §
 
 ## BUG-010 — URLs discovered *during* a crawl are never SSRF-checked, and no worker checks either
 
+> 🔧 **Part 2 FIXED 2026-11-26 — local, unreleased** (`2344ff5..37e2092`, infra `73b2794`). Owner's calls: borrow a
+> maintained egress proxy rather than write one — **Stripe Smokescreen** (`ghcr.io/stripe/smokescreen:v1.0.1`, pinned
+> by digest), run as **one shared service** (`egress` in compose, `scrapeflow-egress` ×2 in the cluster) — and include
+> the LLM worker's `base_url`. Every fetch of a user-chosen address by the http, playwright and LLM workers goes
+> through it (`EGRESS_PROXY_URL`, required): it resolves each name once, refuses anything not public unicast and
+> connects to the address it checked (read in its source, v1.0.1 `dialContext`), so **redirects and DNS rebinding are
+> closed**, on both engines, robots.txt and sitemaps included. Its deny list (`docker/egress/smokescreen.yaml`) closes
+> the gap to `is_public_address`; `contracts/test_egress_proxy.py` runs the shared address table through the live
+> proxy (stricter on NAT64 only). A refusal is a non-retryable `AddressRefused`, message
+> `address refused: <host> is not a public address` — the resolved internal address only in the worker log.
+> Found and fixed on the way: **a job's `proxy_url` was never SSRF-checked** — now refused at save (jobs, pipeline
+> Scrape block); the Go worker reaches it through a CONNECT tunnel the egress proxy opens; Chrome is handed its
+> checked IP (an `https://` proxy is checked, not pinned). Gate: `scripts.egress_gate` (both engines, page actions
+> included) + E.6 crawl gate (both) + J.10 pipeline gate pass on compose. Not covered: WebRTC/UDP from a rendered
+> page (no HTTP read-back); the api's front-door 400 still names the resolved address (pre-existing).
+>
 > ✅ **Part 1 FIXED — deployed 2026-10-27 (E.3, released with E.7 `261f931`):** every URL entering a crawl's frontier —
 > seed, extracted link, sitemap entry — and every sitemap *file* is SSRF-checked at admission
 > (`activities/crawls.py`); a refused one is kept as a `dropped` row, counted in `crawls.dropped`, and
