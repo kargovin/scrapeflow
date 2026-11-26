@@ -39,7 +39,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Accepted 2026-10-27**; cap 20, paused not counted, catch-up 365 d) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-033) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-034) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass complete — **ADR-014** + **ADR-015** Accepted 2026-11-18); **PRD-018** (Draft, owner review complete 2026-11-05; Architect pass **ADR-016**, Accepted 2026-11-18 after a 12-round owner review) |
@@ -161,6 +161,22 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 ---
 
 ## Current state — BUG-013 + BUG-006 + every Dependabot alert, 2026-11-26 *(clock)*
+
+🚀 **Released by the owner's request 2026-11-26 (`main` `2ae9801..ef97bfe`, then docs `bdd59b2`)** — every image rebuilt;
+all pods `Running`, 0 restarts, each worker logged its start. Dependabot **104 → 3** (the 3: playwright's `soupsieve`).
+Owner's job checks (http, playwright, pipeline + LLM) not yet run.
+
+🔧 **Then (owner: "move playwright to a python 3.12 base image") — local, unreleased:**
+- `d46254d` base `mcr.microsoft.com/playwright/python:v1.63.0-noble` (Python 3.12.3, matches patchright 1.63.0),
+  `requires-python >=3.12`, lock drops `soupsieve` 2.10 → the last 3 alerts close on release; `pwuser` (uid 1001 on
+  noble) removed so `appuser` keeps 1001. Stealth probe identical to jammy (webdriver false, clean Chrome UA,
+  5 plugins, `window.chrome`); PID 1 `python -m worker.main` as `appuser`; suite 204.
+- 🔴 **BUG-034 found + fixed (`0ccb487`)** — Chrome 158 refuses http-only sites (`ERR_BLOCKED_BY_CLIENT`); jammy
+  fails the same, so it is the browser, not the base. **Production's playwright image from `ef97bfe` has Chrome 158 →
+  probably live since 07:10 UTC today.** Fix: `--disable-features=HttpsFirstBalancedModeAutoEnable`. E.6's playwright
+  crawl gate passes (6 pages, 1,122 B). Release asap: **playwright-worker image only**, no migration, no infra.
+  Owner checks: the pod `Running`, `browser_launched` args include the new flag, a playwright job on an http-only
+  site (e.g. `http://neverssl.com/`) completes, one https playwright job completes; Dependabot → 0.
 
 🔧 **BUG-013 and BUG-006 fixed, all 104 open Dependabot alerts cleared — local, unreleased.** Built inline, one step
 per commit (owner: "start with bug13 +06; in this itself solve all the current dependabot issues too").

@@ -565,7 +565,7 @@ in `phase4-backlog.md` §4)
 manifests in the repo (`coordinator/` is deleted) are scanned, each with a lock its image installs from (BUG-013). The
 same pass cleared **all 104 open alerts** (`41f7cfe`, `19ff24e`, `5a271b3`, `6fa0988`, `460eb3c`): `aiohttp` 3.14.5,
 `certifi` 2026.11.20 (the critical; **`miniopy-async` < 1.23.6 caps `certifi<2026`**, so a bare upgrade does nothing),
-`soupsieve` 4.1.3 (major; llm-worker only — **every patched soupsieve needs Python ≥ 3.11.5 and the playwright image is 3.10**, so it still installs 2.10 and its 3 alerts stay open; unreachable there, since nothing calls `select()`; closing them = a newer Playwright base image), `mako`, `multidict`, dev-only `filelock`/`virtualenv`; frontend
+`soupsieve` 4.1.3 (major; every patched soupsieve needs Python ≥ 3.11.5, so the playwright worker kept 2.10 and 3 alerts until it moved to the Python 3.12 noble image — `d46254d`, unreleased), `mako`, `multidict`, dev-only `filelock`/`virtualenv`; frontend
 `dompurify` 3.5.0 (override), `vite` 8.3.8, `postcss-selector-parser`, `source-map-js`; Go `klauspost/compress` 1.18.7.
 Closes on the owner's push of `develop`/`main` once GitHub re-scans.
 **Fixed on `develop` 2026-11-20 (M.3, `2bc7488`):** `.github/dependabot.yml` lists every manifest with a
@@ -2529,6 +2529,31 @@ Not BUG-018: the token is fresh per request since J.9.
 otherwise the error and *Try again*), `RefreshFailed` as a note above a loaded page whose refresh failed.
 The list pages keep their "Failed to load" on a refetch error — correctly labelled, but they too drop a
 loaded list; not changed.
+
+---
+
+## BUG-034 — The Playwright engine cannot load an http-only site (Chrome 158)
+
+**Severity:** High (every playwright scrape of a plain-http site fails; https sites and the http engine are unaffected).
+**Discovered:** 2026-11-26, moving the Playwright worker to a Python 3.12 image: the E.6 crawl gate's playwright run
+failed on its fixture (`http://www.crawlfixture.com/`) with `net::ERR_BLOCKED_BY_CLIENT`.
+**Status:** 🔧 **Fixed locally 2026-11-26 (`0ccb487`), unreleased.** ⚠️ **Probably live in production since the
+release of `ef97bfe` (2026-11-26 07:10 UTC)** — that image runs Chrome 158 (checked on the registry image); the
+previous playwright image (Release K or earlier) had an older Chrome. Not checked in the cluster (no exec access here).
+
+Chrome 158 auto-enables *HTTPS-First balanced mode*. A navigation to a site with no https answer shows an interstitial,
+which an automated `page.goto` reports as `ERR_BLOCKED_BY_CLIENT`. A site that redirects itself to https
+(`http://example.com`) still works, which is why https-only probes stayed green.
+
+**Not the base image:** the jammy image built from the same commit fails identically — both install whatever Chrome is
+current at build time (`patchright install chrome`), so every image rebuild can change the browser. That is BUG-013's
+class (the build resolves a dependency nobody chose) for the one dependency no lockfile covers; the Google apt repo
+keeps only the current stable, so pinning it is not a one-line change. Not fixed.
+
+**Fix:** `--disable-features=HttpsFirstBalancedModeAutoEnable` in the launch args (`config.browser_launch_args`,
+setting `PLAYWRIGHT_ALLOW_HTTP`, default on). Measured in the image: the fixture and `http://neverssl.com/` load;
+`navigator.webdriver` false, UA unchanged (no `HeadlessChrome`); E.6's playwright gate passes (6 pages, 1,122 B).
+Disabling `HttpsUpgrades` as well is not needed and was not taken.
 
 ---
 
