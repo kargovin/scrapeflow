@@ -7,7 +7,7 @@ per-test tuning.
 """
 
 import os
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from cryptography.fernet import Fernet
@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 # Must be module-level: Settings() runs at import time, before any fixture executes.
 _TEST_CREDS_KEY = Fernet.generate_key().decode()
 os.environ.setdefault("CREDENTIALS_ENCRYPTION_KEY", _TEST_CREDS_KEY)
+os.environ.setdefault("EGRESS_PROXY_URL", "http://egress.test:4750")
 
 
 def encrypt_credential(plaintext: str) -> str:
@@ -41,6 +42,11 @@ def make_browser(
     """
     page = AsyncMock()
     page.url = page_url  # property access, not a call — must be a plain string
+    # page.on is synchronous; the handlers it registers are kept for tests to fire.
+    page.handlers = {}
+    page.on = MagicMock(
+        side_effect=lambda event, fn: page.handlers.__setitem__(event, fn)
+    )
     page.content = AsyncMock(return_value=html)
 
     context = AsyncMock()
@@ -50,3 +56,15 @@ def make_browser(
     browser.new_context = AsyncMock(return_value=context)
 
     return browser, context, page
+
+
+@pytest.fixture(autouse=True)
+def resolve(monkeypatch):
+    """Every job-proxy host resolves to a public address unless a test says otherwise."""
+    answers = {"default": ["93.184.216.34"]}
+
+    async def lookup(host, port):
+        return answers.get(host, answers["default"])
+
+    monkeypatch.setattr("worker.egress._lookup", lookup)
+    return answers

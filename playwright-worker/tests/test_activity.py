@@ -251,7 +251,7 @@ async def test_decrypted_proxy_reaches_the_context():
     )
 
     assert browser.new_context.await_args.kwargs["proxy"] == {
-        "server": "http://proxy:8080",
+        "server": "http://93.184.216.34:8080",
         "username": "u@x",
         "password": "p:w",
     }
@@ -305,3 +305,23 @@ async def test_cancel_passes_through_and_closes_the_context():
         await _run(browser=browser)
 
     context.close.assert_awaited_once()
+
+
+async def test_an_egress_refusal_is_non_retryable_and_names_no_internal_address():
+    from worker.activity import ADDRESS_REFUSED
+    from worker.egress import AddressRefused
+
+    minio = AsyncMock()
+    with patch(
+        "worker.activity.render",
+        new_callable=AsyncMock,
+        side_effect=AddressRefused(
+            "minio:9000", "… 172.18.0.4 denied by rule 'Deny: Private Range'."
+        ),
+    ):
+        err = await _raises(minio=minio)
+
+    assert err.non_retryable
+    assert err.type == ADDRESS_REFUSED
+    assert err.message == "address refused: minio:9000 is not a public address"
+    minio.put_object.assert_not_called()

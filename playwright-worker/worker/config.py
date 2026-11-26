@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import field_validator
@@ -30,6 +31,8 @@ class Settings(BaseSettings):
     crawl_max_activities: int = 10
     playwright_default_timeout_seconds: int = 60
     credentials_encryption_key: str = ""
+    # Every fetch for a user — Chrome, robots.txt, sitemaps — goes through it (BUG-010 part 2).
+    egress_proxy_url: str = ""
     # How often activity.heartbeat() fires while a scrape runs; must be < the caller's
     # heartbeat_timeout.
     playwright_heartbeat_seconds: int = 30
@@ -68,6 +71,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CREDENTIALS_ENCRYPTION_KEY is not a valid Fernet key"
             ) from None
+        return v
+
+    @field_validator("egress_proxy_url")
+    def validate_egress_proxy_url(cls, v):
+        parts = urlsplit(v)
+        if parts.scheme != "http" or not parts.hostname or not parts.port:
+            raise ValueError("EGRESS_PROXY_URL must be set to http://host:port")
         return v
 
 

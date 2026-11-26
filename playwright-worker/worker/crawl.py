@@ -17,6 +17,7 @@ import structlog
 from miniopy_async import Minio
 from temporalio import activity
 
+from .config import settings
 from .contracts import (
     DISCOVER_SITEMAPS_ACTIVITY,
     EXTRACT_LINKS_ACTIVITY,
@@ -32,8 +33,11 @@ from .link_extractor import extract_links
 
 log = structlog.get_logger()
 
-# Direct, never through a job's proxy (robots.py's rule); redirects are this module's to judge.
-_CLIENT = httpx.AsyncClient(timeout=10.0, follow_redirects=False)
+# Never through a job's proxy (robots.py's rule), always through the egress proxy (BUG-010 part 2),
+# whose refusal reads as an unavailable file; redirects are this module's to judge.
+_CLIENT = httpx.AsyncClient(
+    timeout=10.0, follow_redirects=False, proxy=settings.egress_proxy_url
+)
 
 ROBOTS_MAX_BYTES = 512 * 1024
 # The sitemap protocol's own limit is 50 MB uncompressed; this is ours.

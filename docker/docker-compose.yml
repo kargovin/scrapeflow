@@ -266,7 +266,10 @@ services:
       MINIO_SECURE: 'false'
       PLAYWRIGHT_MAX_WORKERS: '3'
       PLAYWRIGHT_DEFAULT_TIMEOUT_SECONDS: '60'
+      EGRESS_PROXY_URL: http://egress:4750
     depends_on:
+      egress:
+        condition: service_started
       minio:
         condition: service_healthy
       temporal-namespace:

@@ -69,16 +69,20 @@ async def run() -> None:
     launch_args = browser_launch_args(settings)
 
     pw = await async_playwright().start()
+    # The egress proxy carries all of Chrome's traffic; a job's own proxy replaces it per context.
+    # Playwright sends loopback through it too (Chrome's implicit bypass is removed).
     browser = await pw.chromium.launch(
         channel=settings.playwright_channel or None,
         headless=settings.playwright_headless,
         args=launch_args,
+        proxy={"server": settings.egress_proxy_url},
     )
     log.info(
         "browser_launched",
         channel=settings.playwright_channel,
         headless=settings.playwright_headless,
         args=launch_args,
+        egress=settings.egress_proxy_url,
     )
 
     activities = PlayWrightScrapeActivities(minio, browser)

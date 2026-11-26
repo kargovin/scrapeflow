@@ -17,6 +17,7 @@ from temporalio.exceptions import ApplicationError
 
 from .config import settings
 from .contracts import SCRAPE_ACTIVITY, ScrapeInput, ScrapeOutput, StoredObject
+from .egress import AddressRefused
 from .errors import TERMINAL, classify, describe
 from .robots import is_disallowed
 from .scrape import BlockedPage, decrypt_credentials, render
@@ -24,6 +25,7 @@ from .scrape import BlockedPage, decrypt_credentials, render
 log = structlog.get_logger()
 
 # ApplicationError.type values — Go's names (internal/activity/scrape.go) where one exists.
+ADDRESS_REFUSED = "AddressRefused"  # non-retryable
 ROBOTS_DISALLOWED = "RobotsDisallowed"  # non-retryable
 BLOCKED = "Blocked"  # non-retryable
 SCRAPE_FAILED = "ScrapeFailed"  # non-retryable
@@ -106,6 +108,16 @@ class PlayWrightScrapeActivities:
         except BlockedPage as blocked:
             raise ApplicationError(
                 blocked.detection.error, type=BLOCKED, non_retryable=True
+            ) from None
+        except AddressRefused as refused:
+            log.warning(
+                "egress_refused",
+                artifact_id=job.artifact_id,
+                host=refused.host,
+                reason=refused.reason,
+            )
+            raise ApplicationError(
+                str(refused), type=ADDRESS_REFUSED, non_retryable=True
             ) from None
         except Exception as exc:
             # CancelledError is a BaseException and passes through: it is how a cancel or a

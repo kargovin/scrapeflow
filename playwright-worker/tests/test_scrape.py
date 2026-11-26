@@ -186,7 +186,7 @@ async def test_proxy_passed_to_new_context():
     browser.new_context.assert_called_once_with(
         no_viewport=True,
         proxy={
-            "server": "http://proxy.example.com:8080",
+            "server": "http://93.184.216.34:8080",
             "username": "user",
             "password": "pass",
         },
@@ -204,7 +204,7 @@ async def test_proxy_credentials_are_percent_decoded():
     browser.new_context.assert_called_once_with(
         no_viewport=True,
         proxy={
-            "server": "http://proxy.example.com:8080",
+            "server": "http://93.184.216.34:8080",
             "username": "us@er",
             "password": "p@ss:w0rd",
         },
@@ -338,3 +338,160 @@ async def test_execute_actions_called_after_goto():
         await _render(browser, actions=[{"type": "wait", "milliseconds": 50}])
 
     assert call_order.index("goto") < call_order.index("actions")
+
+
+# ---------------------------------------------------------------------------
+# Egress refusals (BUG-010 part 2)
+# ---------------------------------------------------------------------------
+
+from worker.egress import AddressRefused  # noqa: E402
+
+_REASON = "Egress proxying is denied to host 'minio:9000': 172.18.0.4 denied by rule 'Deny: Private Range'."
+
+
+def _navigation(page, url, *, status=407, headers=None):
+    request = MagicMock(frame=page.main_frame)
+    request.is_navigation_request.return_value = True
+    return MagicMock(
+        url=url,
+        status=status,
+        headers={"x-smokescreen-error": _REASON} if headers is None else headers,
+        frame=page.main_frame,
+        request=request,
+    )
+
+
+def _failed_navigation(page, url, failure):
+    request = MagicMock(url=url, failure=failure, frame=page.main_frame)
+    request.is_navigation_request.return_value = True
+    return request
+
+
+async def test_a_refused_redirect_raises_and_uploads_nothing():
+    browser, context, page = make_browser(html=PAGE)
+
+    async def goto(url, **_):
+        page.handlers["response"](
+            _navigation(page, "http://minio:9000/minio/health/live")
+        )
+        return MagicMock(status=407)
+
+    page.goto = AsyncMock(side_effect=goto)
+
+    with (
+        patch("worker.scrape.upload", new_callable=AsyncMock) as mock_upload,
+        _no_actions() as mock_actions,
+        pytest.raises(AddressRefused) as excinfo,
+    ):
+        await render(
+            browser,
+            AsyncMock(),
+            artifact_id="a",
+            url="http://shop.example/redirect",
+            output_format="html",
+            playwright_options=None,
+            actions=[{"type": "wait", "ms": 1}],
+            proxy_url=None,
+            cookies=None,
+            default_timeout=_DEFAULT_TIMEOUT,
+        )
+    assert str(excinfo.value) == "address refused: minio:9000 is not a public address"
+    assert excinfo.value.reason == _REASON
+    mock_actions.assert_not_called()  # no actions on a refused page
+    mock_upload.assert_not_called()
+    context.close.assert_awaited_once()
+
+
+async def test_a_refused_https_navigation_raises_address_refused():
+    browser, _, page = make_browser(html=PAGE)
+
+    async def goto(url, **_):
+        page.handlers["requestfailed"](
+            _failed_navigation(
+                page, "https://internal.example/", "net::ERR_PROXY_AUTH_UNSUPPORTED"
+            )
+        )
+        raise Exception(
+            "Page.goto: net::ERR_PROXY_AUTH_UNSUPPORTED at https://internal.example/"
+        )
+
+    page.goto = AsyncMock(side_effect=goto)
+
+    with pytest.raises(
+        AddressRefused, match="internal.example is not a public address"
+    ):
+        await _render(browser, url="https://internal.example/")
+
+
+async def test_with_a_job_proxy_a_connect_407_is_the_proxys_own_failure():
+    browser, _, page = make_browser(html=PAGE)
+
+    async def goto(url, **_):
+        page.handlers["requestfailed"](
+            _failed_navigation(page, url, "net::ERR_PROXY_AUTH_UNSUPPORTED")
+        )
+        raise Exception("Page.goto: net::ERR_PROXY_AUTH_UNSUPPORTED")
+
+    page.goto = AsyncMock(side_effect=goto)
+
+    with pytest.raises(Exception, match="ERR_PROXY_AUTH_UNSUPPORTED") as excinfo:
+        await _render(browser, proxy_url="http://proxy.example.com:8080")
+    assert not isinstance(excinfo.value, AddressRefused)
+
+
+async def test_a_407_without_the_proxys_header_is_not_a_refusal():
+    browser, _, page = make_browser(html=PAGE)
+
+    async def goto(url, **_):
+        page.handlers["response"](_navigation(page, url, headers={}))
+        return MagicMock(status=407)
+
+    page.goto = AsyncMock(side_effect=goto)
+
+    rendered = await _render(browser)
+    assert rendered.minio_path == _PATH
+
+
+async def test_a_refused_subresource_is_not_a_refusal_of_the_page():
+    browser, _, page = make_browser(html=PAGE)
+
+    def subresource(page):
+        response = _navigation(page, "http://internal.example/pixel.gif")
+        response.request.is_navigation_request.return_value = False
+        return response
+
+    async def goto_sub(url, **_):
+        page.handlers["response"](subresource(page))
+        return MagicMock(status=200)
+
+    page.goto = AsyncMock(side_effect=goto_sub)
+
+    rendered = await _render(browser)
+    assert rendered.minio_path == _PATH
+
+
+async def test_a_navigation_refused_during_the_actions_raises_before_capture():
+    browser, _, page = make_browser(html=PAGE)
+    page.goto = AsyncMock(return_value=MagicMock(status=200))
+
+    async def actions(*_):
+        page.handlers["response"](_navigation(page, "http://10.0.0.1/"))
+        return [], []
+
+    with (
+        patch(
+            "worker.scrape.execute_actions", new_callable=AsyncMock, side_effect=actions
+        ),
+        pytest.raises(AddressRefused, match="10.0.0.1"),
+    ):
+        await _render(browser, actions=[{"type": "click", "selector": "a"}])
+    page.content.assert_not_called()
+
+
+async def test_a_private_job_proxy_is_refused_before_a_context_opens(resolve):
+    browser, _, _ = make_browser(html=PAGE)
+    resolve["proxy.internal"] = ["10.43.0.5"]
+
+    with pytest.raises(AddressRefused, match="proxy.internal is not a public address"):
+        await _render(browser, proxy_url="http://proxy.internal:3128")
+    browser.new_context.assert_not_called()

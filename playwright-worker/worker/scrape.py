@@ -20,6 +20,7 @@ from miniopy_async import Minio
 from .actions import execute_actions
 from .blocking import BlockDetection, detect_block
 from .config import settings
+from .egress import CONNECT_REFUSED, REFUSAL_HEADER, AddressRefused, pinned_proxy_server
 from .formatter import format_output
 from .storage import upload
 
@@ -73,7 +74,9 @@ async def render(
 ) -> Rendered:
     """Render url in a fresh context and upload history/{artifact_id}/scrape.{ext}.
 
-    Raises BlockedPage on a bot wall; any other failure propagates for the caller to classify.
+    Raises BlockedPage on a bot wall, AddressRefused when the egress proxy refused the page (a
+    redirect or a script navigation included) or the job's proxy is not public; any other failure
+    propagates for the caller to classify.
     """
     opts = playwright_options
     timeout_ms = (opts.timeout_seconds if opts else default_timeout) * 1000
@@ -90,12 +93,13 @@ async def render(
     # which is itself a bot-detection signal; deferring to the window (Xvfb screen size)
     # avoids that tell. Deliberately NOT setting user_agent — with channel="chrome" the
     # UA is already a genuine Chrome, and Patchright advises against overriding it.
+    #
+    # Without a job proxy the context inherits the browser's: the egress proxy (BUG-010 part 2).
+    # A job proxy replaces it, so Chrome gets the proxy's checked address, not its name.
     context_kwargs: dict = {"no_viewport": True}
     if proxy_url:
         parsed_proxy = urlparse(proxy_url)
-        proxy_config: dict = {
-            "server": f"{parsed_proxy.scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}",
-        }
+        proxy_config: dict = {"server": await pinned_proxy_server(proxy_url)}
         if parsed_proxy.username:
             proxy_config["username"] = unquote(parsed_proxy.username)
         if parsed_proxy.password:
@@ -105,6 +109,7 @@ async def render(
     context = await browser.new_context(**context_kwargs)
     try:
         page = await context.new_page()
+        refused = _watch_for_refusal(page, through_egress=not proxy_url)
 
         # --- Cookie injection (before goto so cookies are live on first load) ---
         if cookies:
@@ -155,11 +160,18 @@ async def render(
         # --- Navigate ---
         # Keep the Response: its status is a block signal (BUG-003). It is None
         # for same-document navigations, which is not itself evidence.
-        response = await page.goto(url, timeout=timeout_ms)
-        # Same budget as goto (BUG-015): without it the wait gets Playwright's
-        # 30s default, and a networkidle page that never goes quiet fails at
-        # goto elapsed + 30s regardless of what timeout_seconds asked for.
-        await page.wait_for_load_state(wait_state, timeout=timeout_ms)
+        try:
+            response = await page.goto(url, timeout=timeout_ms)
+            # Same budget as goto (BUG-015): without it the wait gets Playwright's
+            # 30s default, and a networkidle page that never goes quiet fails at
+            # goto elapsed + 30s regardless of what timeout_seconds asked for.
+            await page.wait_for_load_state(wait_state, timeout=timeout_ms)
+        except Exception:
+            if refused:
+                raise refused[0] from None
+            raise
+        if refused:
+            raise refused[0]
 
         # --- Execute actions (partial failures collected as warnings) ---
         warnings: list[str] = []
@@ -169,6 +181,8 @@ async def render(
                 page, minio, artifact_id, actions
             )
 
+        if refused:  # a script or an action navigated somewhere refused
+            raise refused[0]
         html = await page.content()
         final_url = page.url
 
@@ -203,3 +217,35 @@ async def render(
         # A close failure must not replace the outcome — success or the real error.
         with contextlib.suppress(Exception):
             await context.close()
+
+
+def _watch_for_refusal(page: Any, *, through_egress: bool) -> list[AddressRefused]:
+    """Records the egress proxy refusing a main-frame navigation: a plain-http one arrives as a 407
+    page carrying the proxy's header, an https one fails with Chrome's CONNECT error (which only
+    the egress proxy can cause when the context has no proxy of its own)."""
+    refused: list[AddressRefused] = []
+
+    def on_response(response: Any) -> None:
+        reason = response.headers.get(REFUSAL_HEADER)
+        if (
+            reason
+            and response.status == 407
+            and response.frame == page.main_frame
+            and response.request.is_navigation_request()
+        ):
+            refused.append(AddressRefused(urlparse(response.url).netloc, reason))
+
+    def on_request_failed(request: Any) -> None:
+        if (
+            through_egress
+            and request.failure == CONNECT_REFUSED
+            and request.frame == page.main_frame
+            and request.is_navigation_request()
+        ):
+            refused.append(
+                AddressRefused(urlparse(request.url).netloc, CONNECT_REFUSED)
+            )
+
+    page.on("response", on_response)
+    page.on("requestfailed", on_request_failed)
+    return refused

@@ -1,4 +1,4 @@
-"""One table of egress cases against both copies of the address check (ADR-015 §3, §11).
+"""One table of egress cases against every copy of the address check (ADR-015 §3, §11).
 
 ``api/app/core/egress.py`` (both webhook senders) and ``delivery-worker/worker/egress.py`` (the sinks)
 are a deliberate duplicate: the delivery image must not import the api's code. Every row here runs
@@ -40,7 +40,17 @@ delivery_egress = importlib.import_module("delivery_worker_egress.egress")
 delivery_pinned = importlib.import_module("delivery_worker_egress.pinned_http")
 delivery_pinned_tcp = importlib.import_module("delivery_worker_egress.pinned_tcp")
 
+# The playwright worker's copy (BUG-010 part 2: a job's proxy, which Chrome reaches directly). Loaded
+# from its file: the module imports nothing of its package.
+_pw_spec = importlib.util.spec_from_file_location(
+    "playwright_worker_egress", REPO / "playwright-worker/worker/egress.py"
+)
+playwright_egress = importlib.util.module_from_spec(_pw_spec)
+_pw_spec.loader.exec_module(playwright_egress)
+
 COPIES = {"api": api_egress, "delivery": delivery_egress}
+# The address rule alone: the playwright copy has no resolve/connect (Chrome connects).
+RULE_COPIES = {**COPIES, "playwright": playwright_egress}
 
 # Each pinned client: the api's webhook POST, the delivery worker's TLS handshake (webhook test),
 # its aiohttp session (bucket sink) and its TCP socket (SMTP).
@@ -98,10 +108,10 @@ ADMITTED = [
 ADDRESS_CASES = [(a, False) for a in REFUSED] + [(a, True) for a in ADMITTED]
 
 
-@pytest.mark.parametrize("copy", sorted(COPIES))
+@pytest.mark.parametrize("copy", sorted(RULE_COPIES))
 @pytest.mark.parametrize(("address", "public"), ADDRESS_CASES)
 def test_the_address_rule(copy, address, public):
-    assert COPIES[copy].is_public_address(ipaddress.ip_address(address)) is public
+    assert RULE_COPIES[copy].is_public_address(ipaddress.ip_address(address)) is public
 
 
 # --- one lookup: answers, refusals and their messages -----------------------------------------

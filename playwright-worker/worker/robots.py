@@ -2,7 +2,8 @@
 robots.txt fetcher and path-disallow checker.
 
 Mirrors the Go worker's internal/robots package (Step 14).
-Key invariant: robots.txt is ALWAYS fetched directly — never via the job's proxy.
+Key invariant: robots.txt is never fetched via the job's proxy; it goes through the egress proxy
+(BUG-010 part 2), whose refusal reads as "no robots.txt" — the page fetch is refused after it.
 """
 
 from urllib.parse import urlparse
@@ -10,12 +11,13 @@ from urllib.parse import urlparse
 import httpx
 import structlog
 
+from .config import settings
+
 log = structlog.get_logger()
 
-# Module-level client with no proxy configuration.
-# This is intentional: robots.txt must be fetched from the real server,
-# not through a proxy that may cache or alter the response.
-_DIRECT_CLIENT = httpx.AsyncClient(timeout=5.0)
+# Never the job's proxy: robots.txt must come from the real server, not through a proxy that may
+# cache or alter the response.
+_DIRECT_CLIENT = httpx.AsyncClient(timeout=5.0, proxy=settings.egress_proxy_url)
 
 _ROBOTS_MAX_BYTES = 512 * 1024  # 512 KB ceiling — robots.txt files are tiny
 
