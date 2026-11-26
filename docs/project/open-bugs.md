@@ -561,7 +561,7 @@ latent rather than realised.
 **Discovered:** 2026-08-05, from a push-time Dependabot banner
 **Status:** Open — **deferred behind BUG-005 and the Temporal migration** (owner's call, recorded
 in `phase4-backlog.md` §4)
-**✅ FIXED on `develop` 2026-11-26 (`683ff6e`), unreleased:** `dependabot.yml` lists `mcp/` too — all seven
+**✅ FIXED (`683ff6e`), RELEASED 2026-11-26 (`main` `2ae9801..ef97bfe`); 104 alerts → 3, the 3 closed by the playwright noble image (`59f439a`):** `dependabot.yml` lists `mcp/` too — all seven
 manifests in the repo (`coordinator/` is deleted) are scanned, each with a lock its image installs from (BUG-013). The
 same pass cleared **all 104 open alerts** (`41f7cfe`, `19ff24e`, `5a271b3`, `6fa0988`, `460eb3c`): `aiohttp` 3.14.5,
 `certifi` 2026.11.20 (the critical; **`miniopy-async` < 1.23.6 caps `certifi<2026`**, so a bare upgrade does nothing),
@@ -1433,7 +1433,7 @@ reached production — but every rebuild is an unreviewed dependency change, and
 produced a crash-looping image)
 **Discovered:** 2026-09-09, working out what a `main` fast-forward would actually build for the P6
 cutover
-**Status:** ✅ **FIXED on `develop` 2026-11-26, unreleased** — `mcp/` gained `uv.lock` + `uv sync --frozen`
+**Status:** ✅ **FIXED, RELEASED 2026-11-26 (`main` `2ae9801..ef97bfe`)** (the MCP image itself is not deployed) — `mcp/` gained `uv.lock` + `uv sync --frozen`
 (`ec37175`), so every dependency root installs from a committed lock (`coordinator/` is deleted). Step 4 was done in B.6
 (`anthropic<2`, `openai<4`); the same choice for `mcp<2` — **an unlocked rebuild today resolves `mcp` 2.3.0, which
 removed the decorator API `server.py` uses**, and on any current 1.x the server crashed at startup anyway
@@ -2023,7 +2023,7 @@ Anthropic key — expect `LLMFailed: AuthenticationError … 401`, not `TypeErro
 worst case adds ~30 s to one rollout's downtime — and uvicorn may start serving inside that window
 and be killed mid-request. Needs a stop within the pod's first seconds of life, so it is rare.
 **Discovered:** 2026-09-30, while fixing the same defect in the workflow worker (B.6 session).
-**Status:** 🔧 **Fixed locally 2026-11-26 (`771d28a`), unreleased** — ships with BUG-029/033. `CMD` is
+**Status:** ✅ **FIXED (`771d28a`), RELEASED 2026-11-26 (`main` `2ae9801..ef97bfe`)** with BUG-029/033. `CMD` is
 `/app/.venv/bin/python -m app.serve`; `app/serve.py` installs a SIGTERM → `sys.exit(0)` handler before importing
 uvicorn, which (0.42) replaces it before importing `app.main` and calls it again on the way out. The production stage
 runs `uv sync --frozen --no-dev` once, so `/health` keeps the package version (it was `uv run`'s per-start build that
@@ -2367,7 +2367,7 @@ all-users numbers were right). The scope now goes through job, batch or crawl ow
 
 **Severity:** Low (SPA display) — the Jobs list mislabels a field.
 **Discovered:** 2026-10-28, by the owner, verifying the H.1 release in prod.
-**Status:** 🔧 **Fixed locally 2026-11-26, unreleased** (`22ace97` API, `c3ac2a5` SPA). `engine` is on
+**Status:** ✅ **FIXED, RELEASED 2026-11-26 (`main` `2ae9801..ef97bfe`)** (`22ace97` API, `c3ac2a5` SPA). `engine` is on
 `JobResponse` (every user and admin job read). My call on the rendering: all three lists show `engine → format`
 under "Engine", as Batches did; the three detail pages show *Engine* and *Output format* as two rows.
 
@@ -2512,7 +2512,7 @@ NetworkPolicy excludes the node IP from slice 1).
 **Severity:** Low (SPA display). Nothing is lost; a reload shows the page again.
 **Discovered:** 2026-11-26, by the owner: a pipeline page left open through a laptop standby showed
 "Pipeline not found." on return; a reload showed the pipeline.
-**Status:** 🔧 **Fixed locally 2026-11-26, unreleased** — ships with BUG-029.
+**Status:** ✅ **FIXED (`4305bec`), RELEASED 2026-11-26 (`main` `2ae9801..ef97bfe`)** with BUG-029.
 
 The seven detail pages (`JobDetail`, `BatchDetail`, `CrawlDetail`, `PipelineDetail`,
 `PipelineRunDetail`, `MonitorDetail`, `DestinationDetail`) rendered
@@ -2556,6 +2556,21 @@ keeps only the current stable, so pinning it is not a one-line change. Not fixed
 setting `PLAYWRIGHT_ALLOW_HTTP`, default on). Measured in the image: the fixture and `http://neverssl.com/` load;
 `navigator.webdriver` false, UA unchanged (no `HeadlessChrome`); E.6's playwright gate passes (6 pages, 1,122 B).
 Disabling `HttpsUpgrades` as well is not needed and was not taken.
+
+---
+
+## BUG-035 — `POST /jobs` refuses a playwright job without `playwright_options`
+
+**Severity:** Low (a request the documented schema allows fails with 422; the SPA always sends the options).
+**Discovered:** 2026-11-26, by the owner, running BUG-034's production check with a minimal body.
+**Status:** 🔧 **Fixed locally 2026-11-26, unreleased.**
+
+`JobCreate.playwright_options` is optional with a default for every field, but `create_job` answered
+`422 Playwright options missing` when `engine=playwright` came without it. The MCP server's `scrape_url` tool sends
+`{url, output_format, engine}` only, so **every MCP scrape with `engine="playwright"` failed**.
+
+**Fix:** `create_job` stores and dispatches `PlaywrightOptions()`'s defaults (`load`, 60 s, images not blocked)
+when a playwright job has none. Test: `test_playwright_job_without_options_gets_the_defaults`.
 
 ---
 

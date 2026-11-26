@@ -39,7 +39,7 @@ When the user is ready to build something, they will say so. Until then, guide a
 | Crawl admission + scheduled-quota decisions (**Accepted 2026-10-13**) | `docs/adr/ADR-010-crawl-admission-and-scheduled-quota.md` |
 | Schedule policy — `SKIP` + per-user scheduled-jobs cap (**Accepted 2026-10-27**; cap 20, paused not counted, catch-up 365 d) | `docs/adr/ADR-013-schedule-policy.md` |
 | **Artifact identity — the live path convention (Accepted)** | `docs/adr/ADR-011-artifact-identity-and-paths.md` |
-| Open bugs (BUG-004 → BUG-034) | `docs/project/open-bugs.md` |
+| Open bugs (BUG-004 → BUG-035) | `docs/project/open-bugs.md` |
 | Open questions (Q1–Q8) | `docs/project/open-questions.md` |
 | Usage findings (UF-00x) + test counts | `docs/project/usage-findings.md` |
 | PRDs | `docs/project/phase4-prd/` — PRD-016 (layer A, built); **PRD-019** and **PRD-017** (Draft, owner reviews complete 2026-10-30; Architect pass complete — **ADR-014** + **ADR-015** Accepted 2026-11-18); **PRD-018** (Draft, owner review complete 2026-11-05; Architect pass **ADR-016**, Accepted 2026-11-18 after a 12-round owner review) |
@@ -179,8 +179,10 @@ Owner's job checks (http, playwright, pipeline + LLM) not yet run.
   09:05 UTC, 0 restarts, `browser_launched` shows the flag; **owner verified** a playwright job on `http://neverssl.com/`
   (completed on a rerun; the first try timed out — the site, not the block) and one on `https://example.com/`.
   Dependabot still 3 right after the push — expect 0 once GitHub re-scans (took > 1 h last time).
-  ⚠️ Found on the way: `POST /jobs` 422s `Playwright options missing` for `engine=playwright` without
-  `playwright_options`, though the schema marks it optional — not filed yet.
+- 🔧 **BUG-035 filed + fixed (local, unreleased)** — `POST /jobs` 422'd `Playwright options missing` for
+  `engine=playwright` without `playwright_options` (schema says optional; **every MCP `scrape_url` with
+  `engine="playwright"` failed**). `create_job` now uses `PlaywrightOptions()`'s defaults. Release: **api image only**,
+  no migration; check = a playwright `POST /jobs` with no `playwright_options` → 201 and completes.
   Owner checks: the pod `Running`, `browser_launched` args include the new flag, a playwright job on an http-only
   site (e.g. `http://neverssl.com/`) completes, one https playwright job completes; Dependabot → 0.
 
