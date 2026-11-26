@@ -1,4 +1,4 @@
-# Every manifest with a lockfile (BUG-006). mcp/ has none yet (BUG-013), so it is not listed.
+# Every dependency manifest in the repo (BUG-006); each has a committed lock its image installs from (BUG-013).
 version: 2
 updates:
   - package-ecosystem: uv
@@ -23,5 +23,9 @@ updates:
       interval: weekly
   - package-ecosystem: uv
     directory: /delivery-worker
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directory: /mcp
     schedule:
       interval: weekly
