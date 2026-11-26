@@ -320,6 +320,44 @@ async def test_csp_handler_injects_all_directives():
     img_route.fulfill.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("status", "smokescreen_error", "outcome"),
+    [
+        # The proxy could not connect (an https upgrade of an http-only site): a network error, so
+        # Chrome falls back to http as it does unproxied.
+        (502, "Failed to connect to remote host: dial tcp 11.222.33.2:443", "abort"),
+        # A refusal is served, so the render sees it as one.
+        (407, "Egress proxying is denied to host 'minio:9000'", "fulfill"),
+        (200, None, "fulfill"),
+    ],
+)
+async def test_csp_handler_under_the_egress_proxy(status, smokescreen_error, outcome):
+    browser, _, page = make_browser(html=PAGE)
+    captured_handlers: dict = {}
+
+    async def track_route(pattern, handler):
+        captured_handlers[pattern] = handler
+
+    page.route = AsyncMock(side_effect=track_route)
+    with _no_actions():
+        await _render(browser, actions=[{"type": "wait", "milliseconds": 100}])
+
+    route = AsyncMock()
+    route.request.resource_type = "document"
+    headers = {"content-type": "text/html"}
+    if smokescreen_error:
+        headers["x-smokescreen-error"] = smokescreen_error
+    route.fetch = AsyncMock(return_value=MagicMock(status=status, headers=headers))
+    await captured_handlers["**"](route)
+
+    if outcome == "abort":
+        route.abort.assert_awaited_once_with("connectionfailed")
+        route.fulfill.assert_not_called()
+    else:
+        route.fulfill.assert_awaited_once()
+        route.abort.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
