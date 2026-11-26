@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.db import AsyncSessionLocal
 from app.core.minio import get_minio
 from app.main import app
+from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.llm_keys import UserLLMKey
@@ -257,22 +258,21 @@ async def test_one_producer_check_rejects_a_row_with_none(db_user):
 
 
 async def test_cleanup_releases_ledger_rows_and_keeps_failed_runs(db_user):
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("cleanup", "scripts/cleanup_old_runs.py")
-    cleanup = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cleanup)
+    cleanup = _load_cleanup()
 
     # Runs dated 2000 against a 2001 cutoff: only this test's rows qualify. A "now - 400d"
     # cutoff would sweep every old run in the shared dev database — it did, once.
     old = datetime(2000, 1, 1, tzinfo=UTC)
     async with AsyncSessionLocal() as db:
-        job = Job(user_id=db_user.id, url="https://example.com")
+        job = _scheduled_job(db_user.id)
         db.add(job)
         await db.flush()
         ok_run = JobRun(job_id=job.id, status="completed", created_at=old)
         bad_run = JobRun(job_id=job.id, status="completed", created_at=old)
-        db.add_all([ok_run, bad_run])
+        newest = JobRun(
+            job_id=job.id, status="completed", created_at=datetime(2000, 6, 1, tzinfo=UTC)
+        )
+        db.add_all([ok_run, bad_run, newest])
         await db.flush()
         ok_key = f"{BUCKET}/history/{ok_run.id}/scrape.html"
         bad_key = f"{BUCKET}/history/{bad_run.id}/scrape.html"
@@ -308,6 +308,61 @@ async def test_cleanup_releases_ledger_rows_and_keeps_failed_runs(db_user):
     assert await _rows_for_run(ok_id) == []
     assert [r.object_key for r in await _rows_for_run(bad_id)] == [bad_key]
     assert await _used(db_user.id) == 20
+
+
+def _load_cleanup():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cleanup", "scripts/cleanup_old_runs.py")
+    cleanup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cleanup)
+    return cleanup
+
+
+def _scheduled_job(user_id) -> Job:
+    return Job(
+        user_id=user_id,
+        url="https://example.com",
+        schedule_cron="0 9 * * *",
+        schedule_status="paused",
+        schedule_lane="v2",
+    )
+
+
+async def test_cleanup_prunes_only_a_scheduled_jobs_older_finished_runs(db_user):
+    """Retention covers scheduled history only: a job's newest run, an unfinished run, a one-off
+    job's runs and a batch's runs are kept, however old."""
+    cleanup = _load_cleanup()
+    at = lambda m: datetime(2000, m, 1, tzinfo=UTC)  # noqa: E731 — all before the 2001 cutoff
+    async with AsyncSessionLocal() as db:
+        scheduled, one_off = (
+            _scheduled_job(db_user.id),
+            Job(user_id=db_user.id, url="https://a.example"),
+        )
+        batch = Batch(user_id=db_user.id, output_format="html")
+        db.add_all([scheduled, one_off, batch])
+        await db.flush()
+        item = BatchItem(batch_id=batch.id, url="https://b.example")
+        db.add(item)
+        await db.flush()
+        pruned = JobRun(job_id=scheduled.id, status="failed", created_at=at(1))
+        stuck = JobRun(job_id=scheduled.id, status="running", created_at=at(2))
+        newest = JobRun(job_id=scheduled.id, status="completed", created_at=at(3))
+        one_off_old = JobRun(job_id=one_off.id, status="completed", created_at=at(1))
+        one_off_newest = JobRun(job_id=one_off.id, status="completed", created_at=at(2))
+        batch_run = JobRun(batch_item_id=item.id, status="completed", created_at=at(1))
+        db.add_all([pruned, stuck, newest, one_off_old, one_off_newest, batch_run])
+        await db.commit()
+        kept = [stuck.id, newest.id, one_off_old.id, one_off_newest.id, batch_run.id]
+        pruned_id = pruned.id
+
+    async with AsyncSessionLocal() as db:
+        await cleanup._cleanup_loop(db, AsyncMock(), datetime(2001, 1, 1, tzinfo=UTC))
+
+    async with AsyncSessionLocal() as db:
+        assert await db.get(JobRun, pruned_id) is None
+        for run_id in kept:
+            assert await db.get(JobRun, run_id) is not None
 
 
 # ---------------------------------------------------------------------------

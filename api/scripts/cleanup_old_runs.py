@@ -4,12 +4,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import exists, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import aliased
 
-from app.core.ledger import ReleaseOutcome, objects_for_runs, release_objects, release_run_objects
+from app.core.ledger import ReleaseOutcome, release_run_objects
 from app.core.minio import close_client, create_client
-from app.models.batch import Batch, BatchItem
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.settings import settings
@@ -18,22 +18,28 @@ logger = structlog.get_logger()
 
 BATCH_SIZE = 500
 RETENTION_DAYS = int(os.environ.get("SCHEDULE_RUN_RETENTION_DAYS", "90"))
+_FINISHED = ("completed", "failed", "cancelled")
 
 
 async def _cleanup_loop(db: AsyncSession, minio, cutoff: datetime) -> None:
     total_deleted = 0
-    label = "expired run object on nightly cleanup"
+    label = "expired scheduled-run object on nightly cleanup"
 
     while True:
-        # Owner is needed only by the pre-ledger branch (a legacy run's result_path);
-        # ledger rows carry their own user_id and are released regardless.
+        newer = aliased(JobRun)
         rows = (
             await db.execute(
-                select(JobRun, func.coalesce(Job.user_id, Batch.user_id).label("user_id"))
-                .outerjoin(Job, JobRun.job_id == Job.id)
-                .outerjoin(BatchItem, JobRun.batch_item_id == BatchItem.id)
-                .outerjoin(Batch, BatchItem.batch_id == Batch.id)
-                .where(JobRun.created_at < cutoff)
+                select(JobRun, Job.user_id)
+                .join(Job, JobRun.job_id == Job.id)
+                .where(
+                    JobRun.created_at < cutoff,
+                    Job.schedule_status.is_not(None),
+                    JobRun.status.in_(_FINISHED),
+                    # A job's newest run is kept: a job with no runs drops out of every job read.
+                    exists().where(
+                        newer.job_id == JobRun.job_id, newer.created_at > JobRun.created_at
+                    ),
+                )
                 .order_by(JobRun.created_at)
                 .limit(BATCH_SIZE)
             )
@@ -42,19 +48,13 @@ async def _cleanup_loop(db: AsyncSession, minio, cutoff: datetime) -> None:
         if not rows:
             break
 
-        by_owner: dict[uuid.UUID | None, list[JobRun]] = {}
+        by_owner: dict[uuid.UUID, list[JobRun]] = {}
         for run, user_id in rows:
             by_owner.setdefault(user_id, []).append(run)
 
         outcome = ReleaseOutcome()
         for user_id, runs in by_owner.items():
-            if user_id is None:
-                partial = await release_objects(
-                    db, minio, await objects_for_runs(db, [r.id for r in runs]), label
-                )
-            else:
-                partial = await release_run_objects(db, minio, runs, user_id, label)
-            outcome.merge(partial)
+            outcome.merge(await release_run_objects(db, minio, runs, user_id, label))
         # A run whose object is still on disk keeps its rows — retried next night.
         successful_ids = [str(run.id) for run, _ in rows if run.id not in outcome.failed_run_ids]
 
