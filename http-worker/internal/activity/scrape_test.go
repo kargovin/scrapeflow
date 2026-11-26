@@ -99,7 +99,7 @@ func TestScrape_Success(t *testing.T) {
 	srv := site(t)
 	up := &fakeUploader{}
 
-	out, heartbeats, err := run(t, New(fetcher.New(5), up, testKey(t)), ScrapeInput{
+	out, heartbeats, err := run(t, New(fetcher.New(5, nil), up, testKey(t)), ScrapeInput{
 		ArtifactID: "art-1", URL: srv.URL, OutputFormat: "markdown",
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestScrape_TransientStorageFaultIsRetryable(t *testing.T) {
 	down := &url.Error{Op: "Put", URL: "http://minio:9000/b/k",
 		Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}}
 
-	_, _, err := run(t, New(fetcher.New(5), &fakeUploader{err: down}, testKey(t)), ScrapeInput{
+	_, _, err := run(t, New(fetcher.New(5, nil), &fakeUploader{err: down}, testKey(t)), ScrapeInput{
 		ArtifactID: "art-1", URL: srv.URL, OutputFormat: "html",
 	})
 
@@ -138,7 +138,7 @@ func TestScrape_TransientStorageFaultIsRetryable(t *testing.T) {
 func TestScrape_TerminalStorageFaultIsNonRetryable(t *testing.T) {
 	srv := site(t)
 
-	_, _, err := run(t, New(fetcher.New(5), &fakeUploader{err: minio.ErrorResponse{Code: "AccessDenied"}}, testKey(t)),
+	_, _, err := run(t, New(fetcher.New(5, nil), &fakeUploader{err: minio.ErrorResponse{Code: "AccessDenied"}}, testKey(t)),
 		ScrapeInput{ArtifactID: "art-1", URL: srv.URL, OutputFormat: "html"})
 
 	if appError(t, err, ErrScrapeFailed) {
@@ -153,7 +153,7 @@ func TestScrape_DeadSiteIsNonRetryable(t *testing.T) {
 	srv.Close()
 	up := &fakeUploader{}
 
-	_, _, err := run(t, New(fetcher.New(5), up, testKey(t)), ScrapeInput{
+	_, _, err := run(t, New(fetcher.New(5, nil), up, testKey(t)), ScrapeInput{
 		ArtifactID: "art-1", URL: deadURL, OutputFormat: "html",
 	})
 
@@ -166,7 +166,7 @@ func TestScrape_DeadSiteIsNonRetryable(t *testing.T) {
 }
 
 func TestScrape_InvalidInputIsNonRetryable(t *testing.T) {
-	_, _, err := run(t, New(fetcher.New(5), &fakeUploader{}, testKey(t)), ScrapeInput{
+	_, _, err := run(t, New(fetcher.New(5, nil), &fakeUploader{}, testKey(t)), ScrapeInput{
 		URL: "https://example.com", OutputFormat: "html",
 	})
 
@@ -178,7 +178,7 @@ func TestScrape_InvalidInputIsNonRetryable(t *testing.T) {
 func TestScrape_UndecryptableProxyIsNonRetryable(t *testing.T) {
 	srv := site(t)
 
-	_, _, err := run(t, New(fetcher.New(5), &fakeUploader{}, testKey(t)), ScrapeInput{
+	_, _, err := run(t, New(fetcher.New(5, nil), &fakeUploader{}, testKey(t)), ScrapeInput{
 		ArtifactID: "art-1", URL: srv.URL, OutputFormat: "html",
 		Credentials: &Credentials{EncryptedProxyURL: "not-a-fernet-token"},
 	})
@@ -197,7 +197,7 @@ func TestScrape_MalformedProxyURLIsNonRetryable(t *testing.T) {
 	}
 	up := &fakeUploader{}
 
-	_, _, err = run(t, New(fetcher.New(5), up, key), ScrapeInput{
+	_, _, err = run(t, New(fetcher.New(5, nil), up, key), ScrapeInput{
 		ArtifactID: "art-1", URL: srv.URL, OutputFormat: "html",
 		Credentials: &Credentials{EncryptedProxyURL: string(token)},
 	})
@@ -214,7 +214,7 @@ func TestScrape_RespectRobotsFalseSkipsTheCheck(t *testing.T) {
 	srv := site(t)
 	up := &fakeUploader{}
 
-	_, _, err := run(t, New(fetcher.New(5), up, testKey(t)), ScrapeInput{
+	_, _, err := run(t, New(fetcher.New(5, nil), up, testKey(t)), ScrapeInput{
 		ArtifactID: "art-1", URL: srv.URL + "/private/page", OutputFormat: "html",
 		Options: &ScrapeOptions{RespectRobots: false},
 	})
@@ -231,7 +231,7 @@ func TestScrape_RobotsDisallowedIsNonRetryable(t *testing.T) {
 	srv := site(t)
 	up := &fakeUploader{}
 
-	_, _, err := run(t, New(fetcher.New(5), up, testKey(t)), ScrapeInput{
+	_, _, err := run(t, New(fetcher.New(5, nil), up, testKey(t)), ScrapeInput{
 		ArtifactID: "art-1", URL: srv.URL + "/private/page", OutputFormat: "html",
 		Options: &ScrapeOptions{RespectRobots: true},
 	})
@@ -241,5 +241,29 @@ func TestScrape_RobotsDisallowedIsNonRetryable(t *testing.T) {
 	}
 	if up.data != nil {
 		t.Error("nothing should be uploaded when robots.txt disallows")
+	}
+}
+
+func TestScrape_EgressRefusalIsNonRetryable(t *testing.T) {
+	egress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Smokescreen-Error", "Egress proxying is denied to host '"+r.Host+"'")
+		w.WriteHeader(http.StatusProxyAuthRequired)
+	}))
+	defer egress.Close()
+	egressURL, err := url.Parse(egress.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := &fakeUploader{}
+
+	_, _, err = run(t, New(fetcher.New(5, egressURL), up, testKey(t)), ScrapeInput{
+		ArtifactID: "art-1", URL: "http://169.254.169.254/latest/meta-data/", OutputFormat: "html",
+	})
+
+	if appError(t, err, ErrAddressRefused) {
+		t.Error("an egress refusal must not be retried")
+	}
+	if up.data != nil {
+		t.Error("nothing should be uploaded for a refused address")
 	}
 }

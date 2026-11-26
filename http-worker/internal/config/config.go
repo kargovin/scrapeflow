@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -24,7 +25,8 @@ type Config struct {
 	CredentialsEncryptionKey string // CREDENTIALS_ENCRYPTION_KEY — Fernet key for the proxy URL in activity inputs
 
 	// HTTP fetcher
-	FetchTimeoutSecs int // FETCH_TIMEOUT_SECS — per-URL HTTP timeout
+	FetchTimeoutSecs int      // FETCH_TIMEOUT_SECS — per-URL HTTP timeout
+	EgressProxyURL   *url.URL // EGRESS_PROXY_URL — every fetch goes through it, e.g. http://egress:4750
 
 	// Temporal
 	TemporalAddress   string // TEMPORAL_ADDRESS — e.g. temporal:7233
@@ -57,6 +59,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CREDENTIALS_ENCRYPTION_KEY is required")
 	}
 
+	egressProxyURL, err := egressProxy(os.Getenv("EGRESS_PROXY_URL"))
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		MinIOEndpoint:  minioEndpoint,
 		MinIOAccessKey: minioAccessKey,
@@ -70,8 +77,21 @@ func Load() (*Config, error) {
 		TemporalNamespace: envStr("TEMPORAL_NAMESPACE", "scrapeflow"),
 
 		FetchTimeoutSecs: envInt("FETCH_TIMEOUT_SECS", 30),
+		EgressProxyURL:   egressProxyURL,
 		WorkerPoolSize:   envInt("WORKER_POOL_SIZE", runtime.NumCPU()),
 	}, nil
+}
+
+// egressProxy parses EGRESS_PROXY_URL: required, an http:// URL with a host and port.
+func egressProxy(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("EGRESS_PROXY_URL is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.Hostname() == "" || u.Port() == "" {
+		return nil, fmt.Errorf("EGRESS_PROXY_URL must be http://host:port, got %q", raw)
+	}
+	return u, nil
 }
 
 // envStr returns the env var value or a default if unset.

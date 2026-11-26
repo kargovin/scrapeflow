@@ -17,7 +17,7 @@ func TestFetch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		f := New(5)
+		f := New(5, nil)
 		result, err := f.Fetch(context.Background(), srv.URL)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -37,7 +37,7 @@ func TestFetch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		f := New(5)
+		f := New(5, nil)
 		_, err := f.Fetch(context.Background(), srv.URL)
 		if err == nil {
 			t.Fatal("expected error for 404 response, got nil")
@@ -53,7 +53,7 @@ func TestFetch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		f := New(5)
+		f := New(5, nil)
 		_, err := f.Fetch(context.Background(), srv.URL)
 		if err == nil {
 			t.Fatal("expected error for 500 response, got nil")
@@ -77,7 +77,7 @@ func TestFetch(t *testing.T) {
 		}))
 		defer srv1.Close()
 
-		f := New(5)
+		f := New(5, nil)
 		result, err := f.Fetch(context.Background(), srv1.URL)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -101,7 +101,7 @@ func TestFetch(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // cancel immediately
 
-		f := New(5)
+		f := New(5, nil)
 		_, err := f.Fetch(ctx, srv.URL)
 		if err == nil {
 			t.Fatal("expected error from cancelled context, got nil")
@@ -116,7 +116,7 @@ func TestFetch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		f := New(5)
+		f := New(5, nil)
 		result, err := f.Fetch(context.Background(), srv.URL)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -144,7 +144,7 @@ func TestWithProxy(t *testing.T) {
 		}))
 		defer proxy.Close()
 
-		f, err := New(5).WithProxy("http://us%40er:p%40ss%3Aw0rd@" + strings.TrimPrefix(proxy.URL, "http://"))
+		f, err := New(5, nil).WithProxy("http://us%40er:p%40ss%3Aw0rd@" + strings.TrimPrefix(proxy.URL, "http://"))
 		if err != nil {
 			t.Fatalf("WithProxy: %v", err)
 		}
@@ -165,7 +165,7 @@ func TestWithProxy(t *testing.T) {
 	})
 
 	t.Run("invalid proxy URL returns error", func(t *testing.T) {
-		if _, err := New(5).WithProxy("http://[::1"); err == nil {
+		if _, err := New(5, nil).WithProxy("http://[::1"); err == nil {
 			t.Fatal("expected error for malformed proxy URL, got nil")
 		}
 	})

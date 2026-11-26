@@ -134,7 +134,7 @@ func TestIsDisallowed_FetchSuccess(t *testing.T) {
 	defer srv.Close()
 
 	t.Run("disallowed path returns true", func(t *testing.T) {
-		disallowed, err := IsDisallowed(context.Background(), srv.URL+"/secret/data")
+		disallowed, err := IsDisallowed(context.Background(), http.DefaultClient, srv.URL+"/secret/data")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -144,7 +144,7 @@ func TestIsDisallowed_FetchSuccess(t *testing.T) {
 	})
 
 	t.Run("allowed path returns false", func(t *testing.T) {
-		disallowed, err := IsDisallowed(context.Background(), srv.URL+"/public/page")
+		disallowed, err := IsDisallowed(context.Background(), http.DefaultClient, srv.URL+"/public/page")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestIsDisallowed_FetchFailure_Proceeds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	disallowed, err := IsDisallowed(context.Background(), srv.URL+"/any/path")
+	disallowed, err := IsDisallowed(context.Background(), http.DefaultClient, srv.URL+"/any/path")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestIsDisallowed_FetchFailure_Proceeds(t *testing.T) {
 
 func TestIsDisallowed_ServerDown_Proceeds(t *testing.T) {
 	// Port with nothing listening — connection refused.
-	disallowed, err := IsDisallowed(context.Background(), "http://127.0.0.1:19998/some/path")
+	disallowed, err := IsDisallowed(context.Background(), http.DefaultClient, "http://127.0.0.1:19998/some/path")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestIsDisallowed_CancelledContext_Proceeds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	disallowed, err := IsDisallowed(ctx, srv.URL+"/some/path")
+	disallowed, err := IsDisallowed(ctx, http.DefaultClient, srv.URL+"/some/path")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestIsDisallowed_RespectRobotsFalse_NeverCalled(t *testing.T) {
 	defer srv.Close()
 
 	// When called, it returns true (everything disallowed).
-	disallowed, err := IsDisallowed(context.Background(), srv.URL+"/any")
+	disallowed, err := IsDisallowed(context.Background(), http.DefaultClient, srv.URL+"/any")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

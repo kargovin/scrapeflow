@@ -47,7 +47,7 @@ func TestRunReportsPathSizeAndHash(t *testing.T) {
 
 	up := &fakeUploader{}
 	var stages []string
-	res, err := Run(context.Background(), fetcher.New(5), up, "art-1", srv.URL, "html",
+	res, err := Run(context.Background(), fetcher.New(5, nil), up, "art-1", srv.URL, "html",
 		func(s string) { stages = append(stages, s) })
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -73,7 +73,7 @@ func TestRunWrapsUploadFailures(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Run(context.Background(), fetcher.New(5), &fakeUploader{err: errors.New("boom")},
+	_, err := Run(context.Background(), fetcher.New(5, nil), &fakeUploader{err: errors.New("boom")},
 		"art-1", srv.URL, "html", nil)
 
 	var ue *UploadError

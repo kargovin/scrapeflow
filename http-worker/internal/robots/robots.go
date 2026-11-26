@@ -1,5 +1,6 @@
 // Package robots fetches and parses robots.txt files to enforce crawl restrictions.
-// The HTTP request is always direct — never via the job proxy (spec §3.4).
+// The HTTP request never goes via the job proxy (spec §3.4); the caller's client goes through the
+// egress proxy (BUG-010 part 2).
 package robots
 
 import (
@@ -17,13 +18,10 @@ const (
 	maxBodySize  = 512 * 1024 // 512 KB — robots.txt files are small in practice
 )
 
-// directClient is used for all robots.txt fetches. It is never proxy-configured.
-var directClient = &http.Client{}
-
-// IsDisallowed fetches {origin}/robots.txt and returns true if rawURL is disallowed
+// IsDisallowed fetches {origin}/robots.txt with client and returns true if rawURL is disallowed
 // for this crawler. Returns (false, nil) on any fetch error — a missing or unreachable
-// robots.txt is treated as no restrictions (spec §3.4).
-func IsDisallowed(ctx context.Context, rawURL string) (bool, error) {
+// robots.txt is treated as no restrictions (spec §3.4). client must not be a job proxy's.
+func IsDisallowed(ctx context.Context, client *http.Client, rawURL string) (bool, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false, fmt.Errorf("invalid URL: %w", err)
@@ -41,7 +39,7 @@ func IsDisallowed(ctx context.Context, rawURL string) (bool, error) {
 	}
 	req.Header.Set("User-Agent", "ScrapeFlow/1.0")
 
-	resp, err := directClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, nil // fetch failure → proceed
 	}

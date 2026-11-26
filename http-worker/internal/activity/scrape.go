@@ -22,6 +22,7 @@ const (
 // ApplicationError types returned by Scrape. Every failure except ErrStorageTransient is
 // non-retryable.
 const (
+	ErrAddressRefused   = "AddressRefused"
 	ErrInvalidInput     = "InvalidInput"
 	ErrProxy            = "ProxyError"
 	ErrRobotsDisallowed = "RobotsDisallowed"
@@ -80,10 +81,10 @@ func (a *Activities) Scrape(ctx context.Context, in ScrapeInput) (ScrapeOutput, 
 	}
 
 	// --- Step 3: robots.txt enforcement ---
-	// Fetched directly — never via the job proxy (spec §3.4).
+	// Never via the job proxy (spec §3.4): the base fetcher's egress-only client.
 	// Fetch failure is treated as no restrictions (proceed).
 	if in.Options != nil && in.Options.RespectRobots {
-		disallowed, err := robots.IsDisallowed(ctx, in.URL)
+		disallowed, err := robots.IsDisallowed(ctx, a.fetcher.Client(), in.URL)
 		if err != nil {
 			logger.Warn("robots.txt check error, proceeding", "artifact_id", in.ArtifactID, "error", err)
 		}
@@ -104,6 +105,9 @@ func (a *Activities) Scrape(ctx context.Context, in ScrapeInput) (ScrapeOutput, 
 	if err != nil {
 		if scrape.Classify(err) == scrape.Transient {
 			return ScrapeOutput{}, temporal.NewApplicationError(err.Error(), ErrStorageTransient)
+		}
+		if fetcher.IsRefused(err) {
+			return ScrapeOutput{}, temporal.NewNonRetryableApplicationError(err.Error(), ErrAddressRefused, nil)
 		}
 		return ScrapeOutput{}, temporal.NewNonRetryableApplicationError(err.Error(), ErrScrapeFailed, nil)
 	}

@@ -50,7 +50,8 @@ func main() {
 	}
 
 	// --- Create the HTTP fetcher ---
-	fetch := fetcher.New(cfg.FetchTimeoutSecs)
+	fetch := fetcher.New(cfg.FetchTimeoutSecs, cfg.EgressProxyURL)
+	log.Printf("Egress proxy: %s", cfg.EgressProxyURL.Host)
 
 	runTemporal(cfg, scrapeactivity.New(fetch, store, credKey))
 }

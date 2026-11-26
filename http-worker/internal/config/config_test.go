@@ -15,6 +15,7 @@ func setRequiredVars(t *testing.T) {
 	t.Setenv("MINIO_ACCESS_KEY", "testkey")
 	t.Setenv("MINIO_SECRET_KEY", "testsecret")
 	t.Setenv("CREDENTIALS_ENCRYPTION_KEY", testCredentialsKey)
+	t.Setenv("EGRESS_PROXY_URL", "http://egress:4750")
 }
 
 func TestLoad_RequiredVars(t *testing.T) {
@@ -69,6 +70,29 @@ func TestLoad_RequiredVars(t *testing.T) {
 			t.Fatal("expected error when CREDENTIALS_ENCRYPTION_KEY is missing")
 		}
 	})
+}
+
+func TestLoad_EgressProxy(t *testing.T) {
+	t.Run("parsed", func(t *testing.T) {
+		setRequiredVars(t)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.EgressProxyURL.Host != "egress:4750" {
+			t.Errorf("EgressProxyURL: got %v", cfg.EgressProxyURL)
+		}
+	})
+
+	for _, raw := range []string{"", "egress:4750", "https://egress:4750", "http://egress", "http://:4750"} {
+		t.Run("refused "+raw, func(t *testing.T) {
+			setRequiredVars(t)
+			t.Setenv("EGRESS_PROXY_URL", raw)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected an error for EGRESS_PROXY_URL=%q", raw)
+			}
+		})
+	}
 }
 
 func TestLoad_Defaults(t *testing.T) {
