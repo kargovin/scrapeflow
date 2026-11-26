@@ -158,6 +158,21 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — as of 2026-11-26 *(clock)*
 
+🚀 **RELEASE P DONE — GROUP P CLOSED (2026-11-26). Every implementation-backlog group A–P is done.** The owner ran the
+P.2 runbook in their own terminal; I checked each step. `main` `cf73ade..2ae9801` (CI `45744291517`; api + delivery-worker
+images, no migration, no infra change); api + workflow worker on `main-1795661046-2ae9801…`, delivery worker on
+`main-1795661011-2ae9801…`. Steps 2a–2e passed through a Gmail account's SMTP (587, app password) — **the first email
+sent from production**; a recipient on a mail-forwarding service received it after the forwarder's delay. SPA items 1–4
+passed; Tracebacks 0. Full record: backlog P.2 section. **Deployed code is `2ae9801`.**
+- **Step 4 (clean up) is the owner's:** the three `p-*` pipelines, the Gmail app password (the email destination stops
+  working once it is revoked). The owner's bucket destination's prefix reads `scrapeflow=m` (probably meant `-`).
+- **Next:** the deferred background items (memory: background items after the backlog — deferred reviews,
+  BUG-029/032/019/021/018, Dependabot) and P's known email limits (P.2 section). Ask the owner which first.
+
+---
+
+## Build state before the release — 2026-11-26 *(clock)*
+
 📋 **P.1 BUILT, RELEASE P RUNBOOK READY (2026-11-24 → 26).** Owner: "start and hopefully finish p1 and p2". Same way of
 working (one builder subagent for P.1, one independent reviewer over P, I verified; the weekly limit paused the review
 2026-11-24 → 26). Brief's group lines → P (`9aa6d6d`).
