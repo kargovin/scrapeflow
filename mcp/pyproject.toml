@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     # Capped below the next major: server.py uses 1.x's decorator API (Server.list_tools /
     # call_tool), which 2.x removed. Raise the cap by hand with a port of server.py.
-    "mcp>=1.0.0,<2",
+    "mcp>=2.3.0,<3",
     "httpx>=0.27.0",
     "pydantic-settings>=2.0.0",
     "structlog>=24.0.0",
