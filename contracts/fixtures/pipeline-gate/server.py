@@ -2,6 +2,7 @@
 
     shop.pipelinefixture.com   GET  /item?name=&price=&stock=in|out   a product page; price=null → none
                                GET  /broken                           503 (a Scrape that fails)
+                               GET  /redirect?to=<url>                302 to <url> (the egress gate's bait)
                                GET  /watched/<key>                    a product page whose content the
                                POST /_watched/<key>  {name,price,stock} gate sets (L.12: a monitor's
                                                                       inputs are fixed for its life)
@@ -68,6 +69,12 @@ class Handler(BaseHTTPRequestHandler):
         if host.startswith("shop."):
             if url.path == "/broken":
                 return self._send(503, b"down", "text/plain")
+            if url.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", parse_qs(url.query)["to"][0])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
             if url.path.startswith("/watched/"):
                 with LOCK:
                     state = WATCHED.get(url.path.removeprefix("/watched/"), DEFAULT)
