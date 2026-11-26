@@ -2483,6 +2483,31 @@ NetworkPolicy excludes the node IP from slice 1).
 
 ---
 
+## BUG-033 — A detail page that fails to refresh replaces itself with "not found"
+
+**Severity:** Low (SPA display). Nothing is lost; a reload shows the page again.
+**Discovered:** 2026-11-26, by the owner: a pipeline page left open through a laptop standby showed
+"Pipeline not found." on return; a reload showed the pipeline.
+**Status:** 🔧 **Fixed locally 2026-11-26, unreleased** — ships with BUG-029.
+
+The seven detail pages (`JobDetail`, `BatchDetail`, `CrawlDetail`, `PipelineDetail`,
+`PipelineRunDetail`, `MonitorDetail`, `DestinationDetail`) rendered
+`if (isError || !x) return <p>X not found.</p>`. Two faults in that line:
+
+1. **Any error reads as "not found"** — a 401, a 500 or a network failure as much as a 404.
+2. **A failed refresh throws away a loaded page.** React Query keeps `data` when a refetch fails and
+   sets `isError`; the check put `isError` first. Returning to the tab refetches (`refetchOnWindowFocus`);
+   after standby the request can fail before the network is back, and `retry: 1` gives up quickly.
+
+Not BUG-018: the token is fresh per request since J.9.
+
+**Fix:** `components/LoadError.tsx` — `LoadFailed` when nothing has loaded ("not found" on a 404 only,
+otherwise the error and *Try again*), `RefreshFailed` as a note above a loaded page whose refresh failed.
+The list pages keep their "Failed to load" on a refetch error — correctly labelled, but they too drop a
+loaded list; not changed.
+
+---
+
 ## BUG-006 addendum (2026-09-04) — the coverage gap produced a concrete outage
 
 Filed against BUG-006 rather than separately: this is not a new bug, it is the first realised

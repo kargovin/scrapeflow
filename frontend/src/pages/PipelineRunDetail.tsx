@@ -29,6 +29,7 @@ import DiffView from '../components/DiffView'
 import ErrorBox from '../components/ErrorBox'
 import LiveBadge from '../components/LiveBadge'
 import StatusPill, { runStatus } from '../components/StatusPill'
+import { LoadFailed, RefreshFailed } from '../components/LoadError'
 
 // Monaco in its own chunk, as on the job page.
 const ContentViewer = lazy(() => import('../components/ContentViewer'))
@@ -88,7 +89,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
   const [cancelInfo, setCancelInfo] = useState<PipelineRunCancel | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
-  const { data: run, isLoading, isError } = useQuery<PipelineRun>({
+  const { data: run, isLoading, error, refetch } = useQuery<PipelineRun>({
     queryKey: runKey,
     queryFn: () => api.get(apiBase),
     // The owner gets pushes over the socket; an admin (no socket) polls.
@@ -166,7 +167,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
   })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
-  if (isError || !run) return <p className="text-sm text-red-600">Run not found.</p>
+  if (!run) return <LoadFailed error={error} subject="Run" onRetry={refetch} />
 
   const approvalBlock = run.blocks.find(b => b.type === 'approval')
   const awaitingApproval = approvalBlock?.status_reason === 'awaiting_approval' && !approvalBlock.approval_answer
@@ -221,6 +222,7 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
 
   return (
     <div>
+      <RefreshFailed error={error} onRetry={refetch} />
       <button
         onClick={() => navigate(`${routeBase}/${pipelineId}`)}
         className="mb-4 text-sm text-indigo-600 hover:underline"

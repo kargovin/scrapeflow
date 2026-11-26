@@ -6,6 +6,7 @@ import { useLiveSocket } from '../lib/useLiveSocket'
 import LiveBadge from '../components/LiveBadge'
 import SchedulePanel from '../components/SchedulePanel'
 import { useApi } from '../lib/useApi'
+import { LoadFailed, RefreshFailed } from '../components/LoadError'
 
 // Lazy — pulls Monaco + react-markdown into a separate chunk so the rest of the
 // admin panel (Users, Jobs list, Stats) doesn't download the editor.
@@ -34,7 +35,7 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
   const apiBase = isAdmin ? '/admin/jobs' : '/jobs'
   const routeBase = isAdmin ? '/app/admin/jobs' : '/app/dashboard/jobs'
 
-  const { data: job, isLoading, isError } = useQuery<Job>({
+  const { data: job, isLoading, error, refetch } = useQuery<Job>({
     queryKey: ['job', mode, jobId],
     queryFn: () => api.get(`${apiBase}/${jobId}`),
   })
@@ -74,9 +75,7 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
   if (isLoading) {
     return <p className="text-sm text-gray-500">Loading…</p>
   }
-  if (isError || !job) {
-    return <p className="text-sm text-red-600">Job not found.</p>
-  }
+  if (!job) return <LoadFailed error={error} subject="Job" onRetry={refetch} />
 
   const status = liveStatus ?? job.status
 
@@ -109,6 +108,7 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
 
   return (
     <div>
+      <RefreshFailed error={error} onRetry={refetch} />
       <button
         onClick={() => navigate(routeBase)}
         className="mb-4 text-sm text-indigo-600 hover:underline"

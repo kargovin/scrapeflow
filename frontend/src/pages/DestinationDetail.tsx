@@ -13,6 +13,7 @@ import { KIND_LABELS, addressRows, editForm, initialValues, type Values } from '
 import DestinationChecks, { failedChecks } from '../components/DestinationChecks'
 import DestinationFields from '../components/DestinationFields'
 import ErrorBox from '../components/ErrorBox'
+import { LoadFailed, RefreshFailed } from '../components/LoadError'
 
 function inUse(error: unknown): DestinationInUse | null {
   if (!(error instanceof ApiError) || error.status !== 409) return null
@@ -36,7 +37,7 @@ export default function DestinationDetail({ mode }: { mode: 'admin' | 'user' }) 
   const [saved, setSaved] = useState<DestinationTestResult | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
-  const { data: destination, isLoading, isError } = useQuery<Destination>({
+  const { data: destination, isLoading, error, refetch } = useQuery<Destination>({
     queryKey: key,
     queryFn: () => api.get(apiBase),
   })
@@ -75,7 +76,7 @@ export default function DestinationDetail({ mode }: { mode: 'admin' | 'user' }) 
   })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
-  if (isError || !destination) return <p className="text-sm text-red-600">Destination not found.</p>
+  if (!destination) return <LoadFailed error={error} subject="Destination" onRetry={refetch} />
 
   const rows: [string, string][] = [
     ...(isAdmin ? [['Owner', destination.user_email ?? destination.user_id ?? '—'] as [string, string]] : []),
@@ -96,6 +97,7 @@ export default function DestinationDetail({ mode }: { mode: 'admin' | 'user' }) 
 
   return (
     <div className="max-w-4xl">
+      <RefreshFailed error={error} onRetry={refetch} />
       <button onClick={() => navigate(routeBase)} className="mb-4 text-sm text-indigo-600 hover:underline">
         ← Back to destinations
       </button>

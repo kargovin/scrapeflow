@@ -20,6 +20,7 @@ import { deadlineInWords, stopLabel } from '../lib/runText'
 import ErrorBox from '../components/ErrorBox'
 import StatusPill, { runStatus } from '../components/StatusPill'
 import { STATE_PILL } from './Monitors'
+import { LoadFailed, RefreshFailed } from '../components/LoadError'
 
 // PRD-018 R6: a notice that could not be delivered is shown as such, beside its situation.
 function NoticeState({ notice }: { notice: MonitorNotice }) {
@@ -113,7 +114,7 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
   const [confirmDelete, setConfirmDelete] = useState<'plain' | 'with_checks' | null>(null)
 
   // R9: the page refreshes while it is open; no live channel.
-  const { data: monitor, isLoading, isError } = useQuery<Monitor | AdminMonitorDetail>({
+  const { data: monitor, isLoading, error, refetch } = useQuery<Monitor | AdminMonitorDetail>({
     queryKey: ['monitor', mode, monitorId],
     queryFn: () => api.get(apiBase),
     refetchInterval: 10_000,
@@ -188,7 +189,7 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
   })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
-  if (isError || !monitor) return <p className="text-sm text-red-600">Monitor not found.</p>
+  if (!monitor) return <LoadFailed error={error} subject="Monitor" onRetry={refetch} />
 
   const active = monitor.state === 'active'
   const described = describeCron(monitor.schedule_cron)
@@ -243,6 +244,7 @@ export default function MonitorDetail({ mode }: { mode: 'admin' | 'user' }) {
 
   return (
     <div>
+      <RefreshFailed error={error} onRetry={refetch} />
       <button onClick={() => navigate(routeBase)} className="mb-4 text-sm text-indigo-600 hover:underline">
         ← Back to monitors
       </button>

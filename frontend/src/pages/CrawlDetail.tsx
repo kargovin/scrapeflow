@@ -10,6 +10,7 @@ import Pager from '../components/Pager'
 import StatusPill from '../components/StatusPill'
 import StoredResult from '../components/StoredResult'
 import { CRAWL_TERMINAL } from './Crawls'
+import { LoadFailed, RefreshFailed } from '../components/LoadError'
 
 // What each admission refusal means (ADR-009 13d, ADR-010 §2); a `sitemap_` prefix = a sitemap file.
 const DROP_REASONS: Record<string, string> = {
@@ -41,7 +42,7 @@ export default function CrawlDetail({ mode }: { mode: 'admin' | 'user' }) {
   const routeBase = isAdmin ? '/app/admin/crawls' : '/app/dashboard/crawls'
   const crawlKey = ['crawl', mode, crawlId]
 
-  const { data: crawl, isLoading, isError } = useQuery<Crawl>({
+  const { data: crawl, isLoading, error, refetch } = useQuery<Crawl>({
     queryKey: crawlKey,
     queryFn: () => api.get(apiBase),
     // The owner gets pushes over the socket; an admin (no socket) polls.
@@ -76,7 +77,7 @@ export default function CrawlDetail({ mode }: { mode: 'admin' | 'user' }) {
   })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
-  if (isError || !crawl) return <p className="text-sm text-red-600">Crawl not found.</p>
+  if (!crawl) return <LoadFailed error={error} subject="Crawl" onRetry={refetch} />
 
   const drops = Object.entries(crawl.dropped ?? {})
   const fields: [string, React.ReactNode][] = [
@@ -109,6 +110,7 @@ export default function CrawlDetail({ mode }: { mode: 'admin' | 'user' }) {
 
   return (
     <div>
+      <RefreshFailed error={error} onRetry={refetch} />
       <button onClick={() => navigate(routeBase)} className="mb-4 text-sm text-indigo-600 hover:underline">
         ← Back to crawls
       </button>

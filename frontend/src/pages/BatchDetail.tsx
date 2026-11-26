@@ -10,6 +10,7 @@ import Pager from '../components/Pager'
 import StatusPill from '../components/StatusPill'
 import StoredResult from '../components/StoredResult'
 import { BATCH_TERMINAL } from './Batches'
+import { LoadFailed, RefreshFailed } from '../components/LoadError'
 
 export default function BatchDetail({ mode }: { mode: 'admin' | 'user' }) {
   const { batchId } = useParams<{ batchId: string }>()
@@ -27,7 +28,7 @@ export default function BatchDetail({ mode }: { mode: 'admin' | 'user' }) {
   const itemsKey = ['batch-items', mode, batchId, offset]
 
   const active = (q: Query<Batch>) => !!q.state.data && !BATCH_TERMINAL.has(q.state.data.status)
-  const { data: batch, isLoading, isError } = useQuery<Batch>({
+  const { data: batch, isLoading, error, refetch } = useQuery<Batch>({
     queryKey: batchKey,
     queryFn: () => api.get(apiBase),
     // The owner gets pushes over the socket; an admin (no socket) polls.
@@ -60,7 +61,7 @@ export default function BatchDetail({ mode }: { mode: 'admin' | 'user' }) {
   })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
-  if (isError || !batch) return <p className="text-sm text-red-600">Batch not found.</p>
+  if (!batch) return <LoadFailed error={error} subject="Batch" onRetry={refetch} />
 
   const fields: [string, string][] = [
     ['ID', batch.id],
@@ -75,6 +76,7 @@ export default function BatchDetail({ mode }: { mode: 'admin' | 'user' }) {
 
   return (
     <div>
+      <RefreshFailed error={error} onRetry={refetch} />
       <button onClick={() => navigate(routeBase)} className="mb-4 text-sm text-indigo-600 hover:underline">
         ← Back to batches
       </button>

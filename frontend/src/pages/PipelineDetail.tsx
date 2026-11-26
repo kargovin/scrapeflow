@@ -14,6 +14,7 @@ import { stopLabel } from '../lib/runText'
 import { STATE_LABELS, changeLabel } from '../lib/monitorText'
 import ErrorBox from '../components/ErrorBox'
 import StatusPill, { runStatus } from '../components/StatusPill'
+import { LoadFailed, RefreshFailed } from '../components/LoadError'
 
 export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
   const { pipelineId } = useParams<{ pipelineId: string }>()
@@ -27,7 +28,7 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
   const [version, setVersion] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<'soft' | 'permanent' | null>(null)
 
-  const { data: pipeline, isLoading, isError } = useQuery<Pipeline>({
+  const { data: pipeline, isLoading, error, refetch } = useQuery<Pipeline>({
     queryKey: ['pipeline', mode, pipelineId],
     queryFn: () => api.get(apiBase),
   })
@@ -89,12 +90,13 @@ export default function PipelineDetail({ mode }: { mode: 'admin' | 'user' }) {
   })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
-  if (isError || !pipeline) return <p className="text-sm text-red-600">Pipeline not found.</p>
+  if (!pipeline) return <LoadFailed error={error} subject="Pipeline" onRetry={refetch} />
 
   const inputNames = Object.keys(pipeline.definition.inputs ?? {})
 
   return (
     <div>
+      <RefreshFailed error={error} onRetry={refetch} />
       <button onClick={() => navigate(routeBase)} className="mb-4 text-sm text-indigo-600 hover:underline">
         ← Back to pipelines
       </button>
