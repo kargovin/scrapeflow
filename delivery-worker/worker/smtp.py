@@ -90,7 +90,9 @@ def message(address: SmtpAddress, inp: SendEmailInput, content: str | None = Non
     msg["Date"] = formatdate(usegmt=True)
     msg["Message-ID"] = inp.message_id
     text = body_text(inp.body, inp.run_id)
-    msg.set_content(text if content is None else text + content)
+    if content is not None and text == inp.body:
+        text += content
+    msg.set_content(text)
     return msg
 
 
@@ -225,17 +227,24 @@ class EmailActivities:
     async def send_email(self, inp: SendEmailInput) -> SendEmailOutput:
         """One message to the destination's recipients. A resend carries the same Message-ID."""
         address, secret = _parsed(inp.address, inp.encrypted_secret)
+        loop = asyncio.get_running_loop()
+        # One budget for the read and the session: past it the workflow retries while DATA may finish.
+        deadline = loop.time() + EMAIL_SEND_ATTEMPT_SECONDS - ATTEMPT_MARGIN_SECONDS
         content = None
         if inp.source_path is not None:
             assert self._source is not None
-            content = await read_content(self._source, inp.source_path, inp.run_id)
+            try:
+                async with asyncio.timeout_at(deadline):
+                    content = await read_content(self._source, inp.source_path, inp.run_id)
+            except TimeoutError as exc:
+                raise source_error(exc) from None
         try:
             msg = message(address, inp, content)
         except ValueError:
             raise final_error("DeliveryFailed", "the message has an invalid header") from None
-        timeout = EMAIL_SEND_ATTEMPT_SECONDS - ATTEMPT_MARGIN_SECONDS
+        timeout = max(deadline - loop.time(), 1.0)
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout_at(deadline):
                 refused = await pinned_tcp.pinned(
                     address.host,
                     address.port,

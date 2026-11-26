@@ -6,6 +6,7 @@ import email.policy
 import json
 import socket
 import ssl
+from contextlib import asynccontextmanager
 
 import aiohttp
 import aiosmtplib
@@ -209,6 +210,34 @@ async def test_a_source_that_cannot_be_read_is_classified_and_nothing_is_sent(
     assert (err.type, err.non_retryable) == (type_, final)
     assert server.messages == []
     assert lookups[0] == []
+
+
+class _SlowSource(FakeSource):
+    @asynccontextmanager
+    async def open(self, path: str):
+        await asyncio.sleep(1)
+        async with super().open(path) as obj:
+            yield obj
+
+
+async def test_a_read_that_outlasts_the_attempt_budget_is_transient_and_nothing_is_sent(
+    lookups, monkeypatch
+):
+    monkeypatch.setattr(smtp, "EMAIL_SEND_ATTEMPT_SECONDS", smtp.ATTEMPT_MARGIN_SECONDS + 0.2)
+    async with smtp_server(HOST) as server:
+        err = await _send_error(_block_input(server), _SlowSource(b"{}"))
+
+    assert (err.type, err.non_retryable) == ("SourceUnavailable", False)
+    assert server.messages == []
+    assert lookups[0] == []
+
+
+async def test_a_body_over_the_cap_carries_the_note_and_no_content(lookups):
+    async with smtp_server(HOST) as server:
+        inp = _send_input(server, body="x" * (smtp.INLINE_MAX_BYTES + 1), run_id="0b1f")
+        await _send(inp.model_copy(update={"source_path": SOURCE}), FakeSource(b'{"price": 8}'))
+
+    assert _text(server.messages[0]) == "result too large to include (256 KiB); fetch it with run 0b1f\n"
 
 
 async def test_recipients_refused_while_another_is_accepted_are_reported(lookups):
