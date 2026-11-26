@@ -158,20 +158,25 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — bug fixes, 2026-11-26 *(clock)*
 
-🔧 **BUG-033 filed + fixed, BUG-029 fixed — local, unreleased; ship together as one api-image release.** Built inline
-(no builder subagent; small SPA + one schema field).
+🔧 **BUG-033 filed + fixed, BUG-029 and BUG-021 fixed — local, unreleased; ship together as one api-image release.**
+Built inline (no builder subagent). Stale status lines fixed (`863246c`: BUG-008/012 dissolved, BUG-009 released,
+BUG-032's scrape half released, BUG-018's "recurrence" = BUG-033).
 - **BUG-033** (owner found it: a pipeline page left open through a laptop standby showed "Pipeline not found."; a reload
   showed it). Seven detail pages rendered "X not found." for *any* error, and dropped a loaded page when a background
   refetch failed. `4305bec` — `components/LoadError.tsx`: `LoadFailed` ("not found" on a 404 only, else the error +
   *Try again*), `RefreshFailed` (a note above a loaded page). List pages unchanged (they say "Failed to load", correctly).
 - **BUG-029** — `22ace97` `engine` on `JobResponse` (all 7 construction sites, required field), tests user + admin;
   `c3ac2a5` SPA: lists show `engine → format` (my call, Batches' existing form), detail pages *Engine* + *Output format*.
+- **BUG-021** — `771d28a` `CMD ["/app/.venv/bin/python", "-m", "app.serve"]`; `app/serve.py` = SIGTERM handler before
+  `import uvicorn`; production stage `uv sync --frozen --no-dev` once (keeps `/health`'s version). Measured on the
+  production target: old 0.5 s stop → 137 after 15 s; new → exit 0 at 0.2/0.5/2/8 s; `/health` 200 `0.1.0`.
 - **Numbers:** API 1592. SPA: `tsc -b` + `vite build` clean; no SPA test suite exists. Not checked in a browser.
-- **Release facts:** `main` `2ae9801..develop`; **api image only**; no migration, no infra change. Owner checks: Jobs list
-  shows `playwright → markdown` for a playwright job; JobDetail shows Engine; a detail page left open across a network drop
-  keeps its content with the amber note; an unknown id still says "not found".
-- **Next candidates:** BUG-021, BUG-019 (infra; first run is a real delete), BUG-032's webhook half (needs a call),
-  P's email limits.
+- **Release facts:** `main` `2ae9801..develop`; **api image only** (api + workflow worker pods); no migration, no infra
+  change. Owner checks: api pods `Running`, `/health` 200 with `version` `0.1.0`, `kubectl exec … cat /proc/1/cmdline`
+  shows the venv python; Jobs list shows `playwright → markdown` for a playwright job; JobDetail shows Engine; a detail
+  page left open across a network drop keeps its content with the amber note; an unknown id still says "not found".
+- **Next candidates:** BUG-013 + BUG-006 (`mcp/` lockfile + Dependabot), BUG-019 (infra; first run is a real delete),
+  BUG-032's webhook half (needs a call), P's email limits.
 
 ## Earlier state — 2026-11-26 *(clock)*
 

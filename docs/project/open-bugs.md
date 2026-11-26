@@ -2009,7 +2009,14 @@ Anthropic key — expect `LLMFailed: AuthenticationError … 401`, not `TypeErro
 worst case adds ~30 s to one rollout's downtime — and uvicorn may start serving inside that window
 and be killed mid-request. Needs a stop within the pod's first seconds of life, so it is rare.
 **Discovered:** 2026-09-30, while fixing the same defect in the workflow worker (B.6 session).
-**Status:** 🔴 **Open — owner's call 2026-09-30: file it, fix later.**
+**Status:** 🔧 **Fixed locally 2026-11-26 (`771d28a`), unreleased** — ships with BUG-029/033. `CMD` is
+`/app/.venv/bin/python -m app.serve`; `app/serve.py` installs a SIGTERM → `sys.exit(0)` handler before importing
+uvicorn, which (0.42) replaces it before importing `app.main` and calls it again on the way out. The production stage
+runs `uv sync --frozen --no-dev` once, so `/health` keeps the package version (it was `uv run`'s per-start build that
+installed it). Measured on the production target as `appuser` against compose: old command stopped at 0.5 s →
+exit 137 after the full 15 s; new → exit 0 at 0.2 / 0.5 / 2 / 8 s (a stop during startup waits for the lifespan
+startup, ~4–6 s, then shuts down cleanly); `/health` 200 `0.1.0` after a normal start. Compose's dev `api` keeps
+`uv run … --reload`. *(Was: 🔴 Open — owner's call 2026-09-30: file it, fix later.)*
 
 ### What happens
 
