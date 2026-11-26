@@ -9,7 +9,8 @@
 # node's public IP that way); they never replace it.
 
 allow_missing_role: true # no mTLS client identity: every caller gets the default (open) ACL
-connect_timeout: 10s
+# A slow-to-connect site waited the whole job budget before the proxy; 10 s (the default) cut it short.
+connect_timeout: 30s
 dns_timeout: 5s
 
 deny_ranges:
