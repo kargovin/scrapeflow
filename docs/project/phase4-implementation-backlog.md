@@ -5006,6 +5006,7 @@ submission server with an app password. Without one, skip steps 2 and 3's items 
 - **Step 0:** `alembic_version` `7d79370b821e`; 0 running pipeline runs. Rollback tags: api, workflow worker, CronJob `k4rth/scrapeflow-api:main-1795517652-cf73ade99c5119162c49d02010e32170a6da9c0f`; delivery worker `k4rth/scrapeflow-delivery-worker:main-1795517612-cf73ade99c5119162c49d02010e32170a6da9c0f`.
 - **Step 1:** `main` `cf73ade..2ae9801`; CI `45744291517` — `replay`, `build-api`, `build-delivery-worker` green, http/playwright/LLM builds skipped. api + workflow worker on `main-1795661046-2ae9801…`, delivery worker on `main-1795661011-2ae9801…`; `alembic_version` still `7d79370b821e`.
 - **Step 2a ✅** an smtp destination on a Gmail account (`smtp.gmail.com:587`, STARTTLS, an app password): the test passed address, tls and login.
+- **Step 2b ✅** `p-mail` (scrape → bucket → email) — **the first email sent from production**: Gmail accepted it (in the sender's Sent at once); the recipient, a personal domain forwarded by a mail-forwarding service, received it after a delay on the forwarder's side.
 
 **Rollback:** prefer a forward fix. An api image revert (api, workflow worker, CronJob to step 0's tags): first **no
 pipeline run with an email block running** (`q "SELECT r.id FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'email';"`
