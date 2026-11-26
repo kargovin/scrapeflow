@@ -13,7 +13,7 @@ import json
 import mcp.server.stdio
 import mcp.types as types
 import structlog
-from mcp.server import Server
+from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 from tools.get_job_status import get_job_status
@@ -146,7 +146,7 @@ async def _run() -> None:
                 server_name="scrapeflow",
                 server_version="0.1.0",
                 capabilities=app.get_capabilities(
-                    notification_options=None,
+                    notification_options=NotificationOptions(),
                     experimental_capabilities={},
                 ),
             ),
