@@ -162,7 +162,7 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — BUG-013 + BUG-006 + every Dependabot alert, 2026-11-26 *(clock)*
 
-🔧 **BUG-013 and BUG-006 fixed, all 120 open Dependabot alerts cleared — local, unreleased.** Built inline, one step
+🔧 **BUG-013 and BUG-006 fixed, all 104 open Dependabot alerts cleared — local, unreleased.** Built inline, one step
 per commit (owner: "start with bug13 +06; in this itself solve all the current dependabot issues too").
 - **BUG-013** — `ec37175` `mcp/` gets `uv.lock` + `uv sync --frozen`, pytest to a dev group, a `test` Docker target,
   **`mcp<2`** (my call: an unlocked rebuild resolves 2.3.0, which removed `Server.list_tools`/`call_tool`);
@@ -172,7 +172,7 @@ per commit (owner: "start with bug13 +06; in this itself solve all the current d
 - **BUG-006** — `683ff6e` `dependabot.yml` adds `/mcp`: all seven manifests scanned.
 - **Alerts** (one commit per manifest): `41f7cfe` Go `klauspost/compress` 1.18.7; `19ff24e` frontend `dompurify` 3.5.0
   (override), `vite` 8.3.8, `postcss-selector-parser` 6.1.6, `source-map-js` 1.2.4; `5a271b3` llm-worker, `6fa0988`
-  playwright-worker — `aiohttp` 3.14.5, `certifi` 2026.11.20, `soupsieve` 4.1.3 (major); `460eb3c` api — `aiohttp`,
+  playwright-worker — `aiohttp` 3.14.5, `certifi` 2026.11.20, `soupsieve` 4.1.3 (major; ⚠️ **not on playwright** — its Python 3.10 image keeps 2.10, every fix needs ≥ 3.11.5; 3 alerts stay open, unreachable: no `select()`); `460eb3c` api — `aiohttp`,
   `certifi`, `mako`, `multidict`, dev `filelock`/`virtualenv`. ⚠️ **`miniopy-async` < 1.23.6 pins `certifi<2026`** —
   the critical only moves with `--upgrade-package miniopy-async`. delivery-worker had none.
 - **Numbers:** API 1592, contracts 228, llm 271, playwright 202, delivery 252 + 23 skipped, MCP 15, Go green + integration

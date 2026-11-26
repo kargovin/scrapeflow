@@ -563,9 +563,9 @@ latent rather than realised.
 in `phase4-backlog.md` §4)
 **✅ FIXED on `develop` 2026-11-26 (`683ff6e`), unreleased:** `dependabot.yml` lists `mcp/` too — all seven
 manifests in the repo (`coordinator/` is deleted) are scanned, each with a lock its image installs from (BUG-013). The
-same pass cleared **all 120 open alerts** (`41f7cfe`, `19ff24e`, `5a271b3`, `6fa0988`, `460eb3c`): `aiohttp` 3.14.5,
+same pass cleared **all 104 open alerts** (`41f7cfe`, `19ff24e`, `5a271b3`, `6fa0988`, `460eb3c`): `aiohttp` 3.14.5,
 `certifi` 2026.11.20 (the critical; **`miniopy-async` < 1.23.6 caps `certifi<2026`**, so a bare upgrade does nothing),
-`soupsieve` 4.1.3 (major; both workers' suites green), `mako`, `multidict`, dev-only `filelock`/`virtualenv`; frontend
+`soupsieve` 4.1.3 (major; llm-worker only — **every patched soupsieve needs Python ≥ 3.11.5 and the playwright image is 3.10**, so it still installs 2.10 and its 3 alerts stay open; unreachable there, since nothing calls `select()`; closing them = a newer Playwright base image), `mako`, `multidict`, dev-only `filelock`/`virtualenv`; frontend
 `dompurify` 3.5.0 (override), `vite` 8.3.8, `postcss-selector-parser`, `source-map-js`; Go `klauspost/compress` 1.18.7.
 Closes on the owner's push of `develop`/`main` once GitHub re-scans.
 **Fixed on `develop` 2026-11-20 (M.3, `2bc7488`):** `.github/dependabot.yml` lists every manifest with a
