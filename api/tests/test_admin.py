@@ -364,6 +364,10 @@ async def test_admin_list_jobs_filter_engine(client, admin_headers, db_user):
     ids = [j["id"] for j in resp.json()]
     assert str(pw_id) in ids
     assert str(http_id) not in ids
+    assert {j["engine"] for j in resp.json()} == {"playwright"}
+    assert (await client.get(f"/admin/jobs/{pw_id}", headers=admin_headers)).json()[
+        "engine"
+    ] == "playwright"
 
 
 # ---------------------------------------------------------------------------

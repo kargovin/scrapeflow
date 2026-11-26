@@ -147,6 +147,7 @@ class JobResponse(BaseModel):
     url: str
     status: str
     output_format: OutputFormat
+    engine: Engine
     result_path: str | None
     error: str | None
     run_id: uuid.UUID

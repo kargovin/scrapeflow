@@ -98,6 +98,30 @@ async def test_get_job_own(client, auth_headers, mock_temporal):
     assert body["status"] == "pending"
 
 
+async def test_job_reads_carry_the_engine(client, auth_headers, mock_temporal):
+    """Every job read returns the engine (BUG-029)."""
+    created_resp = await client.post(
+        "/jobs",
+        json={
+            "url": "https://example.com",
+            "engine": "playwright",
+            "playwright_options": {"wait_strategy": "load"},
+        },
+        headers=auth_headers,
+    )
+    assert created_resp.status_code == 201, created_resp.text
+    created = created_resp.json()
+
+    one = (await client.get(f"/jobs/{created['id']}", headers=auth_headers)).json()
+    [listed] = [
+        j
+        for j in (await client.get("/jobs?limit=100", headers=auth_headers)).json()
+        if j["id"] == created["id"]
+    ]
+
+    assert created["engine"] == one["engine"] == listed["engine"] == "playwright"
+
+
 async def test_job_reads_show_no_change_detection(client, auth_headers, mock_temporal):
     """diff_detected is always null (ADR-016 §14)."""
     created = (
