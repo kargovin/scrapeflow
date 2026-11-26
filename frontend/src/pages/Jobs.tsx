@@ -132,7 +132,7 @@ export default function Jobs({ mode }: { mode: 'admin' | 'user' }) {
                         {job.status}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-gray-500">{job.output_format}</td>
+                    <td className="px-4 py-3 text-gray-500">{job.engine} → {job.output_format}</td>
                     <td className="px-4 py-3 text-gray-500">
                       {job.schedule_cron && job.schedule_status ? (
                         <span className="flex flex-col" title={job.schedule_cron}>

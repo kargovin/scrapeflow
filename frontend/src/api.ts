@@ -84,7 +84,7 @@ export interface Job {
   user_email?: string | null
   url: string
   output_format: string
-  engine?: string
+  engine: string
   status: string
   result_path: string | null
   error: string | null

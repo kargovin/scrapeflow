@@ -102,7 +102,7 @@ export default function Crawls({ mode }: { mode: 'admin' | 'user' }) {
                     <td className="px-4 py-3 text-gray-500">
                       {c.total_completed} done · {c.total_failed} failed · {c.total_queued} found
                     </td>
-                    <td className="px-4 py-3 text-gray-500">{c.engine}</td>
+                    <td className="px-4 py-3 text-gray-500">{c.engine} → {c.output_format}</td>
                     <td className="px-4 py-3 text-gray-500">{new Date(c.created_at).toLocaleString()}</td>
                   </tr>
                 ))}

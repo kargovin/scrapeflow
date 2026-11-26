@@ -91,6 +91,7 @@ export default function JobDetail({ mode }: { mode: 'admin' | 'user' }) {
         ) : job.user_id] as [string, React.ReactNode]]
       : []),
     ['URL', job.url],
+    ['Engine', job.engine],
     ['Output format', job.output_format],
     ['Status', (
       <span className="flex items-center gap-2">

@@ -100,6 +100,7 @@ export default function CrawlDetail({ mode }: { mode: 'admin' | 'user' }) {
       ),
     ],
     ['Engine', crawl.engine],
+    ['Output format', crawl.output_format],
     ['robots.txt', crawl.respect_robots ? 'respected' : 'ignored'],
     ['Sitemap', crawl.ignore_sitemap ? 'ignored' : 'followed'],
     ['Paths', [crawl.include_paths && `only ${crawl.include_paths.join(', ')}`, crawl.exclude_paths && `not ${crawl.exclude_paths.join(', ')}`].filter(Boolean).join('; ') || '—'],
