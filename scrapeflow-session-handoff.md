@@ -171,6 +171,12 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — BUG-010 part 2 (egress proxy), 2026-11-26 *(clock)*
 
+⏸️ **Paused 2026-11-27 by the owner, mid-release.** In prod: the egress proxy (infra `73b2794`) and `main` up to
+`e4b760b` (checks 1–2 passed; check 3 failed — fixed below). **Resume with:** infra push `31f0763` (local, ahead 1),
+then `main` ← `develop` (`develop` ahead of `origin/develop` by 4: `b60798f`, `857f46b`, `ada5c4f`, `0634705`;
+playwright image only), then checks 3–6 (the curl blocks are in this conversation's record, not yet in a file —
+rebuild them from `scripts.egress_gate` and the bullets below if needed).
+
 🔧 **BUG-010 part 2 fixed — local, unreleased.** Built inline, one step per commit (owner: "lets do bug10"). Owner's
 calls: **borrow, don't build** — Stripe **Smokescreen** (v1.0.1, digest-pinned) — run as **one shared service**, and
 **include the LLM `base_url`**. Workflow worker (webhooks) and delivery worker keep their own pinning (not HTTP-proxyable
