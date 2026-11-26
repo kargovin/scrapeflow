@@ -5002,6 +5002,10 @@ submission server with an app password. Without one, skip steps 2 and 3's items 
    delivered results — ScrapeFlow cannot take them back.
 5. Record step 0's values and each step's results here; mark P.1–P.2 ✅ in the status table.
 
+**Release record (2026-11-26, owner ran it):**
+- **Step 0:** `alembic_version` `7d79370b821e`; 0 running pipeline runs. Rollback tags: api, workflow worker, CronJob `k4rth/scrapeflow-api:main-1795517652-cf73ade99c5119162c49d02010e32170a6da9c0f`; delivery worker `k4rth/scrapeflow-delivery-worker:main-1795517612-cf73ade99c5119162c49d02010e32170a6da9c0f`.
+- **Step 1:** `main` `cf73ade..2ae9801`; CI `45744291517` — `replay`, `build-api`, `build-delivery-worker` green, http/playwright/LLM builds skipped. api + workflow worker on `main-1795661046-2ae9801…`, delivery worker on `main-1795661011-2ae9801…`; `alembic_version` still `7d79370b821e`.
+
 **Rollback:** prefer a forward fix. An api image revert (api, workflow worker, CronJob to step 0's tags): first **no
 pipeline run with an email block running** (`q "SELECT r.id FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'email';"`
 → none) — O's api cannot parse a version with an `email` block, so such a run's workflow task fails until rolled
