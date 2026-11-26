@@ -76,16 +76,20 @@ Before that the container held a *baked* copy, so `python scripts/x.py` and any 
 script ran the image's version, not the working tree's — a green "import ok" proved nothing. If the
 container predates the mount, `docker compose up -d api` once.
 
-**Worker tests** — not wired into compose; mount the source over the built image:
+**Worker tests** — not wired into compose; mount the source over each worker's `test` image
+(⚠️ since BUG-013's close, 2026-11-26, pytest is a dev group: the compose/production images have none):
 ```bash
-# from repo root
-# images from `docker compose build llm-worker-temporal playwright-worker-temporal`
+# from repo root — rebuild a test image after its uv.lock changes
+docker build --target test -t llm-worker-test llm-worker/
+docker build --target test -t playwright-worker-test playwright-worker/
+docker build --target test -t delivery-worker-test delivery-worker/
+
 docker run --rm -v "$PWD/llm-worker:/app" -w /app --entrypoint python \
-  docker-llm-worker-temporal -m pytest -q -p no:cacheprovider
+  llm-worker-test -m pytest -q -p no:cacheprovider
 
 docker run --rm -v "$PWD/playwright-worker/worker:/app/worker:ro" \
   -v "$PWD/playwright-worker/tests:/app/tests:ro" -w /app \
-  --entrypoint python docker-playwright-worker-temporal -m pytest tests/ -q -p no:cacheprovider
+  --entrypoint python playwright-worker-test -m pytest tests/ -q -p no:cacheprovider
 # ⚠️ since H.1 there are no NATS-mode images; docker-llm-worker / docker-playwright-worker on
 #    disk are stale v1 builds.
 
@@ -112,9 +116,9 @@ the write):
 cd http-worker && UPDATE_CONTRACT_FIXTURES=1 go test -count=1 ./internal/activity/
 ```
 
-**Delivery worker tests** (image from `docker compose build delivery-worker`; from repo root):
+**Delivery worker tests** (the `delivery-worker-test` image above; from repo root):
 ```bash
-docker run --rm -v "$PWD/delivery-worker:/app" -w /app --entrypoint python docker-delivery-worker -m pytest -q -p no:cacheprovider
+docker run --rm -v "$PWD/delivery-worker:/app" -w /app --entrypoint python delivery-worker-test -m pytest -q -p no:cacheprovider
 ```
 **Delivery gate (M.12):** `scripts/delivery-gate.sh` (compose profile `gate`, ~6 min; since O.1 it brings up `delivery-postgres` too).
 
@@ -122,13 +126,13 @@ docker run --rm -v "$PWD/delivery-worker:/app" -w /app --entrypoint python docke
 ```bash
 docker run --rm --network docker_crawl-fixture -v "$PWD/delivery-worker:/app" -w /app \
     -e PG_TEST_HOST=pg.deliveryfixture.com -e PG_TEST_SUPERUSER_PASSWORD=delivery-gate \
-    --entrypoint python docker-delivery-worker -m pytest -q -p no:cacheprovider tests/test_postgres_db.py
+    --entrypoint python delivery-worker-test -m pytest -q -p no:cacheprovider tests/test_postgres_db.py
 ```
 
 **MCP tests** (standalone image, not in compose):
 ```bash
-docker build -t scrapeflow-mcp mcp/
-docker run --rm -e SCRAPEFLOW_API_KEY=test-key scrapeflow-mcp python -m pytest tests/ -v
+docker build --target test -t scrapeflow-mcp-test mcp/
+docker run --rm scrapeflow-mcp-test
 ```
 
 **Migrations** (Alembic auto-runs on API startup, from `api/app/main.py`):
@@ -156,7 +160,36 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — bug fixes, 2026-11-26 *(clock)*
+## Current state — BUG-013 + BUG-006 + every Dependabot alert, 2026-11-26 *(clock)*
+
+🔧 **BUG-013 and BUG-006 fixed, all 120 open Dependabot alerts cleared — local, unreleased.** Built inline, one step
+per commit (owner: "start with bug13 +06; in this itself solve all the current dependabot issues too").
+- **BUG-013** — `ec37175` `mcp/` gets `uv.lock` + `uv sync --frozen`, pytest to a dev group, a `test` Docker target,
+  **`mcp<2`** (my call: an unlocked rebuild resolves 2.3.0, which removed `Server.list_tools`/`call_tool`);
+  `b676fa1` the MCP server crashed at startup on any current 1.x (`notification_options=None`) — `NotificationOptions()`
+  + `tests/test_server.py` (real stdio handshake; fails without the fix); `cb7f388` pytest out of the llm, playwright
+  and delivery worker images (dev group + `test` target each; **worker test commands above changed**).
+- **BUG-006** — `683ff6e` `dependabot.yml` adds `/mcp`: all seven manifests scanned.
+- **Alerts** (one commit per manifest): `41f7cfe` Go `klauspost/compress` 1.18.7; `19ff24e` frontend `dompurify` 3.5.0
+  (override), `vite` 8.3.8, `postcss-selector-parser` 6.1.6, `source-map-js` 1.2.4; `5a271b3` llm-worker, `6fa0988`
+  playwright-worker — `aiohttp` 3.14.5, `certifi` 2026.11.20, `soupsieve` 4.1.3 (major); `460eb3c` api — `aiohttp`,
+  `certifi`, `mako`, `multidict`, dev `filelock`/`virtualenv`. ⚠️ **`miniopy-async` < 1.23.6 pins `certifi<2026`** —
+  the critical only moves with `--upgrade-package miniopy-async`. delivery-worker had none.
+- **Numbers:** API 1592, contracts 228, llm 271, playwright 202, delivery 252 + 23 skipped, MCP 15, Go green + integration
+  vet; frontend `tsc -b` + `vite build` clean; production api image builds (`npm ci`); compose workers start on the new
+  default images; **delivery gate passed** (with the pipeline + monitor regression gates).
+- **Release facts:** `main` `2ae9801..develop` now carries BUG-033/029/021 **and** this: **api, llm-worker,
+  playwright-worker, delivery-worker, http-worker images** (every image CI builds); no migration, no infra change. MCP
+  isn't built by CI. Extra owner checks beyond the previous block: every worker pod `Running` and its log shows
+  `temporal_worker_started`; one http + one playwright job, one pipeline with an LLM block complete (MinIO writes on the
+  new `aiohttp`/`miniopy-async`). After the push, GitHub re-scans: expect the open-alert count to reach 0 (MCP may raise new ones,
+  first scan).
+- **Next:** BUG-019 (infra; first run is a real delete — owner triggers it), BUG-032's webhook half (owner's call on
+  `EGRESS_DENY_CIDRS`), P's email limits, BUG-004 (product call), BUG-010 part 2, Postgres backups. Close BUG-018 once
+  BUG-033 is out and nothing recurs.
+- `develop` is ahead of `origin/develop` — the owner pushes.
+
+## Earlier state — bug fixes, 2026-11-26 *(clock)*
 
 🔧 **BUG-033 filed + fixed, BUG-029 and BUG-021 fixed — local, unreleased; ship together as one api-image release.**
 Built inline (no builder subagent). Stale status lines fixed (`863246c`: BUG-008/012 dissolved, BUG-009 released,

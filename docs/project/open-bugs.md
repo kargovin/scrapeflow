@@ -561,6 +561,13 @@ latent rather than realised.
 **Discovered:** 2026-08-05, from a push-time Dependabot banner
 **Status:** Open — **deferred behind BUG-005 and the Temporal migration** (owner's call, recorded
 in `phase4-backlog.md` §4)
+**✅ FIXED on `develop` 2026-11-26 (`683ff6e`), unreleased:** `dependabot.yml` lists `mcp/` too — all seven
+manifests in the repo (`coordinator/` is deleted) are scanned, each with a lock its image installs from (BUG-013). The
+same pass cleared **all 120 open alerts** (`41f7cfe`, `19ff24e`, `5a271b3`, `6fa0988`, `460eb3c`): `aiohttp` 3.14.5,
+`certifi` 2026.11.20 (the critical; **`miniopy-async` < 1.23.6 caps `certifi<2026`**, so a bare upgrade does nothing),
+`soupsieve` 4.1.3 (major; both workers' suites green), `mako`, `multidict`, dev-only `filelock`/`virtualenv`; frontend
+`dompurify` 3.5.0 (override), `vite` 8.3.8, `postcss-selector-parser`, `source-map-js`; Go `klauspost/compress` 1.18.7.
+Closes on the owner's push of `develop`/`main` once GitHub re-scans.
 **Fixed on `develop` 2026-11-20 (M.3, `2bc7488`):** `.github/dependabot.yml` lists every manifest with a
 lockfile — `api`, `frontend`, `http-worker`, `llm-worker`, `playwright-worker`, `delivery-worker`. `mcp/` stays
 out until it has a lockfile (BUG-013). Takes effect when the file reaches `main` (Release M).
@@ -1426,7 +1433,14 @@ reached production — but every rebuild is an unreviewed dependency change, and
 produced a crash-looping image)
 **Discovered:** 2026-09-09, working out what a `main` fast-forward would actually build for the P6
 cutover
-**Status:** Open — **step 3 (frontend) done 2026-09-19, steps 1, 2, 4, 5 untouched.**
+**Status:** ✅ **FIXED on `develop` 2026-11-26, unreleased** — `mcp/` gained `uv.lock` + `uv sync --frozen`
+(`ec37175`), so every dependency root installs from a committed lock (`coordinator/` is deleted). Step 4 was done in B.6
+(`anthropic<2`, `openai<4`); the same choice for `mcp<2` — **an unlocked rebuild today resolves `mcp` 2.3.0, which
+removed the decorator API `server.py` uses**, and on any current 1.x the server crashed at startup anyway
+(`notification_options=None`, fixed `b676fa1` with a stdio handshake test). The smaller item is done too: pytest is a
+dev group in `mcp/`, `llm-worker/`, `playwright-worker/`, `delivery-worker/`, each Dockerfile has a `test` target, and
+the production images ship without it (`cb7f388`). The MCP image is not built by CI or deployed.
+**Status as of 2026-09-30:** Open — **step 3 (frontend) done 2026-09-19, steps 1, 2, 4, 5 untouched.**
 `api/Dockerfile`'s builder stage now copies `package-lock.json` beside `package.json` and runs
 **`npm ci`**, so the frontend bundle is built from the committed lock — done in the Dependabot
 sweep of 2026-09-19 (the 58 alerts on the three scanned manifests), because 26 of those alerts
