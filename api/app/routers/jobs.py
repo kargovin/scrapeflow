@@ -52,6 +52,7 @@ from app.schemas.jobs import (
     JobPatch,
     JobResponse,
     JobResultResponse,
+    PlaywrightOptions,
     RotateWebhookSecretResponse,
 )
 from app.settings import settings
@@ -238,10 +239,9 @@ async def create_job(
         webhook_secret_plain = secrets.token_hex(32)
         webhook_secret_encrypted = f.encrypt(webhook_secret_plain.encode()).decode()
 
-    if body.engine == Engine.playwright and not body.playwright_options:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Playwright options missing"
-        )
+    playwright_options = body.playwright_options
+    if body.engine == Engine.playwright and playwright_options is None:
+        playwright_options = PlaywrightOptions()
 
     if body.actions and body.engine != Engine.playwright:
         raise HTTPException(
@@ -264,8 +264,8 @@ async def create_job(
         webhook_url=body.webhook_url,
         webhook_secret=webhook_secret_encrypted if body.webhook_url else None,
         llm_config=body.llm_config.model_dump(mode="json") if body.llm_config else None,
-        playwright_options=body.playwright_options.model_dump()
-        if body.playwright_options
+        playwright_options=playwright_options.model_dump(mode="json")
+        if playwright_options
         else None,
         playwright_actions=body.actions,
         respect_robots=body.respect_robots,

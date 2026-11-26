@@ -122,6 +122,24 @@ async def test_job_reads_carry_the_engine(client, auth_headers, mock_temporal):
     assert created["engine"] == one["engine"] == listed["engine"] == "playwright"
 
 
+async def test_playwright_job_without_options_gets_the_defaults(
+    client, auth_headers, mock_temporal
+):
+    """playwright_options is optional on POST /jobs: a playwright job without it runs with the defaults."""
+    response = await client.post(
+        "/jobs",
+        json={"url": "https://example.com", "engine": "playwright"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert started_scrape(mock_temporal)["playwright_options"] == {
+        "wait_strategy": "load",
+        "timeout_seconds": 60,
+        "block_images": False,
+    }
+
+
 async def test_job_reads_show_no_change_detection(client, auth_headers, mock_temporal):
     """diff_detected is always null (ADR-016 §14)."""
     created = (
