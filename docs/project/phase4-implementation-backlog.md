@@ -166,8 +166,8 @@
 | O.1 | The Postgres sink | ✅ **RELEASED 2026-11-24** (Release O) · built 2026-11-24 (`4e69f3d`, `8993669`, `f5f2b81`, `a7c9437`, `ee34d80`, `1740fcb`). API 1536 → 1547 (replay 116 → 125: four harness + five compose histories), contracts 217 → 227, delivery worker 161 → 216 (+15 against the gate's TLS Postgres, `tests/test_postgres_db.py`, skipped without `PG_TEST_HOST`). Catalog `postgres` (JSON input only, reversible, 30 s × 5 on the delivery ladder + per-try DB writes, undo in the reserve); `DeliverPostgres`/`UndoPostgres`/`TestPostgres` on the delivery worker (`worker/postgres.py`, asyncpg 0.31 locked); `PipelineWorkflow._deliver_bucket` → `_deliver_sink`, `_UNDO_ACTIVITIES` + `postgres`, `_postgres_record` for a lost reply; SPA `locationInWords`; user guide `docs/guides/pipelines-user-guide.md` (row shape + CREATE TABLE). **Compose gate passed in full** (`scripts/delivery-gate.sh`, 88 checks incl. 21 Postgres, pipeline + monitor gates unchanged): row shape, a lost reply retried to one row, undo, a 0-row undo reads undone, a refused login on undo = undo failed, no key/no TLS/wrong password refused at save, no DDL from ScrapeFlow's logins (the fixture's DDL log). Mutation checks 16/16 killed. **My calls:** asyncpg pinned to the vetted IP with an `ssl.SSLContext` subclass whose `wrap_bio` presents and verifies the host name (verified: SNI + name check; no resolver override needed); no new patch — no recorded history can hold a postgres block, the bucket's commands are unchanged (replay green); the location records `host, port, database, schema, table, run_id, block_id` (names only), the undo takes the destination's *current* CA with its login; NOT_WRITTEN = nothing sent, or the server answered with an error (SQLSTATE class 08 is asyncpg's own for a lost connection, so treated as maybe written); content must parse as JSON before sending; the test's delete removing no row is a warning like a refused one; the gate's fixture terminates TLS in front of a plain `delivery-postgres` (so faults can be injected after commit). **Review fixes 2026-11-24** (`5527af7`, `502ba4e`; delivery worker 216 → 243 + 16 against the gate's Postgres; mutation 15/15 killed): content `jsonb` cannot hold — `NaN`/`Infinity`/`-Infinity`, a NUL or an unpaired surrogate in any value or key, nesting deeper than the parser — fails as `ContentNotJson` naming the content, not written; the destination test fails the check that met the error. **My calls:** unpaired surrogates and over-deep nesting added beside the reviewed NaN/NUL (verified: `jsonb` refuses surrogates with 22P02; the parser's `RecursionError` escaped unclassified); a refused or timed-out connect fails `address` (no new name — webhook, bucket and smtp tests still report an unreachable host under `tls`), a timeout during the login itself does too (one exception for both); a failed `ROLLBACK` is a new check name, `rollback` (rendered as-is by the API and SPA); a write or delete with no answer from the server (class 08) fails that check, where a lost delete used to be a warning. |
 | O.2 | 🚀 Release O | ✅ **RELEASED 2026-11-24 — Group O closed** (`main` `c341af7..cf73ade`; api + delivery-worker images, migration 4.16; owner ran the runbook — 2a's expiry notice and 2b's Postgres sink against a hosted Postgres; record in the O.2 section) · compose gate passed 2026-11-24 (approval 87/87, delivery gate with Postgres, J.10 + L.12). After the release: `21f65af` fixes the stale "waiting for approval" on the pipeline page's runs list (N.4's; rides P) |
 | **P** | **Email sink** (PRD-017 slice 3) | |
-| P.1 | The Email block (its sending, test and alert rows shipped in M.14) | 🔧 **Built 2026-11-24** (`0e40f10`, `bfb4c44`, `de5a087`, `de0122a`, `e4be689`). API 1552 → 1591 (replay 125 → 136: seven harness + four compose histories), contracts 227 → 228, delivery worker 243 → 250 + 23 skipped, no migration, no infra change. Catalog `email`: an smtp destination, `events` as Webhook, 60 s × 5 on the delivery ladder + the per-try DB writes, irreversible, no undo; alert-only calls nothing (so it may precede a bucket). The sink-order refusal now ends "put every bucket and postgres block before the first webhook or email". `queue_failure_alerts` writes `kind = 'email'` rows for Email blocks (destination, no URL); the monitor "nothing is sent" warning counts them. `SendEmailInput.source_path` (additive, both sides): the delivery worker (`EmailActivities`) reads ScrapeFlow's copy and appends it inline up to 256 KiB; above it the copy is not read and the body carries "result too large to include (N KiB); fetch it with run …"; a source fault is classified as the bucket's. `PipelineWorkflow`: Email blocks in `_deliver_sink` (`SendEmail` on `delivery`); `load_destination` returns an smtp destination's `EmailEnvelope` (pipeline name, run page, Message-ID host) at each try; Message-ID `<{run}.{block}@{host}>`, subject `[ScrapeFlow] {pipeline}: run {run}`, body from `app/workflows/email_text.py` (run, block and pipeline ids, the run page, on a monitor check the change in words: status, baseline, page lines, values changed). SPA: editor help, a completed email reads "sent". User guide: *Email*. **Delivery gate passed in full** (106 checks incl. 18 email — sent with the extraction inline and the stored password, the too-large note, a 451 then the same Message-ID delivered with the block `waiting` and no slot held, the failure email after the bucket's undo while a result-only Email sent nothing, a monitor check's page lines and changed value; pipeline + monitor gates unchanged). Mutation 17/17 killed. **My calls:** no new patch — no recorded or in-flight run can hold an email block (the type did not exist before P); its tries ride `sinks`, its alert-only skip `webhook-events`. The content travels by reference (no content in history) and the cap applies to the content, not the text before it. The envelope is read by `load_destination` at each try (as M.14's alert rows read theirs at each attempt), not fixed at the trigger. An email try whose reply was lost records nothing for rollback (the block cannot be undone, and a send that gave up announces nothing — M's reading of D13). Recipients refused beside an accepted one are noted on the completed block's `error` (`recipients refused: …`, as alert rows' `last_error`); the run completes. Content that is not UTF-8 is sent with replacement characters. The destination test's `address`/`tls` alignment not taken (an unreachable smtp host still reports under `tls`). The gate fixture is not recreated by `delivery-gate.sh`: restart `delivery-fixture` after a `server.py` change. |
-| P.2 | 🚀 Release P | ⬜ |
+| P.1 | The Email block (its sending, test and alert rows shipped in M.14) | 🔧 **Built 2026-11-24** (`0e40f10`, `bfb4c44`, `de5a087`, `de0122a`, `e4be689`; review fix `6546008`). API 1552 → 1591 (replay 125 → 136: seven harness + four compose histories), contracts 227 → 228, delivery worker 243 → 250 + 23 skipped, no migration, no infra change. Catalog `email`: an smtp destination, `events` as Webhook, 60 s × 5 on the delivery ladder + the per-try DB writes, irreversible, no undo; alert-only calls nothing (so it may precede a bucket). The sink-order refusal now ends "put every bucket and postgres block before the first webhook or email". `queue_failure_alerts` writes `kind = 'email'` rows for Email blocks (destination, no URL); the monitor "nothing is sent" warning counts them. `SendEmailInput.source_path` (additive, both sides): the delivery worker (`EmailActivities`) reads ScrapeFlow's copy and appends it inline up to 256 KiB; above it the copy is not read and the body carries "result too large to include (N KiB); fetch it with run …"; a source fault is classified as the bucket's. `PipelineWorkflow`: Email blocks in `_deliver_sink` (`SendEmail` on `delivery`); `load_destination` returns an smtp destination's `EmailEnvelope` (pipeline name, run page, Message-ID host) at each try; Message-ID `<{run}.{block}@{host}>`, subject `[ScrapeFlow] {pipeline}: run {run}`, body from `app/workflows/email_text.py` (run, block and pipeline ids, the run page, on a monitor check the change in words: status, baseline, page lines, values changed). SPA: editor help, a completed email reads "sent". User guide: *Email*. **Delivery gate passed in full** (106 checks incl. 18 email — sent with the extraction inline and the stored password, the too-large note, a 451 then the same Message-ID delivered with the block `waiting` and no slot held, the failure email after the bucket's undo while a result-only Email sent nothing, a monitor check's page lines and changed value; pipeline + monitor gates unchanged). Mutation 17/17 killed. **My calls:** no new patch — no recorded or in-flight run can hold an email block (the type did not exist before P); its tries ride `sinks`, its alert-only skip `webhook-events`. The content travels by reference (no content in history) and the cap applies to the content, not the text before it. The envelope is read by `load_destination` at each try (as M.14's alert rows read theirs at each attempt), not fixed at the trigger. An email try whose reply was lost records nothing for rollback (the block cannot be undone, and a send that gave up announces nothing — M's reading of D13). Recipients refused beside an accepted one are noted on the completed block's `error` (`recipients refused: …`, as alert rows' `last_error`); the run completes. Content that is not UTF-8 is sent with replacement characters. The destination test's `address`/`tls` alignment not taken (an unreachable smtp host still reports under `tls`). The gate fixture is not recreated by `delivery-gate.sh`: restart `delivery-fixture` after a `server.py` change. |
+| P.2 | 🚀 Release P | 📋 **Runbook ready 2026-11-26** (P.2 section) · compose gate passed 2026-11-24 (delivery gate 106 checks incl. 18 email; J.10 + L.12 unchanged); review: no important findings, one fix `6546008` (the content read shares the send budget; an over-cap body carries no content). Ships api + delivery-worker, no migration, no infra change, `21f65af` rides it |
 | **Y** | **Job-lane leftovers** (ADR-016 §14) | |
 | Y.1 | Release A — stop using: crawl `schedule_cron` refused, `content_hash` unwritten, four columns unmapped (rides J-a) | ✅ Built 2026-11-18 (`8774907`; **released 2026-11-18** with J.2) — prod count of crawls with `schedule_cron`: **0** |
 | Y.2 | Release B — drop the four columns, delete `core/diff.py` (rides K) | ✅ **Released 2026-11-19 (K.4, `a10f698..c46edb4`)**; built 2026-11-19 (`8ddd7cc`; migration 4.11 `c23f1f27522b`, applied in prod). Round trip clean; `alembic check` shows only the dedup false positive; `grep` finds no reader (the `ScrapeOutput.content_hash` contract field stays — workflow histories decode it). Three Y.1 tests that read the columns directly now assert the reads only |
@@ -4879,7 +4879,134 @@ summary (PRD-018 R4).
 
 #### P.2 — 🚀 Release P
 
+**What:** PRD-017's slice-3 criteria on compose; `main` push → api + delivery worker; the first email through a real
+mail server in production (Release M's 5e was skipped).
 **Depends on:** P.1
+
+**Compose gate ✅ (2026-11-24, develop `4e16fe7`, the P.1 builder's run):** full `scripts/delivery-gate.sh` — **106
+checks, 18 of them email** (the gate's SMTP sink `/_mail`: one message per Email block with its fixed Message-ID and
+the content inline, a page over 256 KiB → the "result too large" note, a deferred first try (`4xx`) sent once on the
+retry, an Email block before a bucket refused at save naming both, an alert-only Email block sending one failure
+message after the bucket's undo) — plus the J.10 pipeline gate and L.12 monitor gate unchanged. Suites: API 1591
+(incl. replay 136), contracts 228, delivery worker 250 + 23 skipped. Mutation 17/17.
+
+**Review** (one independent reviewer over P.1 + `21f65af`, 2026-11-26): **no important findings** — the no-new-patch
+claim, D13, tenancy, the sink-order refusal, fixed Message-IDs and plaintext-free history all checked. Fixed
+(`6546008`, delivery worker 252 + 23 skipped, both new tests mutation-killed): the content read now shares the
+attempt's 55 s budget with the SMTP session (a slow read plus a slow session could outlast the activity's 60 s and
+send a second copy); a body over 256 KiB (a huge monitor summary) now carries the note and no content. **Known
+limits, not fixed:** recipients the server defers (`4xx`) while it accepts others are reported as refused and not
+retried; content is decoded as UTF-8 (a page in another charset arrives with replacement characters); the message
+does not list earlier sinks' deliveries as the webhook payload does (not in slice 3's criteria).
+
+**Not run on compose:** the SPA (Clerk — step 3); a mail server with a certificate from a public CA, a real mailbox.
+
+**Ships** (`main` `cf73ade..develop`): `api/` + `frontend/` — P.1 (catalog, alert rows, workflow, SPA), `21f65af`
+(the runs list's stale "waiting for approval"); `delivery-worker/` — `SendEmail` reads the block's content from
+ScrapeFlow's copy (`SendEmailInput.source_path`). **No migration** (head stays `7d79370b821e`), **no infra change**
+(the delivery worker's NetworkPolicy already allows public addresses on any port), **no new workflow patch** (the
+builder's call: no recorded or in-flight run can hold an email block; tries ride `sinks`, the alert-only skip
+`webhook-events`). CI: `replay` → `build-api` and `build-delivery-worker`; http, playwright and LLM builds skipped.
+Flux bumps `api`, `workflow-worker`, the cleanup CronJob and `delivery-worker`.
+
+**Rollout window** (one-line note): until **both** the api and the delivery worker are on the new tag, an Email
+block's message goes out without its content (the old delivery worker ignores `source_path`) — run no Email block
+before step 1's rollouts are complete.
+
+**Runbook** (owner-run, in your own terminal). Same variables as O's, plus the bucket destination from M:
+```bash
+export B=https://scrapeflow.govindappa.com
+export KEY=<an API key from the SPA>
+export D_HOOK=<the webhook destination's id>  D_BUCKET=<the bucket destination's id>
+q() { kubectl -n scrapeflow exec -i sts/scrapeflow-postgresql -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<< "$1"; }
+api() { curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' "$B$1" "${@:2}"; }
+```
+(⚠️ this `api` takes the **path** first: `api /pipelines -X POST -d …`.) Step 2 needs **an SMTP account you
+control** with STARTTLS (587) or implicit TLS (465) and a mailbox you can read — e.g. your mail provider's
+submission server with an app password. Without one, skip steps 2 and 3's items 1–3 (the gate covers them; record
+"skipped").
+
+0. **Before (read-only).**
+   - `q "SELECT version_num FROM alembic_version;"` → **`7d79370b821e`** (4.16, O).
+   - `q "SELECT count(*) FROM pipeline_runs WHERE status = 'running';"` → record it.
+   - Rollback tags: `kubectl -n scrapeflow get deploy scrapeflow-api scrapeflow-workflow-worker scrapeflow-delivery-worker -o jsonpath='{range .items[*]}{.metadata.name} {.spec.template.spec.containers[0].image}{"\n"}{end}'`
+     and `kubectl -n scrapeflow get cronjob scrapeflow-cleanup -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}'`
+     → expected api, workflow worker, CronJob `main-1795517652-cf73ade…`; delivery worker `main-1795517612-cf73ade…` (O).
+1. **Push `develop`, ff `main`, push** (from the app repo):
+   `git push origin develop && git checkout main && git merge --ff-only develop && git push origin main && git checkout develop`.
+   - CI (`gh run watch`): `replay`, `build-api`, **`build-delivery-worker`** green; http, playwright and LLM builds **skipped**.
+   - `kubectl -n scrapeflow rollout status deploy/scrapeflow-api` → 2/2 on the new tag; the same for
+     `deploy/scrapeflow-workflow-worker` and **`deploy/scrapeflow-delivery-worker`**. Record the tags here.
+   - `q "SELECT version_num FROM alembic_version;"` → still **`7d79370b821e`**.
+   - `kubectl -n scrapeflow logs deploy/scrapeflow-delivery-worker --since=5m | grep -ci -e traceback -e error` → `0`.
+2. **Product checks** (prod; do 3's SPA items side by side).
+   - **a. The destination** — in the **SPA** (item 1, so the password is not typed in a terminal): kind **email
+     (SMTP)**, your server's host, port, TLS mode, `from` an address your account may send as, `to` your mailbox.
+     **Test** → `address`, `tls`, `login` pass; **no mail arrives** (testing sends none). Save → `export D_MAIL=<id>`.
+   - **b. A result by email** (the first real-SMTP proof):
+     ```bash
+     api /pipelines -X POST -d '{"name": "p-mail", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://httpbin.org/json", "output_format": "json"}},
+       {"id": "store", "type": "bucket", "input": "fetch", "config": {"destination_id": "'"$D_BUCKET"'"}},
+       {"id": "mail", "type": "email", "input": "store", "config": {"destination_id": "'"$D_MAIL"'"}}]}}'
+     ```
+     → `P1`; `api /pipelines/$P1/runs -X POST -d '{}'` → `R1`; `api /pipelines/$P1/runs/$R1` → **`completed`**,
+     `mail` completed. In your mailbox: **one** message, subject `[ScrapeFlow] p-mail: run <R1>`; its headers'
+     `Message-ID: <R1.mail@scrapeflow.govindappa.com>`; the body names the run, the block and the pipeline, links the
+     run page, then the JSON inline. Check the headers for SPF/DKIM pass (your provider signs it — ScrapeFlow runs no
+     relay).
+   - **c. Too large to include:** the same shape with a page over 256 KiB and no bucket:
+     ```bash
+     api /pipelines -X POST -d '{"name": "p-big", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://en.wikipedia.org/wiki/United_States"}},
+       {"id": "mail", "type": "email", "input": "fetch", "config": {"destination_id": "'"$D_MAIL"'"}}]}}'
+     ```
+     → run it (`P2`, `R2`) → `completed`; the message's body says `result too large to include (N KiB); fetch it with
+     run <R2>` and carries no page.
+   - **d. Refused at save:** an Email block before a bucket →
+     ```bash
+     api /pipelines -X POST -d '{"name": "p-order", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}},
+       {"id": "mail", "type": "email", "input": "fetch", "config": {"destination_id": "'"$D_MAIL"'"}},
+       {"id": "store", "type": "bucket", "input": "mail", "config": {"destination_id": "'"$D_BUCKET"'"}}]}}'
+     ```
+     → **`422`** naming `mail` and `store`.
+   - **e. A failure alert by email** (alert only, after the undo):
+     ```bash
+     api /pipelines -X POST -d '{"name": "p-alert", "definition": {"blocks": [
+       {"id": "fetch", "type": "scrape", "config": {"url": "https://example.com/"}},
+       {"id": "store", "type": "bucket", "input": "fetch", "config": {"destination_id": "'"$D_BUCKET"'"}},
+       {"id": "guard", "type": "validate", "input": "store", "config": {"rules": [{"kind": "contains", "text": "Sold out"}]}},
+       {"id": "alert", "type": "email", "input": "guard", "config": {"destination_id": "'"$D_MAIL"'", "events": ["pipeline.failed"]}}]}}'
+     ```
+     → run it (`P3`, `R3`) → **`failed`** at `guard`; `store` `undo_status` **`undone`** (the object gone from your
+     bucket); `alert` skipped (alert only). Your mailbox: **one** failure message, subject `[ScrapeFlow] p-alert:
+     pipeline.failed`, naming `guard`, its error and the undone `store`; `Message-ID: <R3.alert.failed@scrapeflow.govindappa.com>`. `api /pipelines/$P3/runs/$R3` → its
+     alerts list the row **`email` `delivered`**; `q "SELECT kind, status, attempts FROM webhook_deliveries WHERE pipeline_run_id = '<R3>';"`
+     → `email | delivered | 1`.
+   - **f. (optional) A monitor check by email:** a monitor over `scrape → clean → validate(changed, stop) → email`
+     (as O's 2a with the Approval replaced by `{"id": "mail", "type": "email", "input": "gate", "config": {"destination_id": "'"$D_MAIL"'"}}`),
+     Check now twice on a page that changes (or once: the body says *first check — nothing to compare*).
+   - Logs: `kubectl -n scrapeflow logs deploy/scrapeflow-workflow-worker --since=30m | grep -c Traceback` → `0`; the
+     same for `deploy/scrapeflow-delivery-worker`.
+3. **SPA** (signed in):
+   1. Destinations → new **email (SMTP)** destination: Test shows address / tls / login, Save; the detail reads
+      "Credentials: stored encrypted — never shown".
+   2. Pipeline editor: the help lists `email`; "Block budgets" lists it as a sink that cannot be undone.
+   3. `p-mail`'s run: `mail` reads **"sent — an email cannot be taken back"**; `p-alert`'s run: `store` undone, the
+      alert row `email` delivered.
+   4. (`21f65af`) A pipeline page whose run waited for approval and then ended reads the run's end state, not
+      "waiting for approval", without a reload.
+4. **Clean up:** `api /pipelines/$P1?permanent=true -X DELETE`, `$P2`, `$P3` (and the monitor of 2f with
+   `?with_checks=true`) → `204`. Keep or delete the email destination in the SPA. The messages in your mailbox are
+   delivered results — ScrapeFlow cannot take them back.
+5. Record step 0's values and each step's results here; mark P.1–P.2 ✅ in the status table.
+
+**Rollback:** prefer a forward fix. An api image revert (api, workflow worker, CronJob to step 0's tags): first **no
+pipeline run with an email block running** (`q "SELECT r.id FROM pipeline_runs r JOIN pipeline_run_blocks b ON b.pipeline_run_id = r.id WHERE r.status = 'running' AND b.type = 'email';"`
+→ none) — O's api cannot parse a version with an `email` block, so such a run's workflow task fails until rolled
+forward, and triggers of those pipelines fail on O. Failure-alert email rows are ordinary `kind = 'email'` rows O
+already delivers. A delivery-worker revert alone (O's tag) sends Email blocks' messages **without their content**.
 
 ---
 

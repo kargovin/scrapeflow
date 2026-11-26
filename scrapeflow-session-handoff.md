@@ -156,7 +156,31 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — as of 2026-11-24 *(clock)*
+## Current state — as of 2026-11-26 *(clock)*
+
+📋 **P.1 BUILT, RELEASE P RUNBOOK READY (2026-11-24 → 26).** Owner: "start and hopefully finish p1 and p2". Same way of
+working (one builder subagent for P.1, one independent reviewer over P, I verified; the weekly limit paused the review
+2026-11-24 → 26). Brief's group lines → P (`9aa6d6d`).
+- **P.1 — the Email block**, in replay order: `0e40f10` catalog `email` + its failure alerts as `kind = email` rows +
+  `SendEmailInput.source_path`; `bfb4c44` `SendEmail` reads the block's content from ScrapeFlow's copy, inline ≤ 256 KiB;
+  `de5a087` `PipelineWorkflow` (no new patch — my builder's call: no run can hold an email block; tries ride `sinks`,
+  the alert-only skip `webhook-events`), 7 harness histories; `de0122a` SPA; `e4be689` 5 gate scenarios + 4 compose
+  histories; `4e16fe7` docs (user guide *Email*).
+- **Review:** no important findings; fix `6546008` (the content read shares the attempt's 55 s budget — a slow read
+  could outlast the activity and send a second copy; an over-cap body carries no content). Known limits left in the
+  P.2 section (deferred recipients reported as refused, UTF-8 decode, no deliveries list in the body).
+- **Gate:** full delivery gate 106 checks (18 email) + J.10 + L.12 unchanged (builder's run, 2026-11-24).
+- **Numbers:** API 1591 (replay 136), contracts 228, delivery worker 252 + 23 skipped.
+- **Release facts:** `main` `cf73ade..develop`; **api + delivery-worker images**; **no migration**, no infra change;
+  `21f65af` rides it. Step 2 needs an SMTP account the owner controls (STARTTLS 587 or TLS 465) — the first real-SMTP
+  proof. Rollback trap: O's api cannot parse a version with an email block.
+- **Next: P.2 is the owner's** (backlog P.2 section). After it, every implementation-backlog group A–P is done; the
+  deferred items wait on that (memory: background items after the backlog — deferred reviews, BUG-029/032/019/021,
+  Dependabot).
+
+---
+
+## Earlier state — 2026-11-24 *(clock)*
 
 🚀 **RELEASE O DONE — GROUP O CLOSED (2026-11-24).** The owner ran the O.2 runbook in their own terminal; I checked
 each step. `main` `c341af7..cf73ade` (CI `45379002998`; api + delivery-worker images, migration 4.16 `7d79370b821e`,
