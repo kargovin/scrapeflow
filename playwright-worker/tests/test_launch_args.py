@@ -8,7 +8,7 @@ def test_defaults_carry_the_stealth_flags_and_allow_http():
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-blink-features=AutomationControlled",
-        "--disable-features=HttpsFirstBalancedModeAutoEnable",
+        "--disable-features=HttpsFirstBalancedModeAutoEnable,HttpsUpgrades",
     ]
 
 

@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     playwright_disable_dev_shm: bool = True
     # --disable-features=HttpsFirstBalancedModeAutoEnable (BUG-034): from Chrome 158 a
     # navigation to an http-only site fails with net::ERR_BLOCKED_BY_CLIENT without it.
+    # HttpsUpgrades: Chrome would try https:// first for an http:// URL and fall back on failure;
+    # page actions' route.fetch takes that fallback away, so an http-only site whose port 443
+    # hangs never loads. Fetch the URL as given, like the http engine; a site that wants https
+    # redirects itself.
     playwright_allow_http: bool = True
 
     @field_validator("credentials_encryption_key")
@@ -93,5 +97,6 @@ def browser_launch_args(s: Settings) -> list[str]:
     if s.playwright_disable_automation:
         args.append("--disable-blink-features=AutomationControlled")
     if s.playwright_allow_http:
-        args.append("--disable-features=HttpsFirstBalancedModeAutoEnable")
+        # One flag: Chrome reads a single --disable-features list.
+        args.append("--disable-features=HttpsFirstBalancedModeAutoEnable,HttpsUpgrades")
     return args
