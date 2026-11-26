@@ -31,7 +31,10 @@ COPY api/tests/ tests/
 
 FROM base AS production
 COPY --from=frontend-builder /frontend/dist frontend/dist
+# Installs the project itself once, at build time (its version is /health's).
+RUN uv sync --frozen --no-dev
 RUN adduser --disabled-password --gecos "" --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8000
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# The venv's python as PID 1, not `uv run` (BUG-021).
+CMD ["/app/.venv/bin/python", "-m", "app.serve"]
