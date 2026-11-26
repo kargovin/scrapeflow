@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
+from urllib.parse import urlsplit
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -24,6 +26,8 @@ class Settings(BaseSettings):
     minio_bucket: str = "scrapeflow-results"
     minio_secure: bool = False
     llm_key_encryption_key: str = ""
+    # A user's base_url (and its warm-up probe) is reached through it (BUG-010 part 2).
+    egress_proxy_url: str = ""
     # Wall clock for one provider call, end to end (BUG-022: a per-read timeout is reset by
     # every redirect the SDK follows). The warm-up probe has its own budget.
     llm_request_timeout_seconds: int = 60
@@ -73,6 +77,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LLM_KEY_ENCRYPTION_KEY is not a valid Fernet key"
             ) from None
+        return v
+
+    @field_validator("egress_proxy_url")
+    def validate_egress_proxy_url(cls, v):
+        parts = urlsplit(v)
+        if parts.scheme != "http" or not parts.hostname or not parts.port:
+            raise ValueError("EGRESS_PROXY_URL must be set to http://host:port")
         return v
 
 

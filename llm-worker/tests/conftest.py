@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet
 
 # Must be module-level: Settings() runs at import time, before any fixture executes.
 os.environ.setdefault("LLM_KEY_ENCRYPTION_KEY", Fernet.generate_key().decode())
+os.environ.setdefault("EGRESS_PROXY_URL", "http://egress.test:4750")
 
 
 @pytest.fixture

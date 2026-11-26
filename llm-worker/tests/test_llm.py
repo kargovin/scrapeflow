@@ -12,6 +12,7 @@ fully self-contained and independent of the conftest-bootstrapped settings key.
 import asyncio
 import json
 import time
+import openai
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -95,7 +96,9 @@ async def test_call_llm_routes_openai_compatible_provider():
     encrypted = Fernet(key).encrypt(b"api-key").decode()
 
     with patch.object(settings, "llm_key_encryption_key", key.decode()):
-        with patch("worker.llm._call_anthropic", new_callable=AsyncMock) as mock_a:
+        with patch(
+            "worker.llm._call_anthropic", new_callable=AsyncMock
+        ) as mock_a, patch("worker.llm.ensure_ready", new_callable=AsyncMock):
             with patch(
                 "worker.llm._call_openai_compatible", new_callable=AsyncMock
             ) as mock_o:
@@ -438,6 +441,8 @@ async def test_the_deadline_stops_a_call_that_keeps_being_redirected():
         with (
             patch.object(settings, "llm_request_timeout_seconds", 2),
             patch.object(settings, "llm_warmup_enabled", False),
+            # A local endpoint, reached directly: the egress proxy is the compose gate's.
+            patch("worker.llm._egress_http_client", openai.DefaultAsyncHttpxClient),
         ):
             started = time.monotonic()
             with pytest.raises(LLMRequestTimeout, match="within 2s"):

@@ -3,6 +3,8 @@ import json
 import time
 from typing import Any
 
+from urllib.parse import urlsplit
+
 import anthropic
 import httpx
 import openai
@@ -11,7 +13,12 @@ from cryptography.fernet import Fernet
 from openai import AsyncOpenAI
 
 from worker.config import settings
-from worker.errors import LLMOutputTruncated, LLMRequestTimeout, WarmupTimeout
+from worker.errors import (
+    AddressRefused,
+    LLMOutputTruncated,
+    LLMRequestTimeout,
+    WarmupTimeout,
+)
 
 log = structlog.get_logger()
 
@@ -61,12 +68,49 @@ def _anthropic_client(api_key: str) -> anthropic.AsyncAnthropic:
 
 
 def _openai_client(api_key: str, base_url: str | None) -> AsyncOpenAI:
+    # A user's base_url is a user-chosen address: through the egress proxy (BUG-010 part 2), which
+    # also checks every redirect. The hosted API (no base_url) is not, and goes direct.
     return AsyncOpenAI(
         api_key=api_key,
         base_url=base_url or None,
         timeout=_make_timeout(openai.Timeout),
         max_retries=settings.llm_max_retries,
+        http_client=_egress_http_client() if base_url else None,
     )
+
+
+def _egress_http_client() -> httpx.AsyncClient:
+    return openai.DefaultAsyncHttpxClient(proxy=settings.egress_proxy_url)
+
+
+# How the egress proxy names a refusal on its 407.
+_REFUSAL_HEADER = "x-smokescreen-error"
+
+
+def _refusal(exc: BaseException, fallback_host: str) -> AddressRefused | None:
+    """The egress refusal exc carries, or None. A plain-http endpoint gets the proxy's 407 back as a
+    response; an https one fails the CONNECT, reported as a ProxyError with the status only — the
+    egress proxy sends a 407 for nothing else, and nothing else here has a proxy.
+
+    By shape, not class: the probe uses httpx, the OpenAI SDK its own fork (httpx2), whose classes
+    do not subclass httpx's."""
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) == 407:
+        reason = response.headers.get(_REFUSAL_HEADER)
+        if reason:
+            return AddressRefused(_host(response.request, fallback_host), reason)
+    for err in (exc, exc.__cause__):
+        if type(err).__name__ == "ProxyError" and str(err).startswith("407"):
+            try:
+                request = err.request
+            except RuntimeError:  # raised when the error carries no request
+                request = None
+            return AddressRefused(_host(request, fallback_host), str(err))
+    return None
+
+
+def _host(request: Any, fallback: str) -> str:
+    return urlsplit(str(request.url)).netloc if request is not None else fallback
 
 
 async def ensure_ready(base_url: str, api_key: str) -> None:
@@ -100,16 +144,24 @@ async def ensure_ready(base_url: str, api_key: str) -> None:
     attempts = 0
     last_error: str | None = None
 
+    host = httpx.URL(base_url).netloc.decode()
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(settings.llm_warmup_probe_timeout_seconds)
+        timeout=httpx.Timeout(settings.llm_warmup_probe_timeout_seconds),
+        proxy=settings.egress_proxy_url,
     ) as client:
         while time.monotonic() < deadline:
             attempts += 1
             try:
                 response = await client.get(probe_url, headers=headers)
             except httpx.HTTPError as exc:
+                if refused := _refusal(exc, host):
+                    raise refused from None
                 last_error = f"{type(exc).__name__}: {exc}"
             else:
+                if response.status_code == 407 and (
+                    reason := response.headers.get(_REFUSAL_HEADER)
+                ):
+                    raise AddressRefused(host, reason)
                 _warm_until[base_url] = (
                     time.monotonic() + settings.llm_warm_cache_seconds
                 )
@@ -166,15 +218,20 @@ async def _call_openai_compatible(
     output_schema: dict[str, Any],
 ) -> dict[str, Any]:
     client = _openai_client(api_key, base_url)
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": _prompt(content)}],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {"name": "extraction", "schema": output_schema},
-        },
-        max_tokens=settings.llm_max_output_tokens,
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": _prompt(content)}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "extraction", "schema": output_schema},
+            },
+            max_tokens=settings.llm_max_output_tokens,
+        )
+    except (openai.APIStatusError, openai.APIConnectionError) as exc:
+        if base_url and (refused := _refusal(exc, httpx.URL(base_url).netloc.decode())):
+            raise refused from None
+        raise
     choice = response.choices[0]
     if choice.finish_reason == "length":
         raise LLMOutputTruncated(

@@ -51,8 +51,21 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     openai.InternalServerError,
 )
 
+
+class AddressRefused(Exception):
+    """The egress proxy refused the endpoint's address (BUG-010 part 2): the user's base_url, or a
+    redirect from it, is not public. Terminal — a retry resolves the same name again. ``str()``
+    names the host only; ``reason`` (which names the resolved internal address) is for logs."""
+
+    def __init__(self, host: str, reason: str = "") -> None:
+        super().__init__(f"address refused: {host} is not a public address")
+        self.host = host
+        self.reason = reason
+
+
 # Terminal regardless of anything else — retrying cannot fix these.
 _TERMINAL_TYPES: tuple[type[BaseException], ...] = (
+    AddressRefused,
     # Fernet could not decrypt the stored key: the key is corrupt or was
     # encrypted with a different LLM_KEY_ENCRYPTION_KEY.
     InvalidToken,

@@ -294,7 +294,10 @@ services:
       MINIO_BUCKET: scrapeflow-results
       MINIO_SECURE: 'false'
       LLM_MAX_WORKERS: '3'
+      EGRESS_PROXY_URL: http://egress:4750
     depends_on:
+      egress:
+        condition: service_started
       minio:
         condition: service_healthy
       temporal-namespace:
