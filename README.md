@@ -131,8 +131,8 @@ docker compose exec api uv run pytest tests/test_jobs.py -v
 
 # MCP server (standalone image — not in docker-compose)
 cd ..
-docker build -t scrapeflow-mcp mcp/
-docker run --rm -e SCRAPEFLOW_API_KEY=test-key scrapeflow-mcp python -m pytest tests/ -v
+docker build --target test -t scrapeflow-mcp-test mcp/
+docker run --rm scrapeflow-mcp-test
 ```
 
 **Current test counts:** 239 API · 69 Playwright worker · 14 MCP
