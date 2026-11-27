@@ -1136,6 +1136,44 @@ async def email_deferred(g: DeliveryGate) -> None:
     )
 
 
+async def email_recipient_deferred(g: DeliveryGate) -> None:
+    print("A recipient deferred while another took it: the next try goes to that recipient only")
+    slow = f"defer-rcpt-{uuid.uuid4().hex[:8]}@deliveryfixture.com"
+    resp = await g.create(
+        {
+            "kind": "smtp",
+            "address": {
+                "host": "mail.deliveryfixture.com",
+                "port": 587,
+                "tls_mode": "starttls",
+                "from": "alerts@deliveryfixture.com",
+                "to": ["ops@deliveryfixture.com", slow],
+                "ca_certificate": (await g.fixture.get(f"{CONTROL}/_ca")).text,
+            },
+            "secret": {"user": "gate-mailer", "password": f"{SECRET}-smtp"},
+        }
+    )
+    g.check(
+        resp.status_code == 201, f"a two-recipient SMTP destination is saved ({resp.status_code})"
+    )
+    pid = await g.pipeline(
+        "email-recipient-deferred", [g.fetch(), g.mail(resp.json().get("id", ""), input="fetch")]
+    )
+    rid = await g.start(pid, {"url": item("80")})
+    run = await g.wait(pid, rid, 120)
+    found = await g.mails(message_id(rid, "mail"))
+    g.check(
+        run["status"] == "completed"
+        and [m["rcpt"] for m in found] == [["ops@deliveryfixture.com"], [slow]],
+        f"one message to ops, then one to the deferred recipient only ({run['status']}, "
+        f"{[m['rcpt'] for m in found]})",
+    )
+    g.check(
+        blocks_by_id(run)["mail"]["error"] is None,
+        f"nobody is left unreached ({blocks_by_id(run)['mail']['error']})",
+    )
+
+
 async def email_alert(g: DeliveryGate) -> None:
     print("PRD-019 R5 — an Email block set to the run breaks: one failure message, after rollback")
     pid = await g.pipeline(
@@ -1608,6 +1646,7 @@ SCENARIOS = {
     "email_sent": email_sent,
     "email_too_large": email_too_large,
     "email_deferred": email_deferred,
+    "email_recipient_deferred": email_recipient_deferred,
     "email_alert": email_alert,
     "email_monitor": email_monitor,
     "secrets": secrets,

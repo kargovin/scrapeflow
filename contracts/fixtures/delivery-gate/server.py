@@ -9,7 +9,9 @@ Postgres server, an SMTP sink, and the CA that signed their certificate.
     hooks.deliveryfixture.com  :443  TLS, then the pipeline fixture's receiver (pipeline-fixture:80)
     mail.deliveryfixture.com   :587  SMTP: STARTTLS, then AUTH PLAIN; a password starting "wrong" → 535;
                                      a recipient starting "defer-once" → 451 at the end of DATA, the
-                                     first time each Message-ID arrives (listed under "deferred")
+                                     first time each Message-ID arrives (listed under "deferred");
+                                     a recipient starting "defer-rcpt" → 451 to its RCPT, the first time
+                                     each address arrives; each message lists its envelope ("rcpt")
     pg.deliveryfixture.com     :5432 Postgres: TLS (the client's SSLRequest), then delivery-postgres:5432
                                      in plain text. Two faults, each on the FIRST statement of its kind
                                      for a run whose parameters hold the word:
@@ -61,6 +63,7 @@ S3_LOG: list[dict] = []
 SESSIONS: list[dict] = []
 MESSAGES: list[dict] = []
 DEFERRED: list[str] = []
+DEFERRED_RCPT: set[str] = set()
 PG_SEEN: set[tuple[str, str]] = set()
 PG_LOG: list[dict] = []
 
@@ -280,6 +283,7 @@ async def smtp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> No
                         "user": session["user"],
                         "password_sha256": session["password_sha256"],
                         "session": len(SESSIONS) - 1,
+                        "rcpt": list(recipients),
                         "body": (message.get_body(("plain",)) or message).get_content(),
                     }
                 )
@@ -289,8 +293,13 @@ async def smtp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> No
                 recipients.clear()
                 send("250 ok")
             elif verb == "RCPT":
-                recipients.append(text.split(":", 1)[1].strip().strip("<>").lower())
-                send("250 ok")
+                rcpt = text.split(":", 1)[1].strip().strip("<>").lower()
+                if rcpt.startswith("defer-rcpt") and rcpt not in DEFERRED_RCPT:
+                    DEFERRED_RCPT.add(rcpt)
+                    send("451 try again later")
+                else:
+                    recipients.append(rcpt)
+                    send("250 ok")
             elif verb == "QUIT":
                 send("221 bye")
                 await writer.drain()
