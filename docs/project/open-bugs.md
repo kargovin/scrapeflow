@@ -1067,7 +1067,19 @@ unsubscribed is gone; that is another argument for the client-side re-read in §
 
 ## BUG-010 — URLs discovered *during* a crawl are never SSRF-checked, and no worker checks either
 
-> 🔧 **Part 2 FIXED 2026-11-26 — local, unreleased** (`2344ff5..37e2092`, infra `73b2794`). Owner's calls: borrow a
+> ✅ **CLOSED 2026-11-27 — part 2 RELEASED + VERIFIED** (`main` `c95d8cb..e4b760b` with infra `73b2794` 2026-11-26;
+> then `e4b760b..e47b953` — playwright image — with infra `31f0763` 2026-11-27). Owner's checks: README probes (MinIO,
+> node, metadata → 407; example.com through), an http and a playwright job, a playwright job with page actions on
+> `http://neverssl.com/` (after the follow-up below; neverssl's own connects fail now and then — the proxy log shows
+> 30 s waits, and a plain `curl` without the proxy does the same), a private `proxy_url` → 400, an LLM pipeline on a
+> `base_url`. Check 6 (a redirect to an internal address in prod) **waived by the owner**: public redirectors refuse
+> internal targets (httpbin.org, httpbingo.org → 403); covered by `scripts.egress_gate` on compose plus the probes.
+> Follow-up found by check 3 (pre-existing, not the proxy): page actions' `route.fetch` took away Chrome's fallback from
+> its automatic https upgrade, so an http-only site with a broken 443 never loaded — `b60798f` (a fetch error becomes a
+> network error), `857f46b` (`--disable-features=…,HttpsUpgrades`: fetch the URL as given), `ada5c4f` + infra
+> `31f0763` (proxy connect timeout 10 → 30 s).
+>
+> 🔧 *Built 2026-11-26* (`2344ff5..37e2092`, infra `73b2794`). Owner's calls: borrow a
 > maintained egress proxy rather than write one — **Stripe Smokescreen** (`ghcr.io/stripe/smokescreen:v1.0.1`, pinned
 > by digest), run as **one shared service** (`egress` in compose, `scrapeflow-egress` ×2 in the cluster) — and include
 > the LLM worker's `base_url`. Every fetch of a user-chosen address by the http, playwright and LLM workers goes

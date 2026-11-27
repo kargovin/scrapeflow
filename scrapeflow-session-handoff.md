@@ -169,13 +169,22 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — BUG-010 part 2 (egress proxy), 2026-11-26 *(clock)*
+## Current state — BUG-010 CLOSED (egress proxy released), 2026-11-27 *(clock)*
 
-⏸️ **Paused 2026-11-27 by the owner, mid-release.** In prod: the egress proxy (infra `73b2794`) and `main` up to
-`e4b760b` (checks 1–2 passed; check 3 failed — fixed below). **Resume with:** infra push `31f0763` (local, ahead 1),
-then `main` ← `develop` (`develop` ahead of `origin/develop` by 4: `b60798f`, `857f46b`, `ada5c4f`, `0634705`;
-playwright image only), then checks 3–6 (the curl blocks are in this conversation's record, not yet in a file —
-rebuild them from `scripts.egress_gate` and the bullets below if needed).
+🚀 **BUG-010 part 2 RELEASED + CLOSED 2026-11-27 (owner).** Release 1: infra `73b2794`, `main` `c95d8cb..e4b760b`
+(api + http, playwright, llm worker images). Release 2: infra `31f0763` (proxy connect timeout 30 s, ConfigMap +
+annotation bump rolled both proxy pods), `main` `e4b760b..e47b953` (playwright image; `browser_launched` shows
+`disable-features=HttpsFirstBalancedModeAutoEnable,HttpsUpgrades`). **Deployed code is `e47b953`.**
+- Owner's checks: README probes ✅; 1 http job ✅; 2 playwright job ✅; 3 playwright + page actions on
+  `http://neverssl.com/` ✅ after release 2 (several `ERR_CONNECTION_FAILED` first — neverssl's own: proxy log 30 s
+  connect waits, pods IPv4-only, plain `curl` from here fails 1 in 3); 4 private `proxy_url` → 400 ✅; 5 LLM pipeline on
+  the Modal `base_url` ✅ (model `Qwen/Qwen3-4B-Instruct-2507` — a short name 404s); 6 **waived** (public redirectors
+  refuse internal targets; `scripts.egress_gate` covers it on compose).
+- **Cleanup is the owner's:** the check jobs and the `bug010-llm` pipeline.
+- **Next session:** BUG-004 facet 1 (product call), BUG-034's follow-up (Chrome unpinned per build), P's email limits,
+  Postgres backups, the deferred code reviews (C.4–C.7 first); close BUG-018 once BUG-033 has run clean.
+
+### Build record — BUG-010 part 2, 2026-11-26
 
 🔧 **BUG-010 part 2 fixed — local, unreleased.** Built inline, one step per commit (owner: "lets do bug10"). Owner's
 calls: **borrow, don't build** — Stripe **Smokescreen** (v1.0.1, digest-pinned) — run as **one shared service**, and
