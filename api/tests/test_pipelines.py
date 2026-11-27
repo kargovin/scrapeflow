@@ -23,6 +23,7 @@ from app.core.quota import lock_user
 from app.main import app
 from app.models.llm_keys import UserLLMKey
 from app.models.pipeline import Pipeline, PipelineRun, PipelineRunBlock, PipelineVersion
+from app.models.storage_object import StorageObject
 from app.models.user import User
 from app.models.user_quota import UserQuota
 from app.pipelines.catalog import LLM_EXTRACT, WEBHOOK, WebhookConfigV1
@@ -1133,6 +1134,7 @@ async def test_the_result_is_the_last_content_blocks_object(client, headers, key
         "content": '{"title": "x"}',
         "result_path": EXTRACTED,
         "block_id": "extract",
+        "screenshots": [],
     }
 
 
@@ -1194,6 +1196,86 @@ async def test_a_missing_object_is_404_not_500(client, headers, key, temporal, m
     pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
     resp = await client.get(f"/pipelines/{pipeline_id}/runs/{run_id}/result", headers=headers)
     assert (resp.status_code, resp.json()["detail"]) == (404, "The stored output is missing")
+
+
+async def _fetch_screenshots(run_id: str, user_id: uuid.UUID, count: int) -> list[str]:
+    """Ledger rows for ``count`` screenshots the fetch block took (BUG-004)."""
+    paths = []
+    async with AsyncSessionLocal() as db:
+        block = await db.scalar(
+            select(PipelineRunBlock).where(
+                PipelineRunBlock.pipeline_run_id == uuid.UUID(run_id),
+                PipelineRunBlock.block_id == "fetch",
+            )
+        )
+        for index in range(count):
+            path = f"scrapeflow-results/screenshots/{block.id}/{index}.png"
+            db.add(
+                StorageObject(
+                    user_id=user_id,
+                    object_key=path,
+                    bytes=100 + index,
+                    pipeline_run_block_id=block.id,
+                )
+            )
+            paths.append(path)
+        await db.commit()
+    return paths
+
+
+async def test_a_scrape_blocks_screenshots_are_listed_and_served(
+    client, headers, key, temporal, minio, db_user
+):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
+    paths = await _fetch_screenshots(run_id, db_user.id, 2)
+    minio.objects[SCRAPED] = b"<html>page</html>"
+    minio.objects[paths[1]] = b"\x89PNG1"
+    base = f"/pipelines/{pipeline_id}/runs/{run_id}"
+
+    fetch = (await client.get(f"{base}/result?block=fetch", headers=headers)).json()
+    assert fetch["screenshots"] == [{"index": 0, "bytes": 100}, {"index": 1, "bytes": 101}]
+
+    resp = await client.get(f"{base}/blocks/fetch/screenshots/1", headers=headers)
+    assert (resp.status_code, resp.headers["content-type"], resp.content) == (
+        200,
+        "image/png",
+        b"\x89PNG1",
+    )
+    for url, detail in (
+        (f"{base}/blocks/fetch/screenshots/2", "Screenshot not found"),
+        (f"{base}/blocks/extract/screenshots/0", "Screenshot not found"),
+        (f"{base}/blocks/nope/screenshots/0", "Block not found"),
+    ):
+        resp = await client.get(url, headers=headers)
+        assert (resp.status_code, resp.json()["detail"]) == (404, detail)
+
+
+async def test_another_users_screenshot_is_404_before_storage_is_read(
+    client, headers, key, temporal, minio, db_user, other_user
+):
+    pipeline_id, run_id = await _finished_run(client, headers, key, temporal)
+    paths = await _fetch_screenshots(run_id, db_user.id, 1)
+    minio.objects[paths[0]] = b"\x89PNG"
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == uuid.UUID(run_id))
+            .values(user_id=other_user.id)
+        )
+        await db.commit()
+
+    url = f"/pipelines/{pipeline_id}/runs/{run_id}/blocks/fetch/screenshots/0"
+    resp = await client.get(url, headers=headers)
+
+    assert resp.status_code == 404
+    assert minio.reads == []
+
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, db_user.id)
+        user.is_admin = True
+        await db.commit()
+    resp = await client.get(f"/admin{url}", headers=headers)
+    assert (resp.status_code, resp.content) == (200, b"\x89PNG")
 
 
 async def test_admin_reads_any_users_runs_and_results(

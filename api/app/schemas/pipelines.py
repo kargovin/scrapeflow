@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.pipelines.catalog import RunInputValue
+from app.schemas.jobs import Screenshot
 
 MonitorState = Literal["active", "paused", "paused_itself"]
 # ADR-016 §2b; the first change gate's verdict.
@@ -239,6 +240,8 @@ class PipelineRunResultResponse(BaseModel):
     result_path: str
     # Which block's output this is: the run's result, or ?block= for one step's.
     block_id: str
+    # Screenshots that block's page actions took (a Scrape block's), in action order.
+    screenshots: list[Screenshot] = []
 
 
 class PipelineRunCancelResponse(BaseModel):

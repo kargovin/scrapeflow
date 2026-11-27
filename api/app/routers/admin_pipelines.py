@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from miniopy_async import Minio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +10,7 @@ from app.core.minio import get_minio
 from app.models.pipeline import Pipeline, PipelineRun
 from app.models.user import User
 from app.routers.pipelines import (
+    block_screenshot,
     latest_version_select,
     load_run_diff,
     load_run_result,
@@ -132,6 +133,24 @@ async def admin_get_run_result(
 ) -> PipelineRunResultResponse:
     run, _ = await _admin_run(db, pipeline_id, run_id)
     return await load_run_result(db, minio, run, block)
+
+
+@router.get(
+    "/{pipeline_id}/runs/{run_id}/blocks/{block_id}/screenshots/{index}",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def admin_get_block_screenshot(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    block_id: str,
+    index: int,
+    _admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+) -> Response:
+    run, _ = await _admin_run(db, pipeline_id, run_id)
+    return await block_screenshot(db, minio, run, block_id, index)
 
 
 @router.get("/{pipeline_id}/runs/{run_id}/diff", response_model=PipelineRunDiffResponse)

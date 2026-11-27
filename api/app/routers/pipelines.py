@@ -33,6 +33,7 @@ from app.core.pipeline_trigger import (
 )
 from app.core.quota import admit, lock_user
 from app.core.rate_limit import check_rate_limit
+from app.core.screenshots import list_screenshots, screenshot_png
 from app.core.security import validate_proxy_url
 from app.models.destination import PipelineVersionDestination
 from app.models.monitor import Monitor
@@ -1180,8 +1181,12 @@ async def load_run_result(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="The stored output is missing"
         ) from None
+    holder = next(b for b in blocks if b.block_id == block_id)
     return PipelineRunResultResponse(
-        content=content.decode("utf-8", errors="replace"), result_path=path, block_id=block_id
+        content=content.decode("utf-8", errors="replace"),
+        result_path=path,
+        block_id=block_id,
+        screenshots=await list_screenshots(db, StorageObject.pipeline_run_block_id == holder.id),
     )
 
 
@@ -1198,6 +1203,42 @@ async def get_run_result(
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return await load_run_result(db, minio, run, block)
+
+
+async def block_screenshot(
+    db: AsyncSession, minio: Minio, run: PipelineRun, block_id: str, index: int
+) -> Response:
+    """The caller has authorized ``run``."""
+    block = await db.scalar(
+        select(PipelineRunBlock).where(
+            PipelineRunBlock.pipeline_run_id == run.id, PipelineRunBlock.block_id == block_id
+        )
+    )
+    if block is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Block not found")
+    return await screenshot_png(db, minio, StorageObject.pipeline_run_block_id == block.id, index)
+
+
+@router.get(
+    "/{pipeline_id}/runs/{run_id}/blocks/{block_id}/screenshots/{index}",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def get_block_screenshot(
+    pipeline_id: uuid.UUID,
+    run_id: uuid.UUID,
+    block_id: str,
+    index: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio: Minio = Depends(get_minio),
+) -> Response:
+    """One screenshot a Scrape block's page actions took, as a PNG; ``index`` is from the
+    block's result."""
+    run = await db.scalar(_owned_run(pipeline_id, run_id, user.id))
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return await block_screenshot(db, minio, run, block_id, index)
 
 
 async def load_run_diff(
