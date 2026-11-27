@@ -20,7 +20,7 @@ dependencies = [
     "structlog>=24.0.0",
     # content_hash on the Temporal path; same algorithm and format as the API and Go.
     "xxhash>=3.0.0",
-    "temporalio>=1.33.0",
+    "temporalio>=1.36.1",
 ]
 
 [dependency-groups]
