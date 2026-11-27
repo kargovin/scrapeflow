@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import redis.asyncio as aioredis
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from miniopy_async.api import Minio
 from sqlalchemy import case, func, or_, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -26,7 +26,7 @@ from app.models.monitor import Monitor
 from app.models.user import User
 from app.models.user_quota import UserQuota
 from app.models.webhook_delivery import WebhookDelivery
-from app.routers.jobs import load_completed_result, scheduled_filter
+from app.routers.jobs import job_run_screenshot, load_completed_result, scheduled_filter
 from app.schemas.admin import (
     AdminStatsResponse,
     AdminUserDetailResponse,
@@ -351,6 +351,26 @@ async def admin_get_job_result(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     return await load_completed_result(job, db, minio_client)
+
+
+@router.get(
+    "/jobs/{job_id}/runs/{run_id}/screenshots/{index}",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def admin_get_job_run_screenshot(
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    index: int,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
+) -> Response:
+    """One screenshot of any user's job run (admin — no owner check)."""
+    job = await db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return await job_run_screenshot(db, minio_client, job, run_id, index)
 
 
 @router.delete("/jobs/{job_id}", response_model=CancelJobResponse)

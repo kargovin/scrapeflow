@@ -89,6 +89,7 @@ async def test_batch_item_result_reads_the_stored_object(client, headers, db_use
         # A job run's fields; a batch item has none.
         "run_id": None,
         "completed_at": None,
+        "screenshots": [],
     }
     not_done = await client.get(f"/batch/{batch.id}/items/{failed.id}/result", headers=headers)
     assert not_done.status_code == 404

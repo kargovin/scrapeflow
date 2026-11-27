@@ -39,11 +39,13 @@ from app.core.ledger import release_run_objects
 from app.core.minio import get_minio
 from app.core.quota import Admit, admission, check_scheduled_jobs_quota, lock_user
 from app.core.rate_limit import check_rate_limit
+from app.core.screenshots import list_screenshots, screenshot_png
 from app.core.security import validate_no_ssrf, validate_proxy_url
 from app.models.job import Job
 from app.models.job_runs import JobRun
 from app.models.job_secrets import JobSecrets, JobSecretType
 from app.models.llm_keys import UserLLMKey
+from app.models.storage_object import StorageObject
 from app.models.user import User
 from app.schemas.jobs import (
     CancelJobResponse,
@@ -764,16 +766,19 @@ async def load_completed_result(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No completed result available"
         )
-    return await run_result(minio_client, job, run)
+    return await run_result(db, minio_client, job, run)
 
 
-async def run_result(minio_client: Minio, job: Job, run: JobRun) -> JobResultResponse:
+async def run_result(
+    db: AsyncSession, minio_client: Minio, job: Job, run: JobRun
+) -> JobResultResponse:
     """One completed run's stored content, saying which run it is."""
     response = await read_stored_result(
         minio_client, run.result_path, job.output_format.value, run.warnings
     )
     response.run_id = run.id
     response.completed_at = run.completed_at
+    response.screenshots = await list_screenshots(db, StorageObject.job_run_id == run.id)
     return response
 
 
@@ -834,7 +839,37 @@ async def get_job_run_result(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     if run.status != "completed" or run.result_path is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No result for this run")
-    return await run_result(minio_client, job, run)
+    return await run_result(db, minio_client, job, run)
+
+
+async def job_run_screenshot(
+    db: AsyncSession, minio_client: Minio, job: Job, run_id: uuid.UUID, index: int
+) -> Response:
+    """The caller has authorized ``job``."""
+    run = await db.get(JobRun, run_id)
+    if run is None or run.job_id != job.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return await screenshot_png(db, minio_client, StorageObject.job_run_id == run.id, index)
+
+
+@router.get(
+    "/{job_id}/runs/{run_id}/screenshots/{index}",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def get_job_run_screenshot(
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    index: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    minio_client: Minio = Depends(get_minio),
+) -> Response:
+    """One screenshot a run's page actions took, as a PNG; ``index`` is from the result's list."""
+    job = await db.get(Job, job_id)
+    if job is None or job.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return await job_run_screenshot(db, minio_client, job, run_id, index)
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})

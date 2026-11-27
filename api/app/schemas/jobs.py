@@ -175,6 +175,13 @@ class JobResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class Screenshot(BaseModel):
+    """One stored screenshot; its PNG is the run's ``screenshots/{index}`` route."""
+
+    index: int
+    bytes: int
+
+
 class JobResultResponse(BaseModel):
     content: str
     output_format: str
@@ -183,6 +190,8 @@ class JobResultResponse(BaseModel):
     # The job run the content came from (job routes only; a batch item or crawl page has none).
     run_id: uuid.UUID | None = None
     completed_at: datetime | None = None
+    # Screenshots the run's page actions took, in action order (job routes only).
+    screenshots: list[Screenshot] = []
 
 
 class CancelJobResponse(BaseModel):
