@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { type JobResult } from '../api'
 import ContentViewer from './ContentViewer'
+import Screenshots from './Screenshots'
 import { useApi } from '../lib/useApi'
 
 interface Props {
@@ -51,16 +52,25 @@ export default function ResultViewer({ jobId, outputFormat, status, resultPath, 
       }
       filename={jobId}
       footer={
-        data?.warnings && data.warnings.length > 0 && (
-          <div className="border-t border-gray-100 px-4 py-2 bg-amber-50">
-            <p className="text-xs font-medium text-amber-800 mb-1">Warnings</p>
-            <ul className="list-disc pl-5 text-xs text-amber-700">
-              {data.warnings.map((w, i) => (
-                <li key={i}>{w}</li>
-              ))}
-            </ul>
-          </div>
-        )
+        <>
+          {data?.warnings && data.warnings.length > 0 && (
+            <div className="border-t border-gray-100 px-4 py-2 bg-amber-50">
+              <p className="text-xs font-medium text-amber-800 mb-1">Warnings</p>
+              <ul className="list-disc pl-5 text-xs text-amber-700">
+                {data.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {data?.run_id && data.screenshots && (
+            <Screenshots
+              base={`${apiBase}/${jobId}/runs/${data.run_id}`}
+              screenshots={data.screenshots}
+              filename={jobId}
+            />
+          )}
+        </>
       }
     />
   )

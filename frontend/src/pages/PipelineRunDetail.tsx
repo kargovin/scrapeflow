@@ -27,6 +27,7 @@ import { changeLabel, comparedWith } from '../lib/monitorText'
 import ApprovalPanel from '../components/ApprovalPanel'
 import DiffView from '../components/DiffView'
 import ErrorBox from '../components/ErrorBox'
+import Screenshots from '../components/Screenshots'
 import LiveBadge from '../components/LiveBadge'
 import StatusPill, { runStatus } from '../components/StatusPill'
 import { LoadFailed, RefreshFailed } from '../components/LoadError'
@@ -525,6 +526,13 @@ export default function PipelineRunDetail({ mode }: { mode: 'admin' | 'user' }) 
               format={FORMAT_BY_EXT[output.data.result_path.split('.').pop() ?? ''] ?? 'text'}
               content={output.data.content}
               filename={`${runId}-${viewing ?? 'result'}`}
+              footer={
+                <Screenshots
+                  base={`${apiBase}/blocks/${encodeURIComponent(output.data.block_id)}`}
+                  screenshots={output.data.screenshots ?? []}
+                  filename={`${runId}-${output.data.block_id}`}
+                />
+              }
             />
           </Suspense>
         ) : null

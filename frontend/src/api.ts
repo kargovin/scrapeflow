@@ -37,6 +37,10 @@ export async function apiGet<T>(path: string, token: string): Promise<T> {
   return (await apiFetch(path, token)).json()
 }
 
+export async function apiBlob(path: string, token: string): Promise<Blob> {
+  return (await apiFetch(path, token)).blob()
+}
+
 export async function apiPatch<T>(path: string, token: string, body: unknown): Promise<T> {
   return (await apiFetch(path, token, { method: 'PATCH', body: JSON.stringify(body) })).json()
 }
@@ -114,6 +118,14 @@ export interface JobResult {
   // The job run it came from (job routes only).
   run_id?: string | null
   completed_at?: string | null
+  // Screenshots the run's page actions took, in action order (job routes only).
+  screenshots?: Screenshot[]
+}
+
+// One stored screenshot; its PNG is `…/screenshots/{index}` under the run (or pipeline block).
+export interface Screenshot {
+  index: number
+  bytes: number
 }
 
 export interface ApiKey {
@@ -373,6 +385,7 @@ export interface PipelineRunResult {
   content: string
   result_path: string
   block_id: string
+  screenshots: Screenshot[]
 }
 
 export interface PipelineRunCancel {
