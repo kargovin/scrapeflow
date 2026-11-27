@@ -2620,8 +2620,9 @@ which an automated `page.goto` reports as `ERR_BLOCKED_BY_CLIENT`. A site that r
 **Not the base image:** the jammy image built from the same commit fails identically — both install whatever Chrome is
 current at build time (`patchright install chrome`), so every image rebuild can change the browser. That is BUG-013's
 class (the build resolves a dependency nobody chose) for the one dependency no lockfile covers; the Google apt repo
-keeps only the current stable in its index, so pinning it is not a one-line change. 🔧 **Pinned 2026-11-27 (`40cf423`),
-unreleased:** the Dockerfile downloads `google-chrome-stable_<version>-1_amd64.deb` from Google's pool by version and
+keeps only the current stable in its index, so pinning it is not a one-line change. ✅ **Pinned 2026-11-27 (`40cf423`), released
+(`main` `497029c..1290a6a`, playwright image only; the new pod logs `version=158.0.8127.88`, owner's playwright job
+completed):** the Dockerfile downloads `google-chrome-stable_<version>-1_amd64.deb` from Google's pool by version and
 checks its SHA-256 (`CHROME_VERSION` / `CHROME_SHA256`, now `158.0.8127.88`); the build fails on a hash or version
 mismatch, and `browser_launched` logs `version`. Older stable `.deb`s stay in the pool after they leave the index
 (154–158 all downloadable 2026-11-27). Bumping is by hand — nothing watches for a new stable, and a pinned browser

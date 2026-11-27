@@ -171,7 +171,10 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ## Current state — Chrome pinned (BUG-034 follow-up), 2026-11-27 *(clock)*
 
-🔧 **Chrome pinned — local, unreleased (`40cf423`).** `playwright-worker/Dockerfile` installs
+🚀 **RELEASED 2026-11-27** — `main` `497029c..1290a6a`, playwright image only. **Deployed code is `1290a6a`.** The new
+pod logs `browser_launched … version=158.0.8127.88`; the owner's playwright job completed.
+
+**Build record (`40cf423`):** `playwright-worker/Dockerfile` installs
 `google-chrome-stable_158.0.8127.88-1_amd64.deb` from Google's pool, checks its SHA-256, and fails the build if the
 installed version differs; `browser_launched` now logs `version`. Replaces `patchright install chrome` (always the
 current stable). Same version the image already ran, so no browser change.
