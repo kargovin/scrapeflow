@@ -169,7 +169,31 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — BUG-010 CLOSED (egress proxy released), 2026-11-27 *(clock)*
+## Current state — BUG-004 built (screenshots surfaced), 2026-11-27 *(clock)*
+
+🔧 **BUG-004 facet 1 fixed — local, unreleased.** Built inline, one step per commit (owner: "lets do screenshot; ask
+me the questions"). Owner's calls: keep the `screenshot` action and surface it; list on the result + a PNG route
+through the API; jobs + pipeline Scrape blocks + the SPA (batches and crawls take no page actions); a failed execution
+deletes its screenshots.
+- Commits in replay order: `cb9824f` Playwright `Scrape` removes its screenshots when it ends without a result;
+  `f8f2017` job results list `screenshots`, `GET /jobs/{id}/runs/{run_id}/screenshots/{index}` + `/admin` twin
+  (`api/app/core/screenshots.py`, read from ledger rows); `002476a` the same for a pipeline block
+  (`…/runs/{rid}/blocks/{block_id}/screenshots/{index}` + `/admin` twin); `8f6d756` SPA thumbnails
+  (`components/Screenshots.tsx`) under the job result and a pipeline block's output.
+- **Numbers:** API 1607, playwright 236 (mutation-checked: without the discard three tests fail), SPA build green.
+  Compose end to end: 2 screenshots listed + served with the ledger's size; a screenshot-then-refused job leaves none
+  in MinIO; a permanent delete removes them.
+- 📋 **Release (the owner's):** `main` ← `develop`: **api + playwright-worker images**, no migration, no infra change.
+  Owner checks: (1) a playwright job on a public page with actions `[{"type":"screenshot"},{"type":"scroll"},
+  {"type":"screenshot"}]` completes; `GET /jobs/{id}/result` lists two `screenshots`; `GET
+  /jobs/{id}/runs/{run_id}/screenshots/0` returns a PNG; the SPA job page shows both thumbnails; (2) a pipeline with a
+  playwright Scrape block carrying a screenshot action — the run page's Scrape-block output shows it; (3) a
+  permanent job delete frees the screenshot bytes (`storage_bytes_used` on `GET /admin/users/{user_id}/quota`, before vs after).
+  Rollback: re-tag both images; nothing stored changes shape.
+- **Next session:** BUG-034's follow-up (Chrome unpinned per build), P's email limits, Postgres backups, the deferred
+  code reviews (C.4–C.7 first); close BUG-018 once BUG-033 has run clean.
+
+## Previous state — BUG-010 CLOSED (egress proxy released), 2026-11-27 *(clock)*
 
 🚀 **BUG-010 part 2 RELEASED + CLOSED 2026-11-27 (owner).** Release 1: infra `73b2794`, `main` `c95d8cb..e4b760b`
 (api + http, playwright, llm worker images). Release 2: infra `31f0763` (proxy connect timeout 30 s, ConfigMap +

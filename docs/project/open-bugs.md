@@ -292,7 +292,27 @@ to `amazon.sg`. Any geo-sensitive target behaves accordingly.
 
 **Severity:** Medium (unbounded storage leak + quota bypass; no data corruption)
 **Discovered:** 2026-07-22 (while wiring BUG-003's block path)
-**Status:** Open — **facet 2 (the quota bypass and the leak) closed in code by P8, 2026-09-15**;
+**Status:** 🔧 **FIXED locally 2026-11-27, unreleased** (`cb9824f`, `f8f2017`, `002476a`, `8f6d756`; api +
+playwright-worker images, no migration). Owner's calls 2026-11-27: **keep the action and surface it**; a list on the
+result plus a PNG route through the API (MinIO stays private); **jobs and pipeline Scrape blocks** (batches and crawls
+take no page actions); the SPA shows them; **a failed execution deletes its screenshots**.
+- `cb9824f` the Playwright `Scrape` activity removes `screenshots/{artifact_id}/0..n-1.png` (n = the job's
+  `screenshot` actions) whenever it ends without a result — a raised error, a failed size read, or a cancel. Keys are
+  fixed and removing an absent key succeeds, so no list crosses the contract. A failed removal is logged and the real
+  error stands.
+- `f8f2017` `JobResultResponse.screenshots` = `[{index, bytes}]`, read from the run's **ledger rows** (never the
+  bucket); `GET /jobs/{id}/runs/{run_id}/screenshots/{index}` and `GET /admin/jobs/{id}/runs/{run_id}/screenshots/{index}`
+  stream the PNG (`image/png`); 404 for another user's job, a run of another job, an index with no row, or a row whose
+  object is gone.
+- `002476a` `PipelineRunResultResponse.screenshots` for the block whose output is shown;
+  `GET /pipelines/{pid}/runs/{rid}/blocks/{block_id}/screenshots/{index}` + its `/admin` twin.
+- `8f6d756` SPA: thumbnails under the job result and a pipeline block's output (fetched with the token → blob URL;
+  click opens full size, Download).
+- Verified on compose 2026-11-27: a playwright job with two screenshot actions lists both, both PNGs served with the
+  ledger's size; a job that screenshots and then navigates to `minio:9000` fails `address refused` and leaves no
+  screenshot in MinIO; a permanent delete removes them. API 1607, playwright 236.
+
+*(Was: Open — **facet 2 (the quota bypass and the leak) closed in code by P8, 2026-09-15**;
 **facet 1 (the product gap) is still open and still a product call.** The consumer now reads
 `screenshot_paths`: each screenshot is sized with the page, counted against the storage quota with
 it (over the wall → all of them deleted, run fails), recorded as a ledger row, and released by the
@@ -301,7 +321,7 @@ surfaced on `GET /jobs/{id}/result`; the rows exist, so surfacing is a query onc
 ⚠️ **One leak survives, on the worker side:** the playwright worker omits `screenshot_paths` from
 its `failed` messages (bot-wall and exception paths), so screenshots taken before a failure are
 still orphaned. Fixing that means the worker includes the field on `failed` and the consumer's
-`failed` branch releases them — a contract addition, left for the facet-1 decision.
+`failed` branch releases them — a contract addition, left for the facet-1 decision.)*
 
 ### What happens
 
