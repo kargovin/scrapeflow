@@ -73,7 +73,7 @@ func newFakeEgress(t *testing.T, refused ...string) *fakeEgress {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	}))
-	t.Cleanup(e.Server.Close)
+	t.Cleanup(e.Close)
 	return e
 }
 

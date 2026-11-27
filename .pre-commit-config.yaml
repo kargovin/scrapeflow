@@ -18,12 +18,12 @@ repos:
       - id: ruff-format
         files: ^(api|playwright-worker|llm-worker)/
 
-  # Go — golangci-lint (local hook: module is in worker/, not repo root)
+  # Go — golangci-lint (local hook: module is in http-worker/, not repo root)
   - repo: local
     hooks:
       - id: golangci-lint
         name: golangci-lint
-        entry: bash -c 'cd worker && ~/go/bin/golangci-lint run ./...'
+        entry: bash -c 'cd http-worker && ~/go/bin/golangci-lint run ./...'
         language: system
-        files: ^worker/
+        files: ^http-worker/
         pass_filenames: false
