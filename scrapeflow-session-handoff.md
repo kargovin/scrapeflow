@@ -169,9 +169,14 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — BUG-004 built (screenshots surfaced), 2026-11-27 *(clock)*
+## Current state — BUG-004 CLOSED (screenshots released), 2026-11-27 *(clock)*
 
-🔧 **BUG-004 facet 1 fixed — local, unreleased.** Built inline, one step per commit (owner: "lets do screenshot; ask
+🚀 **BUG-004 RELEASED + CLOSED 2026-11-27 (owner)** — `main` `e47b953..497029c`, api + playwright-worker images.
+**Deployed code is `497029c`.** Owner's checks all passed: (1) job PNGs + SPA thumbnails ✅; (2) pipeline Scrape-block
+screenshot ✅; (3) storage 25,263,358 → 25,494,079 after the runs → 25,341,056 after the job's permanent delete →
+25,263,358 after the pipeline's ✅. Check job and `bug004-shot` pipeline already deleted.
+
+**Build record:** facet 1 built inline. Built inline, one step per commit (owner: "lets do screenshot; ask
 me the questions"). Owner's calls: keep the `screenshot` action and surface it; list on the result + a PNG route
 through the API; jobs + pipeline Scrape blocks + the SPA (batches and crawls take no page actions); a failed execution
 deletes its screenshots.

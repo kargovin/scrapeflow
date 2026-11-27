@@ -292,8 +292,10 @@ to `amazon.sg`. Any geo-sensitive target behaves accordingly.
 
 **Severity:** Medium (unbounded storage leak + quota bypass; no data corruption)
 **Discovered:** 2026-07-22 (while wiring BUG-003's block path)
-**Status:** 🔧 **FIXED locally 2026-11-27, unreleased** (`cb9824f`, `f8f2017`, `002476a`, `8f6d756`; api +
-playwright-worker images, no migration). Owner's calls 2026-11-27: **keep the action and surface it**; a list on the
+**Status:** ✅ **CLOSED 2026-11-27 — RELEASED** (`main` `e47b953..497029c`; `cb9824f`, `f8f2017`, `002476a`,
+`8f6d756`; api + playwright-worker images, no migration, no infra change). Owner verified in production: a job's two
+screenshots listed and served as PNGs, a pipeline Scrape block's screenshot, both in the SPA, and permanent deletes
+freeing exactly the bytes the runs added (+230,721 → −153,023 job, −77,698 pipeline). Owner's calls 2026-11-27: **keep the action and surface it**; a list on the
 result plus a PNG route through the API (MinIO stays private); **jobs and pipeline Scrape blocks** (batches and crawls
 take no page actions); the SPA shows them; **a failed execution deletes its screenshots**.
 - `cb9824f` the Playwright `Scrape` activity removes `screenshots/{artifact_id}/0..n-1.png` (n = the job's
