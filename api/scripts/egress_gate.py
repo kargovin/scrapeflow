@@ -15,7 +15,7 @@ import asyncio
 import sys
 import time
 import uuid
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 from sqlalchemy import delete, func, select
@@ -34,6 +34,12 @@ SHOP = "http://shop.pipelinefixture.com"
 # (name, url, expected status, text the error must contain)
 CASES = [
     ("public page", f"{SHOP}/item?name=Kettle", "completed", None),
+    (
+        "public page in Shift_JIS",
+        f"{SHOP}/item?name={quote('やかん')}&price=null&charset=shift_jis",
+        "completed",
+        None,
+    ),
     (
         "redirect to a private name",
         f"{SHOP}/redirect?to={quote('http://internal.crawlfixture.com/', safe='')}",
@@ -119,7 +125,7 @@ async def gate(engine: str, timeout: float) -> list[str]:
                             final[name] = job
                 await asyncio.sleep(1)
 
-            for name, _, want_status, want_error in cases:
+            for name, url, want_status, want_error in cases:
                 if name not in jobs:
                     continue
                 job = final.get(name)
@@ -133,11 +139,9 @@ async def gate(engine: str, timeout: float) -> list[str]:
                     problems.append(f"{name}: error {job['error']!r} lacks {want_error!r}")
                 if want_status == "completed" and job["status"] == "completed":
                     result = await api.get(f"/jobs/{jobs[name]}/result")
-                    # The fixture page, not an error page the proxy answered with.
-                    if (
-                        result.status_code != 200
-                        or "<h1>Kettle</h1>" not in result.json()["content"]
-                    ):
+                    # The fixture page, not an error page the proxy answered with; as UTF-8.
+                    heading = f"<h1>{parse_qs(urlsplit(url).query)['name'][0]}</h1>"
+                    if result.status_code != 200 or heading not in result.json()["content"]:
                         problems.append(f"{name}: the stored result is not the fixture page")
                 if "Deny:" in (job["error"] or ""):
                     problems.append(

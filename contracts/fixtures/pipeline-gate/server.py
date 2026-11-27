@@ -1,6 +1,7 @@
 """The pipeline gate's fixture (J.10): a shop, a stand-in LLM and a webhook receiver, one per host name.
 
-    shop.pipelinefixture.com   GET  /item?name=&price=&stock=in|out   a product page; price=null → none
+    shop.pipelinefixture.com   GET  /item?name=&price=&stock=in|out   a product page; price=null → none;
+                                    &charset=<codec>                  sent in that charset, named in the header
                                GET  /broken                           503 (a Scrape that fails)
                                GET  /redirect?to=<url>                302 to <url> (the egress gate's bait)
                                GET  /watched/<key>                    a product page whose content the
@@ -82,7 +83,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, body, "text/html; charset=utf-8")
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             body = page(q.get("name", "Blue Kettle"), q.get("price", "80"), q.get("stock", "in"))
-            return self._send(200, body, "text/html; charset=utf-8")
+            charset = q.get("charset", "utf-8")
+            body = body.decode().encode(charset)
+            return self._send(200, body, f"text/html; charset={charset}")
         if host.startswith("llm.") and url.path == "/v1/models":
             return self._json(200, {"object": "list", "data": [{"id": "fixture", "object": "model"}]})
         if host.startswith("llm.") and url.path == "/_calls":

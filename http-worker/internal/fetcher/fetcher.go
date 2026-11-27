@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"golang.org/x/net/html/charset"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -18,9 +20,9 @@ const maxBodySize = 10 * 1024 * 1024 // 10 MB
 // refusalHeader is how the egress proxy (Smokescreen) names a policy refusal on its 407.
 const refusalHeader = "X-Smokescreen-Error"
 
-// Result holds the raw HTML bytes and the final URL after any redirects.
+// Result holds the page as UTF-8 and the final URL after any redirects.
 type Result struct {
-	Body     []byte // raw HTML response body
+	Body     []byte // the response body converted to UTF-8
 	FinalURL string // URL after following redirects (may differ from the requested URL)
 }
 
@@ -121,7 +123,22 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	// resp.Request.URL is the final URL after all redirects.
 	finalURL := resp.Request.URL.String()
 
-	return &Result{Body: body, FinalURL: finalURL}, nil
+	return &Result{Body: toUTF8(body, resp.Header.Get("Content-Type")), FinalURL: finalURL}, nil
+}
+
+// toUTF8 decodes body by its byte-order mark, the Content-Type charset, a <meta> charset, or else
+// UTF-8 if it is valid and windows-1252 if not — the order a browser uses. A <meta> charset left in
+// the page then names the old encoding; the stored object's Content-Type says utf-8.
+func toUTF8(body []byte, contentType string) []byte {
+	enc, name, _ := charset.DetermineEncoding(body, contentType)
+	if name == "utf-8" {
+		return body
+	}
+	decoded, err := enc.NewDecoder().Bytes(body)
+	if err != nil {
+		return body
+	}
+	return decoded
 }
 
 // refusal is the egress proxy's refusal of host carried by resp, or nil. A 407 without the header

@@ -185,3 +185,54 @@ func parseProxyBasicAuth(header string) (user, pass string, ok bool) {
 	user, pass, ok = strings.Cut(string(raw), ":")
 	return user, pass, ok
 }
+
+func TestFetchConvertsToUTF8(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		body        []byte
+		want        string
+	}{
+		{
+			name:        "Content-Type charset (Shift_JIS)",
+			contentType: "text/html; charset=Shift_JIS",
+			body:        []byte("<p>\x93\xfa\x96\x7b</p>"),
+			want:        "<p>日本</p>",
+		},
+		{
+			name:        "meta charset (ISO-8859-1)",
+			contentType: "text/html",
+			body:        []byte(`<meta charset="iso-8859-1"><p>caf` + "\xe9</p>"),
+			want:        `<meta charset="iso-8859-1"><p>café</p>`,
+		},
+		{
+			name:        "unlabelled UTF-8 is kept as is",
+			contentType: "text/html",
+			body:        []byte("<p>café 日本</p>"),
+			want:        "<p>café 日本</p>",
+		},
+		{
+			name:        "unlabelled and not UTF-8 reads as windows-1252",
+			contentType: "text/html",
+			body:        []byte("<p>\x93quoted\x94</p>"),
+			want:        "<p>“quoted”</p>",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write(tc.body)
+			}))
+			defer srv.Close()
+
+			result, err := New(5, nil).Fetch(context.Background(), srv.URL)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(result.Body) != tc.want {
+				t.Errorf("body: got %q, want %q", string(result.Body), tc.want)
+			}
+		})
+	}
+}
