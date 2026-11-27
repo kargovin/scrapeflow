@@ -247,6 +247,35 @@ async def test_recipients_refused_while_another_is_accepted_are_reported(lookups
     assert len(server.messages) == 1
 
 
+async def test_a_recipient_deferred_while_another_is_accepted_is_reported_apart(lookups):
+    refuse = {"oncall@example.org": 451}
+    async with smtp_server(HOST, refuse_rcpt=refuse) as server:
+        out = await _send(_send_input(server))
+    assert (out.refused, out.deferred) == ([], ["oncall@example.org"])
+    assert len(server.messages) == 1
+
+
+async def test_a_later_try_sends_to_the_deferred_recipients_only_with_the_same_headers(lookups):
+    async with smtp_server(HOST) as server:
+        inp = _send_input(server).model_copy(update={"recipients": ["oncall@example.org"]})
+        out = await _send(inp)
+
+    assert (out.refused, out.deferred) == ([], [])
+    rcpts = [line for line, _ in server.commands if line.upper().startswith("RCPT")]
+    assert len(rcpts) == 1 and "<oncall@example.org>" in rcpts[0]
+    msg = _parsed(server.messages[0])
+    assert (msg["To"], msg["Message-ID"]) == ("ops@example.org, oncall@example.org", MESSAGE_ID)
+
+
+async def test_owed_recipients_since_removed_from_the_destination_send_nothing(lookups):
+    async with smtp_server(HOST) as server:
+        inp = _send_input(server).model_copy(update={"recipients": ["gone@example.org"]})
+        out = await _send(inp)
+
+    assert (out.refused, out.deferred) == ([], [])
+    assert server.connections == 0
+
+
 async def test_one_recipient_deferred_and_one_refused_is_final(lookups):
     refuse = {"ops@example.org": 450, "oncall@example.org": 550}
     async with smtp_server(HOST, refuse_rcpt=refuse) as server:

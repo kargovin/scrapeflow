@@ -135,6 +135,8 @@ SINKS_PATCH = "sinks"
 ROLLBACK_PATCH = "rollback"
 # ADR-012: an Approval block's wait (ADR-016 §9b to §9d, N.2).
 APPROVAL_PATCH = "approval"
+# ADR-012: an Email block's later tries to the recipients a server deferred.
+EMAIL_DEFERRED_PATCH = "email-deferred"
 
 # The webhook payload's event for a pipeline run's delivery (job lane: job.completed).
 WEBHOOK_EVENT = WEBHOOK_RESULT_EVENT
@@ -1014,6 +1016,9 @@ class PipelineWorkflow:
         destination_id = str(block.config.destination_id)
         ext = _BUCKET_EXT[block_outputs(input.blocks)[block.input]]
         error = ""
+        # Once an email reached anyone it is out (D13): the recipients still owed, and those refused.
+        owed: list[str] | None = None
+        refused: list[str] = []
         for attempt in range(1, timing.maximum_attempts + 1):
             if attempt > 1:
                 await self._mirror_block(
@@ -1026,10 +1031,10 @@ class PipelineWorkflow:
                     timing.maximum_interval,
                 )
                 if wait >= (deadline - workflow.now()).total_seconds():
-                    raise ApplicationError(
-                        f"{error} (the run's time budget ran out after {attempt - 1} attempts)",
-                        non_retryable=True,
-                    )
+                    why = f"the run's time budget ran out after {attempt - 1} attempts"
+                    if owed is not None:
+                        return None, email_text.recipients_note(refused, owed, why)
+                    raise ApplicationError(f"{error} ({why})", non_retryable=True)
                 try:
                     await workflow.sleep(wait)
                 except asyncio.CancelledError:
@@ -1056,8 +1061,12 @@ class PipelineWorkflow:
                 raise _run_cancelled()
             remaining_s = (deadline - workflow.now()).total_seconds()
             if remaining_s <= 0:
+                if owed is not None:
+                    return None, email_text.recipients_note(
+                        refused, owed, "the run's time budget is spent"
+                    )
                 raise ApplicationError("the run's time budget is spent", non_retryable=True)
-            name, arg, result_type = self._sink_try(block, input, input_ref, loaded, ext)
+            name, arg, result_type = self._sink_try(block, input, input_ref, loaded, ext, owed)
             try:
                 out: (
                     DeliverBucketOutput | DeliverPostgresOutput | SendEmailOutput
@@ -1088,19 +1097,29 @@ class PipelineWorkflow:
                     )
                 error, final = _sink_failure(exc.cause)
                 if final:
+                    if owed is not None:
+                        return None, email_text.recipients_note(refused, owed, error)
                     raise ApplicationError(error, non_retryable=True) from None
                 if self._cancel_requested:
                     raise _run_cancelled() from None
                 continue
             if isinstance(out, SendEmailOutput):
-                refused = ", ".join(out.refused)
-                return None, f"recipients refused: {refused}" if refused else None
+                refused += out.refused
+                if out.deferred and workflow.patched(EMAIL_DEFERRED_PATCH):
+                    owed = out.deferred
+                    error = f"recipients deferred: {', '.join(owed)}"
+                    continue
+                return None, email_text.recipients_note(refused, [])
             # Names only (ADR-014 §5a): never an address or a credential.
             return {
                 "destination_id": destination_id,
                 "kind": kind,
                 "location": out.location.model_dump(mode="json", by_alias=True),
             }, None
+        if owed is not None:
+            return None, email_text.recipients_note(
+                refused, owed, f"gave up after {timing.maximum_attempts} attempts"
+            )
         raise ApplicationError(
             f"{error} (gave up after {timing.maximum_attempts} attempts)", non_retryable=True
         )
@@ -1112,6 +1131,7 @@ class PipelineWorkflow:
         input_ref: str,
         loaded: LoadedDestination,
         ext: Literal["html", "md", "json"],
+        recipients: list[str] | None = None,
     ) -> tuple[str, BaseModel, type[BaseModel]]:
         """One try's activity, input and result type, against the destination as it is now."""
         if isinstance(block, EmailBlock):
@@ -1139,6 +1159,7 @@ class PipelineWorkflow:
                     ),
                     run_id=input.run_id,
                     source_path=input_ref,
+                    recipients=recipients,
                 ),
                 SendEmailOutput,
             )

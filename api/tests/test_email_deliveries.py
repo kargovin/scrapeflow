@@ -36,6 +36,7 @@ from app.workflows.activities.webhook_deliveries import (
 from app.workflows.queues import DELIVERY_QUEUE, WORKFLOW_QUEUE
 from app.workflows.webhook_delivery import (
     ATTEMPT_WEBHOOK_ACTIVITY,
+    EMAIL_DEFERRED_PATCH,
     EMAIL_PATCH,
     RECORD_EMAIL_ATTEMPT_ACTIVITY,
     AttemptOutcome,
@@ -239,6 +240,57 @@ async def test_recipients_the_server_refused_are_noted_on_a_delivered_row(db_use
     )
 
 
+async def test_recipients_deferred_while_others_got_it_wait_on_the_backoff(db_user):
+    run = await _run(db_user.id, status="failed")
+    row = await _email_row(run, await _destination(db_user.id))
+
+    outcome = await _record(row, deferred=["slow@example.org"])
+
+    assert outcome.status == "retry"
+    after = await _row(row.id)
+    assert (after.status, after.attempts, after.last_error) == (
+        "pending",
+        1,
+        "recipients deferred: slow@example.org",
+    )
+
+
+async def test_owed_recipients_on_the_last_attempt_leave_the_row_delivered_naming_them(db_user):
+    run = await _run(db_user.id, status="failed")
+    row = await _email_row(
+        run, await _destination(db_user.id), attempts=settings.webhook_max_attempts - 1
+    )
+
+    outcome = await _record(row, refused=["gone@example.org"], deferred=["slow@example.org"])
+
+    assert outcome.status == "delivered"
+    after = await _row(row.id)
+    assert after.last_error == (
+        "recipients refused: gone@example.org; recipients deferred, not sent: slow@example.org "
+        f"(gave up after {settings.webhook_max_attempts} attempts)"
+    )
+    assert after.delivered_at is not None
+
+
+async def test_owed_recipients_and_a_final_failure_leave_the_row_delivered(db_user):
+    run = await _run(db_user.id, status="failed")
+    row = await _email_row(run, await _destination(db_user.id))
+
+    outcome = await _record(
+        row,
+        error="mail.example.com refused every recipient (550)",
+        error_type="DestinationRefused",
+        final=True,
+        deferred=["slow@example.org"],
+    )
+
+    assert outcome.status == "delivered"
+    assert (await _row(row.id)).last_error == (
+        "recipients deferred, not sent: slow@example.org "
+        "(mail.example.com refused every recipient (550))"
+    )
+
+
 async def test_a_transient_failure_waits_on_the_backoff(db_user):
     run = await _run(db_user.id, status="failed")
     row = await _email_row(run, await _destination(db_user.id), attempts=1)
@@ -365,9 +417,12 @@ class Harness:
                 self.status = "exhausted"
                 return AttemptOutcome(status="exhausted")
             self.attempts += 1
-            if input.error is None:
+            last = input.final or self.attempts >= self.max_attempts
+            if input.error is None and not input.deferred:
                 self.status = "delivered"
-            elif input.final or self.attempts >= self.max_attempts:
+            elif input.deferred and last:
+                self.status = "delivered"
+            elif last:
                 self.status = "exhausted"
             else:
                 return AttemptOutcome(
@@ -448,6 +503,36 @@ async def test_a_final_send_gives_up_without_another_try():
         "DestinationRefused",
         True,
     )
+
+
+async def test_a_later_send_goes_to_the_deferred_recipients_only():
+    h = Harness(
+        [
+            SendEmailOutput(refused=["gone@example.org"], deferred=["slow@example.org"]),
+            _transient,
+            SendEmailOutput(),
+        ]
+    )
+    assert await h.run() == "delivered"
+
+    assert [s.recipients for s, _ in h.sent] == [None, ["slow@example.org"], ["slow@example.org"]]
+    assert [(r.refused, r.deferred) for r in h.recorded] == [
+        (["gone@example.org"], ["slow@example.org"]),
+        (["gone@example.org"], ["slow@example.org"]),
+        (["gone@example.org"], []),
+    ]
+    markers = [
+        e.marker_recorded_event_attributes.SerializeToString()
+        for e in h.history.events
+        if e.HasField("marker_recorded_event_attributes")
+    ]
+    assert any(EMAIL_DEFERRED_PATCH.encode() in m for m in markers)
+
+
+async def test_owed_recipients_and_a_final_send_end_delivered():
+    h = Harness([SendEmailOutput(deferred=["slow@example.org"]), _final])
+    assert await h.run() == "delivered"
+    assert h.recorded[-1].deferred == ["slow@example.org"] and h.recorded[-1].final
 
 
 async def test_transient_sends_stop_at_the_attempt_cap():

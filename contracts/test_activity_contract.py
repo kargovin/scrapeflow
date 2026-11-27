@@ -831,12 +831,15 @@ def test_an_email_blocks_input_reaches_the_delivery_worker_with_its_source():
         body="pipeline.result\n",
         run_id=run_id,
         source_path="scrapeflow-results/history/0b1f/llm.json",
+        recipients=["oncall@example.org"],
     )
     received = _decode(_encode(sent), delivery.SendEmailInput)
     assert received.model_dump() == sent.model_dump()
     assert received.source_path == "scrapeflow-results/history/0b1f/llm.json"
+    assert received.recipients == ["oncall@example.org"]
 
 
 def test_the_api_parses_the_email_output():
-    out = delivery.SendEmailOutput(refused=["oncall@example.org"])
-    assert _decode(_encode(out), api.SendEmailOutput).refused == ["oncall@example.org"]
+    out = delivery.SendEmailOutput(refused=["oncall@example.org"], deferred=["ops@example.org"])
+    parsed = _decode(_encode(out), api.SendEmailOutput)
+    assert (parsed.refused, parsed.deferred) == (["oncall@example.org"], ["ops@example.org"])

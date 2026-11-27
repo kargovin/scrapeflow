@@ -398,8 +398,12 @@ class SendEmailInput(BaseModel):
     run_id: str | None = None
     # An Email block's input, {bucket}/{key}: its content follows the body, inline up to the cap.
     source_path: str | None = None
+    # The destination's recipients this try sends to (those an earlier try left deferred); None = all.
+    recipients: list[str] | None = None
 
 
 class SendEmailOutput(BaseModel):
-    # Recipients the server refused while it accepted others.
+    # Recipients the server refused (5xx) while it accepted others.
     refused: list[str] = []
+    # Recipients the server deferred (4xx) while it accepted others: a later try sends to them only.
+    deferred: list[str] = []

@@ -22,6 +22,8 @@ SWEEP_WEBHOOKS_ACTIVITY = "sweep_pending_webhooks"
 
 # ADR-012: a kind = 'email' row is sent by SendEmail on the delivery queue (M.14).
 EMAIL_PATCH = "email-delivery"
+# ADR-012: an email row's later tries go to the recipients a server deferred.
+EMAIL_DEFERRED_PATCH = "email-deferred"
 
 # The system Schedule that starts a delivery for any pending row nothing is delivering (F.4).
 SWEEP_SCHEDULE_ID = "webhook-sweep"
@@ -61,8 +63,10 @@ class EmailAttempt(BaseModel):
     error: str | None = None
     error_type: str | None = None
     final: bool = False
-    # Recipients the server refused while it accepted others.
+    # Recipients the server refused while it accepted others, over every try.
     refused: list[str] = []
+    # Recipients still owed once the message reached others: the row is delivered whatever follows.
+    deferred: list[str] = []
 
 
 @workflow.defn
@@ -75,6 +79,11 @@ class WebhookDeliveryWorkflow:
     delivers through its Webhook block instead. An email row's attempt is three steps: the row read
     here, ``SendEmail`` on the delivery queue (no database there), the outcome written back here.
     """
+
+    def __init__(self) -> None:
+        # Set once a send reached anyone: the recipients still owed. Lost if the sweep restarts it.
+        self._owed: list[str] | None = None
+        self._refused: list[str] = []
 
     @workflow.run
     async def run(self, input: DeliveryRef) -> str:
@@ -96,6 +105,8 @@ class WebhookDeliveryWorkflow:
             await workflow.sleep(timedelta(seconds=outcome.retry_in_seconds))
 
     async def _send_email(self, ref: DeliveryRef, email: SendEmailInput) -> AttemptOutcome:
+        if self._owed is not None:
+            email = email.model_copy(update={"recipients": self._owed})
         attempt = EmailAttempt(delivery_id=ref.delivery_id)
         try:
             sent: SendEmailOutput = await workflow.execute_activity(
@@ -107,9 +118,15 @@ class WebhookDeliveryWorkflow:
                 schedule_to_start_timeout=_SEND_QUEUE_WAIT,
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
-            attempt.refused = sent.refused
+            self._refused += sent.refused
+            if sent.deferred and workflow.patched(EMAIL_DEFERRED_PATCH):
+                self._owed = sent.deferred
+            elif self._owed is not None:
+                self._owed = []
         except ActivityError as exc:
             attempt = _failed_send(ref, exc.cause)
+        attempt.refused = self._refused
+        attempt.deferred = self._owed or []
         return await workflow.execute_activity(
             RECORD_EMAIL_ATTEMPT_ACTIVITY,
             attempt,

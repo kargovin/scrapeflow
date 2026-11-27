@@ -17,6 +17,16 @@ def message_id(run_id: str, block_id: str, host: str) -> str:
     return f"<{run_id}.{block_id}@{host}>"
 
 
+def recipients_note(refused: list[str], owed: list[str], why: str = "") -> str | None:
+    """A sent email's note: who was refused, and who was never reached and why."""
+    parts = []
+    if refused:
+        parts.append(f"recipients refused: {', '.join(refused)}")
+    if owed:
+        parts.append(f"recipients deferred, not sent: {', '.join(owed)} ({why})")
+    return "; ".join(parts) or None
+
+
 def subject(pipeline_name: str, run_id: str) -> str:
     return f"[ScrapeFlow] {one_line(pipeline_name)}: run {run_id}"
 

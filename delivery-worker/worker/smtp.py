@@ -151,17 +151,20 @@ class Session:
 
 
 async def _send(sock: socket.socket, address: SmtpAddress, secret: LoginSecret, msg: EmailMessage,
-                timeout: float) -> list[str]:
+                recipients: list[str], timeout: float) -> SendEmailOutput:
     session = Session(sock, address, secret, timeout)
     try:
         await session.connect()
         await session.login()
         errors, _ = await session.client.send_message(
-            msg, sender=address.sender, recipients=list(address.to)
+            msg, sender=address.sender, recipients=recipients
         )
-        return sorted(errors)
     finally:
         await session.close()
+    return SendEmailOutput(
+        refused=sorted(r for r, reply in errors.items() if not 400 <= reply.code < 500),
+        deferred=sorted(r for r, reply in errors.items() if 400 <= reply.code < 500),
+    )
 
 
 # --- the classifier (ADR-015 §6): SMTP 4xx and connection errors transient, unknown final ----
@@ -227,6 +230,10 @@ class EmailActivities:
     async def send_email(self, inp: SendEmailInput) -> SendEmailOutput:
         """One message to the destination's recipients. A resend carries the same Message-ID."""
         address, secret = _parsed(inp.address, inp.encrypted_secret)
+        recipients = [r for r in address.to if inp.recipients is None or r in inp.recipients]
+        if not recipients:
+            # Every owed recipient was removed from the destination since the last try.
+            return SendEmailOutput()
         loop = asyncio.get_running_loop()
         # One budget for the read and the session: past it the workflow retries while DATA may finish.
         deadline = loop.time() + EMAIL_SEND_ATTEMPT_SECONDS - ATTEMPT_MARGIN_SECONDS
@@ -245,16 +252,16 @@ class EmailActivities:
         timeout = max(deadline - loop.time(), 1.0)
         try:
             async with asyncio.timeout_at(deadline):
-                refused = await pinned_tcp.pinned(
+                out = await pinned_tcp.pinned(
                     address.host,
                     address.port,
-                    lambda sock: _send(sock, address, secret, msg, timeout),
+                    lambda sock: _send(sock, address, secret, msg, recipients, timeout),
                 )
         except Exception as exc:
             raise classified(exc, address.host, address.port, "send") from None
         log.info(
             "email_sent",
-            host=address.host, message_id=inp.message_id, recipients=len(address.to),
-            refused=refused,
+            host=address.host, message_id=inp.message_id, recipients=len(recipients),
+            refused=out.refused, deferred=out.deferred,
         )
-        return SendEmailOutput(refused=refused)
+        return out

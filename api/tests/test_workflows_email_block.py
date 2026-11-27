@@ -420,3 +420,78 @@ def test_each_delivery_is_one_line_of_names_only():
         "  store: bucket exports, key scrapeflow/r1/store.json (https://s3.example.com/)",
         "  db: postgres shop.public.prices on db.example.com:5432, row run_id r1, block_id db",
     ]
+
+
+def _plays(*outs):
+    """SendEmail answers in turn: an output, or an exception to raise."""
+    plays = list(outs)
+
+    async def send(input):
+        play = plays.pop(0)
+        if isinstance(play, Exception):
+            raise play
+        return play
+
+    return send
+
+
+def _mail_mirrors(h) -> list[MirrorBlockInput]:
+    return [c for c in _sink_calls(h.calls, "mail") if isinstance(c, MirrorBlockInput)]
+
+
+async def test_a_later_try_goes_to_the_deferred_recipients_only():
+    h = Harness(
+        email=_plays(
+            SendEmailOutput(refused=["gone@example.org"], deferred=["slow@example.org"]),
+            SendEmailOutput(),
+        )
+    )
+    result = await h.run(MAIL_ONLY)
+
+    assert result == LLM_PATH
+    assert [e.recipients for e in h.email_inputs] == [None, ["slow@example.org"]]
+    assert [e.message_id for e in h.email_inputs] == [MESSAGE_ID, MESSAGE_ID]
+    mirrors = _mail_mirrors(h)
+    assert mirrors[1].error == "attempt 1: recipients deferred: slow@example.org"
+    assert mirrors[-1] == MirrorBlockInput(
+        run_id="r1",
+        block_id="mail",
+        status="completed",
+        output_ref=LLM_PATH,
+        error="recipients refused: gone@example.org",
+    )
+    assert "email-deferred" in _patches(h.history)
+
+
+async def test_once_it_reached_anyone_a_final_failure_completes_the_block_and_undoes_nothing():
+    h = Harness(
+        email=_plays(
+            SendEmailOutput(deferred=["slow@example.org"]),
+            ApplicationError(
+                "mail.example.com refused every recipient (550)",
+                type="DestinationRefused",
+                non_retryable=True,
+            ),
+        )
+    )
+    result = await h.run(_sinks(STORE, _mail(input="store")))
+
+    assert result == LLM_PATH
+    assert h.undo_inputs == []
+    assert _mail_mirrors(h)[-1].error == (
+        "recipients deferred, not sent: slow@example.org "
+        "(DestinationRefused: mail.example.com refused every recipient (550))"
+    )
+
+
+async def test_recipients_deferred_on_every_try_are_named_when_it_gives_up():
+    timing = EMAIL.timing(MAIL_ONLY.blocks[2].config)
+    h = Harness(email=_plays(*[SendEmailOutput(deferred=["slow@example.org"])] * 20))
+    result = await h.run(MAIL_ONLY)
+
+    assert result == LLM_PATH
+    assert len(h.email_inputs) == timing.maximum_attempts
+    assert _mail_mirrors(h)[-1].error == (
+        "recipients deferred, not sent: slow@example.org "
+        f"(gave up after {timing.maximum_attempts} attempts)"
+    )

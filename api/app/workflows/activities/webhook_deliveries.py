@@ -37,6 +37,7 @@ from app.models.monitor import Monitor
 from app.models.pipeline import PipelineRun
 from app.models.webhook_delivery import WebhookDelivery
 from app.settings import settings
+from app.workflows import email_text
 from app.workflows.webhook_delivery import (
     ATTEMPT_WEBHOOK_ACTIVITY,
     RECORD_EMAIL_ATTEMPT_ACTIVITY,
@@ -224,12 +225,19 @@ async def record_email_attempt(input: EmailAttempt) -> AttemptOutcome:
             delivery.last_error = f"ssrf_blocked: {input.error}"
         else:
             delivery.attempts += 1
-            if input.error is None:
+            owed = input.deferred
+            if input.error is None and not owed:
                 delivery.status = "delivered"
                 delivery.delivered_at = datetime.now(UTC)
-                delivery.last_error = (
-                    f"recipients refused: {', '.join(input.refused)}" if input.refused else None
-                )
+                delivery.last_error = email_text.recipients_note(input.refused, [])
+            elif owed and (input.final or delivery.attempts >= settings.webhook_max_attempts):
+                # It reached the others: delivered, naming who it never reached.
+                delivery.status = "delivered"
+                delivery.delivered_at = datetime.now(UTC)
+                why = input.error or f"gave up after {delivery.attempts} attempts"
+                delivery.last_error = email_text.recipients_note(input.refused, owed, why)
+            elif owed and input.error is None:
+                _apply_backoff(delivery, f"recipients deferred: {', '.join(owed)}")
             elif input.final:
                 delivery.status = "exhausted"
                 delivery.last_error = input.error
@@ -244,6 +252,7 @@ async def record_email_attempt(input: EmailAttempt) -> AttemptOutcome:
             outcome=outcome.status,
             error=input.error,
             refused=input.refused,
+            deferred=input.deferred,
         )
         return outcome
 

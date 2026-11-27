@@ -46,6 +46,7 @@ from tests.test_workflows_email_block import (
     _diffs,
     _mail,
     _monitored_email,
+    _plays,
     _unanswered_then_refused,
 )
 from tests.test_workflows_email_block import _refused as _mail_refused
@@ -315,6 +316,24 @@ SCENARIOS = {
         {"validate": _changed, "diff": _diffs},
         _monitored_email(WITH_BASELINE),
     ),
+    # Later tries to the recipients a server deferred (patch "email-deferred").
+    "harness_sinks_email_recipient_deferred_then_sent": (
+        {"email": _plays(SendEmailOutput(deferred=["slow@example.org"]), SendEmailOutput())},
+        MAIL_ONLY,
+    ),
+    "harness_sinks_email_recipient_deferred_then_refused_kept": (
+        {
+            "email": _plays(
+                SendEmailOutput(deferred=["slow@example.org"]),
+                ApplicationError(
+                    "mail.example.com refused every recipient (550)",
+                    type="DestinationRefused",
+                    non_retryable=True,
+                ),
+            )
+        },
+        _sinks(STORE, _mail(input="store")),
+    ),
     # N.2 — an Approval block's wait (patch "approval").
     "harness_approval_approved": (
         {"during": answers("approved"), "timeout": WAIT_TIMEOUT},
@@ -483,6 +502,11 @@ EMAIL_SCENARIOS = {
     "harness_email_delivered": [SendEmailOutput()],
     "harness_email_retried_then_delivered": [_transient, SendEmailOutput()],
     "harness_email_refused_final": [_final],
+    # Later sends to the recipients a server deferred (patch email-deferred).
+    "harness_email_recipient_deferred_then_delivered": [
+        SendEmailOutput(deferred=["slow@example.org"]),
+        SendEmailOutput(),
+    ],
 }
 
 
