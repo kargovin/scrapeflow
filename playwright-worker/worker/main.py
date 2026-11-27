@@ -80,6 +80,7 @@ async def run() -> None:
     log.info(
         "browser_launched",
         channel=settings.playwright_channel,
+        version=browser.version,
         headless=settings.playwright_headless,
         args=launch_args,
         egress=settings.egress_proxy_url,

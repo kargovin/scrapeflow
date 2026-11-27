@@ -29,7 +29,17 @@ RUN chmod +x /app/entrypoint.sh
 # Install real Google Chrome for Patchright's channel="chrome" (stealth): the UA
 # then reports a genuine Chrome instead of bundled Chromium. Run as root, before
 # dropping privileges, so the binary lands in a world-readable system path.
-RUN patchright install chrome
+# Pinned: bump both values together from google-chrome-stable in
+# https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages
+ARG CHROME_VERSION=158.0.8127.88
+ARG CHROME_SHA256=a656b2db00a8cb7f13a1d754f6aad91f84014906452c6dfb7f3ead93035da03b
+RUN curl -fsSL -o /tmp/chrome.deb \
+        "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}-1_amd64.deb" \
+    && echo "${CHROME_SHA256}  /tmp/chrome.deb" | sha256sum -c - \
+    && apt-get update \
+    && apt-get install -y /tmp/chrome.deb \
+    && rm -rf /tmp/chrome.deb /var/lib/apt/lists/* /etc/apt/sources.list.d/google-chrome.* \
+    && google-chrome --version | grep -qF "Google Chrome ${CHROME_VERSION}"
 
 # Xvfb refuses to create /tmp/.X11-unix as a non-root user, so create it here
 # (sticky, world-writable) while we are still root.
