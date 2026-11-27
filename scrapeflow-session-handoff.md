@@ -169,7 +169,24 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — BUG-004 CLOSED (screenshots released), 2026-11-27 *(clock)*
+## Current state — Chrome pinned (BUG-034 follow-up), 2026-11-27 *(clock)*
+
+🔧 **Chrome pinned — local, unreleased (`40cf423`).** `playwright-worker/Dockerfile` installs
+`google-chrome-stable_158.0.8127.88-1_amd64.deb` from Google's pool, checks its SHA-256, and fails the build if the
+installed version differs; `browser_launched` now logs `version`. Replaces `patchright install chrome` (always the
+current stable). Same version the image already ran, so no browser change.
+- **Checks:** playwright tests 236; a wrong hash and a different version each fail the build; the compose worker
+  logs `version=158.0.8127.88`; `scripts.egress_gate --engine playwright` PASS (http-only fixture, page actions).
+- **Bumping:** take `Version` + `SHA256` of `google-chrome-stable` from
+  `https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages`, set both ARGs, rebuild, run the
+  egress gate. Nothing watches for a new stable (a scheduled CI check is an option, not built).
+- 📋 **Release (the owner's):** `main` ← `develop`, **playwright-worker image only**, no migration, no infra change.
+  Check: the new pod's `browser_launched` line shows `version=158.0.8127.88`, and one playwright job completes.
+  Rollback: re-tag the image.
+- **Next session:** P's email limits, Postgres backups, the deferred code reviews (C.4–C.7 first); close BUG-018 once
+  BUG-033 has run clean.
+
+## Previous state — BUG-004 CLOSED (screenshots released), 2026-11-27 *(clock)*
 
 🚀 **BUG-004 RELEASED + CLOSED 2026-11-27 (owner)** — `main` `e47b953..497029c`, api + playwright-worker images.
 **Deployed code is `497029c`.** Owner's checks all passed: (1) job PNGs + SPA thumbnails ✅; (2) pipeline Scrape-block
