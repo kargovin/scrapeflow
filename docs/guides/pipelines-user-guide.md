@@ -85,7 +85,8 @@ the block: `{"destination_id": "<id>"}`.
 
 **What it sends.** Any input: a page (HTML, Markdown or JSON) or an extraction. The subject is
 `[ScrapeFlow] <pipeline name>: run <run id>`. The body names the run, the block and the pipeline, links
-to the run page, and is followed by the input itself, inline, up to **256 KiB**. A larger input is not
+to the run page, lists what the bucket and postgres blocks before it delivered and where (as a webhook's
+`deliveries` does), and is followed by the input itself, inline, up to **256 KiB**. A larger input is not
 attached; the body says `result too large to include (N KiB); fetch it with run <run id>` instead. On a
 monitor's check the body also says what changed: *first check — nothing to compare*, or *changed since
 check …* followed by the lines of the page that changed and each extracted value that changed
@@ -121,6 +122,17 @@ connects, starts TLS and logs in; **it sends no mail**.
 server deferring the message) is tried again — five tries, waiting 30 s, 5 min, 50 min and 2 h between
 them (about 3 h in all); while it waits the run holds no concurrency slot. A refused login, a `5xx`
 reply, a certificate that does not match or a private address is final, and fails the run — which
-undoes the bucket and postgres deliveries before it, since nothing had gone out. Recipients the server
-refused while it accepted others are listed on the block (`recipients refused: …`); the run still
-completes.
+undoes the bucket and postgres deliveries before it, since nothing had gone out.
+
+**Some recipients.** When the server accepts the message for some recipients and not others, it has gone
+out: the run completes whatever follows. Recipients refused with a `5xx` are listed on the block
+(`recipients refused: …`). Recipients deferred with a `4xx` are tried again on the same schedule, the
+later tries sent to them alone with the same `Message-ID` and headers, so the others get no second copy;
+anyone still not reached when the tries run out (or a later try is refused) is listed on the block
+(`recipients deferred, not sent: … (why)`). Failure messages behave the same; their delivery row ends
+*delivered*, naming whoever it never reached.
+
+**Character sets.** Pages are stored as UTF-8 whatever charset the site sent (the http engine converts
+from the `Content-Type` header's charset, a `<meta>` charset or a byte-order mark, and treats an unlabelled
+page that is not valid UTF-8 as windows-1252), so an email, an API result and an LLM block read the same
+text. An HTML page keeps its `<meta charset>` tag, which then names the old charset.

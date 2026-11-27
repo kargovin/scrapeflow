@@ -4897,7 +4897,11 @@ attempt's 55 s budget with the SMTP session (a slow read plus a slow session cou
 send a second copy); a body over 256 KiB (a huge monitor summary) now carries the note and no content. **Known
 limits, not fixed:** recipients the server defers (`4xx`) while it accepts others are reported as refused and not
 retried; content is decoded as UTF-8 (a page in another charset arrives with replacement characters); the message
-does not list earlier sinks' deliveries as the webhook payload does (not in slice 3's criteria).
+does not list earlier sinks' deliveries as the webhook payload does (not in slice 3's criteria). 🔧 **All three
+fixed 2026-11-28 (local, unreleased; owner's calls):** the body lists earlier deliveries (`6adc4b5`); the http
+engine converts each page to UTF-8 at fetch — the result APIs and the LLM had the same garbling (`2d9f1f7`); a
+deferred recipient is retried alone under the same Message-ID, and once the message reached anyone the block
+completes and an alert row ends *delivered*, naming who was never reached (`14447b5`, patch `email-deferred`).
 
 **Not run on compose:** the SPA (Clerk — step 3); a mail server with a certificate from a public CA, a real mailbox.
 

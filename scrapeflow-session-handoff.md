@@ -169,7 +169,41 @@ docker compose exec api uv run alembic check      # only the dedup false positiv
 
 ---
 
-## Current state — Chrome pinned (BUG-034 follow-up), 2026-11-27 *(clock)*
+## Current state — email limits fixed (P.2's known limits), 2026-11-28 *(clock)*
+
+🔧 **All three of Release P's known email limits fixed — local, unreleased, NOT pushed** (owner: "lets do limits on
+email"; owner's calls: retry deferred recipients only; fix the charset in the http engine, not the email; add the
+deliveries list). `develop` is ahead of `origin/develop`; the owner pushes `develop` and `main` next session.
+- Commits in replay order: `6adc4b5` the Email block's body lists what the bucket/postgres blocks before it
+  delivered (`email_text.deliveries_lines`, the webhook's `deliveries` in words); `2d9f1f7` the http worker
+  converts each fetched page to UTF-8 (`golang.org/x/net/html/charset`: BOM → Content-Type → `<meta>` → UTF-8 if
+  valid, else windows-1252) — **the job/pipeline result APIs and the LLM had the same garbling**; the gate fixture's
+  `/item` takes `&charset=`, `scripts.egress_gate` checks a Shift_JIS page on both engines; `0f1116a` the
+  golangci-lint pre-commit hook pointed at `worker/` (renamed long ago) and never ran — now `http-worker/`;
+  `14447b5` deferred recipients: `SendEmailOutput.deferred` (4xx) apart from `refused` (5xx),
+  `SendEmailInput.recipients` (the subset a later try sends to, same Message-ID and headers); in `PipelineWorkflow`
+  and `WebhookDeliveryWorkflow` under **patch `email-deferred`**; once the message reached anyone the block
+  completes (never fails → no rollback, D13) and an alert row ends `delivered`, both naming who was never reached
+  (`email_text.recipients_note`). 3 harness histories added.
+- **Checks:** API 1621 (replay incl.), delivery worker 255, Go all green (+ lint), contracts 261; mutation-checked
+  (subset send, complete-not-fail, alert subset; the UTF-8 conversion); `egress_gate` both engines PASS, and FAILS
+  on the old http worker. Full `scripts/delivery-gate.sh` (new scenario `email_recipient_deferred`, fixture's
+  `defer-rcpt…` recipient answers 451 to RCPT once per address): **DELIVERY GATE PASSED** 2026-11-27 (with the J.10 + L.12 regression gates, the secret search, the rebinding test)
+- **Trap:** an alert row's owed recipients live in the workflow only — if the sweep restarts the workflow (its
+  attempt activity failing for 1 h) or an admin retries the row, the next send goes to every recipient again.
+- **Known, not mine:** `delivery-worker/` is outside the ruff hook and three of its files differ from ruff's
+  format at HEAD.
+- 📋 **Release (the owner's):** `main` ← `develop`: **api + http-worker + delivery-worker images**, no migration,
+  no infra change (CI: replay → api; the delivery worker and the api must both be new before a deferral can be
+  retried — an old worker reports a deferred recipient as refused, as today). Checks: (1) an http job on a non-UTF-8
+  page — e.g. a Shift_JIS or Latin-1 site — `GET /jobs/{id}/result` shows the text cleanly; (2) a pipeline
+  fetch → bucket → email: the email lists the bucket delivery under *Delivered before this message*; (3) optional,
+  needs a server that defers one recipient: the block note / a second message to that recipient only.
+  Rollback: re-tag the three images; a run mid-retry under the patch replays only on code that knows it.
+- **Next session:** push + release the above; then Postgres backups, the deferred code reviews (C.4–C.7 first);
+  close BUG-018 once BUG-033 has run clean.
+
+## Previous state — Chrome pinned (BUG-034 follow-up), 2026-11-27 *(clock)*
 
 🚀 **RELEASED 2026-11-27** — `main` `497029c..1290a6a`, playwright image only. **Deployed code is `1290a6a`.** The new
 pod logs `browser_launched … version=158.0.8127.88`; the owner's playwright job completed.
