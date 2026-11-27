@@ -50,6 +50,10 @@ async def upload(minio: Minio, artifact_id: str, ext: str, data: bytes) -> str:
     return f"{bucket}/{key}"
 
 
+def screenshot_key(artifact_id: str, index: int) -> str:
+    return f"screenshots/{artifact_id}/{index}.png"
+
+
 async def upload_screenshot(
     minio: Minio, artifact_id: str, index: int, data: bytes
 ) -> str:
@@ -61,7 +65,7 @@ async def upload_screenshot(
     leaving a fresh orphaned set behind on every retry.
     """
     bucket = settings.minio_bucket
-    key = f"screenshots/{artifact_id}/{index}.png"
+    key = screenshot_key(artifact_id, index)
 
     await minio.put_object(
         bucket,
@@ -72,3 +76,11 @@ async def upload_screenshot(
     )
 
     return f"{bucket}/{key}"
+
+
+async def discard_screenshots(minio: Minio, artifact_id: str, count: int) -> None:
+    """Remove screenshots 0..count-1 of a failed execution; MinIO succeeds on an absent key."""
+    for index in range(count):
+        await minio.remove_object(
+            settings.minio_bucket, screenshot_key(artifact_id, index)
+        )

@@ -293,6 +293,84 @@ async def test_minio_caller_error_is_non_retryable():
 
 
 # ---------------------------------------------------------------------------
+# Screenshots of a failed execution (BUG-004)
+# ---------------------------------------------------------------------------
+
+_TWO_SHOTS = {
+    "actions": [
+        {"type": "screenshot"},
+        {"type": "click", "selector": "#x"},
+        {"type": "screenshot"},
+    ]
+}
+
+
+def _removed(minio) -> list[tuple]:
+    return [c.args for c in minio.remove_object.await_args_list]
+
+
+def _shots() -> list[tuple]:
+    return [(_BUCKET, f"screenshots/{_ARTIFACT}/{i}.png") for i in (0, 1)]
+
+
+async def test_a_bot_wall_after_screenshots_removes_them():
+    minio = AsyncMock()
+    browser, _, page = _browser(MYNTRA_MAINTENANCE_WALL)
+    page.screenshot = AsyncMock(return_value=b"\x89PNG")
+
+    err = await _raises(_input(options=_TWO_SHOTS), browser=browser, minio=minio)
+
+    assert err.type == BLOCKED
+    assert _removed(minio) == _shots()
+
+
+async def test_a_failed_size_read_removes_the_screenshots():
+    minio = AsyncMock()
+    minio.stat_object.side_effect = _s3_error("InternalError")
+    browser, _, page = _browser()
+    page.screenshot = AsyncMock(return_value=b"\x89PNG")
+
+    err = await _raises(_input(options=_TWO_SHOTS), browser=browser, minio=minio)
+
+    assert err.type == STORAGE_TRANSIENT
+    assert _removed(minio) == _shots()
+
+
+async def test_a_cancel_removes_the_screenshots():
+    minio = AsyncMock()
+    browser, _, page = _browser()
+    page.screenshot = AsyncMock(return_value=b"\x89PNG")
+    page.content = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run(_input(options=_TWO_SHOTS), browser=browser, minio=minio)
+
+    assert _removed(minio) == _shots()
+
+
+async def test_a_failed_removal_keeps_the_real_error():
+    minio = AsyncMock()
+    minio.remove_object.side_effect = aiohttp.ClientConnectionError("down")
+    browser, _, page = _browser(MYNTRA_MAINTENANCE_WALL)
+    page.screenshot = AsyncMock(return_value=b"\x89PNG")
+
+    err = await _raises(_input(options=_TWO_SHOTS), browser=browser, minio=minio)
+
+    assert err.type == BLOCKED
+
+
+async def test_success_and_screenshot_free_failures_remove_nothing():
+    minio = AsyncMock()
+    browser, _, page = _browser()
+    page.screenshot = AsyncMock(return_value=b"\x89PNG")
+    await _run(_input(options=_TWO_SHOTS), browser=browser, minio=minio)
+
+    await _raises(browser=_browser(MYNTRA_MAINTENANCE_WALL)[0], minio=minio)
+
+    minio.remove_object.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Cancellation
 # ---------------------------------------------------------------------------
 

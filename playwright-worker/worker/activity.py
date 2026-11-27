@@ -21,6 +21,7 @@ from .egress import AddressRefused
 from .errors import TERMINAL, classify, describe
 from .robots import is_disallowed
 from .scrape import BlockedPage, decrypt_credentials, render
+from .storage import discard_screenshots
 
 log = structlog.get_logger()
 
@@ -84,6 +85,7 @@ class PlayWrightScrapeActivities:
                 )
 
         hb = asyncio.create_task(_heartbeat())
+        screenshots: list[StoredObject] | None = None
         try:
             # Inside the try so InvalidToken reaches classify().
             proxy_url, cookies = decrypt_credentials(job.credentials)
@@ -136,6 +138,8 @@ class PlayWrightScrapeActivities:
             hb.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await hb
+            if screenshots is None:
+                await self._discard_screenshots(job)
 
         log.info("job_completed", artifact_id=job.artifact_id, path=rendered.minio_path)
         return ScrapeOutput(
@@ -144,6 +148,21 @@ class PlayWrightScrapeActivities:
             warnings=rendered.warnings,
             screenshots=screenshots,
         )
+
+    async def _discard_screenshots(self, job: ScrapeInput) -> None:
+        # A failed execution reports no objects, so nothing else would ever delete these (BUG-004).
+        actions = (job.options.actions if job.options else None) or []
+        count = sum(1 for a in actions if a.get("type") == "screenshot")
+        if not count:
+            return
+        try:
+            await discard_screenshots(self.minio, job.artifact_id, count)
+        except Exception as exc:
+            log.warning(
+                "screenshot_discard_failed",
+                artifact_id=job.artifact_id,
+                error=describe(exc),
+            )
 
     async def _stored(self, path: str) -> StoredObject:
         # execute_actions returns paths only; the size comes from the object itself.
