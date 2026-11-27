@@ -60,6 +60,25 @@ def change_lines(change: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _delivery_line(delivery: dict[str, Any]) -> str:
+    loc = delivery["location"]
+    if delivery["kind"] == "bucket":
+        where = f"bucket {loc['bucket']}, key {loc['key']} ({loc['endpoint']})"
+    elif delivery["kind"] == "postgres":
+        where = (
+            f"postgres {loc['database']}.{loc['schema']}.{loc['table']} on {loc['host']}:"
+            f"{loc['port']}, row run_id {loc['run_id']}, block_id {loc['block_id']}"
+        )
+    else:
+        where = f"{delivery['kind']} {_value(loc)}"
+    return f"  {delivery['block_id']}: {where}"
+
+
+def deliveries_lines(deliveries: list[dict[str, Any]]) -> list[str]:
+    """The Webhook payload's ``deliveries`` in words: what the sinks before this one wrote."""
+    return ["Delivered before this message:"] + [_delivery_line(d) for d in deliveries]
+
+
 def body(
     *,
     pipeline_name: str,
@@ -71,6 +90,7 @@ def body(
     input_type: str,
     monitor_id: str | None = None,
     change: dict[str, Any] | None = None,
+    deliveries: list[dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         f"pipeline.result — pipeline {one_line(pipeline_name)}, run {run_id}",
@@ -84,5 +104,7 @@ def body(
         lines += ["", f"monitor_id: {monitor_id}"]
         if change is not None:
             lines += change_lines(change)
+    if deliveries:
+        lines += ["", *deliveries_lines(deliveries)]
     lines += ["", f"The result — {input_block}'s output ({input_type}):", "", ""]
     return "\n".join(lines)

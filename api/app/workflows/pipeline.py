@@ -1134,6 +1134,7 @@ class PipelineWorkflow:
                         run_url=envelope.run_url,
                         input_block=block.input,
                         input_type=block_outputs(input.blocks)[block.input],
+                        deliveries=self._deliveries(),
                         **self._webhook_check_fields(),
                     ),
                     run_id=input.run_id,

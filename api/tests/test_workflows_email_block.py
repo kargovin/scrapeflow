@@ -361,3 +361,62 @@ async def test_load_destination_reads_the_pipeline_name_run_page_and_message_hos
         ),
         "message_host": "scrapeflow.example.org",
     }
+
+
+async def test_the_body_lists_what_the_sinks_before_it_delivered():
+    from tests.test_workflows_postgres_sink import DB
+
+    db = {**DB, "input": "store"}
+    h = Harness()
+    await h.run(_sinks(STORE, db, _mail(input="db")))
+
+    [sent] = h.email_inputs
+    [section] = [part for part in sent.body.split("\n\n") if part.startswith("Delivered")]
+    store, db_line = section.splitlines()[1:]
+    assert store == "  store: bucket exports, key out/p1/r1/store.json (https://s3.example.com/)"
+    assert db_line.startswith("  db: postgres ") and ", row run_id r1, block_id db" in db_line
+    assert section.index("store") < section.index("db:")
+    assert sent.body.endswith("The result — db's output (extraction):\n\n")
+
+
+async def test_with_nothing_delivered_before_it_the_body_has_no_deliveries_section():
+    h = Harness()
+    await h.run(MAIL_ONLY)
+
+    [sent] = h.email_inputs
+    assert "Delivered" not in sent.body
+
+
+def test_each_delivery_is_one_line_of_names_only():
+    lines = email_text.deliveries_lines(
+        [
+            {
+                "block_id": "store",
+                "kind": "bucket",
+                "location": {
+                    "endpoint": "https://s3.example.com/",
+                    "bucket": "exports",
+                    "region": None,
+                    "key": "scrapeflow/r1/store.json",
+                },
+            },
+            {
+                "block_id": "db",
+                "kind": "postgres",
+                "location": {
+                    "host": "db.example.com",
+                    "port": 5432,
+                    "database": "shop",
+                    "schema": "public",
+                    "table": "prices",
+                    "run_id": "r1",
+                    "block_id": "db",
+                },
+            },
+        ]
+    )
+    assert lines == [
+        "Delivered before this message:",
+        "  store: bucket exports, key scrapeflow/r1/store.json (https://s3.example.com/)",
+        "  db: postgres shop.public.prices on db.example.com:5432, row run_id r1, block_id db",
+    ]
